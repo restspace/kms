@@ -1,0 +1,11 @@
+# OS / shell debris
+bash.exe.stackdump
+Thumbs.db
+.DS_Store
+
+# Build & deps (for when the app lands in this repo)
+node_modules/
+dist/
+.wrangler/
+.dev.vars
+*.local
