@@ -11,6 +11,7 @@ import type { AppEnv, Env } from '../env';
 import { createSessionToken, getSession, setSessionCookie, type SessionPayload } from '../session';
 import { formsAdminRoutes } from './formsAdmin';
 import { evaluationRoutes } from './evaluation';
+import { agendaRoutes } from './agenda';
 
 type ApiEnv = { Bindings: Env; Variables: { session: SessionPayload } };
 
@@ -64,6 +65,9 @@ adminApiRoutes.route('/forms', formsAdminRoutes);
 
 // Review & scoring: submission ops, evaluation admin, reviewer surface (docs/06).
 adminApiRoutes.route('/', evaluationRoutes);
+
+// Agenda & scheduling (docs/07) — board payload, schedule writes, conflicts.
+adminApiRoutes.route('/agenda', agendaRoutes);
 
 // GET /app/api/builder-meta — everything the builder's pickers need: the
 // field library, and routing-rule targets (tracks, tags, evaluation plans).

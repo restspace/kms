@@ -172,14 +172,35 @@ does search/sort/virtualise/detail. What remains:
   Deferred within spec: saved views/column drawer/import/export (M6 or cut list),
   keyboard shortcuts in the reviewer workspace, per-plan rating columns.
 
-### M4 — Agenda & conflicts (Mon, ~7 h) — *brief #5*
+### M4 — Agenda & conflicts (Mon, ~7 h) — *brief #5* — **done**
 - Views: List, Day, Week, Month, Rooms, Conflicts; track grouping.
 - Unscheduled tray, drag/drop/resize, undo, keyboard Move dialog.
 - Conflict engine with the eight rules; Conflicts view with resolve actions.
 - Schedule-change emails with updated `.ics`.
 - *Stretch:* the agenda respects the workspace anchor (calendar filtered to the anchored
   speaker/track).
-- **Exit:** schedule an accepted session, provoke and resolve a conflict, receive an invite.
+- **Exit:** schedule an accepted session, provoke and resolve a conflict, receive an invite. ✅
+- **Notes (Aug 8, delivered a day early):** the conflict engine lives in `@kms/core`
+  (`computeConflicts`, all eight rules, half-open overlap, sorted sweep) and runs in
+  *both* places — authoritative on every schedule write in the Worker, and again in the
+  SPA for optimistic updates and the red drop-ghost with the clash named in its tooltip.
+  One agenda payload (`GET /app/api/agenda`) carries sessions+speakers+invite state with
+  conflicts pre-flagged; `PUT …/schedule` returns the fresh conflict set so blocks render
+  already marked. All eight docs/07 §8 acceptance tests verified in-browser: tray drop
+  persists across reload, `ROOM_DOUBLE_BOOKED` flags both blocks and bumps the tab chip,
+  exact-touch boundaries stay clean, resize (5-min snap) re-flags live, unschedule clears,
+  Move dialog (focus + `M`) has full drag parity, and Ctrl+Z/toast undo walks the change
+  stack back. Invite flow proven end-to-end: Send confirmations queued 5
+  `schedule_confirmed` (Grace once per session), moving an invited session prompts
+  "notify speakers?" — accept sent `schedule_changed` with `SEQUENCE:1` and the new
+  `DTSTART;TZID` in the ICS, decline moved the session silently; `METHOD:CANCEL` rides
+  the same path before unschedule clears the row. Ignored conflicts persist per
+  signature in KV with a collapsed Restore section. Seed: SESS-11–14 accepted, five
+  sessions scheduled Oct 12 across Main Stage/Hall A with the deliberate Grace
+  double-booking, SESS-14 left unscheduled for the tray + nudge. Judgment calls:
+  "+ Add Session" is the minimal manual-accepted-submission form (full session editing
+  stays on the submission detail); conflicts recompute per read instead of the KV cache
+  (six sessions — revisit at scale); agenda-respects-anchor stretch skipped (cut list).
 
 ### M5 — Dashboard (Tue AM, ~4 h) — *brief #6*
 - Today dashboard: KPIs, status tiles, "Also check" nudges, tabs.

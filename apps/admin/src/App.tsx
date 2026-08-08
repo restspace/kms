@@ -18,6 +18,7 @@ import {
 } from './api'
 import { FormsSection } from './forms/FormsSection'
 import { EvaluationSection } from './evaluation/EvaluationSection'
+import { AgendaSection } from './agenda/AgendaSection'
 import { ReviewerWorkspace } from './review/ReviewerWorkspace'
 import {
   BulkBar,
@@ -40,7 +41,7 @@ const NAV_ITEMS = [
   { key: 'forms', label: 'Forms', soon: null },
   { key: 'evaluation', label: 'Evaluation', soon: null },
   { key: 'review', label: 'Review', soon: null },
-  { key: 'agenda', label: 'Agenda', soon: 'M4' },
+  { key: 'agenda', label: 'Agenda', soon: null },
   { key: 'settings', label: 'Settings', soon: 'M6' },
 ] as const
 
@@ -449,6 +450,8 @@ export default function App() {
           <FormsSection eventSlug={me.event.slug} />
         ) : view === 'evaluation' && !isReviewer ? (
           <EvaluationSection />
+        ) : view === 'agenda' && !isReviewer ? (
+          <AgendaSection />
         ) : view === 'review' ? (
           <ReviewerWorkspace />
         ) : (

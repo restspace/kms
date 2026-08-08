@@ -292,6 +292,102 @@ export const assignReviewers = (planId: string, body: Record<string, unknown>) =
     { method: 'POST', body: JSON.stringify(body) },
   )
 
+// ---------------------------------------------------------------------------
+// Agenda & scheduling (docs/07, M4)
+// ---------------------------------------------------------------------------
+
+export interface AgendaRoom {
+  id: string
+  name: string
+  capacity: number | null
+  position: number
+}
+
+export interface AgendaTrack {
+  id: string
+  name: string
+  color: string | null
+  position: number
+}
+
+export interface AgendaSessionRow {
+  id: string
+  code: string
+  title: string
+  description: string | null
+  format: string | null
+  level: string | null
+  capacity: number | null
+  track_id: string | null
+  room_id: string | null
+  starts_at: string | null
+  ends_at: string | null
+  updated_at: string
+  /** 1 when a live METHOD:REQUEST calendar invite exists */
+  invited: number
+  speakers: Array<{ contact_id: string; name: string }>
+}
+
+export interface AgendaConflictRow {
+  code: string
+  severity: 'error' | 'warning' | 'info'
+  message: string
+  session_ids: string[]
+  contact_id?: string
+  signature: string
+  ignored: boolean
+}
+
+export interface AgendaPayload {
+  event: {
+    id: string
+    name: string
+    slug: string
+    timezone: string
+    starts_at: string
+    ends_at: string
+    location: string | null
+    agenda_published: number
+  }
+  rooms: AgendaRoom[]
+  tracks: AgendaTrack[]
+  sessions: AgendaSessionRow[]
+  conflicts: AgendaConflictRow[]
+}
+
+export interface SchedulePatch {
+  starts_at: string | null
+  ends_at: string | null
+  room_id: string | null
+  notify?: 'confirmed' | 'changed' | 'cancelled'
+}
+
+export const getAgenda = () => request<AgendaPayload>('/app/api/agenda')
+export const scheduleSession = (id: string, body: SchedulePatch) =>
+  request<AgendaPayload & { ok: boolean; notified: number }>(`/app/api/agenda/sessions/${id}/schedule`, {
+    method: 'PUT',
+    body: JSON.stringify(body),
+  })
+export const addAgendaSession = (body: Record<string, unknown>) =>
+  request<AgendaPayload & { ok: boolean; id: string }>('/app/api/agenda/sessions', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+export const sendScheduleConfirmations = () =>
+  request<AgendaPayload & { ok: boolean; sent_sessions: number; queued: number }>('/app/api/agenda/send-confirmations', {
+    method: 'POST',
+    body: JSON.stringify({}),
+  })
+export const setConflictIgnored = (signature: string, ignored: boolean) =>
+  request<AgendaPayload & { ok: boolean }>('/app/api/agenda/conflicts/ignore', {
+    method: 'POST',
+    body: JSON.stringify({ signature, ignored }),
+  })
+export const removeSessionSpeaker = (sessionId: string, contactId: string) =>
+  request<AgendaPayload & { ok: boolean }>(`/app/api/agenda/sessions/${sessionId}/speakers/${contactId}`, {
+    method: 'DELETE',
+  })
+
 export const getReviewQueue = () => request<ReviewQueue>('/app/api/review/queue')
 export const saveReview = (assignmentId: string, body: Record<string, unknown>) =>
   request<{ ok: boolean; weighted_total: number | null; submission_rating: number | null }>(

@@ -461,3 +461,66 @@ UPDATE submissions SET rating_cache = '{"plan0000-0000-4000-8000-000000000001":3
 UPDATE submissions SET rating_cache = '{"plan0000-0000-4000-8000-000000000001":2.63}' WHERE id = 'sub00000-0000-4000-8000-000000000007';
 UPDATE submissions SET rating_cache = '{"plan0000-0000-4000-8000-000000000001":1.83}' WHERE id = 'sub00000-0000-4000-8000-000000000008';
 UPDATE submissions SET rating_cache = '{"plan0000-0000-4000-8000-000000000002":4.34}' WHERE id = 'sub00000-0000-4000-8000-000000000003';
+
+-- ---------------------------------------------------------------------------
+-- M4: agenda (docs/12 §2) — four more accepted sessions; five scheduled on
+-- Oct 12 across Main Stage and Hall A, with one deliberate speaker
+-- double-booking (Grace: SESS-2 on Main Stage 10:00–10:30 PDT overlaps
+-- SESS-11 in Hall A 10:15–10:45) so the Conflicts view is non-empty on
+-- arrival. SESS-14 stays unscheduled so the tray and the dashboard nudge
+-- have material. All times UTC; the event runs in America/Los_Angeles (PDT,
+-- UTC-7 in October).
+-- ---------------------------------------------------------------------------
+
+INSERT INTO submissions (
+  id, event_id, form_id, code, kind, title, description, status,
+  track_id, format, level, language, submitter_contact_id, notified_at,
+  room_id, starts_at, ends_at, source, created_at, updated_at
+) VALUES
+  ('sub00000-0000-4000-8000-000000000011', 'evt00000-0000-4000-8000-000000000001', 'form0000-0000-4000-8000-000000000001',
+   'SESS-11', 'abstract', 'Live-Debugging Agent Traces: A Postmortem Toolkit',
+   '<p>Walking through real traces of agent failures and the tooling that made them legible in minutes instead of hours.</p>',
+   'accepted', 'trk00000-0000-4000-8000-000000000001', 'Talk', 'Intermediate', 'English',
+   'con00000-0000-4000-8000-000000000003', '2026-08-06T15:30:00Z',
+   'room0000-0000-4000-8000-000000000002', '2026-10-12T17:15:00Z', '2026-10-12T17:45:00Z', 'form',
+   '2026-08-02T10:30:00Z', '2026-08-07T09:00:00Z'),
+
+  ('sub00000-0000-4000-8000-000000000012', 'evt00000-0000-4000-8000-000000000001', 'form0000-0000-4000-8000-000000000001',
+   'SESS-12', 'abstract', 'Guardrail Benchmarks in CI: Catching Regressions Before Users Do',
+   '<p>How we turned red-team findings into a CI benchmark suite that gates every model and prompt change.</p>',
+   'accepted', 'trk00000-0000-4000-8000-000000000002', 'Talk', 'Intermediate', 'English',
+   'con00000-0000-4000-8000-000000000006', '2026-08-06T15:31:00Z',
+   'room0000-0000-4000-8000-000000000002', '2026-10-12T18:00:00Z', '2026-10-12T18:45:00Z', 'form',
+   '2026-08-02T11:00:00Z', '2026-08-07T09:05:00Z'),
+
+  ('sub00000-0000-4000-8000-000000000013', 'evt00000-0000-4000-8000-000000000001', 'form0000-0000-4000-8000-000000000001',
+   'SESS-13', 'abstract', 'Building a Retrieval Evaluation Harness from Scratch',
+   '<p>A hands-on workshop: golden sets, graded relevance judgments and a live leaderboard for your own corpus.</p>',
+   'accepted', 'trk00000-0000-4000-8000-000000000003', 'Workshop', 'Advanced', 'English',
+   'con00000-0000-4000-8000-000000000007', '2026-08-06T15:32:00Z',
+   'room0000-0000-4000-8000-000000000001', '2026-10-12T20:00:00Z', '2026-10-12T21:30:00Z', 'form',
+   '2026-08-03T09:00:00Z', '2026-08-07T09:10:00Z'),
+
+  ('sub00000-0000-4000-8000-000000000014', 'evt00000-0000-4000-8000-000000000001', 'form0000-0000-4000-8000-000000000001',
+   'SESS-14', 'abstract', 'Postmortems of Production LLM Incidents',
+   '<p>Five anonymised incidents, what the on-call saw, and the mitigations that actually held up.</p>',
+   'accepted', 'trk00000-0000-4000-8000-000000000005', 'Talk', 'Intermediate', 'English',
+   'con00000-0000-4000-8000-000000000008', '2026-08-06T15:33:00Z',
+   NULL, NULL, NULL, 'form',
+   '2026-08-03T10:00:00Z', '2026-08-07T09:15:00Z');
+
+-- Schedule the two originally accepted talks on Main Stage.
+UPDATE submissions SET room_id = 'room0000-0000-4000-8000-000000000001',
+  starts_at = '2026-10-12T16:00:00Z', ends_at = '2026-10-12T16:45:00Z',
+  updated_at = '2026-08-07T09:20:00Z'
+  WHERE id = 'sub00000-0000-4000-8000-000000000001';
+UPDATE submissions SET room_id = 'room0000-0000-4000-8000-000000000001',
+  starts_at = '2026-10-12T17:00:00Z', ends_at = '2026-10-12T17:30:00Z',
+  updated_at = '2026-08-07T09:21:00Z'
+  WHERE id = 'sub00000-0000-4000-8000-000000000002';
+
+INSERT INTO submission_participants (id, submission_id, contact_id, role, position, is_primary_contact, confirmed_at) VALUES
+  ('sp000000-0000-4000-8000-000000000011', 'sub00000-0000-4000-8000-000000000011', 'con00000-0000-4000-8000-000000000003', 'speaker', 1, 1, '2026-08-02T10:30:00Z'),
+  ('sp000000-0000-4000-8000-000000000012', 'sub00000-0000-4000-8000-000000000012', 'con00000-0000-4000-8000-000000000006', 'speaker', 1, 1, '2026-08-02T11:00:00Z'),
+  ('sp000000-0000-4000-8000-000000000013', 'sub00000-0000-4000-8000-000000000013', 'con00000-0000-4000-8000-000000000007', 'speaker', 1, 1, '2026-08-03T09:00:00Z'),
+  ('sp000000-0000-4000-8000-000000000014', 'sub00000-0000-4000-8000-000000000014', 'con00000-0000-4000-8000-000000000008', 'speaker', 1, 1, '2026-08-03T10:00:00Z');

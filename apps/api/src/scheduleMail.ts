@@ -68,8 +68,8 @@ function fmtLocal(isoUtc: string, timeZone: string): string {
  * call repeatedly: each (speaker, session, sequence) sends at most once.
  * Returns the number of invites queued.
  */
-export async function sendScheduleEmails(
-  c: Context<AppEnv>,
+export async function sendScheduleEmails<E extends AppEnv>(
+  c: Context<E>,
   submissionId: string,
   kind: ScheduleMailKind,
 ): Promise<number> {
