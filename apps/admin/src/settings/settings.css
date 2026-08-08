@@ -1,0 +1,183 @@
+/* Settings (M6): token management, docs pointers, demo reset. */
+
+.settings-shell {
+  padding: var(--space-5, 20px);
+  max-width: 760px;
+  overflow-y: auto;
+  height: 100%;
+  box-sizing: border-box;
+}
+
+.settings-shell h1 {
+  font-size: 18px;
+  margin: 0 0 16px;
+}
+
+.settings-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 16px 18px;
+  margin-bottom: 16px;
+}
+
+.settings-card h2 {
+  font-size: 14px;
+  margin: 0 0 6px;
+}
+
+.settings-hint {
+  color: var(--text-muted);
+  font-size: 13px;
+  margin: 0 0 12px;
+  line-height: 1.5;
+}
+
+.settings-error {
+  color: var(--danger);
+  font-size: 13px;
+}
+
+.settings-empty {
+  color: var(--text-faint, var(--text-muted));
+  font-size: 13px;
+  padding: 8px 0;
+}
+
+.settings-token-create {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.settings-token-create input {
+  flex: 1;
+  max-width: 320px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 13px;
+  background: var(--surface);
+  color: var(--text);
+}
+
+.settings-token-create button,
+.settings-fresh-actions button {
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: var(--accent-contrast, #fff);
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  padding: 6px 12px;
+  cursor: pointer;
+}
+
+.settings-ghost {
+  background: transparent !important;
+  border: 1px solid var(--border) !important;
+  color: var(--text-muted) !important;
+  border-radius: 6px;
+  font-size: 12px;
+  padding: 3px 10px;
+  cursor: pointer;
+}
+
+.settings-ghost.danger:hover {
+  color: var(--danger) !important;
+  border-color: var(--danger) !important;
+}
+
+.settings-fresh-token {
+  border: 1px solid var(--accent);
+  background: var(--accent-soft, color-mix(in srgb, var(--accent) 8%, var(--surface)));
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin-bottom: 12px;
+  font-size: 13px;
+  display: grid;
+  gap: 8px;
+}
+
+.settings-token-value {
+  font-size: 13px;
+  word-break: break-all;
+  background: var(--surface);
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+  padding: 6px 8px;
+  user-select: all;
+}
+
+.settings-fresh-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.settings-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.settings-table th {
+  text-align: left;
+  color: var(--text-muted);
+  font-weight: 600;
+  font-size: 12px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.settings-table td {
+  padding: 7px 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.settings-table tr.revoked td {
+  color: var(--text-faint, var(--text-muted));
+  text-decoration: line-through;
+}
+
+.settings-table tr.revoked td:last-child {
+  text-decoration: none;
+}
+
+.settings-revoked-chip {
+  font-size: 11px;
+  color: var(--text-faint, var(--text-muted));
+}
+
+.settings-curl {
+  background: var(--surface-sunken, color-mix(in srgb, var(--text) 4%, var(--surface)));
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-size: 12px;
+  overflow-x: auto;
+  margin: 0;
+}
+
+.settings-danger {
+  border: 1px solid var(--danger);
+  background: transparent;
+  color: var(--danger);
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  padding: 6px 14px;
+  cursor: pointer;
+}
+
+.settings-danger:hover:not(:disabled) {
+  background: var(--danger);
+  color: #fff;
+}
+
+.settings-reset-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 13px;
+  color: var(--text-muted);
+}

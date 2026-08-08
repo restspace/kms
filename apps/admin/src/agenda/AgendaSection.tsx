@@ -12,6 +12,7 @@ import {
   type AgendaSessionRow,
   type SchedulePatch,
 } from '../api'
+import { appConfirm } from '../components/dialogs'
 import { ConflictsView } from './ConflictsView'
 import { AddSessionDialog, MoveDialog } from './dialogs'
 import { RoomsBoard } from './RoomsBoard'
@@ -180,49 +181,54 @@ export function AgendaSection({ initialView }: { initialView?: AgendaView } = {}
 
       // Invited sessions never change silently (docs/07 §6): ask before
       // cancelling or re-sending; declining still applies the schedule change.
-      let notify: SchedulePatch['notify']
-      if (session.invited === 1) {
-        if (patch.starts_at === null) {
-          notify = window.confirm(
-            `“${session.title}” has a live calendar invite.\nSend a cancellation email to its speakers?`,
-          )
-            ? 'cancelled'
-            : undefined
-        } else {
-          notify = window.confirm(
-            `“${session.title}” has a live calendar invite.\nEmail its speakers an updated invite for the new slot?`,
-          )
-            ? 'changed'
-            : undefined
+      // The dialog is async, so the whole commit continues inside the IIFE.
+      void (async () => {
+        let notify: SchedulePatch['notify']
+        if (session.invited === 1) {
+          if (patch.starts_at === null) {
+            notify = (await appConfirm(
+              `“${session.title}” has a live calendar invite.\nSend a cancellation email to its speakers?`,
+              { title: 'Unscheduling an invited session', confirmLabel: 'Send cancellation', cancelLabel: 'Skip the email' },
+            ))
+              ? 'cancelled'
+              : undefined
+          } else {
+            notify = (await appConfirm(
+              `“${session.title}” has a live calendar invite.\nEmail its speakers an updated invite for the new slot?`,
+              { title: 'Moving an invited session', confirmLabel: 'Send updated invite', cancelLabel: 'Skip the email' },
+            ))
+              ? 'changed'
+              : undefined
+          }
         }
-      }
 
-      const prev = { starts_at: session.starts_at, ends_at: session.ends_at, room_id: session.room_id }
-      if (opts.pushUndo !== false) undoStack.current.push({ id, prev })
+        const prev = { starts_at: session.starts_at, ends_at: session.ends_at, room_id: session.room_id }
+        if (opts.pushUndo !== false) undoStack.current.push({ id, prev })
 
-      const nextSessions = data.sessions.map((s) => (s.id === id ? { ...s, ...patch } : s))
-      setData(withLocalConflicts(data, nextSessions))
+        const nextSessions = data.sessions.map((s) => (s.id === id ? { ...s, ...patch } : s))
+        setData(withLocalConflicts(data, nextSessions))
 
-      const undo = () => {
-        const entry = undoStack.current.pop()
-        if (entry) commitSchedule(entry.id, entry.prev, { pushUndo: false, label: 'Undone' })
-      }
-      showToast({
-        message:
-          opts.label ??
-          (patch.starts_at === null
-            ? `${session.code} unscheduled`
-            : `${session.code} → ${fmtRange(patch.starts_at, patch.ends_at as string, tz)}`),
-        ...(opts.pushUndo !== false ? { undo } : {}),
-      })
-
-      scheduleSession(id, { ...patch, ...(notify ? { notify } : {}) })
-        .then(applyPayload)
-        .catch((e: unknown) => {
-          // Server rejected: the block animates back via a fresh load.
-          getAgenda().then(setData).catch(() => undefined)
-          showToast({ message: e instanceof Error ? e.message : 'Schedule change failed' })
+        const undo = () => {
+          const entry = undoStack.current.pop()
+          if (entry) commitSchedule(entry.id, entry.prev, { pushUndo: false, label: 'Undone' })
+        }
+        showToast({
+          message:
+            opts.label ??
+            (patch.starts_at === null
+              ? `${session.code} unscheduled`
+              : `${session.code} → ${fmtRange(patch.starts_at, patch.ends_at as string, tz)}`),
+          ...(opts.pushUndo !== false ? { undo } : {}),
         })
+
+        scheduleSession(id, { ...patch, ...(notify ? { notify } : {}) })
+          .then(applyPayload)
+          .catch((e: unknown) => {
+            // Server rejected: the block animates back via a fresh load.
+            getAgenda().then(setData).catch(() => undefined)
+            showToast({ message: e instanceof Error ? e.message : 'Schedule change failed' })
+          })
+      })()
     },
     [data, sessionById, withLocalConflicts, applyPayload, showToast, tz],
   )
@@ -496,11 +502,17 @@ export function AgendaSection({ initialView }: { initialView?: AgendaView } = {}
               sessionById={sessionById}
               onOpenMove={setMoveId}
               onRemoveSpeaker={(sessionId, contactId, speakerName, sessionTitle) => {
-                if (!window.confirm(`Remove ${speakerName} from “${sessionTitle}”?`)) return
-                runAction(
-                  () => removeSessionSpeaker(sessionId, contactId),
-                  () => `${speakerName} removed from the session`,
-                )
+                void appConfirm(`Remove ${speakerName} from “${sessionTitle}”?`, {
+                  title: 'Remove speaker',
+                  confirmLabel: 'Remove',
+                  danger: true,
+                }).then((confirmed) => {
+                  if (!confirmed) return
+                  runAction(
+                    () => removeSessionSpeaker(sessionId, contactId),
+                    () => `${speakerName} removed from the session`,
+                  )
+                })
               }}
               onIgnore={(signatureValue, ignored) =>
                 runAction(

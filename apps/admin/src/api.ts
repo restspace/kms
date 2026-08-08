@@ -469,6 +469,51 @@ export const remindTasks = (assignmentIds?: string[]) =>
     body: JSON.stringify(assignmentIds ? { assignment_ids: assignmentIds } : {}),
   })
 
+// ---------------------------------------------------------------------------
+// Settings: API tokens + demo reset (docs/10 §1, M6)
+// ---------------------------------------------------------------------------
+
+export interface ApiTokenRow {
+  id: string
+  name: string
+  token_prefix: string
+  created_at: string
+  last_used_at: string | null
+  revoked_at: string | null
+}
+
+export const listTokens = () => request<{ tokens: ApiTokenRow[] }>('/app/api/tokens')
+export const createToken = (name: string) =>
+  request<{ id: string; name: string; token: string; token_prefix: string }>('/app/api/tokens', {
+    method: 'POST',
+    body: JSON.stringify({ name }),
+  })
+export const revokeToken = (id: string) =>
+  request<{ ok: boolean }>(`/app/api/tokens/${id}`, { method: 'DELETE' })
+export const resetDemoData = () =>
+  request<{ ok: boolean; statements: number }>('/app/api/demo/reset', { method: 'POST', body: JSON.stringify({}) })
+
+/**
+ * Export URL against the public REST API (session cookie authorises the
+ * first-party request). The workspace passes the tab's live merged filters,
+ * so the file contains exactly what the grid shows (docs/09 §10 test 7).
+ */
+export function buildExportUrl(
+  eventId: string,
+  resource: 'contacts' | 'submissions' | 'tasks' | 'messages',
+  format: 'csv' | 'xlsx',
+  filters: Record<string, unknown>,
+  sort?: { field: string; direction: 'asc' | 'desc' },
+): string {
+  const params = new URLSearchParams({ format })
+  for (const [key, value] of Object.entries(filters)) {
+    if (value === undefined || value === null || value === '' || value === false) continue
+    params.set(key, String(value))
+  }
+  if (sort) params.set('sort', sort.direction === 'desc' ? `-${sort.field}` : sort.field)
+  return `/api/v1/events/${eventId}/${resource}/export?${params.toString()}`
+}
+
 export const getReviewQueue = () => request<ReviewQueue>('/app/api/review/queue')
 export const saveReview = (assignmentId: string, body: Record<string, unknown>) =>
   request<{ ok: boolean; weighted_total: number | null; submission_rating: number | null }>(

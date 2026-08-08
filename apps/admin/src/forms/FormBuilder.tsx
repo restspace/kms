@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { appConfirm } from '../components/dialogs'
 import {
   addQuestion,
   deleteQuestion,
@@ -401,7 +402,10 @@ function QuestionList({
               <button
                 className="fbtn-link danger"
                 onClick={() => {
-                  if (window.confirm(`Remove "${q.label}"?`)) void run(deleteQuestion(formId, q.id))
+                  void appConfirm(`Remove "${q.label}"?`, { title: 'Remove question', confirmLabel: 'Remove', danger: true })
+                    .then((confirmed) => {
+                      if (confirmed) void run(deleteQuestion(formId, q.id))
+                    })
                 }}
               >
                 Remove

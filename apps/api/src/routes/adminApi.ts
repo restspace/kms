@@ -5,9 +5,11 @@
 // sort field is whitelisted here; all values travel as bound parameters.
 
 import { Hono } from 'hono';
+import type { Context } from 'hono';
 import { can } from '@kms/core';
 import type { Actor, Role } from '@kms/core';
 import type { AppEnv, Env } from '../env';
+import { sha256Hex } from '../hashing';
 import { createSessionToken, getSession, setSessionCookie, type SessionPayload } from '../session';
 import { formsAdminRoutes } from './formsAdmin';
 import { evaluationRoutes } from './evaluation';
@@ -96,7 +98,7 @@ adminApiRoutes.get('/builder-meta', async (c) => {
 // Query endpoint machinery
 // ---------------------------------------------------------------------------
 
-interface QueryBody {
+export interface QueryBody {
   from: number;
   size: number;
   filters: Record<string, unknown>;
@@ -106,7 +108,7 @@ interface QueryBody {
 /** A filter contributes a WHERE fragment plus its bound params. */
 type FilterBuilder = (value: unknown) => { sql: string; params: unknown[] } | null;
 
-interface ResourceDef {
+export interface ResourceDef {
   /** FROM clause including joins; `?1` is always the event id. */
   fromSql: string;
   selectSql: string;
@@ -132,7 +134,9 @@ const SUBMISSION_STATUSES = new Set([
   'draft', 'pending', 'accept_queue', 'accepted', 'decline_queue', 'declined', 'withdrawn',
 ]);
 
-const RESOURCES: Record<string, ResourceDef> = {
+// Exported: the REST API (/api/v1) and its OpenAPI document are generated from
+// this same registry, so the public surface cannot drift from the SPA's.
+export const RESOURCES: Record<string, ResourceDef> = {
   contacts: {
     fromSql: 'FROM contacts c WHERE c.event_id = ?',
     selectSql: 'SELECT c.*',
@@ -371,7 +375,7 @@ const RESOURCES: Record<string, ResourceDef> = {
   },
 };
 
-function parseQueryBody(raw: unknown): QueryBody {
+export function parseQueryBody(raw: unknown): QueryBody {
   const body = (raw ?? {}) as Record<string, unknown>;
   const from = Number.isInteger(body.from) && (body.from as number) >= 0 ? (body.from as number) : 0;
   const sizeRaw = Number.isInteger(body.size) ? (body.size as number) : 50;
@@ -386,16 +390,19 @@ function parseQueryBody(raw: unknown): QueryBody {
   return { from, size, filters, sort };
 }
 
-// POST /app/api/:resource/query → { items, total }
-adminApiRoutes.post('/:resource/query', async (c) => {
-  const def = RESOURCES[c.req.param('resource')];
-  if (!def) return c.json({ error: 'unknown_resource' }, 404);
-
-  const session = c.get('session');
-  const { from, size, filters, sort } = parseQueryBody(await c.req.json().catch(() => ({})));
-
+/**
+ * Execute a registry query for one resource, scoped to an event. Shared by the
+ * SPA's POST /:resource/query, the REST API's GET list endpoints and the
+ * export endpoints — one executor, three surfaces.
+ */
+export async function queryResource(
+  db: D1Database,
+  def: ResourceDef,
+  eventId: string,
+  { from, size, filters, sort }: QueryBody,
+): Promise<{ items: Record<string, unknown>[]; total: number }> {
   const where: string[] = [];
-  const params: unknown[] = [session.eventId];
+  const params: unknown[] = [eventId];
   for (const [key, value] of Object.entries(filters)) {
     const builder = def.filters[key];
     if (!builder) continue; // unknown filter names are ignored, never interpolated
@@ -415,11 +422,21 @@ adminApiRoutes.post('/:resource/query', async (c) => {
   const countSql = `SELECT COUNT(*) AS n ${def.fromSql}${whereSql}`;
 
   const [list, count] = await Promise.all([
-    c.env.DB.prepare(listSql).bind(...params, size, from).all(),
-    c.env.DB.prepare(countSql).bind(...params).first<{ n: number }>(),
+    db.prepare(listSql).bind(...params, size, from).all(),
+    db.prepare(countSql).bind(...params).first<{ n: number }>(),
   ]);
 
-  return c.json({ items: list.results, total: count?.n ?? 0 });
+  return { items: list.results as Record<string, unknown>[], total: count?.n ?? 0 };
+}
+
+// POST /app/api/:resource/query → { items, total }
+adminApiRoutes.post('/:resource/query', async (c) => {
+  const def = RESOURCES[c.req.param('resource')];
+  if (!def) return c.json({ error: 'unknown_resource' }, 404);
+
+  const session = c.get('session');
+  const body = parseQueryBody(await c.req.json().catch(() => ({})));
+  return c.json(await queryResource(c.env.DB, def, session.eventId, body));
 });
 
 // ---------------------------------------------------------------------------
@@ -504,6 +521,69 @@ adminApiRoutes.delete('/contacts/:id', async (c) => {
     .run();
   if (result.meta.changes === 0) return c.json({ error: 'not_found' }, 404);
   return c.json({ ok: true });
+});
+
+// ---------------------------------------------------------------------------
+// API tokens (Settings → API tokens; docs/10 §1, docs/12 M6)
+// ---------------------------------------------------------------------------
+
+/** The organisation owning the session's event — API tokens are org-scoped. */
+async function sessionOrgId(c: Context<ApiEnv>): Promise<string | null> {
+  const row = await c.env.DB.prepare('SELECT org_id FROM events WHERE id = ?')
+    .bind(c.get('session').eventId)
+    .first<{ org_id: string }>();
+  return row?.org_id ?? null;
+}
+
+adminApiRoutes.get('/tokens', async (c) => {
+  const orgId = await sessionOrgId(c);
+  const { results } = await c.env.DB.prepare(
+    `SELECT id, name, token_prefix, created_at, last_used_at, revoked_at
+     FROM api_tokens WHERE org_id = ? ORDER BY created_at DESC`,
+  )
+    .bind(orgId)
+    .all();
+  return c.json({ tokens: results });
+});
+
+// POST /tokens { name } — the secret is returned exactly once; only its hash
+// is stored (docs/10 §1: bearer tokens, org-scoped).
+adminApiRoutes.post('/tokens', async (c) => {
+  const orgId = await sessionOrgId(c);
+  if (!orgId) return c.json({ error: 'not_found' }, 404);
+  const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+  const name = typeof body.name === 'string' && body.name.trim() ? body.name.trim().slice(0, 100) : 'API token';
+
+  const bytes = crypto.getRandomValues(new Uint8Array(20));
+  const token = 'kms_' + [...bytes].map((b) => b.toString(16).padStart(2, '0')).join('');
+  const id = crypto.randomUUID();
+  await c.env.DB.prepare(
+    `INSERT INTO api_tokens (id, org_id, name, token_hash, token_prefix, created_by_contact_id, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+  )
+    .bind(id, orgId, name, await sha256Hex(token), token.slice(0, 12), c.get('session').contactId, new Date().toISOString())
+    .run();
+  return c.json({ id, name, token, token_prefix: token.slice(0, 12) }, 201);
+});
+
+adminApiRoutes.delete('/tokens/:id', async (c) => {
+  const orgId = await sessionOrgId(c);
+  const result = await c.env.DB.prepare(
+    'UPDATE api_tokens SET revoked_at = ? WHERE id = ? AND org_id = ? AND revoked_at IS NULL',
+  )
+    .bind(new Date().toISOString(), c.req.param('id'), orgId)
+    .run();
+  if (result.meta.changes === 0) return c.json({ error: 'not_found' }, 404);
+  return c.json({ ok: true });
+});
+
+// POST /demo/reset — replay the seed (docs/12 §2's "reset demo data" button).
+// Gated on DEMO_RESET so a real deployment can never be wiped from the UI.
+adminApiRoutes.post('/demo/reset', async (c) => {
+  if (c.env.DEMO_RESET !== 'on') return c.json({ error: 'demo_reset_disabled' }, 403);
+  const { resetDemoData } = await import('../demo');
+  const statements = await resetDemoData(c.env.DB);
+  return c.json({ ok: true, statements });
 });
 
 // ---------------------------------------------------------------------------

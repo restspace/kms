@@ -591,3 +591,41 @@
   cursor: not-allowed;
   transform: none;
 }
+
+/* Export buttons (M6): bottom-left counterpart to the add button. */
+.data-list-export-buttons {
+  position: absolute;
+  bottom: max(16px, env(safe-area-inset-bottom));
+  left: max(16px, env(safe-area-inset-left));
+  display: flex;
+  gap: 6px;
+  z-index: 2;
+}
+
+.data-list-export-buttons.with-summary-row {
+  bottom: max(52px, calc(env(safe-area-inset-bottom) + 52px));
+}
+
+.data-list-export-button {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background-color: var(--surface);
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  padding: 4px 8px;
+  cursor: pointer;
+  box-shadow: var(--shadow-overlay);
+  transition: color 0.15s ease, border-color 0.15s ease;
+}
+
+.data-list-export-button:hover {
+  color: var(--text);
+  border-color: var(--accent);
+}
+
+.data-list-export-button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}

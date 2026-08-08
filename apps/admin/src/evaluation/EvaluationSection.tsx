@@ -9,6 +9,7 @@ import {
   updatePlan,
   type EvaluationOverview,
 } from '../api'
+import { appConfirm } from '../components/dialogs'
 import '../workspace/review.css'
 
 /**
@@ -116,7 +117,10 @@ function PlanCard({
           <button
             className="fbtn-link danger"
             onClick={() => {
-              if (window.confirm(`Remove criterion "${c.name}"?`)) void deleteCriterion(c.id).then(reload)
+              void appConfirm(`Remove criterion "${c.name}"?`, { title: 'Remove criterion', confirmLabel: 'Remove', danger: true })
+                .then((confirmed) => {
+                  if (confirmed) void deleteCriterion(c.id).then(reload)
+                })
             }}
           >
             ✕

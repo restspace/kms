@@ -7,6 +7,7 @@ import {
   updateForm,
   type FormRow,
 } from '../api'
+import { appConfirm } from '../components/dialogs'
 import { FormBuilder } from './FormBuilder'
 import './forms.css'
 
@@ -124,9 +125,13 @@ export function FormsSection({ eventSlug }: { eventSlug: string }) {
                   <button
                     className="fbtn danger"
                     onClick={() => {
-                      if (window.confirm(`Delete "${f.internal_name}"? Its submissions are kept.`)) {
-                        void deleteForm(f.id).then(reload)
-                      }
+                      void appConfirm(`Delete "${f.internal_name}"? Its submissions are kept.`, {
+                        title: 'Delete form',
+                        confirmLabel: 'Delete',
+                        danger: true,
+                      }).then((confirmed) => {
+                        if (confirmed) void deleteForm(f.id).then(reload)
+                      })
                     }}
                   >
                     Delete

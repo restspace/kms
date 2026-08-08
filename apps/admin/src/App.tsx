@@ -16,7 +16,10 @@ import {
   type SubmissionRow,
   type TaskAssignmentRow,
 } from './api'
+import { buildExportUrl } from './api'
+import { appConfirm } from './components/dialogs'
 import { FormsSection } from './forms/FormsSection'
+import { SettingsSection } from './settings/SettingsSection'
 import { EvaluationSection } from './evaluation/EvaluationSection'
 import { AgendaSection } from './agenda/AgendaSection'
 import { DashboardSection, type AppNavTarget } from './dashboard/DashboardSection'
@@ -43,7 +46,7 @@ const NAV_ITEMS = [
   { key: 'evaluation', label: 'Evaluation', soon: null },
   { key: 'review', label: 'Review', soon: null },
   { key: 'agenda', label: 'Agenda', soon: null },
-  { key: 'settings', label: 'Settings', soon: 'M6' },
+  { key: 'settings', label: 'Settings', soon: null },
 ] as const
 
 type ViewKey = (typeof NAV_ITEMS)[number]['key']
@@ -96,7 +99,14 @@ function buildWorkspaceConfig(
   onChecklist: (ids: string[]) => void,
   checklistResetKey: number,
   seeds: WorkspaceSeeds,
+  eventId: string,
 ): Record<string, TabConfig> {
+  // Export buttons (M6): each tab downloads its current view — active filters
+  // and anchor included — through the public REST API's export endpoint.
+  const exportFor = (resource: 'contacts' | 'submissions' | 'tasks' | 'messages') => ({
+    buildUrl: (format: 'csv' | 'xlsx', query: { filters: Record<string, unknown>; sort?: { field: string; direction: 'asc' | 'desc' } }) =>
+      buildExportUrl(eventId, resource, format, query.filters, query.sort),
+  })
   const speakers: TabConfig<ContactRow> = {
     displayTitle: 'Speakers',
     dataSource: queryResource<ContactRow>('contacts'),
@@ -129,13 +139,16 @@ function buildWorkspaceConfig(
     ),
     globalFilterSets: { id: 'contact_id' },
     globalFilterReceives: { submission_id: 'submission_id' },
+    exportConfig: exportFor('contacts'),
     schema: speakerSchema,
     onUpsert: async (data, existing?: ContactRow) =>
       existing ? updateContact(existing.id, data) : createContact(data),
     onDelete: async (item) => {
-      if (!window.confirm(`Delete ${contactName(item)}? Their submissions remain, unattributed.`)) {
-        return false
-      }
+      const confirmed = await appConfirm(
+        `Delete ${contactName(item)}? Their submissions remain, unattributed.`,
+        { title: 'Delete contact', confirmLabel: 'Delete', danger: true },
+      )
+      if (!confirmed) return false
       await deleteContact(item.id)
       return true
     },
@@ -207,6 +220,7 @@ function buildWorkspaceConfig(
     detailComponent: ({ item }) => <SubmissionDetailPanel id={item.id} />,
     globalFilterSets: { id: 'submission_id' },
     globalFilterReceives: { contact_id: 'contact_id' },
+    exportConfig: exportFor('submissions'),
   }
 
   const tasks: TabConfig<TaskAssignmentRow> = {
@@ -263,6 +277,7 @@ function buildWorkspaceConfig(
     // to its assignee.
     globalFilterSets: { contact_id: 'contact_id' },
     globalFilterReceives: { contact_id: 'contact_id', submission_id: 'submission_id' },
+    exportConfig: exportFor('tasks'),
   }
 
   const messages: TabConfig<MessageRow> = {
@@ -310,6 +325,7 @@ function buildWorkspaceConfig(
       </div>
     ),
     globalFilterReceives: { contact_id: 'contact_id' },
+    exportConfig: exportFor('messages'),
   }
 
   // Dashboard deep-link seeds (M5 stretch): tabs without their own filter UI
@@ -367,8 +383,8 @@ export default function App() {
   // Rebuilding on checklistResetKey both clears checks and refetches lists —
   // exactly what a bulk action needs.
   const workspaceConfig = useMemo(
-    () => buildWorkspaceConfig(handleChecklist, checklistResetKey, wsPreset?.seeds ?? {}),
-    [handleChecklist, checklistResetKey, wsPreset],
+    () => buildWorkspaceConfig(handleChecklist, checklistResetKey, wsPreset?.seeds ?? {}, me?.event.id ?? ''),
+    [handleChecklist, checklistResetKey, wsPreset, me?.event.id],
   )
 
   const handleNavigate = useCallback((target: AppNavTarget) => {
@@ -512,6 +528,8 @@ export default function App() {
           <AgendaSection key={agendaStart.key} initialView={agendaStart.view} />
         ) : view === 'dashboard' && !isReviewer ? (
           <DashboardSection onNavigate={handleNavigate} />
+        ) : view === 'settings' && !isReviewer ? (
+          <SettingsSection me={me} />
         ) : view === 'review' ? (
           <ReviewerWorkspace />
         ) : (

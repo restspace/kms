@@ -4,6 +4,8 @@ import { authRoutes } from './routes/auth';
 import { portalRoutes } from './routes/portal';
 import { adminRoutes } from './routes/admin';
 import { adminApiRoutes } from './routes/adminApi';
+import { restApiRoutes } from './routes/restApi';
+import { buildOpenApi, docsHtml } from './openapi';
 import { fileRoutes } from './routes/files';
 import { publicRoutes } from './routes/public';
 import { submitRoutes } from './routes/submit';
@@ -14,6 +16,11 @@ export function createApp() {
   app.get('/health', (c) =>
     c.json({ ok: true, service: 'kms', time: new Date().toISOString() }),
   );
+
+  // Docs + spec are public and must register before the authed /api/v1 mount.
+  app.get('/api/v1/openapi.json', (c) => c.json(buildOpenApi(new URL(c.req.url).origin)));
+  app.get('/docs', (c) => c.html(docsHtml(new URL(c.req.url).origin)));
+  app.route('/api/v1', restApiRoutes); // public REST API, bearer-token auth (docs/10)
 
   app.route('/auth', authRoutes);
   app.route('/portal', portalRoutes);

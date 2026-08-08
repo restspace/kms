@@ -7,6 +7,10 @@ main = "apps/api/src/index.ts"
 compatibility_date = "2025-09-01"
 compatibility_flags = ["nodejs_compat"]
 
+# The seed script is bundled as text so the Worker can replay it (demo reset).
+# Top-level key: must sit above the first [table] header.
+rules = [{ type = "Text", globs = ["**/*.sql"], fallthrough = true }]
+
 # One JSX idiom, two build targets (docs/03 §3). The Worker's SSR bundle resolves
 # the React API onto preact/compat, exactly as the public client bundle does.
 [alias]
@@ -33,7 +37,9 @@ binding = "KV"
 id = "8d840a61775244d7a7439618b8d699c0"
 
 [triggers]
-crons = ["* * * * *"] # outbox retry sweep + reminder sweeps
+# every minute: outbox retry sweep + reminder sweeps
+# 09:00 UTC (2am PT): demo data reset, when DEMO_RESET = "on"
+crons = ["* * * * *", "0 9 * * *"]
 
 [vars]
 APP_URL = "https://kms.r-s.workers.dev" # local dev overrides via .dev.vars
@@ -42,5 +48,6 @@ EMAIL_PROVIDER = "resend"
 AIRTABLE_SYNC = "off"
 USE_QUEUES = "off"
 DEV_MODE = "off" # "on" exposes the magic link in the /auth/request response instead of emailing it; local dev re-enables it via .dev.vars
+DEMO_RESET = "on" # the deployed site IS the public demo: Settings reset button + nightly 09:00 UTC seed replay. Set "off" for a real installation.
 
 # R2 binding intentionally absent for M0 — needs the r2 OAuth scope + card on file (see docs/12 M2).

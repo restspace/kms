@@ -8,6 +8,8 @@ export interface Env {
   AIRTABLE_SYNC: string;
   USE_QUEUES: string;
   DEV_MODE: string;
+  /** "on" enables the Settings reset button + nightly seed replay (demo deployments only) */
+  DEMO_RESET: string;
   // secrets (.dev.vars locally, `wrangler secret put` in production)
   RESEND_API_KEY?: string;
   /** calendar-safe invite path (spike verdict, docs/12 M0); Resend fallback without it */

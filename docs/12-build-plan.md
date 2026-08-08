@@ -242,8 +242,8 @@ does search/sort/virtualise/detail. What remains:
   the cut list, their headline numbers already live in the Today tabs; seed now
   leaves Claude + Barbara unconfirmed so the confirmation donut shows a real mix.
 
-### M6 — API, polish, deploy (Tue PM, ~5 h)
-- REST API + OpenAPI + `/docs`; webhooks if time allows.
+### M6 — API, polish, deploy (Tue PM, ~5 h) — **done** (core; deploy step in M7)
+- REST API + OpenAPI + `/docs`; ~~webhooks~~ (cut list). ✅
   **Design constraints for agentic consumers (assessed Aug 8, partly landed early):**
   the REST surface is *the* agent surface — bearer tokens with the event in the path
   (per-request scope, no session-held event state); OpenAPI generated from the same
@@ -252,17 +252,54 @@ does search/sort/virtualise/detail. What remains:
   (filters with semantics, sortable fields, conventions), idempotency keys on form
   creation, optimistic concurrency (`expected_updated_at` → 409) on form updates,
   and parsed-JSON-out on all structured columns.
-- Airtable mirror worker (bonus).
-- Exports (CSV/XLSX, files bundle) — served by the API, offered from the workspace tabs.
+- ~~Airtable mirror worker (bonus)~~ (cut list).
+- Exports (CSV/XLSX) — served by the API, offered from the workspace tabs. ✅
+  (files bundle: cut with the Files tab)
 - Workspace polish remainder: replace the `window.alert`/`confirm` call sites with proper
-  dialogs (the skin pass itself moved to M0.5).
-- *If time:* **Files** list tab over `file_assets` receiving the anchor.
-- Performance pass against the budgets in [03 §6](03-architecture.md); Lighthouse on the public pages.
-- Accessibility pass; empty states; error states.
-- Seed the public demo, nightly reset cron.
+  dialogs (the skin pass itself moved to M0.5). ✅
+- ~~*If time:* **Files** list tab over `file_assets` receiving the anchor~~ (cut list).
+- Performance/Lighthouse + accessibility/empty/error-state passes → folded into M7's
+  demo runs (the SPA already ships empty/error/retry states per list; a11y basics —
+  listbox semantics, aria-labels, focus-visible — are in the ported components).
+- Seed the public demo, nightly reset cron. ✅ (cron + button built; remote seed lands
+  with the M7 deploy)
 - README with a 15-minute deploy path, architecture notes and the judgment-call rationale —
   including why the admin core is a tab workspace with a global anchor filter rather than
-  a Sessionboard-style page-per-resource clone.
+  a Sessionboard-style page-per-resource clone. ✅
+- **Notes (Aug 8, delivered ~4 days early):** the `/api/v1` surface is generated
+  from the same `RESOURCES` registry the SPA queries — `queryResource()` is one
+  executor behind three surfaces (SPA grid, REST lists, exports), and
+  `openapi.ts` derives the OpenAPI 3.1 document (filters + one-line semantics +
+  sortable fields) from the registry objects themselves, so `/docs` (Scalar via
+  CDN, raw-JSON fallback) cannot drift from the implementation. Auth: `api_tokens`
+  (migration 0003) stores a SHA-256 hash + display prefix, org-scoped, revocable;
+  the bearer middleware also accepts the first-party admin session cookie, which
+  is how the workspace export buttons authorise. Endpoints: `GET /events`,
+  `GET /events/:id`, registry lists (`?status=&sort=-created_at&limit=&offset=` →
+  `{data,total,limit,offset,has_more}`), submission/contact detail (parsed
+  answers, participants, tags, rating), `POST …/submissions/:id/status` (no
+  emails by design — batch notify stays in the app), and
+  `GET …/:resource/export?format=csv|xlsx` honouring the same filters. XLSX is
+  hand-rolled minimal OOXML zipped with `fflate` (SheetJS is megabytes);
+  validated with openpyxl. Workspace: every tab grew CSV/XLSX buttons fed by
+  DataList's live merged filters — verified in-browser that the Pending chip
+  exports exactly the 4 pending rows (docs/09 §10 test 7, closed) and that a
+  shift-click anchor narrows the Tasks export to Ada's 3 assignments. Dialogs:
+  promise-based `appConfirm`/`appAlert` + one `DialogHost` replaced all 11
+  `window.confirm`/`alert` call sites (contact delete, invite notify, speaker
+  remove, question/form/criterion deletes, token revoke, demo reset, save
+  failures). Settings section went live: token create (secret shown once) /
+  revoke (immediate 401, verified), docs pointers with a filled-in curl, and the
+  demo reset button. Demo reset bundles `seed.sql` as text (wrangler `rules`),
+  splits on end-of-line `;` (D1 `exec()` can't take multi-line statements) and
+  replays in ordered batches — 44 statements, verified via UI and API; api_tokens
+  are snapshotted and restored around the replay so a judge's token survives the
+  nightly reset (second cron `0 9 * * *`, gated on `DEMO_RESET=on`). Judgment
+  calls: webhooks/Airtable/Files tab taken from the cut list to protect M7;
+  writes beyond status stay off the API surface for now (the app's flows carry
+  the invariants — decision emails, task auto-assignment); the wrangler `rules`
+  key must sit above the first `[table]` header or it's silently swallowed by
+  `[[kv_namespaces]]` (found the hard way).
 
 ### M7 — Buffer & submission (Wed)
 - Run the demo script end-to-end three times, on desktop and phone.

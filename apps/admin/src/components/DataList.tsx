@@ -226,6 +226,18 @@ export type DataListSummaryDataSource = (
   filters: Record<string, any>
 ) => DataListSummaryData | Promise<DataListSummaryData | null | undefined> | null | undefined;
 
+/**
+ * Optional export buttons (CSV/XLSX) floating at the bottom-left of the list.
+ * The consumer builds the URL from the list's live merged filters + sort, so
+ * exports always match exactly what the grid is showing.
+ */
+export interface DataListExportConfig {
+  buildUrl: (
+    format: 'csv' | 'xlsx',
+    query: { filters: Record<string, any>; sort?: { field: string; direction: 'asc' | 'desc' } }
+  ) => string;
+}
+
 export interface DataListRowDragPayload {
   sourceType: string;
   id: string;
@@ -378,6 +390,8 @@ export interface DataListProps<T = any, TFilters extends Record<string, any> = R
    * they change, so the parent can restore them across remounts.
    */
   onLocalChecksChange?: (checkedIds: string[]) => void;
+  /** When provided, CSV/XLSX export buttons render at the bottom-left. */
+  exportConfig?: DataListExportConfig;
   rowHeight?: number;
   /**
    * Width breakpoint (px) below which the list switches to mobile card layout.
@@ -542,6 +556,7 @@ export const DataList = <T extends Record<string, any>, TFilters extends Record<
   checklistResetKey,
   restoredState,
   onLocalChecksChange,
+  exportConfig,
   rowHeight = DEFAULT_ROW_HEIGHT,
   mobileBreakpointWidth,
   mobileRowHeight,
@@ -1916,6 +1931,31 @@ export const DataList = <T extends Record<string, any>, TFilters extends Record<
                 >
                   <img src={PlusIcon} alt="" aria-hidden="true" />
                 </button>
+              )}
+              {exportConfig && !isMobile && (
+                <div className={`data-list-export-buttons ${hasSummaryData ? 'with-summary-row' : ''}`}>
+                  {(['csv', 'xlsx'] as const).map((format) => (
+                    <button
+                      key={format}
+                      type="button"
+                      className="data-list-export-button"
+                      title={`Export the current view as ${format.toUpperCase()} (honours active filters)`}
+                      onClick={() => {
+                        const sort = sortState.field && sortState.direction
+                          ? { field: sortState.field, direction: sortState.direction }
+                          : undefined;
+                        const anchor = document.createElement('a');
+                        anchor.href = exportConfig.buildUrl(format, { filters: mergedFilters, sort });
+                        anchor.rel = 'noopener';
+                        document.body.appendChild(anchor);
+                        anchor.click();
+                        anchor.remove();
+                      }}
+                    >
+                      ↓ {format.toUpperCase()}
+                    </button>
+                  ))}
+                </div>
               )}
               {fastAdd && !isMobile && (
                 <button

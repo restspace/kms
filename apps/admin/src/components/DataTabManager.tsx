@@ -1,7 +1,8 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import { useQueries, useQueryClient } from '@tanstack/react-query';
 import { DataList, ColumnDefinition, DataListQuery, DataSourceParams, DataSourceResult } from './DataList';
-import type { DataListFastAddConfig, DataListFilterConfig, DataListRowDragConfig, DataListRowDropConfig, DataListSummaryDataSource } from './DataList';
+import { appAlert } from './dialogs';
+import type { DataListExportConfig, DataListFastAddConfig, DataListFilterConfig, DataListRowDragConfig, DataListRowDropConfig, DataListSummaryDataSource } from './DataList';
 import { RecordForm } from './RecordForm';
 import { ContextMenu } from './ContextMenu';
 import { generateRandomId, toReadableText } from '../utility';
@@ -232,6 +233,10 @@ export interface TabConfig<T = any> {
    * Optional filter UI configuration rendered by DataList.
    */
   filterConfig?: DataListFilterConfig;
+  /**
+   * Optional CSV/XLSX export buttons on the list view (see DataListExportConfig).
+   */
+  exportConfig?: DataListExportConfig;
   /**
    * Optional hook to observe the merged filters + sort state from the list view.
    */
@@ -1400,7 +1405,7 @@ export const DataTabManager: React.FC<DataTabManagerProps> = ({
           : undefined;
         if (!isAllowed) {
           if (deniedMessage) {
-            window.alert(deniedMessage);
+            void appAlert(deniedMessage);
           }
           return;
         }
@@ -1869,7 +1874,7 @@ export const DataTabManager: React.FC<DataTabManagerProps> = ({
         return true;
       } catch (err) {
         console.error('Error creating record:', err);
-        window.alert(`Failed to save: ${err instanceof Error ? err.message : 'Unexpected error.'}`);
+        void appAlert(`Failed to save: ${err instanceof Error ? err.message : 'Unexpected error.'}`, 'Save failed');
         return false;
       }
     };
@@ -1952,7 +1957,7 @@ export const DataTabManager: React.FC<DataTabManagerProps> = ({
         return true;
       } catch (err) {
         console.error('Error updating record:', err);
-        window.alert(`Failed to save: ${err instanceof Error ? err.message : 'Unexpected error.'}`);
+        void appAlert(`Failed to save: ${err instanceof Error ? err.message : 'Unexpected error.'}`, 'Save failed');
         return false;
       }
     };
@@ -2213,6 +2218,7 @@ export const DataTabManager: React.FC<DataTabManagerProps> = ({
           getItemAriaLabel={tabConfig.getItemAriaLabel}
           globalFilter={globalFiltersByTab[tab.id]}
           filterConfig={tabConfig.filterConfig}
+          exportConfig={tabConfig.exportConfig}
           onQueryChange={handleQueryChange}
           getSummaryData={tabConfig.getSummaryData}
           initialSort={tabConfig.initialSort}
@@ -2242,7 +2248,7 @@ export const DataTabManager: React.FC<DataTabManagerProps> = ({
               : undefined;
             if (!isAllowed) {
               if (deniedMessage) {
-                window.alert(deniedMessage);
+                void appAlert(deniedMessage);
               }
               return;
             }
