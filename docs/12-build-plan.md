@@ -15,6 +15,14 @@ deployment and the write-up.
   renders as a native invite in Gmail, Outlook and Apple Calendar, and that re-sending with an
   incremented `SEQUENCE` updates the calendar entry in place and `METHOD:CANCEL` removes it.
   If any client fails, there are still four days to change the MIME shape or provider.
+  **Result (Aug 8, spikes/):** Gmail renders natively even from a REST attachment; Outlook does
+  not, and delivered-MIME inspection proved why — Resend (REST and SMTP alike) re-files the
+  `text/calendar` alternative part as a generic attachment and strips `method=REQUEST`
+  (nodemailer's local output verified correct; upstream resend-node #198, closed unfixed).
+  **Decision: invite emails go through a calendar-safe provider (SendGrid REST planned); all
+  other mail stays on Resend.** Still open: verify SendGrid on Outlook, the SEQUENCE update /
+  METHOD:CANCEL round-trip on the final provider, and the Apple Calendar leg (no iCloud test
+  address yet).
 - Repo, licence (MIT), README skeleton, CI.
 - Cloudflare Worker + Hono + Vite scaffold; D1, R2, KV, Cron bindings; `outbox` table
   (no Queues — free tier, see [03 §2a](03-architecture.md)).

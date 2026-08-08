@@ -5,6 +5,7 @@ Thumbs.db
 
 # Personal test data — repo will be public
 test-emails.txt
+outlook-b-source.txt
 
 # Build & deps (for when the app lands in this repo)
 node_modules/

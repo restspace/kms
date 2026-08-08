@@ -20,7 +20,7 @@ implies: a stranger must be able to clone and deploy it.
 | Cache / sessions | **Workers KV** | Magic-link tokens, session cookies, dashboard aggregates |
 | Background work | **D1 outbox table + Cron Triggers** (Queues optional, see §2a) | Email sends, reminder sweeps, Airtable sync — without leaving the free tier (Queues requires the Workers paid plan) |
 | Realtime (optional) | **Durable Objects** | Live dashboard + collaborative agenda editing |
-| Email | **Resend** | Simple API, good deliverability, supports the `text/calendar` MIME part needed for native invites. (MailChannels' free Workers integration was discontinued in 2024 — it is not a fallback.) |
+| Email | **Resend** for transactional mail; a **second provider for calendar invites** (SendGrid REST planned) | M0 spike (Aug 8) proved Resend cannot carry invites: its pipeline (REST *and* SMTP) demotes the `text/calendar` alternative part to a generic attachment and strips `method=REQUEST`, so Outlook never offers RSVP (Gmail copes; resend-node #198, closed unfixed). Provider clients already sit behind one interface. (MailChannels' free Workers integration was discontinued in 2024 — not a fallback.) |
 | Auth | Magic link + signed cookie (JWT in HttpOnly cookie) | No password storage; matches the portal UX in the screenshots |
 
 ### If not Cloudflare
