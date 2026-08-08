@@ -130,3 +130,4 @@ Because the tiebreaker is *"a product we'd actually use/buy"*, build order is:
 | [11-ui-and-navigation.md](11-ui-and-navigation.md) | Information architecture, screens, components, design direction |
 | [12-build-plan.md](12-build-plan.md) | Milestones against the Aug 12 deadline, demo script, seed data |
 | [13-open-questions.md](13-open-questions.md) | Assumptions taken and questions for the organisers |
+| [14-e2e-browser-test.md](14-e2e-browser-test.md) | Staged end-to-end browser test plan (browser-pilot), one section per milestone |

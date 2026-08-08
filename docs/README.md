@@ -29,6 +29,7 @@ conflict-free agenda by drag and drop, and watch it all on a live dashboard.
 | [11-ui-and-navigation.md](11-ui-and-navigation.md) | Information architecture, screens, design direction |
 | [12-build-plan.md](12-build-plan.md) | Milestones, seed data, the demo script that must be flawless |
 | [13-open-questions.md](13-open-questions.md) | Assumptions taken, questions for the organisers, risks |
+| [14-e2e-browser-test.md](14-e2e-browser-test.md) | End-to-end browser test plan, staged per milestone, run with browser-pilot |
 
 ---
 
