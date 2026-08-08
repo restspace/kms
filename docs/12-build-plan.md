@@ -169,6 +169,14 @@ does search/sort/virtualise/detail. What remains:
 
 ### M6 — API, polish, deploy (Tue PM, ~5 h)
 - REST API + OpenAPI + `/docs`; webhooks if time allows.
+  **Design constraints for agentic consumers (assessed Aug 8, partly landed early):**
+  the REST surface is *the* agent surface — bearer tokens with the event in the path
+  (per-request scope, no session-held event state); OpenAPI generated from the same
+  resource registry that `GET /app/api/meta` already serves (single source, cannot
+  drift). Already in place since M1.5: the `/app/api/meta` discovery endpoint
+  (filters with semantics, sortable fields, conventions), idempotency keys on form
+  creation, optimistic concurrency (`expected_updated_at` → 409) on form updates,
+  and parsed-JSON-out on all structured columns.
 - Airtable mirror worker (bonus).
 - Exports (CSV/XLSX, files bundle) — served by the API, offered from the workspace tabs.
 - Workspace polish remainder: replace the `window.alert`/`confirm` call sites with proper

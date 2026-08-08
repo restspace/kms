@@ -59,7 +59,7 @@ export function FormsSection({ eventSlug }: { eventSlug: string }) {
         <button
           className="fbtn primary"
           onClick={() => {
-            void createForm({ internal_name: 'Untitled form' }).then((r) => {
+            void createForm({ internal_name: 'Untitled form', idempotency_key: crypto.randomUUID() }).then((r) => {
               setOpenFormId(r.form.id)
             })
           }}

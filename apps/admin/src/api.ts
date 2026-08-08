@@ -83,6 +83,7 @@ const ERROR_MESSAGES: Record<string, string> = {
   email_exists: 'A contact with this email already exists for this event.',
   email_required: 'An email address is required.',
   not_found: 'The record no longer exists.',
+  conflict: 'This record changed in another session — reload to pick up the latest version before saving again.',
 }
 
 function readableError(code: string): string {
@@ -134,8 +135,9 @@ export interface FormRow {
   allow_multiple_drafts: number
   success_message: string | null
   auto_redirect_to_portal: number
-  routing_rules: string | null
-  participant_roles: string | null
+  /** parsed json in responses (server normalises); send objects back */
+  routing_rules: Record<string, unknown> | null
+  participant_roles: Array<{ role: string; min: number; max: number | null }> | null
   confirmation_email_enabled: number
   created_at: string
   updated_at: string

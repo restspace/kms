@@ -51,7 +51,9 @@ interface RuleDraft {
   set_track_id: string
 }
 
-/** Editable subset of the form sent on Save. */
+/** Editable subset of the form sent on Save. expected_updated_at makes the
+ * save conditional: a concurrent edit elsewhere turns into a 409, not a
+ * silent overwrite. */
 function editablePatch(form: FormRow): Record<string, unknown> {
   return {
     internal_name: form.internal_name,
@@ -67,8 +69,9 @@ function editablePatch(form: FormRow): Record<string, unknown> {
     success_message: form.success_message,
     auto_redirect_to_portal: form.auto_redirect_to_portal === 1,
     confirmation_email_enabled: form.confirmation_email_enabled === 1,
-    routing_rules: form.routing_rules ? JSON.parse(form.routing_rules) : null,
-    participant_roles: form.participant_roles ? JSON.parse(form.participant_roles) : null,
+    routing_rules: form.routing_rules,
+    participant_roles: form.participant_roles,
+    expected_updated_at: form.updated_at,
   }
 }
 
@@ -784,15 +787,10 @@ function RoutingPanel({ form, patch, meta, questions }: {
   meta: BuilderMeta
   questions: FormQuestion[]
 }) {
-  const parsed = useMemo(() => {
-    try {
-      return form.routing_rules
-        ? (JSON.parse(form.routing_rules) as { rules?: Array<Record<string, unknown>>; fallback?: Record<string, unknown> })
-        : null
-    } catch {
-      return null
-    }
-  }, [form.routing_rules])
+  const parsed = form.routing_rules as {
+    rules?: Array<Record<string, unknown>>
+    fallback?: Record<string, unknown>
+  } | null
 
   const rules: RuleDraft[] = useMemo(
     () =>
@@ -830,7 +828,7 @@ function RoutingPanel({ form, patch, meta, questions }: {
       })),
       ...(nextFallback ? { fallback: { assign_evaluation_plan_id: nextFallback } } : {}),
     }
-    patch({ routing_rules: JSON.stringify(config) })
+    patch({ routing_rules: config })
   }
 
   const optionQuestions = questions.filter((q) => q.options !== null && q.options.length > 0)
@@ -932,10 +930,7 @@ function RoutingPanel({ form, patch, meta, questions }: {
 
 function RolesPanel({ form, patch }: { form: FormRow; patch: (c: Partial<FormRow>) => void }) {
   const configured: RoleRow[] = useMemo(() => {
-    let parsed: Array<{ role: string; min: number; max: number | null }> = []
-    try {
-      parsed = form.participant_roles ? JSON.parse(form.participant_roles) : []
-    } catch { /* default below */ }
+    let parsed = form.participant_roles ?? []
     if (parsed.length === 0) parsed = [{ role: 'speaker', min: 1, max: null }]
     return ALL_ROLES.map((role) => {
       const found = parsed.find((p) => p.role === role)
@@ -945,9 +940,7 @@ function RolesPanel({ form, patch }: { form: FormRow; patch: (c: Partial<FormRow
 
   const write = (rows: RoleRow[]) =>
     patch({
-      participant_roles: JSON.stringify(
-        rows.filter((r) => r.enabled).map((r) => ({ role: r.role, min: r.min, max: r.max })),
-      ),
+      participant_roles: rows.filter((r) => r.enabled).map((r) => ({ role: r.role, min: r.min, max: r.max })),
     })
 
   return (

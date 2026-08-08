@@ -25,6 +25,35 @@ adminApiRoutes.use('*', async (c, next) => {
   await next();
 });
 
+// GET /app/api/meta — self-description for API consumers, agents included.
+// Derived from the same RESOURCES registry the query endpoint executes, so it
+// cannot drift from reality; filter semantics come from filterDocs verbatim.
+adminApiRoutes.get('/meta', (c) => {
+  const resources: Record<string, unknown> = {};
+  for (const [name, def] of Object.entries(RESOURCES)) {
+    resources[name] = {
+      query: `POST /app/api/${name}/query`,
+      request: { from: 'int ≥ 0', size: 'int 1–200', filters: 'object, see filters', sort: '{ field, direction: asc|desc } | omitted' },
+      response: '{ items: row[], total: int }',
+      filters: Object.fromEntries(
+        Object.keys(def.filters).map((key) => [key, def.filterDocs[key] ?? '']),
+      ),
+      sortable: Object.keys(def.sortable),
+    };
+  }
+  return c.json({
+    resources,
+    conventions: {
+      scope: 'Every request is scoped to the event bound to the current session.',
+      errors: 'Non-2xx responses carry { error: <machine_code> }; validation failures add errors: [{ question_id, code, message }].',
+      unknown_filters: 'Unknown filter names are ignored, never an error.',
+      forms_create: 'POST /app/api/forms accepts idempotency_key; replays within 24 h return the originally created form.',
+      forms_update: 'PUT /app/api/forms/:id accepts expected_updated_at; a stale value yields 409 { error: "conflict", current_updated_at }.',
+      json_columns: 'Structured columns (routing_rules, participant_roles, visibility, options, notify lists) are parsed JSON in responses; requests may send them as objects.',
+    },
+  });
+});
+
 // Form builder + question endpoints (docs/04) — inherits the guard above.
 adminApiRoutes.route('/forms', formsAdminRoutes);
 
@@ -69,6 +98,9 @@ interface ResourceDef {
   sortable: Record<string, string>;
   defaultSort: string;
   filters: Record<string, FilterBuilder>;
+  /** One line of intent per filter — served verbatim by GET /app/api/meta so
+   * agent tooling learns the vocabulary from the registry, not from docs. */
+  filterDocs: Record<string, string>;
 }
 
 const asText = (value: unknown): string | null =>
@@ -121,6 +153,11 @@ const RESOURCES: Record<string, ResourceDef> = {
           params: [v, v],
         };
       },
+    },
+    filterDocs: {
+      q: 'Free-text match over first name, last name, email and company.',
+      submission_id:
+        'Contacts related to this submission: its participants (any role) or its submitter.',
     },
   },
 
@@ -187,6 +224,18 @@ const RESOURCES: Record<string, ResourceDef> = {
           params: [v, v],
         };
       },
+    },
+    filterDocs: {
+      q: 'Free-text match over title and code.',
+      status:
+        'Exact status: draft | pending | accept_queue | accepted | decline_queue | declined | withdrawn.',
+      track_id: 'Submissions on this track.',
+      tag_id: 'Submissions carrying this tag.',
+      submitter_contact_id: 'Submissions this contact submitted (the narrow relation).',
+      participant_contact_id:
+        'Submissions this contact appears on as a participant, any role (the narrow relation).',
+      contact_id:
+        "Submissions that are this contact's in the broad sense: submitted by them OR with them as a participant. The global anchor filter uses this.",
     },
   },
 };

@@ -130,6 +130,31 @@ async function getForm(db: D1Database, eventId: string, id: string) {
     .first<Record<string, unknown>>();
 }
 
+/** json-in-TEXT form columns, parsed on the way out — clients (and agents)
+ * always see structured values; only the DB stores strings. */
+const FORM_JSON_COLUMNS = [
+  'routing_rules',
+  'participant_roles',
+  'cross_field_limits',
+  'notify_admins_on_create',
+  'notify_admins_on_update',
+] as const;
+
+function shapeForm(row: Record<string, unknown>): Record<string, unknown> {
+  const out = { ...row };
+  for (const column of FORM_JSON_COLUMNS) {
+    const value = out[column];
+    if (typeof value === 'string') {
+      try {
+        out[column] = JSON.parse(value) as unknown;
+      } catch {
+        out[column] = null;
+      }
+    }
+  }
+  return out;
+}
+
 // GET / — forms list with submission/draft counts (docs/04 §1).
 formsAdminRoutes.get('/', async (c) => {
   const session = c.get('session');
@@ -143,7 +168,7 @@ formsAdminRoutes.get('/', async (c) => {
   )
     .bind(session.eventId)
     .all();
-  return c.json({ items: results });
+  return c.json({ items: results.map((r) => shapeForm(r as Record<string, unknown>)) });
 });
 
 /** The default question set for new forms (docs/04 §2.3–2.4), by field key. */
@@ -167,10 +192,31 @@ const DEFAULT_PARTICIPANT_KEYS: Array<{ key: string; required: boolean; locked: 
   { key: 'biography', required: false, locked: false },
 ];
 
-// POST / — create a form seeded with the default question set.
+// POST / — create a form seeded with the default question set. Retry-safe:
+// an idempotency_key replayed within 24 h returns the originally created form
+// instead of minting a duplicate (agents retrying on timeouts, NFR-11 spirit).
 formsAdminRoutes.post('/', async (c) => {
   const session = c.get('session');
-  const fields = pickFormFields(await c.req.json().catch(() => ({})));
+  const rawBody = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+  const idempotencyKey =
+    typeof rawBody.idempotency_key === 'string' && rawBody.idempotency_key.trim() !== ''
+      ? rawBody.idempotency_key.trim().slice(0, 128)
+      : null;
+  const idemKvKey = idempotencyKey ? `idem:form-create:${session.eventId}:${idempotencyKey}` : null;
+  if (idemKvKey) {
+    const existingId = await c.env.KV.get(idemKvKey);
+    if (existingId) {
+      const existing = await getForm(c.env.DB, session.eventId, existingId);
+      if (existing) {
+        return c.json(
+          { form: shapeForm(existing), questions: await loadQuestions(c.env.DB, existingId), replayed: true },
+          200,
+        );
+      }
+    }
+  }
+
+  const fields = pickFormFields(rawBody);
   const id = crypto.randomUUID();
   const ts = nowIso();
   const name = (fields.internal_name as string) ?? 'Untitled form';
@@ -220,8 +266,12 @@ formsAdminRoutes.post('/', async (c) => {
   seed('participant', DEFAULT_PARTICIPANT_KEYS);
   if (inserts.length > 0) await c.env.DB.batch(inserts);
 
+  if (idemKvKey) {
+    await c.env.KV.put(idemKvKey, id, { expirationTtl: 24 * 60 * 60 });
+  }
+
   const form = await getForm(c.env.DB, session.eventId, id);
-  return c.json({ form, questions: await loadQuestions(c.env.DB, id) }, 201);
+  return c.json({ form: form ? shapeForm(form) : null, questions: await loadQuestions(c.env.DB, id) }, 201);
 });
 
 // GET /:id — full form + questions for the builder and the workspace.
@@ -229,27 +279,51 @@ formsAdminRoutes.get('/:id', async (c) => {
   const session = c.get('session');
   const form = await getForm(c.env.DB, session.eventId, c.req.param('id'));
   if (!form) return c.json({ error: 'not_found' }, 404);
-  return c.json({ form, questions: await loadQuestions(c.env.DB, form.id as string) });
+  return c.json({ form: shapeForm(form), questions: await loadQuestions(c.env.DB, form.id as string) });
 });
 
-// PUT /:id — update builder-editable columns.
+// PUT /:id — update builder-editable columns. Optimistic concurrency: when
+// the caller sends expected_updated_at and it no longer matches, nothing is
+// written and 409 { error: 'conflict' } reports the current version — a
+// concurrent writer's work is never silently clobbered.
 formsAdminRoutes.put('/:id', async (c) => {
   const session = c.get('session');
   const id = c.req.param('id');
-  const fields = pickFormFields(await c.req.json().catch(() => ({})));
+  const rawBody = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+  const expected =
+    typeof rawBody.expected_updated_at === 'string' ? rawBody.expected_updated_at : null;
+  if (expected) {
+    const current = await c.env.DB.prepare(
+      'SELECT updated_at FROM submission_forms WHERE id = ? AND event_id = ?',
+    )
+      .bind(id, session.eventId)
+      .first<{ updated_at: string }>();
+    if (!current) return c.json({ error: 'not_found' }, 404);
+    if (current.updated_at !== expected) {
+      return c.json({ error: 'conflict', current_updated_at: current.updated_at }, 409);
+    }
+  }
+  const fields = pickFormFields(rawBody);
   const cols = Object.keys(fields);
   if (cols.length > 0) {
+    // The updated_at guard re-checks inside the write itself, so two racing
+    // saves that both passed the read above still cannot both land.
+    const guardSql = expected ? ' AND updated_at = ?' : '';
     const result = await c.env.DB.prepare(
       `UPDATE submission_forms SET ${cols.map((k) => `${k} = ?`).join(', ')}, updated_at = ?
-       WHERE id = ? AND event_id = ?`,
+       WHERE id = ? AND event_id = ?${guardSql}`,
     )
-      .bind(...cols.map((k) => fields[k]), nowIso(), id, session.eventId)
+      .bind(...cols.map((k) => fields[k]), nowIso(), id, session.eventId, ...(expected ? [expected] : []))
       .run();
-    if (result.meta.changes === 0) return c.json({ error: 'not_found' }, 404);
+    if (result.meta.changes === 0) {
+      const current = await getForm(c.env.DB, session.eventId, id);
+      if (!current) return c.json({ error: 'not_found' }, 404);
+      return c.json({ error: 'conflict', current_updated_at: current.updated_at }, 409);
+    }
   }
   const form = await getForm(c.env.DB, session.eventId, id);
   if (!form) return c.json({ error: 'not_found' }, 404);
-  return c.json({ form });
+  return c.json({ form: shapeForm(form) });
 });
 
 // DELETE /:id — submissions keep their rows (form_id set null by FK).
@@ -331,7 +405,7 @@ formsAdminRoutes.post('/:id/duplicate', async (c) => {
     );
   }
   const form = await getForm(c.env.DB, session.eventId, id);
-  return c.json({ form, questions: await loadQuestions(c.env.DB, id) }, 201);
+  return c.json({ form: form ? shapeForm(form) : null, questions: await loadQuestions(c.env.DB, id) }, 201);
 });
 
 // ---------------------------------------------------------------------------
