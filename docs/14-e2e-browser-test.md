@@ -172,7 +172,7 @@ fails the milestone regardless of the rest.
 | M6.1 | `open http://localhost:8787/docs` then `do "confirm the API docs page renders an operation list and report the submissions endpoints"` | OpenAPI + `/docs` |
 | M6.2 | `do "using fetch_source, retrieve /app/api/meta and report the resources it lists"` | Discovery endpoint — raw response, not live DOM |
 | M6.3 | `do "export the Submissions tab to CSV and confirm the download completes"` | **FR-DASH-13** |
-| M6.4 | `do "confirm no window.alert or window.confirm dialogs appear during a delete from the workspace — report what confirmation UI is used"` | Polish item |
+| M6.4 | `do "confirm no window.alert or window.confirm dialogs appear when deleting a form from the Forms list — report what confirmation UI is used"` | Polish item — the workspace tabs have no delete affordance; Forms is where delete lives |
 | M6.5 | `do "open the deployed landing page and confirm the demo admin login, demo speaker login and the reset-demo-data button are all present"` | **FR-PLAT-7** — judges must never ask how to get in |
 
 ---
