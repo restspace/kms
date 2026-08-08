@@ -41,25 +41,27 @@ function wantsJson(accept: string | undefined): boolean {
   return (accept ?? '').includes('application/json');
 }
 
+/** Only same-origin relative paths may be used as post-login destinations. */
+function safeRedirect(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  return value.startsWith('/') && !value.startsWith('//') ? value : null;
+}
+
 async function readBody(c: Context<AppEnv>) {
   const contentType = c.req.header('content-type') ?? '';
-  if (contentType.includes('application/json')) {
-    const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
-    return {
-      email: typeof body.email === 'string' ? body.email : '',
-      event_slug: typeof body.event_slug === 'string' ? body.event_slug : '',
-    };
-  }
-  const body = await c.req.parseBody();
+  const body = contentType.includes('application/json')
+    ? ((await c.req.json().catch(() => ({}))) as Record<string, unknown>)
+    : await c.req.parseBody();
   return {
     email: typeof body.email === 'string' ? body.email : '',
     event_slug: typeof body.event_slug === 'string' ? body.event_slug : '',
+    redirect_to: safeRedirect(body.redirect_to),
   };
 }
 
 // POST /auth/request — accept form or JSON {email, event_slug}, mint + email a magic link.
 authRoutes.post('/request', async (c) => {
-  const { email, event_slug } = await readBody(c);
+  const { email, event_slug, redirect_to } = await readBody(c);
   const json = wantsJson(c.req.header('accept'));
 
   if (!email || !event_slug) {
@@ -83,7 +85,11 @@ authRoutes.post('/request', async (c) => {
   const hash = await sha256hex(token);
   await c.env.KV.put(
     `magic:${hash}`,
-    JSON.stringify({ contactId: contact.id, eventId: event.id }),
+    JSON.stringify({
+      contactId: contact.id,
+      eventId: event.id,
+      ...(redirect_to ? { redirectTo: redirect_to } : {}),
+    }),
     { expirationTtl: MAGIC_TTL_SECONDS },
   );
 
@@ -148,9 +154,9 @@ authRoutes.get('/callback', async (c) => {
   if (!stored) return expired();
   await c.env.KV.delete(key); // single-use (NFR-4)
 
-  let ref: { contactId: string; eventId: string };
+  let ref: { contactId: string; eventId: string; redirectTo?: string };
   try {
-    ref = JSON.parse(stored) as { contactId: string; eventId: string };
+    ref = JSON.parse(stored) as { contactId: string; eventId: string; redirectTo?: string };
   } catch {
     return expired();
   }
@@ -175,7 +181,9 @@ authRoutes.get('/callback', async (c) => {
   );
   setSessionCookie(c, sessionToken);
 
-  const dest = role === 'admin' || role === 'owner' ? '/app' : `/portal/${event.slug}`;
+  const dest =
+    safeRedirect(ref.redirectTo) ??
+    (role === 'admin' || role === 'owner' ? '/app' : `/portal/${event.slug}`);
   return c.redirect(dest);
 });
 

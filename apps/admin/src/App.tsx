@@ -11,6 +11,7 @@ import {
   type Me,
   type SubmissionRow,
 } from './api'
+import { FormsSection } from './forms/FormsSection'
 import './shell.css'
 
 /**
@@ -22,7 +23,7 @@ import './shell.css'
 const NAV_ITEMS = [
   { key: 'dashboard', label: 'Dashboard', soon: 'M5' },
   { key: 'workspace', label: 'Workspace', soon: null },
-  { key: 'forms', label: 'Forms', soon: 'M1' },
+  { key: 'forms', label: 'Forms', soon: null },
   { key: 'evaluation', label: 'Evaluation', soon: 'M3' },
   { key: 'agenda', label: 'Agenda', soon: 'M4' },
   { key: 'settings', label: 'Settings', soon: 'M6' },
@@ -244,6 +245,8 @@ export default function App() {
       <main className="shell-main">
         {view === 'workspace' ? (
           <DataTabManager config={workspaceConfig} defaultTabs={['speakers', 'submissions']} />
+        ) : view === 'forms' ? (
+          <FormsSection eventSlug={me.event.slug} />
         ) : (
           <div className="shell-placeholder">
             <h2>{NAV_ITEMS.find((i) => i.key === view)?.label}</h2>

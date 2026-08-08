@@ -5,6 +5,7 @@ import { portalRoutes } from './routes/portal';
 import { adminRoutes } from './routes/admin';
 import { adminApiRoutes } from './routes/adminApi';
 import { publicRoutes } from './routes/public';
+import { submitRoutes } from './routes/submit';
 
 export function createApp() {
   const app = new Hono<AppEnv>();
@@ -21,6 +22,7 @@ export function createApp() {
   app.get('/app/', (c) => c.redirect('/app')); // strict routing: normalise the slash form
   app.route('/app', adminRoutes);
   app.route('/hello', publicRoutes); // SSR + island proof page (commit 8454ce6)
+  app.route('/submit', submitRoutes); // public CFP wizard (docs/04 §5)
 
   app.get('/', (c) => c.redirect('/app'));
 

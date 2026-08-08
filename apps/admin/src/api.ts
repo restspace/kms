@@ -114,3 +114,83 @@ export const updateContact = (id: string, data: Record<string, unknown>) =>
 
 export const deleteContact = (id: string) =>
   request<{ ok: boolean }>(`/app/api/contacts/${id}`, { method: 'DELETE' })
+
+// ---------------------------------------------------------------------------
+// Form builder (docs/04)
+// ---------------------------------------------------------------------------
+
+export interface FormRow {
+  id: string
+  internal_name: string
+  external_title: string | null
+  page_heading: string | null
+  welcome_message: string | null
+  welcome_message_visible: number
+  collection_type: 'abstracts' | 'sessions'
+  collect_participants: number
+  status: 'open' | 'closed'
+  close_at: string | null
+  submission_limit: number | null
+  allow_multiple_drafts: number
+  success_message: string | null
+  auto_redirect_to_portal: number
+  routing_rules: string | null
+  participant_roles: string | null
+  confirmation_email_enabled: number
+  created_at: string
+  updated_at: string
+  submission_count?: number
+  draft_count?: number
+}
+
+export interface FormQuestion {
+  id: string
+  form_id: string
+  section: 'abstract' | 'participant'
+  position: number
+  required: boolean
+  locked: boolean
+  label: string
+  help_text: string | null
+  options: Array<{ value: string; label: string; color?: string }> | null
+  max_chars: number | null
+  visibility: Record<string, unknown> | null
+  field_id: string
+  field_key: string
+  type: string
+}
+
+export interface BuilderMeta {
+  fields: Array<{ id: string; key: string; label: string; type: string; scope: string; options: string | null; max_chars: number | null; system: number }>
+  tracks: Array<{ id: string; name: string; color: string | null }>
+  tags: Array<{ id: string; name: string; color: string | null }>
+  plans: Array<{ id: string; name: string; status: string }>
+}
+
+export interface FormWithQuestions {
+  form: FormRow
+  questions: FormQuestion[]
+}
+
+export const listForms = () => request<{ items: FormRow[] }>('/app/api/forms')
+export const createForm = (data: Record<string, unknown>) =>
+  request<FormWithQuestions>('/app/api/forms', { method: 'POST', body: JSON.stringify(data) })
+export const getFormDetail = (id: string) => request<FormWithQuestions>(`/app/api/forms/${id}`)
+export const updateForm = (id: string, patch: Record<string, unknown>) =>
+  request<{ form: FormRow }>(`/app/api/forms/${id}`, { method: 'PUT', body: JSON.stringify(patch) })
+export const deleteForm = (id: string) =>
+  request<{ ok: boolean }>(`/app/api/forms/${id}`, { method: 'DELETE' })
+export const duplicateForm = (id: string) =>
+  request<FormWithQuestions>(`/app/api/forms/${id}/duplicate`, { method: 'POST', body: JSON.stringify({}) })
+export const addQuestion = (formId: string, body: Record<string, unknown>) =>
+  request<{ questions: FormQuestion[] }>(`/app/api/forms/${formId}/questions`, { method: 'POST', body: JSON.stringify(body) })
+export const updateQuestion = (formId: string, qid: string, patch: Record<string, unknown>) =>
+  request<{ questions: FormQuestion[] }>(`/app/api/forms/${formId}/questions/${qid}`, { method: 'PUT', body: JSON.stringify(patch) })
+export const deleteQuestion = (formId: string, qid: string) =>
+  request<{ questions: FormQuestion[] }>(`/app/api/forms/${formId}/questions/${qid}`, { method: 'DELETE' })
+export const reorderQuestions = (formId: string, section: string, ids: string[]) =>
+  request<{ questions: FormQuestion[] }>(`/app/api/forms/${formId}/questions/reorder`, {
+    method: 'POST',
+    body: JSON.stringify({ section, ids }),
+  })
+export const getBuilderMeta = () => request<BuilderMeta>('/app/api/builder-meta')

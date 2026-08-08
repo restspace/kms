@@ -99,7 +99,7 @@ Ground rules for where the idiom applies (per the assessment that led to this):
   submissions; a submission → its participants), plus speaker create/edit/delete
   round-trip and server-side sort.
 
-### M1 — Forms & public submission (Sat PM, ~6 h) — *brief #1*
+### M1 — Forms & public submission (Sat PM, ~6 h) — *brief #1* — **done**
 - Form builder wizard: Submission Setup, Welcome, Abstract, Participant, Settings, Notifications.
 - Question list with drag order, required toggles, locked system fields, field library + create field.
 - Conditional-logic editor and evaluator (client + server).
@@ -107,7 +107,19 @@ Ground rules for where the idiom applies (per the assessment that led to this):
 - Public wizard: Welcome → Account → Submission → Participant → Review, autosave drafts,
   close date, submission limits, success page, 10-second auto-redirect.
 - **Exit:** a proposal can be submitted end-to-end and appears in the workspace
-  Submissions tab.
+  Submissions tab. ✅
+- **Notes (Aug 8):** conditional + routing engines live in `@kms/core` (one evaluator
+  for the island, the builder and the server's authoritative re-check). Migration 0002
+  adds `submissions.evaluation_plan_id` (routing's "assign to plan" needs a home before
+  M3's reviewer assignments) and `submission_forms.participant_roles`. The wizard is a
+  ~14 KB-gzip preact island; magic-link auth gained a validated `redirect_to` so the
+  Account step round-trips back to the form. All six docs/04 §6 acceptance tests
+  verified (Workshop reveals conditionals; routing → Workshops plan + Production tag;
+  closed form notice; confirmation email queued; authenticated portal redirect;
+  limit-1 blocks the second submission with drafts counted). Judgment calls: builder
+  rich-text fields are HTML textareas for now; section elements, Copy-from and
+  admin-notify pickers deferred (M2/M6); per-participant custom answers have no
+  storage home in the schema — known-key contact fields only.
 
 ### M2 — Portal & communications (Sun AM, ~6 h) — *brief #2, #3*
 - Portal: Home, Submissions, Profile (bio, headshot, links), Tasks.

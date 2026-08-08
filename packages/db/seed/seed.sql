@@ -85,7 +85,10 @@ INSERT INTO field_definitions (id, event_id, key, label, type, scope, options, m
   ('fld00000-0000-4000-8000-000000000013', 'evt00000-0000-4000-8000-000000000001', 'email',             'Email',             'email',       'contact',    NULL, 255, 1),
   ('fld00000-0000-4000-8000-000000000014', 'evt00000-0000-4000-8000-000000000001', 'mobile_phone',      'Mobile Phone',      'phone',       'contact',    NULL, NULL, 0),
   ('fld00000-0000-4000-8000-000000000015', 'evt00000-0000-4000-8000-000000000001', 'biography',         'Biography',         'wysiwyg',     'contact',    NULL, 5000, 0),
-  ('fld00000-0000-4000-8000-000000000016', 'evt00000-0000-4000-8000-000000000001', 'headshot',          'Headshot',          'file',        'contact',    NULL, NULL, 0);
+  ('fld00000-0000-4000-8000-000000000016', 'evt00000-0000-4000-8000-000000000001', 'headshot',          'Headshot',          'file',        'contact',    NULL, NULL, 0),
+  -- workshop-only fields (docs/04 §3 worked example)
+  ('fld00000-0000-4000-8000-000000000017', 'evt00000-0000-4000-8000-000000000001', 'room_setup',        'Room Setup Requirements', 'textarea', 'submission', NULL, 1000, 0),
+  ('fld00000-0000-4000-8000-000000000018', 'evt00000-0000-4000-8000-000000000001', 'prerequisites',     'Prerequisites',           'textarea', 'submission', NULL, 1000, 0);
 
 -- ---------------------------------------------------------------------------
 -- Submission form: Call for Speakers 2026 (the form judges use)
@@ -130,6 +133,85 @@ INSERT INTO form_questions (id, form_id, section, field_id, label, help_text, po
   ('q0000000-0000-4000-8000-000000000013', 'form0000-0000-4000-8000-000000000001', 'participant', 'fld00000-0000-4000-8000-000000000013', 'Email', NULL, 3, 1, 1, 255),
   ('q0000000-0000-4000-8000-000000000014', 'form0000-0000-4000-8000-000000000001', 'participant', 'fld00000-0000-4000-8000-000000000014', 'Mobile Phone', NULL, 4, 0, 0, NULL),
   ('q0000000-0000-4000-8000-000000000015', 'form0000-0000-4000-8000-000000000001', 'participant', 'fld00000-0000-4000-8000-000000000015', 'Biography', 'A short bio for the programme', 5, 0, 0, 5000);
+
+-- The demo's conditional questions: choosing Format = Workshop reveals room
+-- setup + prerequisites (docs/12 §2 form 1; visibility per docs/02 §3).
+INSERT INTO form_questions (id, form_id, section, field_id, label, help_text, position, required, locked, max_chars, visibility) VALUES
+  ('q0000000-0000-4000-8000-000000000016', 'form0000-0000-4000-8000-000000000001', 'abstract', 'fld00000-0000-4000-8000-000000000017', 'Room Setup Requirements', 'Layout, AV and anything the venue must provide', 11, 1, 0, 1000,
+   '{"action":"show","match":"all","conditions":[{"question_id":"q0000000-0000-4000-8000-000000000003","op":"equals","value":"Workshop"}]}'),
+  ('q0000000-0000-4000-8000-000000000017', 'form0000-0000-4000-8000-000000000001', 'abstract', 'fld00000-0000-4000-8000-000000000018', 'Prerequisites', 'What should attendees know or install beforehand?', 12, 0, 0, 1000,
+   '{"action":"show","match":"all","conditions":[{"question_id":"q0000000-0000-4000-8000-000000000003","op":"equals","value":"Workshop"}]}');
+
+-- ---------------------------------------------------------------------------
+-- Evaluation plans (docs/12 §2) — targets for the routing rules below; M3
+-- attaches reviewers and criteria-driven scoring.
+-- ---------------------------------------------------------------------------
+
+INSERT INTO evaluation_plans (id, event_id, name, description, status, scoring_scale_min, scoring_scale_max, anonymise_submitters, created_at) VALUES
+  ('plan0000-0000-4000-8000-000000000001', 'evt00000-0000-4000-8000-000000000001', 'Round 1 — Track leads', 'First-pass review by track leads', 'active', 1, 5, 0, '2026-08-08T12:00:00Z'),
+  ('plan0000-0000-4000-8000-000000000002', 'evt00000-0000-4000-8000-000000000001', 'Workshops',             'Hands-on sessions need logistics review', 'active', 1, 5, 0, '2026-08-08T12:00:00Z'),
+  ('plan0000-0000-4000-8000-000000000003', 'evt00000-0000-4000-8000-000000000001', 'General Review',        'Fallback plan for unrouted submissions', 'active', 1, 5, 0, '2026-08-08T12:00:00Z');
+
+INSERT INTO scoring_criteria (id, plan_id, name, description, weight, allow_comment, position) VALUES
+  ('crit0000-0000-4000-8000-000000000001', 'plan0000-0000-4000-8000-000000000001', 'Relevance',           'Fit with the track and audience', 2, 1, 1),
+  ('crit0000-0000-4000-8000-000000000002', 'plan0000-0000-4000-8000-000000000001', 'Speaker credibility', 'Evidence the speaker can deliver', 1, 1, 2),
+  ('crit0000-0000-4000-8000-000000000003', 'plan0000-0000-4000-8000-000000000001', 'Novelty',             'New results or perspective', 1, 1, 3);
+
+-- Routing (docs/04 §4): tracks route to the track-leads plan, workshops
+-- override to the Workshops plan and pick up the Production tag; anything
+-- unmatched falls back to General Review.
+UPDATE submission_forms SET
+  participant_roles = '[{"role":"speaker","min":1,"max":null},{"role":"co-speaker","min":0,"max":3},{"role":"panelist","min":0,"max":5}]',
+  routing_rules = '{"rules":[
+    {"id":"r-tracks","when":{"question_id":"q0000000-0000-4000-8000-000000000005","op":"is_any_of","value":["Agents","Evals","RAG & Retrieval","Infra & Serving","AI in Production"]},"then":{"assign_evaluation_plan_id":"plan0000-0000-4000-8000-000000000001"}},
+    {"id":"r-workshops","when":{"question_id":"q0000000-0000-4000-8000-000000000003","op":"equals","value":"Workshop"},"then":{"assign_evaluation_plan_id":"plan0000-0000-4000-8000-000000000002","add_tag_ids":["tag00000-0000-4000-8000-000000000003"]}}
+  ],"fallback":{"assign_evaluation_plan_id":"plan0000-0000-4000-8000-000000000003"}}'
+WHERE id = 'form0000-0000-4000-8000-000000000001';
+
+-- ---------------------------------------------------------------------------
+-- Forms #2 and #3 (docs/12 §2): an open 1-submission form and a closed form
+-- so the list and the closed state are demonstrable.
+-- ---------------------------------------------------------------------------
+
+INSERT INTO submission_forms (
+  id, event_id, internal_name, external_title, page_heading,
+  welcome_message, welcome_message_visible, collection_type, collect_participants,
+  status, close_at, submission_limit, allow_multiple_drafts,
+  success_message, auto_redirect_to_portal, confirmation_email_enabled,
+  participant_roles, created_at, updated_at
+) VALUES
+  ('form0000-0000-4000-8000-000000000002', 'evt00000-0000-4000-8000-000000000001',
+   'Session Submission Form #2', 'Submit a Session', 'Sessions',
+   '<p>Submit a full session proposal for the programme.</p>', 1, 'sessions', 1,
+   'open', NULL, 1, 0,
+   '<p>Thanks — your session is in.</p>', 1, 1,
+   '[{"role":"speaker","min":1,"max":null}]',
+   '2026-08-08T12:00:00Z', '2026-08-08T12:00:00Z'),
+  ('form0000-0000-4000-8000-000000000003', 'evt00000-0000-4000-8000-000000000001',
+   'Lightning Talks', 'Lightning Talks — 5 minutes, big ideas', 'Lightning',
+   '<p>Five minutes on stage. No slides required.</p>', 1, 'abstracts', 0,
+   'closed', '2026-08-01T06:59:00Z', 1, 0,
+   NULL, 1, 1,
+   '[{"role":"speaker","min":1,"max":1}]',
+   '2026-08-08T12:00:00Z', '2026-08-08T12:00:00Z');
+
+INSERT INTO form_questions (id, form_id, section, field_id, label, help_text, position, required, locked, max_chars) VALUES
+  ('q0000000-0000-4000-8000-000000000021', 'form0000-0000-4000-8000-000000000002', 'abstract', 'fld00000-0000-4000-8000-000000000001', 'Title', NULL, 1, 1, 1, 255),
+  ('q0000000-0000-4000-8000-000000000022', 'form0000-0000-4000-8000-000000000002', 'abstract', 'fld00000-0000-4000-8000-000000000002', 'Description', NULL, 2, 1, 0, 5000),
+  ('q0000000-0000-4000-8000-000000000023', 'form0000-0000-4000-8000-000000000002', 'abstract', 'fld00000-0000-4000-8000-000000000003', 'Format', NULL, 3, 1, 0, NULL),
+  ('q0000000-0000-4000-8000-000000000024', 'form0000-0000-4000-8000-000000000002', 'participant', 'fld00000-0000-4000-8000-000000000011', 'First Name', NULL, 1, 1, 1, 255),
+  ('q0000000-0000-4000-8000-000000000025', 'form0000-0000-4000-8000-000000000002', 'participant', 'fld00000-0000-4000-8000-000000000012', 'Last Name', NULL, 2, 1, 1, 255),
+  ('q0000000-0000-4000-8000-000000000026', 'form0000-0000-4000-8000-000000000002', 'participant', 'fld00000-0000-4000-8000-000000000013', 'Email', NULL, 3, 1, 1, 255),
+  ('q0000000-0000-4000-8000-000000000031', 'form0000-0000-4000-8000-000000000003', 'abstract', 'fld00000-0000-4000-8000-000000000001', 'Title', NULL, 1, 1, 1, 255),
+  ('q0000000-0000-4000-8000-000000000032', 'form0000-0000-4000-8000-000000000003', 'abstract', 'fld00000-0000-4000-8000-000000000002', 'Pitch', 'One paragraph. Make it count.', 2, 1, 0, 1000);
+
+-- Seeded submissions land on the plans the routing rules would have chosen.
+UPDATE submissions SET evaluation_plan_id = 'plan0000-0000-4000-8000-000000000002'
+WHERE id IN ('sub00000-0000-4000-8000-000000000003', 'sub00000-0000-4000-8000-000000000006');
+UPDATE submissions SET evaluation_plan_id = 'plan0000-0000-4000-8000-000000000001'
+WHERE id IN ('sub00000-0000-4000-8000-000000000001', 'sub00000-0000-4000-8000-000000000002',
+             'sub00000-0000-4000-8000-000000000004', 'sub00000-0000-4000-8000-000000000005',
+             'sub00000-0000-4000-8000-000000000007', 'sub00000-0000-4000-8000-000000000008');
 
 -- ---------------------------------------------------------------------------
 -- Contacts (admin + 7 speakers) and the owner event_user

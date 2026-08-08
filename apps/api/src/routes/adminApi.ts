@@ -9,6 +9,7 @@ import { can } from '@kms/core';
 import type { Actor, Role } from '@kms/core';
 import type { AppEnv, Env } from '../env';
 import { createSessionToken, getSession, setSessionCookie, type SessionPayload } from '../session';
+import { formsAdminRoutes } from './formsAdmin';
 
 type ApiEnv = { Bindings: Env; Variables: { session: SessionPayload } };
 
@@ -22,6 +23,28 @@ adminApiRoutes.use('*', async (c, next) => {
   if (!can(actor, 'admin.view')) return c.json({ error: 'forbidden' }, 403);
   c.set('session', session);
   await next();
+});
+
+// Form builder + question endpoints (docs/04) — inherits the guard above.
+adminApiRoutes.route('/forms', formsAdminRoutes);
+
+// GET /app/api/builder-meta — everything the builder's pickers need: the
+// field library, and routing-rule targets (tracks, tags, evaluation plans).
+adminApiRoutes.get('/builder-meta', async (c) => {
+  const session = c.get('session');
+  const db = c.env.DB;
+  const [fields, tracks, tags, plans] = await Promise.all([
+    db.prepare('SELECT id, key, label, type, scope, options, max_chars, system FROM field_definitions WHERE event_id = ? ORDER BY label').bind(session.eventId).all(),
+    db.prepare('SELECT id, name, color FROM tracks WHERE event_id = ? ORDER BY position').bind(session.eventId).all(),
+    db.prepare('SELECT id, name, color FROM tags WHERE event_id = ? ORDER BY name').bind(session.eventId).all(),
+    db.prepare('SELECT id, name, status FROM evaluation_plans WHERE event_id = ? ORDER BY name').bind(session.eventId).all(),
+  ]);
+  return c.json({
+    fields: fields.results,
+    tracks: tracks.results,
+    tags: tags.results,
+    plans: plans.results,
+  });
 });
 
 // ---------------------------------------------------------------------------
