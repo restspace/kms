@@ -533,3 +533,45 @@ INSERT INTO submission_participants (id, submission_id, contact_id, role, positi
 
 UPDATE submission_participants SET confirmed_at = NULL
 WHERE contact_id IN ('con00000-0000-4000-8000-000000000007', 'con00000-0000-4000-8000-000000000008');
+
+-- ---------------------------------------------------------------------------
+-- M2: message log. The anchor demo (docs/12 §3 step 7) narrows every tab to one
+-- speaker, so Ada needs a real comms history — varied templates and statuses,
+-- including one failure — plus a few rows for other speakers so the unfiltered
+-- Messages tab is not a single-contact list.
+-- ---------------------------------------------------------------------------
+
+INSERT INTO message_log (id, event_id, template_key, to_email, contact_id, subject, status,
+  provider_message_id, error, idempotency_key, created_at, sent_at) VALUES
+  ('msg00000-0000-4000-8000-000000000001', 'evt00000-0000-4000-8000-000000000001', 'submission_confirmation',
+   'ada@example.com', 'con00000-0000-4000-8000-000000000002',
+   'We received your submission — Agentic Retrieval at Scale', 'sent',
+   'demo-provider-0001', NULL, 'seed:msg:0001', '2026-07-28T09:12:00Z', '2026-07-28T09:12:04Z'),
+  ('msg00000-0000-4000-8000-000000000002', 'evt00000-0000-4000-8000-000000000001', 'magic_link',
+   'ada@example.com', 'con00000-0000-4000-8000-000000000002',
+   'Your sign-in link for AI.Engineer NYC', 'sent',
+   'demo-provider-0002', NULL, 'seed:msg:0002', '2026-07-28T09:20:00Z', '2026-07-28T09:20:03Z'),
+  ('msg00000-0000-4000-8000-000000000003', 'evt00000-0000-4000-8000-000000000001', 'decision_accepted',
+   'ada@example.com', 'con00000-0000-4000-8000-000000000002',
+   'Your session has been accepted', 'sent',
+   'demo-provider-0003', NULL, 'seed:msg:0003', '2026-08-04T15:02:00Z', '2026-08-04T15:02:06Z'),
+  ('msg00000-0000-4000-8000-000000000004', 'evt00000-0000-4000-8000-000000000001', 'task_assigned',
+   'ada@example.com', 'con00000-0000-4000-8000-000000000002',
+   'Action needed: Presentation Upload', 'sent',
+   'demo-provider-0004', NULL, 'seed:msg:0004', '2026-08-04T15:03:00Z', '2026-08-04T15:03:05Z'),
+  ('msg00000-0000-4000-8000-000000000005', 'evt00000-0000-4000-8000-000000000001', 'task_reminder',
+   'ada@example.com', 'con00000-0000-4000-8000-000000000002',
+   'Reminder: Speaker Profile & Headshot is due soon', 'failed',
+   NULL, 'provider temporarily unavailable (502)', 'seed:msg:0005', '2026-08-07T08:00:00Z', NULL),
+  ('msg00000-0000-4000-8000-000000000006', 'evt00000-0000-4000-8000-000000000001', 'task_reminder',
+   'ada@example.com', 'con00000-0000-4000-8000-000000000002',
+   'Reminder: Speaker Profile & Headshot is due soon', 'queued',
+   NULL, NULL, 'seed:msg:0006', '2026-08-08T08:00:00Z', NULL),
+  ('msg00000-0000-4000-8000-000000000007', 'evt00000-0000-4000-8000-000000000001', 'submission_confirmation',
+   'grace.hopper@example.com', 'con00000-0000-4000-8000-000000000003',
+   'We received your submission — Compilers for Agents', 'sent',
+   'demo-provider-0007', NULL, 'seed:msg:0007', '2026-07-29T11:41:00Z', '2026-07-29T11:41:04Z'),
+  ('msg00000-0000-4000-8000-000000000008', 'evt00000-0000-4000-8000-000000000001', 'decision_declined',
+   'joan.clarke@example.com', 'con00000-0000-4000-8000-000000000006',
+   'An update on your submission', 'sent',
+   'demo-provider-0008', NULL, 'seed:msg:0008', '2026-08-05T16:10:00Z', '2026-08-05T16:10:07Z');
