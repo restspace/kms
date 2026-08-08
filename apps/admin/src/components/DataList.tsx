@@ -1885,6 +1885,11 @@ export const DataList = <T extends Record<string, any>, TFilters extends Record<
               </div>
             )}
             <div className="data-list-list-wrapper" ref={wrapperRef}>
+              {items.length === 0 && isListComplete && !loadError && !draftItem && (
+                <div className="data-list-empty" role="status">
+                  No records match the current filters.
+                </div>
+              )}
               <InfiniteLoader
                 key={`${querySignature}-${isMobile ? 'm' : 'd'}`}
                 isItemLoaded={isItemLoaded}

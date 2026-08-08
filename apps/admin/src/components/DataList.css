@@ -562,6 +562,19 @@
   background: var(--danger-soft);
 }
 
+/* Zero-row state: the list keeps its headers, this explains the blank body */
+.data-list-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: var(--space-4);
+  color: var(--text-muted);
+  font-size: var(--text-grid);
+  pointer-events: none;
+}
+
 /* Inline fast-add draft row (pinned above the virtualized list) */
 .data-list-row-draft {
   background: var(--accent-soft);
