@@ -9,6 +9,7 @@ import { buildOpenApi, docsHtml } from './openapi';
 import { fileRoutes } from './routes/files';
 import { publicRoutes } from './routes/public';
 import { submitRoutes } from './routes/submit';
+import { landingRoutes } from './routes/landing';
 
 export function createApp() {
   const app = new Hono<AppEnv>();
@@ -33,7 +34,8 @@ export function createApp() {
   app.route('/submit', submitRoutes); // public CFP wizard (docs/04 §5)
   app.route('/files', fileRoutes); // stored files, event-scoped (docs/05 §7)
 
-  app.get('/', (c) => c.redirect('/app'));
+  // The front door: demo admin login, demo speaker login, reset (docs/12 §2).
+  app.route('/', landingRoutes);
 
   return app;
 }
