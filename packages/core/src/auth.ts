@@ -26,9 +26,10 @@ export interface ResourceRef {
 }
 
 /**
- * M0 action matrix:
+ * Action matrix:
  *  - 'event.view'       any role
  *  - 'admin.view'       admin or owner
+ *  - 'review.view'      reviewer or better — the reviewer workspace (docs/06 §4)
  *  - 'submission.view'  admin/owner, or the contact who owns the record
  * Unknown actions are denied (default-deny).
  */
@@ -38,6 +39,8 @@ export function can(actor: Actor, action: string, resource?: ResourceRef): boole
       return true;
     case 'admin.view':
       return roleAtLeast(actor.role, 'admin');
+    case 'review.view':
+      return roleAtLeast(actor.role, 'reviewer');
     case 'submission.view':
       if (roleAtLeast(actor.role, 'admin')) return true;
       return (

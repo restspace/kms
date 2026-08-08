@@ -109,7 +109,7 @@ export async function queueTemplated(
  * response never waits on the provider. On success the outbox row is
  * settled so the sweep cannot resend; on failure the sweep is the retry.
  */
-export async function sendTemplated(c: Context<AppEnv>, args: SendTemplatedArgs): Promise<SendOutcome> {
+export async function sendTemplated<E extends AppEnv>(c: Context<E>, args: SendTemplatedArgs): Promise<SendOutcome> {
   const db = c.env.DB;
   const { outcome, payload } = await queueTemplated(db, args);
   if (outcome !== 'queued' || !payload) return outcome;

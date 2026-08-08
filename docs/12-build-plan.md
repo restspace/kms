@@ -145,7 +145,7 @@ Ground rules for where the idiom applies (per the assessment that led to this):
   callers. Portal submission *editing* stays deferred (withdraw works); task admin UI
   arrives with M3's workspace tabs.
 
-### M3 — Review & scoring (Sun PM, ~4 h) — *brief #4*
+### M3 — Review & scoring (Sun PM, ~4 h) — *brief #4* — **done**
 The 5-hour bespoke-grid line item from the original plan is gone; the workspace already
 does search/sort/virtualise/detail. What remains:
 - Submissions tab: status **filter chips** (`FilterComponent`) with the tab count tracking
@@ -159,7 +159,18 @@ does search/sort/virtualise/detail. What remains:
   `contact_id` and `submission_id` anchors.
 - Evaluation plans + criteria config (schema-driven forms where they fit), reviewer
   assignment, bespoke reviewer workspace, rating aggregation.
-- **Exit:** score, sort by rating, bulk-accept, notify — from the workspace.
+- **Exit:** score, sort by rating, bulk-accept, notify — from the workspace. ✅
+- **Notes (Aug 8):** the full decision chain verified in one browser pass — reviewer
+  scores land live in the rating column (weighted mean math confirmed to the cent),
+  chips filter the tab count, bulk queue moves + Send decisions flip statuses, stamp
+  Notified, auto-assign on-accept tasks with task_assigned emails, and a second send
+  skips everything (mailer idempotency). The anchor now spans four tabs: anchoring
+  Ada narrows Submissions, Tasks *and* Messages at once. Reviewers sign in like
+  everyone else and get a review-only shell ('review.view' in core; magic-link
+  callback now sends reviewer+ to /app). Rating column reads a live AVG subquery;
+  rating_cache is maintained on every review save as the documented fast-sort path.
+  Deferred within spec: saved views/column drawer/import/export (M6 or cut list),
+  keyboard shortcuts in the reviewer workspace, per-plan rating columns.
 
 ### M4 — Agenda & conflicts (Mon, ~7 h) — *brief #5*
 - Views: List, Day, Week, Month, Rooms, Conflicts; track grouping.

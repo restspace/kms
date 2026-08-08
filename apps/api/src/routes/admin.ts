@@ -55,7 +55,9 @@ adminRoutes.get('/', async (c) => {
     role: session.role,
     ...(session.impersonatedBy ? { impersonatedBy: session.impersonatedBy } : {}),
   };
-  if (!can(actor, 'admin.view')) {
+  // Reviewers load the same shell; the SPA renders only the reviewer
+  // workspace for them (role comes from /app/api/me).
+  if (!can(actor, 'review.view')) {
     return c.html(forbidden, 403);
   }
 

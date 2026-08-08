@@ -10,17 +10,22 @@ import type { Actor, Role } from '@kms/core';
 import type { AppEnv, Env } from '../env';
 import { createSessionToken, getSession, setSessionCookie, type SessionPayload } from '../session';
 import { formsAdminRoutes } from './formsAdmin';
+import { evaluationRoutes } from './evaluation';
 
 type ApiEnv = { Bindings: Env; Variables: { session: SessionPayload } };
 
 export const adminApiRoutes = new Hono<ApiEnv>();
 
 // Guard every /app/api route with JSON errors (the /app HTML gate is separate).
+// Reviewers (docs/06 §4) reach only /me and /app/api/review/*; everything else
+// requires admin.
 adminApiRoutes.use('*', async (c, next) => {
   const session = await getSession(c);
   if (!session) return c.json({ error: 'unauthenticated' }, 401);
   const actor: Actor = { contactId: session.contactId, email: session.email, role: session.role };
-  if (!can(actor, 'admin.view')) return c.json({ error: 'forbidden' }, 403);
+  if (!can(actor, 'review.view')) return c.json({ error: 'forbidden' }, 403);
+  const reviewerSurface = c.req.path.startsWith('/app/api/review/') || c.req.path === '/app/api/me';
+  if (!reviewerSurface && !can(actor, 'admin.view')) return c.json({ error: 'forbidden' }, 403);
   c.set('session', session);
   await next();
 });
@@ -56,6 +61,9 @@ adminApiRoutes.get('/meta', (c) => {
 
 // Form builder + question endpoints (docs/04) — inherits the guard above.
 adminApiRoutes.route('/forms', formsAdminRoutes);
+
+// Review & scoring: submission ops, evaluation admin, reviewer surface (docs/06).
+adminApiRoutes.route('/', evaluationRoutes);
 
 // GET /app/api/builder-meta — everything the builder's pickers need: the
 // field library, and routing-rule targets (tracks, tags, evaluation plans).
@@ -165,9 +173,15 @@ const RESOURCES: Record<string, ResourceDef> = {
     fromSql: `FROM submissions s
               LEFT JOIN tracks t ON t.id = s.track_id
               LEFT JOIN contacts sc ON sc.id = s.submitter_contact_id
+              LEFT JOIN evaluation_plans ep ON ep.id = s.evaluation_plan_id
               WHERE s.event_id = ?`,
     selectSql: `SELECT s.*, t.name AS track_name,
-                NULLIF(TRIM(COALESCE(sc.first_name, '') || ' ' || COALESCE(sc.last_name, '')), '') AS submitter_name`,
+                NULLIF(TRIM(COALESCE(sc.first_name, '') || ' ' || COALESCE(sc.last_name, '')), '') AS submitter_name,
+                ep.name AS plan_name,
+                (SELECT ROUND(AVG(r.weighted_total), 2) FROM reviews r
+                 WHERE r.submission_id = s.id AND r.plan_id = s.evaluation_plan_id) AS rating,
+                (SELECT COUNT(*) FROM reviews r
+                 WHERE r.submission_id = s.id AND r.plan_id = s.evaluation_plan_id) AS review_count`,
     sortable: {
       code: 's.code',
       title: 's.title',
@@ -176,6 +190,9 @@ const RESOURCES: Record<string, ResourceDef> = {
       track_name: 't.name',
       submitter_name: 'sc.last_name',
       created_at: 's.created_at',
+      notified_at: 's.notified_at',
+      rating: `(SELECT AVG(r.weighted_total) FROM reviews r
+                WHERE r.submission_id = s.id AND r.plan_id = s.evaluation_plan_id)`,
     },
     defaultSort: 's.created_at DESC',
     filters: {
@@ -236,6 +253,60 @@ const RESOURCES: Record<string, ResourceDef> = {
         'Submissions this contact appears on as a participant, any role (the narrow relation).',
       contact_id:
         "Submissions that are this contact's in the broad sense: submitted by them OR with them as a participant. The global anchor filter uses this.",
+    },
+  },
+
+  // Tasks tab (docs/12 M3): assignments joined to task + contact, receiving
+  // both the contact and submission anchors.
+  tasks: {
+    fromSql: `FROM task_assignments ta
+              JOIN tasks t ON t.id = ta.task_id
+              JOIN contacts c ON c.id = ta.contact_id
+              LEFT JOIN submissions s ON s.id = ta.submission_id
+              WHERE t.event_id = ?`,
+    selectSql: `SELECT ta.id, ta.status, ta.completed_at, ta.submission_id, ta.contact_id,
+                t.id AS task_id, t.title AS task_title, t.action_type, t.due_at, t.required,
+                NULLIF(TRIM(COALESCE(c.first_name, '') || ' ' || COALESCE(c.last_name, '')), '') AS assignee_name,
+                c.email AS assignee_email, s.code AS submission_code, s.title AS submission_title`,
+    sortable: {
+      task_title: 't.title',
+      assignee_name: 'c.last_name',
+      status: 'ta.status',
+      due_at: 't.due_at',
+      completed_at: 'ta.completed_at',
+    },
+    defaultSort: `CASE WHEN ta.status = 'complete' THEN 1 ELSE 0 END, t.due_at`,
+    filters: {
+      q: (value) => {
+        const v = asText(value);
+        if (v === null) return null;
+        const like = `%${v}%`;
+        return {
+          sql: '(t.title LIKE ? OR c.first_name LIKE ? OR c.last_name LIKE ? OR c.email LIKE ?)',
+          params: [like, like, like, like],
+        };
+      },
+      status: (value) => {
+        const v = asText(value);
+        return v !== null && ['not_started', 'in_progress', 'complete'].includes(v)
+          ? { sql: 'ta.status = ?', params: [v] }
+          : null;
+      },
+      task_id: eq('ta.task_id'),
+      contact_id: eq('ta.contact_id'),
+      submission_id: eq('ta.submission_id'),
+      overdue: (value) =>
+        value === true || value === 'true'
+          ? { sql: `ta.status != 'complete' AND t.due_at IS NOT NULL AND t.due_at < ?`, params: [new Date().toISOString()] }
+          : null,
+    },
+    filterDocs: {
+      q: 'Free-text match over task title and assignee name/email.',
+      status: 'Exact assignment status: not_started | in_progress | complete.',
+      task_id: 'Assignments of this task.',
+      contact_id: 'Assignments belonging to this contact. The global anchor filter uses this.',
+      submission_id: 'Assignments tied to this submission. The global anchor filter uses this.',
+      overdue: 'true → incomplete assignments past their due date.',
     },
   },
 

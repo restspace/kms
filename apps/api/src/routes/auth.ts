@@ -159,9 +159,11 @@ authRoutes.get('/callback', async (c) => {
   );
   setSessionCookie(c, sessionToken);
 
+  // Admins and reviewers land in the app (reviewers get the review
+  // workspace); speakers land in their portal.
   const dest =
     safeRedirect(ref.redirectTo) ??
-    (role === 'admin' || role === 'owner' ? '/app' : `/portal/${event.slug}`);
+    (role === 'speaker' ? `/portal/${event.slug}` : '/app');
   return c.redirect(dest);
 });
 

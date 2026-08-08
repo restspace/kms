@@ -113,7 +113,7 @@ export interface MessageRow {
 
 /** DataList-compatible data source for the generic query endpoint. */
 export const queryResource =
-  <T>(resource: 'contacts' | 'submissions' | 'messages') =>
+  <T>(resource: 'contacts' | 'submissions' | 'messages' | 'tasks') =>
   (params: DataSourceParams): Promise<DataSourceResult<T>> =>
     request<DataSourceResult<T>>(`/app/api/${resource}/query`, {
       method: 'POST',
@@ -209,3 +209,92 @@ export const reorderQuestions = (formId: string, section: string, ids: string[])
     body: JSON.stringify({ section, ids }),
   })
 export const getBuilderMeta = () => request<BuilderMeta>('/app/api/builder-meta')
+
+// ---------------------------------------------------------------------------
+// Review & scoring (docs/06, M3)
+// ---------------------------------------------------------------------------
+
+export interface TaskAssignmentRow {
+  id: string
+  status: 'not_started' | 'in_progress' | 'complete'
+  completed_at: string | null
+  submission_id: string | null
+  contact_id: string
+  task_id: string
+  task_title: string
+  action_type: string
+  due_at: string | null
+  required: number
+  assignee_name: string | null
+  assignee_email: string
+  submission_code: string | null
+  submission_title: string | null
+}
+
+export interface SubmissionDetail {
+  submission: Record<string, unknown>
+  answers: Array<{ label: string; value_json: string | null }>
+  participants: Array<{
+    role: string
+    is_primary_contact: number
+    contact_id: string
+    first_name: string | null
+    last_name: string | null
+    email: string
+    has_bio: number
+    has_headshot: number
+  }>
+  reviews: Array<{ reviewer_name: string | null; weighted_total: number | null; comment: string | null; conflict_of_interest: number }>
+  tags: string[]
+}
+
+export interface EvaluationOverview {
+  plans: Array<{ id: string; name: string; description: string | null; status: string; anonymise_submitters: number; scoring_scale_min: number; scoring_scale_max: number }>
+  criteria: Array<{ id: string; plan_id: string; name: string; description: string | null; weight: number; position: number }>
+  reviewers: Array<{ id: string; email: string; name: string | null }>
+  stats: Array<{ plan_id: string; submissions: number; assignments: number; completed: number }>
+}
+
+export interface ReviewQueue {
+  assignments: Array<Record<string, unknown>>
+  criteria: Record<string, Array<{ id: string; name: string; description: string | null; weight: number }>>
+  participants: Record<string, Array<{ name: string | null; role: string }>>
+}
+
+export const updateSubmissionStatus = (id: string, status: string) =>
+  request<{ ok: boolean }>(`/app/api/submissions/${id}/status`, { method: 'PUT', body: JSON.stringify({ status }) })
+export const bulkStatus = (ids: string[], status: string) =>
+  request<{ ok: boolean; changed: number }>('/app/api/submissions/bulk-status', {
+    method: 'POST',
+    body: JSON.stringify({ ids, status }),
+  })
+export const sendDecisions = (ids: string[]) =>
+  request<{ ok: boolean; accepted: number; declined: number; tasks_assigned: number; skipped: number }>(
+    '/app/api/submissions/send-decisions',
+    { method: 'POST', body: JSON.stringify({ ids }) },
+  )
+export const getSubmissionDetail = (id: string) => request<SubmissionDetail>(`/app/api/submissions/${id}/detail`)
+
+export const getEvaluationOverview = () => request<EvaluationOverview>('/app/api/evaluation/overview')
+export const createPlan = (name: string) =>
+  request<{ ok: boolean; id: string }>('/app/api/evaluation/plans', { method: 'POST', body: JSON.stringify({ name }) })
+export const updatePlan = (id: string, patch: Record<string, unknown>) =>
+  request<{ ok: boolean }>(`/app/api/evaluation/plans/${id}`, { method: 'PUT', body: JSON.stringify(patch) })
+export const addCriterion = (planId: string, body: Record<string, unknown>) =>
+  request<{ ok: boolean }>(`/app/api/evaluation/plans/${planId}/criteria`, { method: 'POST', body: JSON.stringify(body) })
+export const updateCriterion = (id: string, patch: Record<string, unknown>) =>
+  request<{ ok: boolean }>(`/app/api/evaluation/criteria/${id}`, { method: 'PUT', body: JSON.stringify(patch) })
+export const deleteCriterion = (id: string) =>
+  request<{ ok: boolean }>(`/app/api/evaluation/criteria/${id}`, { method: 'DELETE' })
+export const assignReviewers = (planId: string, body: Record<string, unknown>) =>
+  request<{ ok: boolean; total_assignments: number; submissions: number }>(
+    `/app/api/evaluation/plans/${planId}/assign`,
+    { method: 'POST', body: JSON.stringify(body) },
+  )
+
+export const getReviewQueue = () => request<ReviewQueue>('/app/api/review/queue')
+export const saveReview = (assignmentId: string, body: Record<string, unknown>) =>
+  request<{ ok: boolean; weighted_total: number | null; submission_rating: number | null }>(
+    `/app/api/review/assignments/${assignmentId}`,
+    { method: 'POST', body: JSON.stringify(body) },
+  )
