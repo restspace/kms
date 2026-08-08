@@ -72,7 +72,7 @@ Ground rules for where the idiom applies (per the assessment that led to this):
   create/edit round trip). See §0.
 - **Exit:** a seeded event renders behind login. ✅
 
-### M0.5 — Tab workspace on real data (Sat early PM, ~2.5 h)
+### M0.5 — Tab workspace on real data (Sat early PM, ~2.5 h) — **done**
 - Admin shell for the `/app` SPA: event switcher, slim sidebar
   (Dashboard · Workspace · Forms · Evaluation · Agenda · Settings), session/role gate.
 - **Generic list endpoint pattern** on the Worker: `from`/`size`/`filters`/`sort` in,
@@ -90,7 +90,14 @@ Ground rules for where the idiom applies (per the assessment that led to this):
   compact rows, flat 1 px borders, ≤150 ms motion, dark mode with both themes explicit.
 - Replace the in-memory demo wiring in `App.tsx` with the real API.
 - **Exit:** seeded speakers and submissions browsable in the workspace; anchoring
-  Ada narrows Submissions to hers, against D1.
+  Ada narrows Submissions to hers, against D1. ✅
+- **Notes (Aug 8):** the skin pass had already landed with the M0 port. Delivered here:
+  `/app/api` JSON routes (`POST /:resource/query` with whitelisted filter/sort maps,
+  contact CRUD, `/me`, `/switch-event`); the SPA build lands in
+  `apps/public/dist/app` and `/app` stays behind the Worker's session gate via
+  `run_worker_first`; both anchor directions browser-verified (Ada → her 3
+  submissions; a submission → its participants), plus speaker create/edit/delete
+  round-trip and server-side sort.
 
 ### M1 — Forms & public submission (Sat PM, ~6 h) — *brief #1*
 - Form builder wizard: Submission Setup, Welcome, Abstract, Participant, Settings, Notifications.

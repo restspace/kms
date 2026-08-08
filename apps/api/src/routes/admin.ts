@@ -1,5 +1,7 @@
-// Admin shell (M0 exit screen): guarded by can(actor, 'admin.view'); lists events with
-// submission counts and a "View Portal" link per event.
+// /app — the admin SPA. The session/role gate lives here in the Worker
+// (run_worker_first in wrangler.toml routes /app past the asset handler):
+// no session → SSR login page; non-admin → 403; otherwise the built SPA shell
+// from the ASSETS binding. Data access is gated separately in /app/api.
 
 import { Hono } from 'hono';
 import { createDb } from '@kms/db';
@@ -10,23 +12,6 @@ import { esc, page } from '../html';
 import { getSession } from '../session';
 
 export const adminRoutes = new Hono<AppEnv>();
-
-function fmtDate(iso: string): string {
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return iso;
-  return d.toLocaleDateString('en-US', {
-    month: 'short',
-    day: 'numeric',
-    year: 'numeric',
-    timeZone: 'UTC',
-  });
-}
-
-function fmtDates(event: Event): string {
-  const start = fmtDate(event.starts_at);
-  const end = fmtDate(event.ends_at);
-  return start === end ? start : `${start} – ${end}`;
-}
 
 function adminLoginPage(events: Event[]): string {
   const options = events
@@ -57,8 +42,8 @@ const forbidden = page(
 <p><a href="/auth/logout">Log out</a> and sign in with an admin account.</p>`,
 );
 
-// Guard every /app route: no session → login page; non-admin → 403.
-adminRoutes.use('*', async (c, next) => {
+// GET /app — gate, then hand over the built SPA shell.
+adminRoutes.get('/', async (c) => {
   const session = await getSession(c);
   if (!session) {
     const events = await createDb(c.env.DB).events.listAll();
@@ -73,39 +58,13 @@ adminRoutes.use('*', async (c, next) => {
   if (!can(actor, 'admin.view')) {
     return c.html(forbidden, 403);
   }
-  await next();
-});
 
-// GET /app — admin shell: events with submission counts, linking to each portal.
-adminRoutes.get('/', async (c) => {
-  const session = await getSession(c);
-  const db = createDb(c.env.DB);
-  const events = await db.events.listAll();
-  const counts = await Promise.all(events.map((e) => db.submissions.countByEvent(e.id)));
-
-  const rows =
-    events.length === 0
-      ? '<tr><td colspan="4" class="muted">No events yet.</td></tr>'
-      : events
-          .map(
-            (e, i) => `<tr>
-  <td><strong>${esc(e.name)}</strong><br><span class="code">${esc(e.slug)}</span></td>
-  <td>${esc(fmtDates(e))}</td>
-  <td>${counts[i]}</td>
-  <td><a href="/portal/${esc(e.slug)}">View Portal</a></td>
-</tr>`,
-          )
-          .join('');
-
-  return c.html(
-    page(
-      'KMS — Admin',
-      `<h1>Events</h1>
-<p class="muted">Signed in as <strong>${esc(session?.email ?? '')}</strong> · <a href="/auth/logout">Log out</a></p>
-<table>
-  <thead><tr><th>Event</th><th>Dates</th><th>Submissions</th><th></th></tr></thead>
-  <tbody>${rows}</tbody>
-</table>`,
-    ),
-  );
+  const shell = await c.env.ASSETS.fetch(new URL('/app/index.html', c.req.url));
+  if (!shell.ok) {
+    return c.html(
+      page('Build missing', '<h1>Admin build missing</h1><p>Run <span class="code">npm run build:admin</span> and reload.</p>'),
+      503,
+    );
+  }
+  return c.html(await shell.text());
 });

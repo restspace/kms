@@ -114,13 +114,13 @@ export async function verifySessionToken(
 }
 
 /** Read + verify the kms_session cookie; null when absent, tampered or expired. */
-export async function getSession(c: Context<AppEnv>): Promise<SessionPayload | null> {
+export async function getSession<E extends AppEnv>(c: Context<E>): Promise<SessionPayload | null> {
   const token = getCookie(c, SESSION_COOKIE);
   if (!token) return null;
   return verifySessionToken(token, c.env.SESSION_SECRET);
 }
 
-export function setSessionCookie(c: Context<AppEnv>, token: string): void {
+export function setSessionCookie<E extends AppEnv>(c: Context<E>, token: string): void {
   setCookie(c, SESSION_COOKIE, token, {
     httpOnly: true,
     secure: true,
@@ -130,6 +130,6 @@ export function setSessionCookie(c: Context<AppEnv>, token: string): void {
   });
 }
 
-export function clearSessionCookie(c: Context<AppEnv>): void {
+export function clearSessionCookie<E extends AppEnv>(c: Context<E>): void {
   deleteCookie(c, SESSION_COOKIE, { path: '/' });
 }

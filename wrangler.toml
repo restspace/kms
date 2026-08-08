@@ -17,6 +17,10 @@ react = "preact/compat"
 [assets]
 directory = "./apps/public/dist"
 binding = "ASSETS"
+# /app (the admin SPA shell) must hit the Worker's session gate even though
+# dist/app/index.html exists as an asset; hashed files under /app/assets/*
+# stay on the asset fast path.
+run_worker_first = ["/app", "/app/"]
 
 [[d1_databases]]
 binding = "DB"

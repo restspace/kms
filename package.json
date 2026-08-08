@@ -11,13 +11,14 @@
   "scripts": {
     "build:public": "vite build --config apps/public/vite.config.ts",
     "build:admin": "npm run build -w apps/admin",
-    "dev": "npm run build:public && wrangler dev",
+    "build": "npm run build:public && npm run build:admin",
+    "dev": "npm run build && wrangler dev",
     "typecheck": "tsc --noEmit",
     "migrate:local": "wrangler d1 migrations apply kms --local",
     "migrate:remote": "wrangler d1 migrations apply kms --remote",
     "seed:local": "wrangler d1 execute kms --local --file packages/db/seed/seed.sql",
     "seed:remote": "wrangler d1 execute kms --remote --file packages/db/seed/seed.sql",
-    "deploy": "npm run build:public && wrangler deploy"
+    "deploy": "npm run build && wrangler deploy"
   },
   "dependencies": {
     "hono": "4.13.1",
