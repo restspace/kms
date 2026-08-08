@@ -193,7 +193,7 @@ Priority uses MoSCoW. **M** = must ship for the Aug 12 submission, **S** = shoul
 | NFR-7 | **Responsiveness:** public CFP, portal and the agenda read views work on mobile; the agenda editor may be desktop-first. |
 | NFR-8 | **Observability:** structured request logs, error tracking, an email-delivery log, and a `/health` endpoint. |
 | NFR-9 | **Licence:** OSI-approved open-source licence (MIT or Apache-2.0) with a README that a stranger can deploy from in under 15 minutes. |
-| NFR-10 | **Portability:** persistence behind a repository interface so the Airtable adapter and the SQL adapter are swappable (see [03](03-architecture.md)). |
+| NFR-10 | **Portability:** persistence behind a repository interface; SQL (D1) is the system of record and the Airtable adapter implements a one-way mirror (see [03](03-architecture.md)). Swapping the primary store (e.g. to Postgres) must not require touching route handlers. |
 | NFR-11 | **Idempotency:** email sends and calendar invites are keyed so retries cannot double-send. |
 | NFR-12 | **Timezones:** all timestamps stored UTC; rendered in the event timezone with the abbreviation shown (e.g. "October 12th, 2026 at 9:00 AM PDT"). |
 

@@ -13,14 +13,14 @@ implies: a stranger must be able to clone and deploy it.
 |---|---|---|
 | Runtime | **Cloudflare Workers** | Bonus points; global edge; sub-50 ms cold start |
 | Web framework | **Hono** (Workers-native) | Tiny, fast, first-class Workers support |
-| Frontend | **React + Vite SPA** for admin; **server-rendered HTML** for public CFP, portal login and embeds | Public pages must be fast on mobile; admin can be an app-shell |
+| Frontend | **React everywhere** — Vite SPA for admin; the *same* React components server-rendered by Hono (`react-dom/server`) for public CFP, portal login and embeds | One JSX runtime, so `/packages/ui` and the form renderer are written once; public pages still ship near-zero JS (only the form island hydrates) |
 | Styling | Tailwind + a small component set (shadcn-style, vendored) | Speed of build, consistent look without a heavy dependency |
 | Primary DB | **Cloudflare D1** (SQLite) | Free-tier, edge-local reads, SQL keeps grids/filters/sorts fast |
 | Files | **Cloudflare R2** | Headshots, slides, supporting docs, export bundles |
 | Cache / sessions | **Workers KV** | Magic-link tokens, session cookies, dashboard aggregates |
-| Background work | **Cloudflare Queues** + **Cron Triggers** | Email sends, reminder sweeps, Airtable sync |
+| Background work | **D1 outbox table + Cron Triggers** (Queues optional, see §2a) | Email sends, reminder sweeps, Airtable sync — without leaving the free tier (Queues requires the Workers paid plan) |
 | Realtime (optional) | **Durable Objects** | Live dashboard + collaborative agenda editing |
-| Email | **Resend** (or MailChannels via Workers) | Simple API, good deliverability, attachments for `.ics` |
+| Email | **Resend** | Simple API, good deliverability, supports the `text/calendar` MIME part needed for native invites. (MailChannels' free Workers integration was discontinued in 2024 — it is not a fallback.) |
 | Auth | Magic link + signed cookie (JWT in HttpOnly cookie) | No password storage; matches the portal UX in the screenshots |
 
 ### If not Cloudflare
@@ -29,11 +29,12 @@ interface (below) so the choice is reversible; do not let SQL leak into route ha
 
 ---
 
-## 2. Persistence strategy — SQL primary, Airtable adapter
+## 2. Persistence strategy — SQL primary, one-way Airtable mirror
 
 The brief offers bonus points for Airtable "because those are what we use on our team", but
 Airtable alone is a poor primary store for a grid product (5 req/s per base, 100 records per
-page, no joins, no transactions). Two modes, one interface:
+page, no joins, no transactions). **D1 is always the system of record**; Airtable is a mirror.
+Two modes, one interface:
 
 ```ts
 interface Repository<T> {
@@ -47,13 +48,36 @@ interface Repository<T> {
 
 | Mode | Config | Behaviour |
 |---|---|---|
-| **`sql`** (default) | `PERSISTENCE=d1` | D1 is the system of record. Fast, transactional. |
-| **`airtable-mirror`** (recommended for the demo) | `PERSISTENCE=d1 AIRTABLE_SYNC=on` | D1 is the system of record; a queue-backed worker mirrors Submissions, Contacts, Sessions and Tasks into Airtable within seconds, and a cron pulls Airtable edits back (last-write-wins on `updated_at`). Gives the AIE team the Airtable view they actually want without the latency penalty. |
-| **`airtable`** | `PERSISTENCE=airtable` | Airtable is the system of record. Supported for small events; documented rate-limit caveats. |
+| **`sql`** (default) | `AIRTABLE_SYNC=off` | D1 only. Fast, transactional. |
+| **`airtable-mirror`** (recommended for the demo) | `AIRTABLE_SYNC=on` | Outbox jobs mirror Submissions, Contacts, Sessions and Tasks into Airtable within seconds — **one-way, D1 → Airtable**. Gives the AIE team the Airtable view they actually want without the latency penalty. |
+
+**Cut from scope:** Airtable as primary store (`PERSISTENCE=airtable`). It doubled the adapter
+work to support a mode nobody should run at the target scale (NFR-2), and the rate-limit
+caveats made it a support liability. The `Repository<T>` interface stays, so the decision is
+reversible post-deadline.
+
+**Stretch, post-deadline:** pulling Airtable edits back into D1 (cron, last-write-wins on
+`updated_at`). Bidirectional sync is where deletes, schema drift and conflict edge cases live;
+it is deliberately off the critical path.
 
 **Airtable base schema** (tables mirror [02](02-domain-model.md)): `Events`, `Forms`,
 `Submissions`, `Contacts`, `Sessions`, `Tasks`, `Reviews`, `Tracks`, `Rooms`, `Tags`.
 Record IDs are stored back on the D1 row (`airtable_record_id`) to make the mirror idempotent.
+
+### 2a. Background jobs — outbox, not Queues
+
+Only two things need asynchronous work: **outbound email** and the **Airtable mirror**. Both
+run off a D1 `outbox` table:
+
+1. The request handler inserts a job row (with an idempotency key, per NFR-11) and attempts it
+   immediately via `ctx.waitUntil` — the happy path is near-instant.
+2. A cron sweep (every minute) retries failed/stuck rows with exponential backoff and a
+   dead-letter status after N attempts.
+
+Cloudflare **Queues requires the Workers paid plan**, so it is an optional optimisation
+(`USE_QUEUES=on` swaps the outbox consumer onto a Queue binding), never a dependency. The
+free-tier deploy path — the one a stranger follows from the README — must work end-to-end
+without it.
 
 ---
 
@@ -61,22 +85,29 @@ Record IDs are stored back on the D1 row (`airtable_record_id`) to make the mirr
 
 ```
 /apps
-  /admin        React SPA (Vite)         → /app/*
-  /public       SSR routes (Hono + JSX)  → /submit/*, /portal/*, /e/*, /embed/*
-  /api          Hono REST                → /api/v1/*
+  /admin        React SPA (Vite)                     → /app/*
+  /public       SSR routes (Hono + React SSR)        → /submit/*, /portal/*, /e/*, /embed/*
+  /api          Hono REST                            → /api/v1/*
 /packages
   /core         domain services (pure TS): forms, routing, conflicts, scoring, scheduling
-  /db           D1 schema, migrations, SQL repositories
-  /airtable     Airtable adapter + sync worker
+  /db           D1 schema, migrations, SQL repositories, outbox
+  /airtable     Airtable mirror adapter (one-way, D1 → Airtable)
   /email        templates, renderer, ICS builder, provider clients
-  /ui           shared components
+  /ui           shared React components — used by BOTH the SSR pages and the SPA
 /workers
-  /queue-consumer   email + sync jobs
-  /cron             reminder sweeps, dashboard aggregate refresh
+  /jobs         outbox consumer: email + Airtable sync (waitUntil + cron retry sweep)
+  /cron         reminder sweeps, outbox retry sweep, dashboard aggregate refresh
 ```
 
 Domain logic lives in `/packages/core` with **no I/O** so the conflict engine, conditional-logic
 evaluator, routing engine and scoring aggregation are unit-testable without a database.
+
+**One JSX runtime.** React is the single rendering idiom: public pages are React components
+rendered to HTML on the Worker (`react-dom/server`) and ship no client JS except the hydrated
+CFP form island (react + react-dom ≈ 45 KB gzip, inside the 60 KB budget; if it gets tight,
+alias `preact/compat` at build time — no component changes). The payoff is that the form
+renderer and conditional-logic display are written once and reused in the public wizard, the
+admin form-builder preview, and portal task forms. Hono's own JSX is not used.
 
 ---
 
@@ -158,10 +189,10 @@ Limits: headshot ≤ 5 MB (jpg/png/webp); slides ≤ 50 MB (pdf/pptx/key); docum
 ```
 APP_URL                 https://…                     public base URL
 EVENT_DEFAULT_TZ        America/Los_Angeles
-PERSISTENCE             d1 | airtable
-AIRTABLE_SYNC           off | on
+AIRTABLE_SYNC           off | on                      one-way D1 → Airtable mirror
 AIRTABLE_API_KEY        pat…
 AIRTABLE_BASE_ID        app…
+USE_QUEUES              off | on                      on = paid plan, Queue-driven jobs; off = outbox + cron (free tier, default)
 EMAIL_PROVIDER          resend | mailchannels
 RESEND_API_KEY          re_…
 EMAIL_FROM              "AI.Engineer <cfp@…>"
@@ -169,7 +200,7 @@ SESSION_SECRET          32-byte hex
 R2_BUCKET               bindings in wrangler.toml
 ```
 
-`wrangler.toml` declares D1, R2, KV, Queue and Cron bindings. `npm run seed` populates the demo
+`wrangler.toml` declares D1, R2, KV and Cron bindings (plus a Queue only when `USE_QUEUES=on`). `npm run seed` populates the demo
 event described in [12](12-build-plan.md).
 
 ---

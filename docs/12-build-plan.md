@@ -9,8 +9,15 @@ deployment and the write-up.
 ## 1. Milestones
 
 ### M0 — Foundations (Sat AM, ~3 h)
+- **Spike, first hour — native calendar invites (acceptance criterion #6, the likeliest late
+  failure):** send a real `.ics` through Resend from the actual sending domain, built as a
+  `text/calendar; method=REQUEST` *alternative MIME part* (not merely an attachment). Verify it
+  renders as a native invite in Gmail, Outlook and Apple Calendar, and that re-sending with an
+  incremented `SEQUENCE` updates the calendar entry in place and `METHOD:CANCEL` removes it.
+  If any client fails, there are still four days to change the MIME shape or provider.
 - Repo, licence (MIT), README skeleton, CI.
-- Cloudflare Worker + Hono + Vite scaffold; D1, R2, KV, Queue bindings.
+- Cloudflare Worker + Hono + Vite scaffold; D1, R2, KV, Cron bindings; `outbox` table
+  (no Queues — free tier, see [03 §2a](03-architecture.md)).
 - Schema and migrations for the entities in [02](02-domain-model.md).
 - Auth: magic link, signed cookie, role guard, `Scope` plumbing.
 - **Exit:** a seeded event renders behind login.
@@ -26,9 +33,9 @@ deployment and the write-up.
 
 ### M2 — Portal & communications (Sun AM, ~6 h) — *brief #2, #3*
 - Portal: Home, Submissions, Profile (bio, headshot, links), Tasks.
-- Email pipeline: templates, themes, renderer, queue consumer, message log.
+- Email pipeline: templates, themes, renderer, outbox consumer + retry sweep, message log.
 - `submission_confirmation` ("must have"), `magic_link`, `task_assigned`.
-- ICS builder + `schedule_confirmed` with Gmail/Outlook/iCal verification.
+- ICS builder + `schedule_confirmed`, wired to the MIME shape proven by the M0 spike.
 - Cron reminder sweeps.
 - **Exit:** submit → email → portal login → edit profile, all without a password.
 
