@@ -524,3 +524,12 @@ INSERT INTO submission_participants (id, submission_id, contact_id, role, positi
   ('sp000000-0000-4000-8000-000000000012', 'sub00000-0000-4000-8000-000000000012', 'con00000-0000-4000-8000-000000000006', 'speaker', 1, 1, '2026-08-02T11:00:00Z'),
   ('sp000000-0000-4000-8000-000000000013', 'sub00000-0000-4000-8000-000000000013', 'con00000-0000-4000-8000-000000000007', 'speaker', 1, 1, '2026-08-03T09:00:00Z'),
   ('sp000000-0000-4000-8000-000000000014', 'sub00000-0000-4000-8000-000000000014', 'con00000-0000-4000-8000-000000000008', 'speaker', 1, 1, '2026-08-03T10:00:00Z');
+
+-- ---------------------------------------------------------------------------
+-- M5: Speaker Tracking needs a confirmation mix — Claude and Barbara haven't
+-- confirmed their accepted slots yet, so the donut shows 3 confirmed / 2
+-- awaiting instead of a solid ring.
+-- ---------------------------------------------------------------------------
+
+UPDATE submission_participants SET confirmed_at = NULL
+WHERE contact_id IN ('con00000-0000-4000-8000-000000000007', 'con00000-0000-4000-8000-000000000008');

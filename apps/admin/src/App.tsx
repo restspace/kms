@@ -19,6 +19,7 @@ import {
 import { FormsSection } from './forms/FormsSection'
 import { EvaluationSection } from './evaluation/EvaluationSection'
 import { AgendaSection } from './agenda/AgendaSection'
+import { DashboardSection, type AppNavTarget } from './dashboard/DashboardSection'
 import { ReviewerWorkspace } from './review/ReviewerWorkspace'
 import {
   BulkBar,
@@ -36,7 +37,7 @@ import './shell.css'
  */
 
 const NAV_ITEMS = [
-  { key: 'dashboard', label: 'Dashboard', soon: 'M5' },
+  { key: 'dashboard', label: 'Dashboard', soon: null },
   { key: 'workspace', label: 'Workspace', soon: null },
   { key: 'forms', label: 'Forms', soon: null },
   { key: 'evaluation', label: 'Evaluation', soon: null },
@@ -82,10 +83,19 @@ const speakerSchema = {
   },
 }
 
+/** Workspace tab keys addressable by dashboard deep-links. */
+type WorkspaceTabKey = 'speakers' | 'submissions' | 'tasks' | 'messages'
+
+type WorkspaceSeeds = Partial<Record<WorkspaceTabKey, Record<string, unknown>>>
+
+/** Filter UI for tabs whose only filters come from dashboard deep-link seeds. */
+const NullFilter = () => null
+
 /** Workspace tab configs against the Worker's generic query endpoints. */
 function buildWorkspaceConfig(
   onChecklist: (ids: string[]) => void,
   checklistResetKey: number,
+  seeds: WorkspaceSeeds,
 ): Record<string, TabConfig> {
   const speakers: TabConfig<ContactRow> = {
     displayTitle: 'Speakers',
@@ -138,7 +148,8 @@ function buildWorkspaceConfig(
     titleField: 'title',
     initialSort: { field: 'created_at', direction: 'desc' },
     filterConfig: {
-      initialFilters: { status: '' },
+      initialFilters: { status: '', ...(seeds.submissions ?? {}) },
+      defaultFilters: { status: '' },
       FilterComponent: StatusChipsFilter,
     },
     onChecklist,
@@ -301,6 +312,18 @@ function buildWorkspaceConfig(
     globalFilterReceives: { contact_id: 'contact_id' },
   }
 
+  // Dashboard deep-link seeds (M5 stretch): tabs without their own filter UI
+  // still honour seeded local filters; the preset bar in App clears them.
+  if (seeds.speakers) {
+    speakers.filterConfig = { initialFilters: seeds.speakers, defaultFilters: {}, FilterComponent: NullFilter }
+  }
+  if (seeds.tasks) {
+    tasks.filterConfig = { initialFilters: seeds.tasks, defaultFilters: {}, FilterComponent: NullFilter }
+  }
+  if (seeds.messages) {
+    messages.filterConfig = { initialFilters: seeds.messages, defaultFilters: {}, FilterComponent: NullFilter }
+  }
+
   return {
     speakers: speakers as TabConfig,
     submissions: submissions as TabConfig,
@@ -312,8 +335,14 @@ function buildWorkspaceConfig(
 export default function App() {
   const [me, setMe] = useState<Me | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
-  const [view, setView] = useState<ViewKey>('workspace')
+  const [view, setView] = useState<ViewKey>('dashboard')
   const [switching, setSwitching] = useState(false)
+
+  // Dashboard deep-link state (M5 stretch): seeded workspace filters + which
+  // tab to land on, and the agenda view to open with.
+  const [wsPreset, setWsPreset] = useState<{ seeds: WorkspaceSeeds; label: string | null } | null>(null)
+  const [wsTabRequest, setWsTabRequest] = useState<{ configKey: string; token: number } | undefined>(undefined)
+  const [agendaStart, setAgendaStart] = useState<{ view?: 'conflicts'; key: number }>({ key: 0 })
 
   // Bulk-action state (docs/06 §5): checks come up from the Submissions tab.
   const [checkedIds, setCheckedIds] = useState<string[]>([])
@@ -338,9 +367,25 @@ export default function App() {
   // Rebuilding on checklistResetKey both clears checks and refetches lists —
   // exactly what a bulk action needs.
   const workspaceConfig = useMemo(
-    () => buildWorkspaceConfig(handleChecklist, checklistResetKey),
-    [handleChecklist, checklistResetKey],
+    () => buildWorkspaceConfig(handleChecklist, checklistResetKey, wsPreset?.seeds ?? {}),
+    [handleChecklist, checklistResetKey, wsPreset],
   )
+
+  const handleNavigate = useCallback((target: AppNavTarget) => {
+    if (target.view === 'agenda') {
+      // Keyed remount so a repeat deep-link re-applies the initial view.
+      setAgendaStart((prev) => ({ view: target.agendaView, key: prev.key + 1 }))
+      setView('agenda')
+      return
+    }
+    if (target.view === 'forms') {
+      setView('forms')
+      return
+    }
+    setWsPreset(target.seedFilters || target.label ? { seeds: target.seedFilters ?? {}, label: target.label ?? null } : null)
+    setWsTabRequest((prev) => ({ configKey: target.tab, token: (prev?.token ?? 0) + 1 }))
+    setView('workspace')
+  }, [])
 
   const runBulk = useCallback(
     async (action: 'accept_queue' | 'decline_queue' | 'pending' | 'send_decisions') => {
@@ -428,9 +473,22 @@ export default function App() {
       <main className="shell-main" style={{ position: 'relative' }}>
         {view === 'workspace' && !isReviewer ? (
           <>
+            {wsPreset?.label && (
+              <div className="ws-preset-bar" role="status">
+                Filtered from dashboard: <strong>{wsPreset.label}</strong>
+                <button
+                  onClick={() => setWsPreset(null)}
+                  title="Clear the dashboard filter"
+                  aria-label="Clear the dashboard filter"
+                >
+                  ×
+                </button>
+              </div>
+            )}
             <DataTabManager
               config={workspaceConfig}
               defaultTabs={['speakers', 'submissions', 'tasks', 'messages']}
+              activeTabRequest={wsTabRequest}
             />
             {(checkedIds.length > 0 || bulkNote !== null) && (
               <BulkBar
@@ -451,7 +509,9 @@ export default function App() {
         ) : view === 'evaluation' && !isReviewer ? (
           <EvaluationSection />
         ) : view === 'agenda' && !isReviewer ? (
-          <AgendaSection />
+          <AgendaSection key={agendaStart.key} initialView={agendaStart.view} />
+        ) : view === 'dashboard' && !isReviewer ? (
+          <DashboardSection onNavigate={handleNavigate} />
         ) : view === 'review' ? (
           <ReviewerWorkspace />
         ) : (

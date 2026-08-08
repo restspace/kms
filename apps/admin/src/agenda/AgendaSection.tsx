@@ -69,10 +69,10 @@ interface Toast {
   undo?: () => void
 }
 
-export function AgendaSection() {
+export function AgendaSection({ initialView }: { initialView?: AgendaView } = {}) {
   const [data, setData] = useState<AgendaPayload | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [view, setView] = useState<AgendaView>('day')
+  const [view, setView] = useState<AgendaView>(initialView ?? 'day')
   const [groupBy, setGroupBy] = useState<'room' | 'track'>('room')
   const [curDay, setCurDay] = useState('')
   const [search, setSearch] = useState('')

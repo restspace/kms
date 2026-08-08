@@ -202,15 +202,45 @@ does search/sort/virtualise/detail. What remains:
   stays on the submission detail); conflicts recompute per read instead of the KV cache
   (six sessions — revisit at scale); agenda-respects-anchor stretch skipped (cut list).
 
-### M5 — Dashboard (Tue AM, ~4 h) — *brief #6*
+### M5 — Dashboard (Tue AM, ~4 h) — *brief #6* — **done**
 - Today dashboard: KPIs, status tiles, "Also check" nudges, tabs.
 - **Speaker Tracking dashboard** (the required one): accepted speakers, outstanding tasks,
   top speakers by outstanding tasks, overdue list with "Send reminder", asset completeness.
 - Submissions Pipeline dashboard.
 - Live refresh with ETag polling.
 - *Stretch:* dashboard rows deep-link into the workspace with the row pre-anchored
-  (e.g. an overdue speaker opens Tasks narrowed to them).
-- **Exit:** completing a portal task visibly moves the dashboard.
+  (e.g. an overdue speaker opens Tasks narrowed to them). ✅ built
+- **Exit:** completing a portal task visibly moves the dashboard. ✅
+- **Notes (Aug 8, delivered ~4 days early):** one polled payload
+  (`GET /app/api/dashboard`) serves all three fixed boards — Today (KPIs, status
+  tiles, seven-nudge "Also check" strip, Submission Forms/Participants/Evaluations/
+  Agenda tabs with pacing line, role bars, status donut, reviewer progress,
+  per-day/per-room bars), Speaker Tracking (stats, confirmation donut, top-by-
+  outstanding, overdue list with per-row Send reminder + Remind all, asset
+  completeness with bio/headshot/slides chips) and Submissions Pipeline
+  (received→reviewed→decided→accepted→scheduled funnel, by-form, by-track).
+  Freshness: client polls every 15 s with `If-None-Match`; the Worker hashes the
+  payload (minus the clock) into an ETag so idle polls are 304s. Conflict counts
+  come from the same `@kms/core` engine via the agenda loaders, honouring the KV
+  ignore list — the dashboard cannot disagree with the agenda. Reminders reuse the
+  `task_reminder` template through the one mailer path with a `manual-<date>`
+  version, so "Remind all" is idempotent per assignment per day (verified:
+  2 sent → 2 skipped, exactly two `message_log` rows). The stretch landed as
+  seeded deep-links: every nudge, status tile, top-speaker/overdue/asset row and
+  recent-submission row navigates with pre-seeded workspace filters (new
+  `contact_id`/`missing_assets` contacts filters server-side), lands on the right
+  tab (`activeTabRequest` in DataTabManager), and shows a dismissible "Filtered
+  from dashboard" bar; conflict nudges open the Agenda directly in its Conflicts
+  view. Acceptance (docs/09 §10): 1–6 verified in-browser against local D1 —
+  Ada's portal task completion moved Outstanding 5→4 and reordered the top list
+  within one poll; accepting SESS-5 bumped Accepted Speakers 5→6 and the
+  time-slot nudge 1→2; scheduling it dropped the nudge back; the headshot+bio
+  upload cleared Ada's chips. Test 7 (filtered export) belongs to M6 exports.
+  Judgment calls: aggregates recompute per read behind the ETag instead of the
+  KV 15-s cache (a dozen indexed queries on one event; revisit at scale, same
+  call as M4's conflicts); Review Progress and Schedule Health boards stay on
+  the cut list, their headline numbers already live in the Today tabs; seed now
+  leaves Claude + Barbara unconfirmed so the confirmation donut shows a real mix.
 
 ### M6 — API, polish, deploy (Tue PM, ~5 h)
 - REST API + OpenAPI + `/docs`; webhooks if time allows.

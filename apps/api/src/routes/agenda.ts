@@ -66,7 +66,7 @@ const SESSION_SELECT = `
   FROM submissions s
   WHERE s.event_id = ? AND s.status = 'accepted'`;
 
-async function loadSessions(db: D1Database, eventId: string): Promise<AgendaSession[]> {
+export async function loadSessions(db: D1Database, eventId: string): Promise<AgendaSession[]> {
   const [{ results: rows }, { results: speakers }] = await Promise.all([
     db.prepare(`${SESSION_SELECT} ORDER BY s.starts_at IS NULL, s.starts_at, s.code`).bind(eventId).all<SessionRow>(),
     db
@@ -91,7 +91,7 @@ async function loadSessions(db: D1Database, eventId: string): Promise<AgendaSess
 
 const ignoredKey = (eventId: string) => `agenda:ignored:${eventId}`;
 
-async function loadIgnored(kv: KVNamespace, eventId: string): Promise<string[]> {
+export async function loadIgnored(kv: KVNamespace, eventId: string): Promise<string[]> {
   const raw = await kv.get(ignoredKey(eventId));
   if (!raw) return [];
   try {
@@ -102,7 +102,7 @@ async function loadIgnored(kv: KVNamespace, eventId: string): Promise<string[]> 
   }
 }
 
-function toEngineInput(sessions: AgendaSession[]): AgendaSessionInput[] {
+export function toEngineInput(sessions: AgendaSession[]): AgendaSessionInput[] {
   return sessions.map((s) => ({
     id: s.id,
     code: s.code,

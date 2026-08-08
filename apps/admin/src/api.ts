@@ -388,6 +388,87 @@ export const removeSessionSpeaker = (sessionId: string, contactId: string) =>
     method: 'DELETE',
   })
 
+// ---------------------------------------------------------------------------
+// Dashboards (docs/09, M5)
+// ---------------------------------------------------------------------------
+
+export interface DashboardNudge {
+  key: 'unscheduled' | 'pending' | 'staged' | 'assets' | 'outstanding' | 'overdue' | 'conflicts'
+  count: number
+  text: string
+}
+
+export interface DashboardPayload {
+  now: string
+  event: { id: string; name: string; slug: string; timezone: string; starts_at: string; ends_at: string }
+  kpis: { submissions: number; accepted_speakers: number }
+  status_tiles: { accepted: number; pending: number; declined: number; drafts: number; withdrawn: number }
+  nudges: DashboardNudge[]
+  forms: {
+    forms: Array<{ id: string; internal_name: string; status: string; close_at: string | null; submission_count: number; draft_count: number }>
+    recent: Array<{ id: string; code: string; title: string; status: string; source: string; created_at: string; track_name: string | null; submitter_name: string | null }>
+    pacing: Array<{ day: string; count: number; cumulative: number }>
+  }
+  participants: {
+    by_role: Array<{ role: string; n: number }>
+    status_mix: Array<{ kind: string; status: string; n: number }>
+  }
+  evaluations: {
+    reviewers: Array<{ name: string | null; email: string; assigned: number; completed: number }>
+    reviews: number
+    evaluated_submissions: number
+    in_progress: number
+    plans: Array<{ name: string; n: number }>
+  }
+  agenda: {
+    scheduled: number
+    unscheduled: number
+    per_day: Array<{ day: string; count: number }>
+    per_room: Array<{ room: string; count: number }>
+    conflicts: { error: number; warning: number; info: number }
+  }
+  tracking: {
+    accepted_speakers: number
+    outstanding_tasks: number
+    confirmation: { confirmed: number; awaiting: number }
+    top_speakers: Array<{ contact_id: string; name: string; outstanding: number; overdue: number }>
+    overdue: Array<{ assignment_id: string; contact_id: string; name: string; task_title: string; due_at: string; days_overdue: number }>
+    assets: Array<{ contact_id: string; name: string; missing_bio: number; missing_headshot: number; missing_slides: number }>
+  }
+  pipeline: {
+    total: number
+    pending_review: number
+    by_form: Array<{ name: string; count: number }>
+    by_track: Array<{ name: string; count: number }>
+    funnel: { received: number; reviewed: number; decided: number; accepted: number; scheduled: number }
+  }
+}
+
+/**
+ * ETag-aware poll: pass the previous etag and a 304 comes back as
+ * { fresh: false } without a payload (docs/09 §7).
+ */
+export async function fetchDashboard(
+  etag: string | null,
+): Promise<{ fresh: true; payload: DashboardPayload; etag: string | null } | { fresh: false }> {
+  const res = await fetch('/app/api/dashboard', {
+    headers: { accept: 'application/json', ...(etag ? { 'if-none-match': etag } : {}) },
+  })
+  if (res.status === 304) return { fresh: false }
+  if (res.status === 401) {
+    window.location.assign('/app')
+    throw new ApiError('Signed out', 401)
+  }
+  if (!res.ok) throw new ApiError(`The server rejected the request (HTTP ${res.status}).`, res.status)
+  return { fresh: true, payload: (await res.json()) as DashboardPayload, etag: res.headers.get('etag') }
+}
+
+export const remindTasks = (assignmentIds?: string[]) =>
+  request<{ ok: boolean; sent: number; skipped: number }>('/app/api/dashboard/remind', {
+    method: 'POST',
+    body: JSON.stringify(assignmentIds ? { assignment_ids: assignmentIds } : {}),
+  })
+
 export const getReviewQueue = () => request<ReviewQueue>('/app/api/review/queue')
 export const saveReview = (assignmentId: string, body: Record<string, unknown>) =>
   request<{ ok: boolean; weighted_total: number | null; submission_rating: number | null }>(

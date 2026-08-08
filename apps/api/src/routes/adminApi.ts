@@ -12,6 +12,7 @@ import { createSessionToken, getSession, setSessionCookie, type SessionPayload }
 import { formsAdminRoutes } from './formsAdmin';
 import { evaluationRoutes } from './evaluation';
 import { agendaRoutes } from './agenda';
+import { dashboardRoutes } from './dashboard';
 
 type ApiEnv = { Bindings: Env; Variables: { session: SessionPayload } };
 
@@ -68,6 +69,9 @@ adminApiRoutes.route('/', evaluationRoutes);
 
 // Agenda & scheduling (docs/07) — board payload, schedule writes, conflicts.
 adminApiRoutes.route('/agenda', agendaRoutes);
+
+// Dashboards (docs/09) — aggregates with ETag polling, reminder sends.
+adminApiRoutes.route('/dashboard', dashboardRoutes);
 
 // GET /app/api/builder-meta — everything the builder's pickers need: the
 // field library, and routing-rule targets (tracks, tags, evaluation plans).
@@ -165,11 +169,27 @@ const RESOURCES: Record<string, ResourceDef> = {
           params: [v, v],
         };
       },
+      contact_id: eq('c.id'),
+      // Dashboard deep-link (docs/09 §1): accepted speakers whose programme
+      // profile is incomplete.
+      missing_assets: (value) =>
+        value === true || value === 'true'
+          ? {
+              sql: `(c.biography IS NULL OR c.biography = '' OR c.headshot_asset_id IS NULL)
+                    AND EXISTS (SELECT 1 FROM submission_participants sp
+                                JOIN submissions s ON s.id = sp.submission_id
+                                WHERE sp.contact_id = c.id AND s.status = 'accepted')`,
+              params: [],
+            }
+          : null,
     },
     filterDocs: {
       q: 'Free-text match over first name, last name, email and company.',
       submission_id:
         'Contacts related to this submission: its participants (any role) or its submitter.',
+      contact_id: 'Exactly this contact. The global anchor filter uses this.',
+      missing_assets:
+        'true → accepted speakers missing a biography or headshot (the programme-completeness list).',
     },
   },
 

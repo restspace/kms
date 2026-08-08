@@ -217,3 +217,38 @@
 .detail-panel .detail-actions button:hover {
   background: var(--surface-hover);
 }
+
+/* Dashboard deep-link preset chip (M5 stretch) */
+
+.ws-preset-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.35rem 0.85rem;
+  background: var(--accent-soft);
+  border-bottom: 1px solid var(--accent-border);
+  font-size: var(--text-label);
+  color: var(--text);
+}
+
+.ws-preset-bar strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 32rem;
+}
+
+.ws-preset-bar button {
+  margin-left: 0.25rem;
+  border: none;
+  background: none;
+  color: var(--text-muted);
+  font-size: 1rem;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 0.25rem;
+}
+
+.ws-preset-bar button:hover {
+  color: var(--text);
+}

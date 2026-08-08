@@ -971,6 +971,11 @@ export interface DataTabManagerProps {
   onListQueryChange?: (snapshot: DataTabListQuerySnapshot) => void;
   itemReceiverPanel?: ItemReceiverPanelConfig;
   reloadKey?: number | string;
+  /**
+   * External request to focus the list tab for a config key (e.g. a dashboard
+   * deep-link landing on Tasks). Re-fires whenever `token` changes.
+   */
+  activeTabRequest?: { configKey: string; token: number };
 }
 
 /**
@@ -988,7 +993,8 @@ export const DataTabManager: React.FC<DataTabManagerProps> = ({
   onGlobalFilterChange,
   onListQueryChange,
   itemReceiverPanel,
-  reloadKey
+  reloadKey,
+  activeTabRequest
 }) => {
   const initialState: TabManagerState = {
     tabs: [],
@@ -1147,6 +1153,26 @@ export const DataTabManager: React.FC<DataTabManagerProps> = ({
       initialized.current = true;
     }
   }, [defaultTabs, config]);
+
+  /**
+   * Honour external activate-tab requests (dashboard deep-links). Runs after
+   * tab initialization because it depends on state.tabs; the token guard keeps
+   * a stale request from re-firing on unrelated tab changes.
+   */
+  const handledTabRequestToken = useRef<number | null>(null);
+  useEffect(() => {
+    if (!activeTabRequest || handledTabRequestToken.current === activeTabRequest.token) {
+      return;
+    }
+    const index = state.tabs.findIndex(
+      t => t.type === 'list' && t.configKey === activeTabRequest.configKey
+    );
+    if (index === -1) {
+      return; // tabs not initialized yet; retry when state.tabs changes
+    }
+    handledTabRequestToken.current = activeTabRequest.token;
+    dispatch({ type: 'SET_ACTIVE_TAB', payload: { index } });
+  }, [activeTabRequest, state.tabs]);
 
   /**
    * Notify consumers when the active tab changes.
