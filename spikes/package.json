@@ -1,0 +1,8 @@
+{
+  "name": "kms-spikes",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "nodemailer": "^6.9.14"
+  }
+}
