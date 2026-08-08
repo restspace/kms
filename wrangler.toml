@@ -1,5 +1,9 @@
+# KMS — Cloudflare Worker config. See docs/03-architecture.md.
+# D1 is the system of record; KV holds magic-link tokens, sessions and cached aggregates.
+# No Queues: background jobs use the D1 outbox + the cron sweep (docs/03 §2a).
+
 name = "kms"
-main = "apps/public/src/index.tsx"
+main = "apps/api/src/index.ts"
 compatibility_date = "2025-09-01"
 compatibility_flags = ["nodejs_compat"]
 
@@ -10,12 +14,6 @@ react = "preact/compat"
 "react-dom" = "preact/compat"
 "react/jsx-runtime" = "preact/jsx-runtime"
 
-[vars]
-APP_URL = "http://localhost:8787"
-EVENT_DEFAULT_TZ = "America/Los_Angeles"
-AIRTABLE_SYNC = "off"
-USE_QUEUES = "off"
-
 [assets]
 directory = "./apps/public/dist"
 binding = "ASSETS"
@@ -23,9 +21,22 @@ binding = "ASSETS"
 [[d1_databases]]
 binding = "DB"
 database_name = "kms"
-database_id = "00000000-0000-0000-0000-000000000000" # replaced by `wrangler d1 create kms`
+database_id = "00000000-0000-0000-0000-000000000000" # replaced by `wrangler d1 create kms` output before first deploy
 migrations_dir = "packages/db/migrations"
 
 [[kv_namespaces]]
 binding = "KV"
-id = "0000000000000000000000000000000f" # replaced by `wrangler kv namespace create KV`
+id = "00000000000000000000000000000000" # replaced by `wrangler kv namespace create KV` output before first deploy
+
+[triggers]
+crons = ["* * * * *"] # outbox retry sweep + reminder sweeps
+
+[vars]
+APP_URL = "http://localhost:8787"
+EVENT_DEFAULT_TZ = "America/Los_Angeles"
+EMAIL_PROVIDER = "resend"
+AIRTABLE_SYNC = "off"
+USE_QUEUES = "off"
+DEV_MODE = "on" # exposes the magic link in the /auth/request response instead of relying on email; MUST be "off" in production
+
+# R2 binding intentionally absent for M0 — needs the r2 OAuth scope + card on file (see docs/12 M2).

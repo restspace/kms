@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run build:admin
+
+  deploy:
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    # Secrets cannot be referenced in a job-level `if`, so the secret is mapped
+    # into the job env and a first step gates the rest of the job on it. Forks
+    # and clones without CLOUDFLARE_API_TOKEN skip the deploy cleanly.
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - name: Check for Cloudflare credentials
+        id: creds
+        run: |
+          if [ -n "$CLOUDFLARE_API_TOKEN" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "CLOUDFLARE_API_TOKEN secret not set — skipping deploy."
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.creds.outputs.present == 'true'
+
+      - uses: actions/setup-node@v4
+        if: steps.creds.outputs.present == 'true'
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+        if: steps.creds.outputs.present == 'true'
+
+      # Migrations apply via `wrangler d1 migrations apply kms --remote` before
+      # the Worker deploys, so schema and code stay in step (docs/03 §11).
+      - name: Apply D1 migrations
+        if: steps.creds.outputs.present == 'true'
+        run: npx wrangler d1 migrations apply kms --remote
+
+      - name: Deploy
+        if: steps.creds.outputs.present == 'true'
+        run: npx wrangler deploy

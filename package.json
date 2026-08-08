@@ -10,13 +10,19 @@
   ],
   "scripts": {
     "build:public": "vite build --config apps/public/vite.config.ts",
+    "build:admin": "npm run build -w apps/admin",
     "dev": "npm run build:public && wrangler dev",
-    "db:migrate:local": "wrangler d1 migrations apply kms --local",
-    "db:migrate": "wrangler d1 migrations apply kms --remote",
-    "seed:local": "wrangler d1 execute kms --local --file=packages/db/seed.sql",
-    "seed": "wrangler d1 execute kms --remote --file=packages/db/seed.sql",
-    "deploy": "npm run build:public && wrangler deploy",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "migrate:local": "wrangler d1 migrations apply kms --local",
+    "migrate:remote": "wrangler d1 migrations apply kms --remote",
+    "seed:local": "wrangler d1 execute kms --local --file packages/db/seed/seed.sql",
+    "seed:remote": "wrangler d1 execute kms --remote --file packages/db/seed/seed.sql",
+    "deploy": "npm run build:public && wrangler deploy"
+  },
+  "dependencies": {
+    "hono": "4.13.1",
+    "preact": "10.29.8",
+    "preact-render-to-string": "6.7.0"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "5.20260808.1",
@@ -24,10 +30,5 @@
     "typescript": "7.0.2",
     "vite": "8.2.1",
     "wrangler": "4.120.0"
-  },
-  "dependencies": {
-    "hono": "4.13.1",
-    "preact": "10.29.8",
-    "preact-render-to-string": "6.7.0"
   }
 }

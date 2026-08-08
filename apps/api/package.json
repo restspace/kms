@@ -1,0 +1,11 @@
+{
+  "name": "@kms/api",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@kms/core": "*",
+    "@kms/db": "*",
+    "@kms/email": "*",
+    "hono": "^4.5.0"
+  }
+}
