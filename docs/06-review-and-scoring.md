@@ -10,6 +10,13 @@ Add Abstract drawer), 37 (review-progress dashboard).
 
 ## 1. Abstracts grid (`/app/e/:event/abstracts`)
 
+> **Implementation note (Aug 8).** This section records the *reference product's* grid. In
+> KMS it is realised as the **Submissions tab of the tab workspace**
+> ([11 §3](11-ui-and-navigation.md), [12 §0](12-build-plan.md)): status tabs become filter
+> chips with a live tab count, the detail drawer becomes a detail tab, and related records
+> are reached via the global anchor filter. Saved Views, the Columns drawer, multi-key sort
+> and page-number pagination are deliberately dropped (cut list, [12 §1](12-build-plan.md)).
+
 Header: "Abstracts — Review and manage your abstract submissions", with **⋯ Options** and
 **+ Add Abstract**.
 

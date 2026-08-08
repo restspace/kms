@@ -98,7 +98,7 @@ Priority uses MoSCoW. **M** = must ship for the Aug 12 submission, **S** = shoul
 | FR-REV-2 | Status lifecycle: `draft → pending → accept_queue | decline_queue → accepted | declined`, plus `withdrawn`. Inline status editing from the grid with a colour-coded picker. | M |
 | FR-REV-3 | Grid columns are user-configurable (show/hide, reorder, reset to default) across Session Details and Reporting Fields; column-set persists per user as a **Saved View**. | S |
 | FR-REV-4 | Search, multi-condition **Filter**, multi-key **Sort**, pagination (25/50/100 per page). | M |
-| FR-REV-5 | Row-level quick edit and a full detail drawer with **Details** and **Participants** tabs. | M |
+| FR-REV-5 | Row-level quick edit (inline editable cells) and a full detail view with **Details** and **Participants** — realised as a workspace detail tab plus the global anchor filter ([11 §3](11-ui-and-navigation.md)). | M |
 | FR-REV-6 | Admin can create a submission manually ("Add Abstract"): title, status, description, starts-at, ends-at, capacity, CEU credits, client ID, format, track, tags, participants. | S |
 | FR-REV-7 | Bulk select → bulk status change, bulk tag, bulk assign to an evaluation plan, bulk notify. | S |
 | FR-REV-8 | **Import sessions** from CSV/XLSX; **Export .CSV** / **Export .XLSX**; **Download files bundle** (zip of submission files). | S |

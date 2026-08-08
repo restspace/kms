@@ -1,0 +1,763 @@
+/* DataTabManager — skinned onto the KMS tokens in src/theme.css. */
+
+.data-tab-manager {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+  font-family: var(--font-ui);
+  font-size: var(--text-base);
+  color: var(--text);
+}
+
+.data-tab-header {
+  display: flex;
+  align-items: stretch;
+  flex: 0 0 auto;
+  border-bottom: 1px solid var(--border);
+  background: var(--chrome);
+}
+
+/* Tab labels container */
+.data-tab-labels {
+  display: flex;
+  flex: 1 1 auto;
+  height: var(--tab-height);
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.data-tab-labels-empty {
+  display: flex;
+  align-items: center;
+  padding: 0 var(--space-3);
+  color: var(--text-muted);
+  font-size: var(--text-label);
+  white-space: nowrap;
+}
+
+.data-tab-header-actions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 var(--space-2);
+  border-left: 1px solid var(--border);
+}
+
+.data-tab-receiver-toggle {
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  color: var(--text-secondary);
+  border-radius: var(--radius);
+  padding: 6px var(--space-2);
+  font-size: var(--text-label);
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.data-tab-receiver-toggle:hover {
+  background: var(--surface-hover);
+}
+
+.data-tab-receiver-toggle.active {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+/* Individual tab label */
+.data-tab-label {
+  border: none;
+  background-color: transparent;
+  padding: 0 var(--space-4);
+  cursor: pointer;
+  color: var(--text-muted);
+  font-size: var(--text-grid);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  position: relative;
+  border-bottom: 2px solid transparent;
+  border-right: 1px solid var(--border);
+  transition: color 0.15s ease, border-color 0.15s ease, background-color 0.15s ease;
+  user-select: none;
+}
+
+.data-tab-label-content {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1px;
+}
+
+.data-tab-label-text {
+  white-space: nowrap;
+  font-weight: 500;
+}
+
+.data-tab-label-count {
+  font-size: var(--text-caption);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  align-self: flex-start;
+  color: var(--text-faint);
+}
+
+.data-tab-label:hover {
+  color: var(--text-secondary);
+  background: var(--surface-hover);
+}
+
+.data-tab-label:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.data-tab-label.active {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+  background: var(--surface);
+}
+
+.data-tab-label.active .data-tab-label-count {
+  color: var(--text-muted);
+}
+
+.data-tab-label.filter-source {
+  background: var(--accent-soft);
+}
+
+.data-tab-label.filter-source.active {
+  background: var(--surface);
+  border-bottom-color: var(--accent);
+}
+
+/* Global filter dot indicator on tab headers */
+.data-tab-filter-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  border: 1.5px solid var(--text-faint);
+  background: transparent;
+  flex-shrink: 0;
+  cursor: pointer;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.data-tab-filter-dot:hover {
+  border-color: var(--accent);
+}
+
+.data-tab-filter-dot.active {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+/* Queued as a filter source but waiting for a row selection */
+.data-tab-filter-dot.pending {
+  border-color: var(--accent);
+  border-style: dashed;
+  background: var(--accent-soft);
+}
+
+/* Note shown in receiver mode when hidden tabs' filter sources are suspended */
+.data-tab-suspended-filters {
+  font-size: var(--text-label);
+  color: var(--notice-text);
+  background: var(--notice-soft);
+  border: 1px solid var(--notice-border);
+  border-radius: var(--radius-sm);
+  padding: 2px var(--space-2);
+  margin-right: var(--space-2);
+  white-space: nowrap;
+  align-self: center;
+}
+
+/* Close button */
+.data-tab-close {
+  margin-left: var(--space-1);
+  padding: 0 6px;
+  font-size: 1.3em;
+  line-height: 1;
+  opacity: 0.55;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  color: inherit;
+  transition: opacity 0.15s ease, color 0.15s ease;
+}
+
+.data-tab-close:hover {
+  opacity: 1;
+  color: var(--danger);
+}
+
+.data-tab-close:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  opacity: 1;
+}
+
+/* Tab content area */
+.data-tab-content {
+  flex: 1 1 auto;
+  min-height: 0;
+  background: var(--surface);
+  display: flex;
+  flex-direction: column;
+}
+
+.data-tab-panels {
+  flex: 1 1 auto;
+  min-height: 0;
+  position: relative;
+}
+
+.data-tab-panel {
+  display: none;
+  height: 100%;
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+}
+
+.data-tab-panel.active {
+  display: block;
+}
+
+.data-tab-panel.hidden-by-mode {
+  display: none;
+}
+
+.data-tab-content-split {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  width: 100%;
+}
+
+.data-tab-main-pane {
+  min-width: 0;
+  min-height: 0;
+  flex: 0 1 auto;
+  display: flex;
+}
+
+.data-tab-splitter {
+  width: 8px;
+  cursor: col-resize;
+  background: linear-gradient(to right, transparent 0%, var(--border) 50%, transparent 100%);
+  flex: 0 0 auto;
+}
+
+.data-tab-splitter:hover {
+  background: linear-gradient(to right, transparent 0%, var(--border-strong) 50%, transparent 100%);
+}
+
+.data-tab-receiver-pane {
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.data-tab-receiver-pane-title {
+  height: var(--tab-height);
+  display: flex;
+  align-items: center;
+  padding: 0 var(--space-3);
+  border-bottom: 1px solid var(--border);
+  font-size: var(--text-grid);
+  font-weight: 600;
+  color: var(--text-secondary);
+  background: var(--chrome);
+}
+
+.data-tab-receiver-pane-content {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+/* Empty state */
+.data-tab-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--text-muted);
+  font-size: 1.05em;
+}
+
+/* Global filter indicator */
+.data-tab-filter-indicator {
+  position: absolute;
+  bottom: var(--space-4);
+  right: var(--space-4);
+  background: var(--accent);
+  color: var(--accent-contrast);
+  padding: var(--space-2) var(--space-4);
+  border-radius: 16px;
+  font-size: var(--text-label);
+  box-shadow: var(--shadow-overlay);
+  pointer-events: none;
+  animation: slideIn 0.15s ease;
+}
+
+@keyframes slideIn {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Scrollbar styling for tab labels */
+.data-tab-labels::-webkit-scrollbar {
+  height: 6px;
+}
+
+.data-tab-labels::-webkit-scrollbar-track {
+  background: var(--chrome);
+}
+
+.data-tab-labels::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 3px;
+}
+
+.data-tab-labels::-webkit-scrollbar-thumb:hover {
+  background: var(--text-faint);
+}
+
+/* -------------------------------------------------------------------------- */
+/* Create tab (SchemaSubmitForm / @restspace/schema-form) styling overrides     */
+/* Kept for a future swap to the full schema-form stack; harmless meanwhile.    */
+/* -------------------------------------------------------------------------- */
+
+.data-tab-create,
+.data-tab-edit {
+  height: 100%;
+  overflow-y: auto;
+  background: var(--surface);
+}
+
+.data-tab-create,
+.data-tab-edit {
+  .sf-form {
+    .sf-row > label.sf-caption {
+      font-size: var(--text-label);
+      font-weight: 600;
+      color: var(--text-secondary);
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      padding: 0;
+      max-width: none;
+    }
+
+    .sf-description {
+      color: var(--text-muted);
+      font-size: var(--text-label);
+      margin-top: var(--space-1);
+      /* The description span sits inside the label, which is a child of the
+         fit-content() label grid column. width: 0 keeps long helper text from
+         contributing to the column's intrinsic (max-content) width, so the
+         captions alone size the column; min-width: 100% then lets the text
+         fill and wrap within the width the column actually gets. */
+      display: block;
+      width: 0;
+      min-width: 100%;
+      white-space: normal;
+      font-weight: 400;
+      text-transform: none;
+      letter-spacing: normal;
+    }
+
+    .sf-control:not(.sf-checkbox),
+    .sf-control:not(.sf-checkbox) input,
+    .sf-control:not(.sf-checkbox) select,
+    .sf-control:not(.sf-checkbox) textarea,
+    input.sf-control:not(.sf-checkbox),
+    select.sf-control,
+    textarea.sf-control {
+      box-sizing: border-box;
+      height: var(--control-height);
+      padding: 0 var(--space-2);
+      border: 1px solid var(--border-strong);
+      border-radius: var(--radius);
+      background: var(--surface);
+      font-size: var(--text-grid);
+      color: var(--text);
+      outline: none;
+    }
+
+    .autocomplete-container,
+    .tags-container {
+      display: contents;
+    }
+
+    .autocomplete-label,
+    .tags-label {
+      font-size: var(--text-label);
+      font-weight: 600;
+      color: var(--text-secondary);
+      letter-spacing: 0.04em;
+      padding: 0;
+      max-width: none;
+      min-width: 0;
+    }
+
+    .autocomplete-field,
+    .tags-box {
+      width: 100%;
+    }
+
+    .sf-control textarea {
+      height: auto;
+      min-height: 96px;
+      padding: var(--space-2);
+      resize: vertical;
+      line-height: 1.4;
+    }
+
+    .sf-control input[readonly],
+    .sf-control input[readonly]:focus,
+    input.sf-control[readonly],
+    input.sf-control[readonly]:focus {
+      border: none;
+      box-shadow: none;
+    }
+
+    input.sf-control.sf-checkbox {
+      width: 16px;
+      height: 16px;
+      padding: 0;
+      border-radius: var(--radius-sm);
+      margin: 0;
+      justify-self: start;
+      align-self: center;
+      accent-color: var(--accent);
+    }
+
+    .sf-control:focus-within,
+    .sf-control input:focus,
+    .sf-control select:focus,
+    .sf-control textarea:focus {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 2px var(--accent-soft-hover);
+    }
+
+    .sf-control.sf-has-error,
+    .sf-control.sf-has-error input,
+    .sf-control.sf-has-error select,
+    .sf-control.sf-has-error textarea {
+      border-color: var(--danger);
+      box-shadow: 0 0 0 2px var(--danger-soft);
+    }
+
+    .sf-control-button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: var(--control-height);
+      height: var(--control-height);
+      border-radius: var(--radius);
+      cursor: pointer;
+      user-select: none;
+      color: transparent;
+      background-repeat: no-repeat;
+      background-position: center;
+      background-size: 14px 14px;
+      border: 1px solid var(--border-strong);
+      background-color: var(--surface);
+      transition: background-color 0.15s ease, border-color 0.15s ease, transform 0.15s ease;
+    }
+
+    .sf-control-button:hover {
+      background-color: var(--surface-hover);
+      border-color: var(--border-strong);
+    }
+
+    .sf-control-button:active {
+      transform: scale(0.98);
+    }
+
+    .sf-add-button {
+      background-image: url(../assets/plus-icon.svg);
+    }
+
+    .sf-delete-button {
+      background-image: url(../assets/delete-icon.svg);
+    }
+
+    .sf-delete-button:hover {
+      background-color: var(--danger-soft);
+      border-color: var(--danger-border);
+    }
+
+    .sf-duplication-button {
+      background-image: url(../assets/duplicate-icon.svg);
+    }
+
+    .sf-control.sf-upload {
+      height: 50px !important;
+      min-height: 50px !important;
+      display: flex;
+      align-items: center;
+      justify-content: flex-start;
+      transition: background-color 0.15s ease, border-color 0.15s ease;
+    }
+
+    .sf-upload > div {
+      height: 100% !important;
+      display: flex;
+      align-items: center;
+      justify-content: flex-start;
+    }
+
+    .sf-control.sf-upload.sf-drag-over {
+      background-color: var(--accent-soft) !important;
+      border-color: var(--accent) !important;
+    }
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Unsaved changes confirmation dialog                                         */
+/* -------------------------------------------------------------------------- */
+
+.data-tab-confirm-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: var(--scrim);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  animation: fadeIn 0.15s ease;
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.data-tab-confirm-dialog {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-overlay);
+  padding: var(--space-5);
+  max-width: 400px;
+  width: 90%;
+  animation: scaleIn 0.15s ease;
+}
+
+@keyframes scaleIn {
+  from {
+    opacity: 0;
+    transform: scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.data-tab-confirm-dialog h3 {
+  margin: 0 0 var(--space-3) 0;
+  font-size: 1.05em;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.data-tab-confirm-dialog p {
+  margin: 0 0 var(--space-4) 0;
+  color: var(--text-muted);
+  font-size: var(--text-grid);
+  line-height: 1.5;
+}
+
+.data-tab-confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-3);
+}
+
+.data-tab-confirm-cancel,
+.data-tab-confirm-discard {
+  padding: 6px var(--space-4);
+  border-radius: var(--radius);
+  font-size: var(--text-grid);
+  font-weight: 500;
+  cursor: pointer;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.data-tab-confirm-cancel {
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  color: var(--text-secondary);
+}
+
+.data-tab-confirm-cancel:hover {
+  background: var(--surface-hover);
+}
+
+.data-tab-confirm-discard {
+  background: var(--danger);
+  border: 1px solid var(--danger);
+  color: var(--accent-contrast);
+}
+
+.data-tab-confirm-discard:hover {
+  background: var(--danger-strong);
+  border-color: var(--danger-strong);
+}
+
+/* -------------------------------------------------------------------------- */
+/* Mobile responsive — tab nav dropdown + vertical split pane                  */
+/* -------------------------------------------------------------------------- */
+
+.data-tab-mobile-nav {
+  display: none;
+}
+
+@media (max-width: 768px) {
+  .data-tab-labels {
+    display: none;
+  }
+
+  .data-tab-header {
+    position: relative;
+    width: 100%;
+    box-sizing: border-box;
+    margin-top: var(--space-1);
+  }
+
+  .data-tab-manager {
+    overflow: unset;
+  }
+
+  .data-tab-mobile-nav {
+    display: block;
+    position: relative;
+    flex: 1 1 auto;
+  }
+
+  .data-tab-mobile-trigger {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    height: var(--tab-height);
+    padding: 0 var(--space-2);
+    border: none;
+    background: transparent;
+    font-size: var(--text-grid);
+    font-weight: 600;
+    color: var(--text);
+    cursor: pointer;
+    text-align: left;
+  }
+
+  .data-tab-mobile-trigger:hover {
+    background: var(--surface-hover);
+  }
+
+  .data-tab-mobile-chevron {
+    font-size: 1.2em;
+    margin-left: var(--space-2);
+    flex-shrink: 0;
+  }
+
+  .data-tab-mobile-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 99;
+  }
+
+  .data-tab-mobile-dropdown {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    right: 0;
+    z-index: 100;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 0 0 var(--radius) var(--radius);
+    box-shadow: var(--shadow-overlay);
+    max-height: 60vh;
+    overflow-y: auto;
+  }
+
+  .data-tab-mobile-option {
+    display: block;
+    width: 100%;
+    padding: var(--space-3) var(--space-2);
+    border: none;
+    border-bottom: 1px solid var(--border);
+    background: transparent;
+    font-size: var(--text-grid);
+    text-align: left;
+    cursor: pointer;
+    color: var(--text-secondary);
+  }
+
+  .data-tab-mobile-option:hover {
+    background: var(--surface-hover);
+    color: var(--text);
+  }
+
+  .data-tab-mobile-option.active {
+    font-weight: 600;
+    color: var(--text);
+  }
+
+  /* Vertical split pane */
+  .data-tab-content-split {
+    flex-direction: column;
+  }
+
+  .data-tab-main-pane {
+    min-height: 200px;
+    min-width: unset;
+  }
+
+  .data-tab-splitter {
+    height: 8px;
+    width: 100%;
+    flex: 0 0 8px;
+    cursor: row-resize;
+    background: linear-gradient(to bottom, transparent 0%, var(--border) 50%, transparent 100%);
+  }
+
+  .data-tab-splitter:hover {
+    background: linear-gradient(to bottom, transparent 0%, var(--border-strong) 50%, transparent 100%);
+  }
+
+  .data-tab-receiver-pane {
+    border-left: none;
+    border-top: 1px solid var(--border);
+    min-height: 200px;
+  }
+}

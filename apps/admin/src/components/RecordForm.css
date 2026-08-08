@@ -1,0 +1,181 @@
+.record-form {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  max-width: 640px;
+  padding: var(--space-4) var(--space-5);
+  overflow-y: auto;
+  box-sizing: border-box;
+  background: var(--surface);
+  color: var(--text);
+}
+
+.record-form-header h2 {
+  margin: 0 0 var(--space-3);
+  font-size: 1.1em;
+  font-weight: 600;
+}
+
+.record-form-submit-error {
+  margin-bottom: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--danger-border);
+  border-radius: var(--radius-sm);
+  background: var(--danger-soft);
+  color: var(--danger-strong);
+  font-size: var(--text-grid);
+}
+
+.record-form-fields {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  flex: 1 1 auto;
+}
+
+.record-form-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.record-form-field > label {
+  font-size: var(--text-label);
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.record-form-field input[type="text"],
+.record-form-field input[type="number"],
+.record-form-field input[type="date"],
+.record-form-field input[type="datetime-local"],
+.record-form-field input[type="email"],
+.record-form-field input[type="url"],
+.record-form-field select,
+.record-form-field textarea {
+  height: var(--control-height);
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: var(--text-grid);
+  box-sizing: border-box;
+}
+
+.record-form-field textarea {
+  height: auto;
+  min-height: 88px;
+  padding: var(--space-2);
+  resize: vertical;
+  line-height: 1.4;
+}
+
+.record-form-field input:focus,
+.record-form-field select:focus,
+.record-form-field textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft-hover);
+}
+
+.record-form-field-checkbox label {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-grid);
+  text-transform: none;
+  letter-spacing: normal;
+  font-weight: 500;
+  color: var(--text);
+}
+
+.record-form-field-checkbox input[type="checkbox"] {
+  width: 15px;
+  height: 15px;
+  accent-color: var(--accent);
+}
+
+.record-form-json {
+  font-family: var(--font-mono);
+}
+
+.record-form-required {
+  color: var(--danger);
+}
+
+.record-form-help {
+  margin: 0;
+  font-size: var(--text-label);
+  color: var(--text-muted);
+}
+
+.record-form-error {
+  margin: 0;
+  font-size: var(--text-label);
+  color: var(--danger-strong);
+}
+
+.record-form-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: var(--space-4);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border);
+}
+
+.record-form-actions-spacer {
+  flex: 1 1 auto;
+}
+
+.record-form-actions button {
+  height: var(--control-height);
+  padding: 0 var(--space-4);
+  border-radius: var(--radius);
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: var(--text-grid);
+  font-weight: 500;
+  cursor: pointer;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.record-form-actions button:hover:not(:disabled) {
+  background: var(--surface-hover);
+}
+
+.record-form-actions button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.record-form-actions button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.record-form-submit {
+  background: var(--accent) !important;
+  border-color: var(--accent) !important;
+  color: var(--accent-contrast) !important;
+}
+
+.record-form-submit:hover:not(:disabled) {
+  background: var(--accent-strong) !important;
+  border-color: var(--accent-strong) !important;
+}
+
+.record-form-delete {
+  border-color: var(--danger-border) !important;
+  color: var(--danger-strong) !important;
+}
+
+.record-form-delete:hover:not(:disabled) {
+  background: var(--danger-soft) !important;
+}

@@ -1,0 +1,22 @@
+.context-menu {
+    position: fixed; /* portal + viewport coords */
+    background-color: var(--surface);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius);
+    padding: var(--space-1);
+    z-index: 10000; /* ensure above virtualized rows */
+    box-shadow: var(--shadow-overlay);
+    min-width: 160px;
+
+    & .context-menu-item {
+        padding: 5px var(--space-2);
+        border-radius: var(--radius-sm);
+        cursor: pointer;
+        font-size: var(--text-grid);
+        color: var(--text);
+
+        &:hover {
+            background-color: var(--accent-soft);
+        }
+    }
+}

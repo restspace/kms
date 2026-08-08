@@ -51,22 +51,27 @@ Settings
 ```
 
 **Recommended simplification.** The reference has four separate "Forms" and three separate
-"Files" entries in one sidebar, which is genuinely confusing. Collapse to:
+"Files" entries in one sidebar, which is genuinely confusing. Collapse the record-keeping
+core into a single **tab workspace** (see §3 and [12 §0](12-build-plan.md)) and keep a slim
+sidebar for the bespoke surfaces:
 
 ```
 Dashboard
-Submissions      (grid; tabs: Abstracts | Sessions | Drafts)
+Workspace        (tab workspace: Speakers | Submissions | Tasks | Messages* | Files*)
 Forms            (tabs: Call for papers | Portal forms | File requests)
 Evaluation
 Agenda
-Speakers         (contacts)
-Tasks
-Files            (all uploads, filterable by source)
 Settings         (Event · Library · Email · Portal · Team · API)
 ```
 
-This is exactly the kind of "subjective judgment call for a product we'd actually use" the
-tiebreaker rewards — record the reasoning in the README.
+*\* as time allows — see the cut list in [12 §1](12-build-plan.md).*
+
+The workspace replaces the separate Submissions/Speakers/Tasks/Files sidebar entries and
+their per-resource detail pages: entity list tabs sit side by side, records open as detail/
+create/edit tabs next to their list, and a **global anchor filter** (select a row, make it
+the filter) narrows every related tab to that record. This is exactly the kind of
+"subjective judgment call for a product we'd actually use" the tiebreaker rewards — record
+the reasoning in the README.
 
 ### Top bar
 Global search / command palette (⌘K, "Find or ask") · **View Portal** · notifications ·
@@ -85,8 +90,7 @@ Card grid grouped as **Event setup** (Event Details, Record Settings, Portals, S
 |---|---|
 | `/app` | Org / event chooser |
 | `/app/e/:event/dashboard` | Dashboard (tabbed by dashboard key) |
-| `/app/e/:event/submissions` | Abstracts/sessions grid |
-| `/app/e/:event/submissions/:id` | Submission detail (Details / Participants) |
+| `/app/e/:event/workspace` | Tab workspace (Speakers · Submissions · Tasks · …); detail/create/edit open as child tabs, not routes |
 | `/app/e/:event/forms` | Forms list |
 | `/app/e/:event/forms/:id/edit/:step` | Form builder wizard |
 | `/app/e/:event/evaluation` | Plans list |
@@ -106,11 +110,25 @@ Card grid grouped as **Event setup** (Event Details, Record Settings, Portals, S
 
 ## 3. Core interaction patterns
 
-### The grid (used by Submissions, Sessions, Speakers, Tasks)
-One component, configured per resource: status tabs with counts, search, Saved Views, Columns
-drawer, Filter builder, multi-key Sort, row selection with a bulk-action bar, inline cell edit,
-row detail drawer, pagination with a page-size selector, CSV/XLSX export. Rows virtualise;
-column widths and order persist per user.
+### The tab workspace (Speakers, Submissions, Tasks, Messages, Files)
+One `DataTabManager` instance configured per entity via `TabConfig`
+(`apps/admin/src/components/`, ported from the atelyr codebase):
+
+- **List tabs** with live row counts, virtualised infinite scroll, single-key sort,
+  per-tab filter chips (status, search), inline cell edit, and checklist selection
+  feeding a bulk-action bar.
+- **Detail / create / edit child tabs** opened from rows (double-click, context menu,
+  "+"), inserted beside their parent list, with unsaved-change guarding. Simple entities
+  use schema-driven forms (`RecordForm`); complex ones supply custom components.
+- **Global anchor filter** — shift-click a row or right-click → *Make global filter*;
+  every other tab narrows to records related to the anchor via per-tab field maps,
+  with join-table relations (participants, task assignments) resolved server-side.
+  The source tab shows a filter dot; Ctrl+click adds additional anchors (AND).
+  Ambiguous relation paths are always named ("Submitted" vs "Speaking on").
+
+Deliberately dropped from the original grid spec (not supported by the components, not
+needed for the deadline): saved views, column show/hide + width persistence, multi-key
+sort, page-number pagination. CSV/XLSX export moves to the API, offered from the tabs.
 
 ### The form builder (used by CFP forms and portal forms)
 Left step rail with completion state, right content pane, sticky primary actions, drag-ordered
@@ -160,7 +178,7 @@ larger than the control they replace. No full-page spinners after first paint.
 | Public CFP | First-class. Single column, sticky step header, large tap targets, native file picker |
 | Speaker portal | First-class. Cards stack; the four nav items become a bottom bar |
 | Public agenda / embeds | First-class. Day-by-day list with track filters |
-| Admin grids | Usable — horizontal scroll with pinned title column, or a card layout below 768 px |
+| Admin workspace | Usable — DataList's built-in card layout below 640 px; the tab strip becomes a dropdown below 768 px |
 | Agenda editor | Desktop-first; mobile gets read-only plus the "Move session" dialog |
 
 ---
