@@ -41,7 +41,7 @@ browser-pilot open http://localhost:8787/health
 | # | Step | Expect |
 |---|---|---|
 | S0.1 | `open http://localhost:8787/health` | 200, JSON ok |
-| S0.2 | `do "confirm the seeded event 'AI.Engineer Sandbox Event – NYC' is reachable: open /submit/ai-engineer-sandbox-event/form0000-0000-4000-8000-000000000001 and report the page heading and any deadline text"` | Welcome screen, "Speak at NYC", close date Sept 15 2026 |
+| S0.2 | `do "confirm the seeded event 'AI.Engineer Sandbox Event – NYC' is reachable: open /submit/ai-engineer-sandbox-event/form0000-0000-4000-8000-000000000001 and report the page heading and any deadline text"` | Welcome screen, "AI.Engineer NYC — Call for Speakers 2026", close date Sept 15 2026 |
 | S0.3 | `do "log in as an admin: go to /app, enter james@atelyr.com, then follow the DEV_MODE sign-in link shown on the page. Confirm you land on the admin shell and report which sidebar items are present"` | Dashboard · Workspace · Forms · Evaluation · Agenda · Settings |
 
 **Gate:** if S0.3 fails, stop — everything downstream is authenticated.
