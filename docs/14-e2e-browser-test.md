@@ -207,7 +207,7 @@ finding, not a failure to hide — [00 §4](00-overview.md) ranks speed as a jud
 | X.3 | `do "log in as one speaker and try to open another speaker's submission by URL — report what happens"` | NFR-5 — tenant/record isolation |
 | X.4 | `do "open the agenda for Oct 12 and confirm the view header declares the event timezone abbreviation"` | NFR-12, [07 §2](07-agenda-and-scheduling.md) — one header-level declaration governs the whole calendar view |
 | X.5 | `do "submit the CFP form with the title field empty and report the validation message"` | Error states |
-| X.6 | `do "open the workspace with a filter that matches nothing and report the empty state shown"` | Empty states |
+| X.6 | `do "open the workspace Submissions tab, select the Decline Queue status chip so the list matches nothing, and report the empty state shown"` | Empty states |
 
 ---
 
