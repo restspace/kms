@@ -4,14 +4,9 @@
 import { Hono } from 'hono';
 import type { Context } from 'hono';
 import { createDb } from '@kms/db';
-import {
-  createConsoleProvider,
-  createResendProvider,
-  type EmailProvider,
-  type OutgoingEmail,
-} from '@kms/email';
-import type { AppEnv, Env } from '../env';
+import type { AppEnv } from '../env';
 import { esc, page } from '../html';
+import { sendTemplated } from '../mailer';
 import { clearSessionCookie, createSessionToken, setSessionCookie } from '../session';
 
 export const authRoutes = new Hono<AppEnv>();
@@ -27,14 +22,6 @@ function b64url(bytes: Uint8Array): string {
 async function sha256hex(input: string): Promise<string> {
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(input));
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
-}
-
-/** Same provider selection as the jobs worker: Resend outside DEV_MODE, else console. */
-function selectProvider(env: Env): EmailProvider {
-  if (env.RESEND_API_KEY && env.DEV_MODE !== 'on') {
-    return createResendProvider(env.RESEND_API_KEY, env.EMAIL_FROM ?? 'KMS <no-reply@example.com>');
-  }
-  return createConsoleProvider();
 }
 
 function wantsJson(accept: string | undefined): boolean {
@@ -94,26 +81,17 @@ authRoutes.post('/request', async (c) => {
   );
 
   const link = `${c.env.APP_URL}/auth/callback?t=${token}`;
-  const mail: OutgoingEmail = {
-    to: contact.email,
-    subject: 'Your sign-in link',
-    text: `Sign in to ${event.name}:\n\n${link}\n\nThis link expires in 15 minutes and can only be used once. If you did not request it, you can ignore this email.`,
-    html: `<p>Sign in to <strong>${esc(event.name)}</strong>:</p><p><a href="${esc(link)}">Sign in to ${esc(event.name)}</a></p><p>This link expires in 15 minutes and can only be used once. If you did not request it, you can ignore this email.</p>`,
-  };
-
-  // Outbox first (cron sweep retries it), then attempt an immediate send (docs/03 §2a).
-  await db.outbox.enqueue({ kind: 'email', idempotencyKey: `magic-${hash}`, payload: mail });
-  const immediate = selectProvider(c.env)
-    .send(mail)
-    .catch((err: unknown) => {
-      // Never log the token/link — the message text stays out of logs.
-      console.error('magic-link immediate send failed:', err instanceof Error ? err.message : 'unknown error');
-    });
-  try {
-    c.executionCtx.waitUntil(immediate);
-  } catch {
-    await immediate; // test environments without an execution context
-  }
+  // Through the template pipeline (docs/08): message_log row, outbox retry,
+  // immediate attempt. The token hash keys idempotency — one send per link.
+  // The rendered body carries the link; mailer never logs message content.
+  await sendTemplated(c, {
+    templateKey: 'magic_link',
+    eventId: event.id,
+    contactId: contact.id,
+    toEmail: contact.email,
+    entityId: hash,
+    context: { event: { name: event.name }, magic_link: link },
+  });
 
   const dev = c.env.DEV_MODE === 'on';
   if (json) {

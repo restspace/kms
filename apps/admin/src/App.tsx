@@ -9,6 +9,7 @@ import {
   updateContact,
   type ContactRow,
   type Me,
+  type MessageRow,
   type SubmissionRow,
 } from './api'
 import { FormsSection } from './forms/FormsSection'
@@ -163,9 +164,58 @@ function buildWorkspaceConfig(): Record<string, TabConfig> {
     globalFilterReceives: { contact_id: 'contact_id' },
   }
 
+  const messages: TabConfig<MessageRow> = {
+    displayTitle: 'Messages',
+    dataSource: queryResource<MessageRow>('messages'),
+    getItemId: (item) => item.id,
+    getItemTitle: (item) => item.subject ?? item.template_key ?? item.id,
+    initialSort: { field: 'created_at', direction: 'desc' },
+    columns: [
+      {
+        field: 'created_at',
+        header: 'Queued',
+        width: '130px',
+        sortable: true,
+        render: (value: string) => {
+          const d = new Date(value)
+          return Number.isNaN(d.getTime())
+            ? value
+            : d.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })
+        },
+      },
+      { field: 'template_key', header: 'Template', width: '150px', sortable: true },
+      { field: 'to_email', header: 'To', width: '1.2fr', sortable: true, mobileRow: 2 },
+      { field: 'subject', header: 'Subject', width: '2fr' },
+      {
+        field: 'status',
+        header: 'Status',
+        width: '90px',
+        sortable: true,
+        render: (value: string) => <span className={`status-chip status-${value}`}>{value}</span>,
+      },
+    ],
+    detailComponent: ({ item }) => (
+      <div className="detail-panel">
+        <h2>{item.subject ?? '(no subject)'}</h2>
+        <div className="detail-sub">
+          {item.template_key} · <span className={`status-chip status-${item.status}`}>{item.status}</span>
+        </div>
+        <dl>
+          <dt>To</dt><dd>{item.contact_name ? `${item.contact_name} <${item.to_email}>` : item.to_email}</dd>
+          <dt>Queued</dt><dd>{new Date(item.created_at).toLocaleString()}</dd>
+          {item.sent_at && <><dt>Sent</dt><dd>{new Date(item.sent_at).toLocaleString()}</dd></>}
+          {item.error && <><dt>Error</dt><dd>{item.error}</dd></>}
+        </dl>
+      </div>
+    ),
+    // Receive-only: anchoring a speaker narrows to every email we sent them.
+    globalFilterReceives: { contact_id: 'contact_id' },
+  }
+
   return {
     speakers: speakers as TabConfig,
     submissions: submissions as TabConfig,
+    messages: messages as TabConfig,
   }
 }
 
@@ -244,7 +294,7 @@ export default function App() {
       </aside>
       <main className="shell-main">
         {view === 'workspace' ? (
-          <DataTabManager config={workspaceConfig} defaultTabs={['speakers', 'submissions']} />
+          <DataTabManager config={workspaceConfig} defaultTabs={['speakers', 'submissions', 'messages']} />
         ) : view === 'forms' ? (
           <FormsSection eventSlug={me.event.slug} />
         ) : (

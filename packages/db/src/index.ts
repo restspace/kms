@@ -158,6 +158,13 @@ export function createDb(d1: D1Database): Db {
         await d1.prepare(`UPDATE outbox SET status = 'done', last_error = NULL WHERE id = ?`).bind(id).run();
       },
 
+      async markDoneByKey(idempotencyKey: string): Promise<void> {
+        await d1
+          .prepare(`UPDATE outbox SET status = 'done', last_error = NULL WHERE idempotency_key = ?`)
+          .bind(idempotencyKey)
+          .run();
+      },
+
       async markFailed(id: string, error: string): Promise<void> {
         const row = await d1
           .prepare('SELECT attempts FROM outbox WHERE id = ?')

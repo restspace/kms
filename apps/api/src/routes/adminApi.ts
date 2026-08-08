@@ -238,6 +238,42 @@ const RESOURCES: Record<string, ResourceDef> = {
         "Submissions that are this contact's in the broad sense: submitted by them OR with them as a participant. The global anchor filter uses this.",
     },
   },
+
+  // Comms debugging (docs/12 M2 stretch): "every email we sent this speaker"
+  // is one anchor click in the workspace Messages tab.
+  messages: {
+    fromSql: `FROM message_log m
+              LEFT JOIN contacts mc ON mc.id = m.contact_id
+              WHERE m.event_id = ?`,
+    selectSql: `SELECT m.id, m.template_key, m.to_email, m.contact_id, m.subject, m.status,
+                m.error, m.created_at, m.sent_at,
+                NULLIF(TRIM(COALESCE(mc.first_name, '') || ' ' || COALESCE(mc.last_name, '')), '') AS contact_name`,
+    sortable: {
+      created_at: 'm.created_at',
+      sent_at: 'm.sent_at',
+      template_key: 'm.template_key',
+      to_email: 'm.to_email',
+      status: 'm.status',
+    },
+    defaultSort: 'm.created_at DESC',
+    filters: {
+      q: (value) => {
+        const v = asText(value);
+        if (v === null) return null;
+        const like = `%${v}%`;
+        return { sql: '(m.to_email LIKE ? OR m.subject LIKE ?)', params: [like, like] };
+      },
+      template_key: eq('m.template_key'),
+      status: eq('m.status'),
+      contact_id: eq('m.contact_id'),
+    },
+    filterDocs: {
+      q: 'Free-text match over recipient email and subject.',
+      template_key: 'Exact template key, e.g. submission_confirmation, magic_link, task_reminder.',
+      status: 'Exact status: queued | sent | failed | bounced.',
+      contact_id: 'Messages sent to this contact. The global anchor filter uses this.',
+    },
+  },
 };
 
 function parseQueryBody(raw: unknown): QueryBody {

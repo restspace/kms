@@ -10,6 +10,8 @@ export interface Env {
   DEV_MODE: string;
   // secrets (.dev.vars locally, `wrangler secret put` in production)
   RESEND_API_KEY?: string;
+  /** calendar-safe invite path (spike verdict, docs/12 M0); Resend fallback without it */
+  SENDGRID_API_KEY?: string;
   EMAIL_FROM?: string;
   SESSION_SECRET: string;
 }

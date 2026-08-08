@@ -208,7 +208,11 @@ body {
   white-space: nowrap;
 }
 
-.status-chip.status-accepted { background: var(--status-accepted-bg); color: var(--status-accepted-text); }
+.status-chip.status-accepted,
+.status-chip.status-sent { background: var(--status-accepted-bg); color: var(--status-accepted-text); }
+.status-chip.status-queued { background: var(--status-pending-bg); color: var(--status-pending-text); }
+.status-chip.status-failed,
+.status-chip.status-bounced { background: var(--status-declined-bg); color: var(--status-declined-text); }
 .status-chip.status-pending { background: var(--status-pending-bg); color: var(--status-pending-text); }
 .status-chip.status-accept_queue,
 .status-chip.status-decline_queue { background: var(--status-queue-bg); color: var(--status-queue-text); }

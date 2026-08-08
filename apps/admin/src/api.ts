@@ -98,9 +98,22 @@ export const switchEvent = (eventId: string) =>
     body: JSON.stringify({ event_id: eventId }),
   })
 
+export interface MessageRow {
+  id: string
+  template_key: string | null
+  to_email: string
+  contact_id: string | null
+  contact_name: string | null
+  subject: string | null
+  status: string
+  error: string | null
+  created_at: string
+  sent_at: string | null
+}
+
 /** DataList-compatible data source for the generic query endpoint. */
 export const queryResource =
-  <T>(resource: 'contacts' | 'submissions') =>
+  <T>(resource: 'contacts' | 'submissions' | 'messages') =>
   (params: DataSourceParams): Promise<DataSourceResult<T>> =>
     request<DataSourceResult<T>>(`/app/api/${resource}/query`, {
       method: 'POST',

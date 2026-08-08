@@ -17,14 +17,8 @@ import {
   type RoutingConfig,
 } from '@kms/core';
 import { Page, SubmitPage, type SubmitBootstrap, type SubmitViewer } from '@kms/ui';
-import {
-  createConsoleProvider,
-  createResendProvider,
-  type EmailProvider,
-  type OutgoingEmail,
-} from '@kms/email';
-import type { AppEnv, Env } from '../env';
-import { esc } from '../html';
+import type { AppEnv } from '../env';
+import { sendTemplated } from '../mailer';
 import { getSession, type SessionPayload } from '../session';
 import { loadQuestions } from './formsAdmin';
 
@@ -175,13 +169,6 @@ function parseAnswers(raw: unknown): Answers {
     }
   }
   return out;
-}
-
-function selectProvider(env: Env): EmailProvider {
-  if (env.RESEND_API_KEY && env.DEV_MODE !== 'on') {
-    return createResendProvider(env.RESEND_API_KEY, env.EMAIL_FROM ?? 'KMS <no-reply@example.com>');
-  }
-  return createConsoleProvider();
 }
 
 // ---------------------------------------------------------------------------
@@ -630,33 +617,22 @@ submitRoutes.post('/:slug/:formId/submit', async (c) => {
   }
   await db.batch(participantStatements);
 
-  // Confirmation email (must-have, docs/04 §2.6): outbox first, then an
-  // immediate attempt — the cron sweep retries anything that failed.
+  // Confirmation email (must-have, docs/04 §2.6) through the template
+  // pipeline: message_log row, outbox retry, immediate attempt — idempotent
+  // on the submission id so a double-submit cannot double-send.
   if (ctx.form.confirmation_email_enabled === 1) {
-    const portalUrl = `${c.env.APP_URL}/portal/${ctx.event.slug}`;
-    const mail: OutgoingEmail = {
-      to: submitterContact.email,
-      subject: `Submission received: ${title} (${code})`,
-      text:
-        `Thanks for your proposal to ${ctx.event.name}!\n\n` +
-        `"${title}" was received as ${code} and is now pending review.\n\n` +
-        `Track your submission, complete tasks and update your speaker profile in your portal:\n${portalUrl}\n`,
-      html:
-        `<p>Thanks for your proposal to <strong>${esc(ctx.event.name)}</strong>!</p>` +
-        `<p>&ldquo;${esc(title)}&rdquo; was received as <strong>${esc(code)}</strong> and is now pending review.</p>` +
-        `<p><a href="${esc(portalUrl)}">Open your speaker portal</a> to track your submission, complete tasks and update your profile.</p>`,
-    };
-    await kdb.outbox.enqueue({ kind: 'email', idempotencyKey: `subconf-${submissionId}`, payload: mail });
-    const immediate = selectProvider(c.env)
-      .send(mail)
-      .catch((err: unknown) => {
-        console.error('confirmation immediate send failed:', err instanceof Error ? err.message : 'unknown');
-      });
-    try {
-      c.executionCtx.waitUntil(immediate);
-    } catch {
-      await immediate;
-    }
+    await sendTemplated(c, {
+      templateKey: 'submission_confirmation',
+      eventId: ctx.event.id,
+      contactId: session.contactId,
+      toEmail: submitterContact.email,
+      entityId: submissionId,
+      context: {
+        event: { name: ctx.event.name },
+        submission: { title, code },
+        portal_url: `${c.env.APP_URL}/portal/${ctx.event.slug}`,
+      },
+    });
   }
 
   return c.json({

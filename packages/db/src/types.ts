@@ -32,6 +32,8 @@ export interface Db {
     /** claim up to `limit` due jobs for the cron sweep */
     claimDue(limit: number): Promise<OutboxRow[]>;
     markDone(id: string): Promise<void>;
+    /** settle a job after an immediate (non-sweep) send so the sweep won't resend it */
+    markDoneByKey(idempotencyKey: string): Promise<void>;
     markFailed(id: string, error: string): Promise<void>;
   };
 }

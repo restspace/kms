@@ -121,7 +121,7 @@ Ground rules for where the idiom applies (per the assessment that led to this):
   admin-notify pickers deferred (M2/M6); per-participant custom answers have no
   storage home in the schema — known-key contact fields only.
 
-### M2 — Portal & communications (Sun AM, ~6 h) — *brief #2, #3*
+### M2 — Portal & communications (Sun AM, ~6 h) — *brief #2, #3* — **done**
 - Portal: Home, Submissions, Profile (bio, headshot, links), Tasks.
 - Email pipeline: templates, themes, renderer, outbox consumer + retry sweep, message log.
 - `submission_confirmation` ("must have"), `magic_link`, `task_assigned`.
@@ -130,7 +130,20 @@ Ground rules for where the idiom applies (per the assessment that led to this):
 - *Stretch (~30 min):* **Messages** list tab over `message_log`, receiving the
   `contact_id` anchor — makes "every email we sent this speaker" a one-click view and
   gives comms debugging a UI for free.
-- **Exit:** submit → email → portal login → edit profile, all without a password.
+- **Exit:** submit → email → portal login → edit profile, all without a password. ✅
+- **Notes (Aug 8):** every send now flows through one path — render (code-default
+  templates, DB overrides win, themed 600px wrapper + plain-text alt) → message_log
+  INSERT OR IGNORE → outbox → immediate attempt that settles the outbox row so the
+  sweep can't double-send. The Messages workspace tab (stretch) landed: anchor a
+  speaker, read every email they got. Reminder sweeps (task offsets + overdue cap,
+  draft T-7d/2d/12h) verified firing exactly once. The ICS builder + schedule_confirmed/
+  changed/cancelled machinery is built and idle until M4 schedules something; invite
+  mail prefers SendGrid (SENDGRID_API_KEY) per the spike verdict, falling back to a
+  Resend attachment. Portal is a deliberate island-free SSR MPA (form POSTs), usable
+  at 375 px. **Judgment call:** files (headshots, task uploads) live in KV behind the
+  filestore seam — R2 needs the paid subscription; swapping the seam later touches no
+  callers. Portal submission *editing* stays deferred (withdraw works); task admin UI
+  arrives with M3's workspace tabs.
 
 ### M3 — Review & scoring (Sun PM, ~4 h) — *brief #4*
 The 5-hour bespoke-grid line item from the original plan is gone; the workspace already

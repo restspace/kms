@@ -322,3 +322,62 @@ INSERT INTO submission_participants (id, submission_id, contact_id, role, positi
   ('sp000000-0000-4000-8000-000000000008', 'sub00000-0000-4000-8000-000000000008', 'con00000-0000-4000-8000-000000000008', 'speaker', 1, 1, '2026-08-04T13:40:00Z'),
   ('sp000000-0000-4000-8000-000000000009', 'sub00000-0000-4000-8000-000000000009', 'con00000-0000-4000-8000-000000000003', 'speaker', 1, 1, '2026-08-05T09:15:00Z'),
   ('sp000000-0000-4000-8000-000000000010', 'sub00000-0000-4000-8000-000000000010', 'con00000-0000-4000-8000-000000000002', 'speaker', 1, 1, NULL);
+
+-- ---------------------------------------------------------------------------
+-- M2: portal work items (docs/12 §2 tasks) — 4 speakers with outstanding
+-- tasks, 2 of them overdue (Speaker Agreement was due Aug 5).
+-- ---------------------------------------------------------------------------
+
+INSERT INTO email_themes (id, event_id, name, primary_color, background_color) VALUES
+  ('thm00000-0000-4000-8000-000000000001', 'evt00000-0000-4000-8000-000000000001', 'AI.Engineer default', '#2563eb', '#f5f6f8');
+
+INSERT INTO file_requests (id, event_id, title, type, instructions, allowed_types, max_size_mb, due_at, created_at) VALUES
+  ('fr000000-0000-4000-8000-000000000001', 'evt00000-0000-4000-8000-000000000001', 'Presentation Slides', 'submissions',
+   '<p>Upload your final deck as PDF or PowerPoint.</p>', '["application/pdf","application/vnd.openxmlformats-officedocument.presentationml.presentation"]',
+   20, '2026-09-28T07:00:00Z', '2026-08-08T12:00:00Z');
+
+INSERT INTO portal_forms (id, event_id, name, title, type, questions, send_confirmation_email, created_at) VALUES
+  ('pf000000-0000-4000-8000-000000000001', 'evt00000-0000-4000-8000-000000000001', 'Hotel & Travel', 'Hotel and Travel Reservations', 'contacts',
+   '[{"id":"q_hotel","label":"Do you need a hotel room?","type":"dropdown","required":true,"options":[{"value":"yes","label":"Yes, please book for me"},{"value":"no","label":"No, I will arrange my own"}]},
+     {"id":"q_checkin","label":"Check-in date","type":"date"},
+     {"id":"q_checkout","label":"Check-out date","type":"date"},
+     {"id":"q_notes","label":"Travel notes (arrival time, accessibility, dietary)","type":"textarea"}]',
+   1, '2026-08-08T12:00:00Z');
+
+INSERT INTO tasks (id, event_id, title, description, target, assignment_mode, "trigger", action_type,
+                   portal_form_id, file_request_id, due_at, reminder_offsets_days, required, created_at) VALUES
+  ('task0000-0000-4000-8000-000000000001', 'evt00000-0000-4000-8000-000000000001', 'Presentation Upload',
+   '<p>Upload your final presentation for review.</p>', 'submission', 'automatic', 'on_accept', 'file_upload',
+   NULL, 'fr000000-0000-4000-8000-000000000001', '2026-09-28T07:00:00Z', '[7,2,0]', 1, '2026-08-08T12:00:00Z'),
+  ('task0000-0000-4000-8000-000000000002', 'evt00000-0000-4000-8000-000000000001', 'Speaker Profile & Headshot',
+   '<p>Complete your biography and upload a headshot in your portal profile — both appear in the printed programme.</p>',
+   'contact', 'manual', 'none', 'acknowledge', NULL, NULL, '2026-09-12T07:00:00Z', '[7,2]', 0, '2026-08-08T12:00:00Z'),
+  ('task0000-0000-4000-8000-000000000003', 'evt00000-0000-4000-8000-000000000001', 'Hotel and Travel Reservations',
+   '<p>Tell us your travel plans so we can book accommodation.</p>', 'contact', 'manual', 'none', 'portal_form',
+   'pf000000-0000-4000-8000-000000000001', NULL, '2026-09-21T07:00:00Z', '[7,2,0]', 0, '2026-08-08T12:00:00Z'),
+  ('task0000-0000-4000-8000-000000000004', 'evt00000-0000-4000-8000-000000000001', 'Speaker Agreement',
+   '<p>Please read the speaker agreement at https://ai.engineer/speaker-agreement and confirm your acceptance.</p>',
+   'contact', 'manual', 'none', 'acknowledge', NULL, NULL, '2026-08-05T07:00:00Z', '[2,0]', 1, '2026-08-08T12:00:00Z');
+
+INSERT INTO task_assignments (id, task_id, contact_id, submission_id, status, completed_at, response_id) VALUES
+  -- Ada: three open (agreement overdue) — the anchor speaker for the demo
+  ('ta000000-0000-4000-8000-000000000001', 'task0000-0000-4000-8000-000000000001', 'con00000-0000-4000-8000-000000000002', 'sub00000-0000-4000-8000-000000000001', 'not_started', NULL, NULL),
+  ('ta000000-0000-4000-8000-000000000002', 'task0000-0000-4000-8000-000000000002', 'con00000-0000-4000-8000-000000000002', NULL, 'not_started', NULL, NULL),
+  ('ta000000-0000-4000-8000-000000000003', 'task0000-0000-4000-8000-000000000004', 'con00000-0000-4000-8000-000000000002', NULL, 'not_started', NULL, NULL),
+  -- Grace: two open (agreement overdue)
+  ('ta000000-0000-4000-8000-000000000004', 'task0000-0000-4000-8000-000000000001', 'con00000-0000-4000-8000-000000000003', 'sub00000-0000-4000-8000-000000000002', 'not_started', NULL, NULL),
+  ('ta000000-0000-4000-8000-000000000005', 'task0000-0000-4000-8000-000000000004', 'con00000-0000-4000-8000-000000000003', NULL, 'not_started', NULL, NULL),
+  -- Alan: hotel form open
+  ('ta000000-0000-4000-8000-000000000006', 'task0000-0000-4000-8000-000000000003', 'con00000-0000-4000-8000-000000000004', NULL, 'not_started', NULL, NULL),
+  -- Margaret: profile task open
+  ('ta000000-0000-4000-8000-000000000007', 'task0000-0000-4000-8000-000000000002', 'con00000-0000-4000-8000-000000000005', NULL, 'not_started', NULL, NULL),
+  -- Joan: one already complete, for contrast
+  ('ta000000-0000-4000-8000-000000000008', 'task0000-0000-4000-8000-000000000002', 'con00000-0000-4000-8000-000000000006', NULL, 'complete', '2026-08-07T09:00:00Z', NULL);
+
+-- Seeded submissions land on the plans the routing rules would have chosen.
+UPDATE submissions SET evaluation_plan_id = 'plan0000-0000-4000-8000-000000000002'
+WHERE id IN ('sub00000-0000-4000-8000-000000000003', 'sub00000-0000-4000-8000-000000000006');
+UPDATE submissions SET evaluation_plan_id = 'plan0000-0000-4000-8000-000000000001'
+WHERE id IN ('sub00000-0000-4000-8000-000000000001', 'sub00000-0000-4000-8000-000000000002',
+             'sub00000-0000-4000-8000-000000000004', 'sub00000-0000-4000-8000-000000000005',
+             'sub00000-0000-4000-8000-000000000007', 'sub00000-0000-4000-8000-000000000008');

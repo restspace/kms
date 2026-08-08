@@ -1,30 +1,33 @@
 // Outbox sweep, invoked from the cron `scheduled` handler (docs/03 §2a).
 // Claims due jobs, dispatches by kind, and records done/failed — failures back
 // off exponentially inside db.outbox.markFailed and die after 8 attempts.
+// Email jobs carry an OutboxEmailPayload; delivery and message_log updates
+// live in mailer.ts so the request path and the sweep behave identically.
 
 import type { Db } from '@kms/db';
-import { createConsoleProvider, createResendProvider, type OutgoingEmail } from '@kms/email';
+import type { OutgoingEmail } from '@kms/email';
+import { selectProvider } from '@kms/email';
 import type { Env } from '../env';
+import { deliverEmail, markEmailFailed, type OutboxEmailPayload } from '../mailer';
 
 const BATCH_SIZE = 10;
+const MAX_ATTEMPTS = 8;
 
-export async function sweepOutbox(db: Db, env: Env): Promise<void> {
+export async function sweepOutbox(db: Db, env: Env, d1: D1Database): Promise<void> {
   const jobs = await db.outbox.claimDue(BATCH_SIZE);
   if (jobs.length === 0) return;
-
-  // Real provider only when a key is present and we are not in dev mode;
-  // otherwise mail is logged to the console (local dev needs no key).
-  const provider =
-    env.RESEND_API_KEY && env.DEV_MODE !== 'on'
-      ? createResendProvider(env.RESEND_API_KEY, env.EMAIL_FROM ?? 'noreply@localhost')
-      : createConsoleProvider();
 
   for (const job of jobs) {
     try {
       switch (job.kind) {
         case 'email': {
-          const mail = job.payload as OutgoingEmail;
-          await provider.send({ to: mail.to, subject: mail.subject, text: mail.text, html: mail.html });
+          const payload = job.payload as OutboxEmailPayload | OutgoingEmail;
+          if ('log_key' in payload) {
+            await deliverEmail(d1, env, payload);
+          } else {
+            // Pre-M2 payload shape without a message_log row; send directly.
+            await selectProvider(env).send(payload);
+          }
           break;
         }
         case 'airtable_sync': {
@@ -35,7 +38,12 @@ export async function sweepOutbox(db: Db, env: Env): Promise<void> {
       }
       await db.outbox.markDone(job.id);
     } catch (err) {
-      await db.outbox.markFailed(job.id, err instanceof Error ? err.message : String(err));
+      const message = err instanceof Error ? err.message : String(err);
+      await db.outbox.markFailed(job.id, message);
+      if (job.attempts + 1 >= MAX_ATTEMPTS && job.kind === 'email') {
+        const payload = job.payload as Partial<OutboxEmailPayload>;
+        if (payload.log_key) await markEmailFailed(d1, payload.log_key, message);
+      }
     }
   }
 }

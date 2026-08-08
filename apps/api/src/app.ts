@@ -4,6 +4,7 @@ import { authRoutes } from './routes/auth';
 import { portalRoutes } from './routes/portal';
 import { adminRoutes } from './routes/admin';
 import { adminApiRoutes } from './routes/adminApi';
+import { fileRoutes } from './routes/files';
 import { publicRoutes } from './routes/public';
 import { submitRoutes } from './routes/submit';
 
@@ -23,6 +24,7 @@ export function createApp() {
   app.route('/app', adminRoutes);
   app.route('/hello', publicRoutes); // SSR + island proof page (commit 8454ce6)
   app.route('/submit', submitRoutes); // public CFP wizard (docs/04 §5)
+  app.route('/files', fileRoutes); // stored files, event-scoped (docs/05 §7)
 
   app.get('/', (c) => c.redirect('/app'));
 
