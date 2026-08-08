@@ -21,22 +21,22 @@ binding = "ASSETS"
 [[d1_databases]]
 binding = "DB"
 database_name = "kms"
-database_id = "00000000-0000-0000-0000-000000000000" # replaced by `wrangler d1 create kms` output before first deploy
+database_id = "23da825a-d5e3-4b70-8783-36fc47619b6e"
 migrations_dir = "packages/db/migrations"
 
 [[kv_namespaces]]
 binding = "KV"
-id = "00000000000000000000000000000000" # replaced by `wrangler kv namespace create KV` output before first deploy
+id = "8d840a61775244d7a7439618b8d699c0"
 
 [triggers]
 crons = ["* * * * *"] # outbox retry sweep + reminder sweeps
 
 [vars]
-APP_URL = "http://localhost:8787"
+APP_URL = "https://kms.r-s.workers.dev" # local dev overrides via .dev.vars
 EVENT_DEFAULT_TZ = "America/Los_Angeles"
 EMAIL_PROVIDER = "resend"
 AIRTABLE_SYNC = "off"
 USE_QUEUES = "off"
-DEV_MODE = "on" # exposes the magic link in the /auth/request response instead of relying on email; MUST be "off" in production
+DEV_MODE = "off" # "on" exposes the magic link in the /auth/request response instead of emailing it; local dev re-enables it via .dev.vars
 
 # R2 binding intentionally absent for M0 — needs the r2 OAuth scope + card on file (see docs/12 M2).
