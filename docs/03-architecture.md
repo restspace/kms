@@ -13,7 +13,7 @@ implies: a stranger must be able to clone and deploy it.
 |---|---|---|
 | Runtime | **Cloudflare Workers** | Bonus points; global edge; sub-50 ms cold start |
 | Web framework | **Hono** (Workers-native) | Tiny, fast, first-class Workers support |
-| Frontend | **React everywhere** — Vite SPA for admin; the *same* React components server-rendered by Hono (`react-dom/server`) for public CFP, portal login and embeds | One JSX runtime, so `/packages/ui` and the form renderer are written once; public pages still ship near-zero JS (only the form island hydrates) |
+| Frontend | **React API everywhere, two build targets** — admin SPA (Vite) bundles real React; the public build aliases `preact/compat`, so the *same* components are server-rendered by Hono and hydrate as a ~13 KB island | One JSX idiom, so `/packages/ui` and the form renderer are written once; public pages ship near-zero JS; admin keeps full React ecosystem compatibility (dnd-kit, TanStack) |
 | Styling | Tailwind + a small component set (shadcn-style, vendored) | Speed of build, consistent look without a heavy dependency |
 | Primary DB | **Cloudflare D1** (SQLite) | Free-tier, edge-local reads, SQL keeps grids/filters/sorts fast |
 | Files | **Cloudflare R2** | Headshots, slides, supporting docs, export bundles |
@@ -102,12 +102,25 @@ without it.
 Domain logic lives in `/packages/core` with **no I/O** so the conflict engine, conditional-logic
 evaluator, routing engine and scoring aggregation are unit-testable without a database.
 
-**One JSX runtime.** React is the single rendering idiom: public pages are React components
-rendered to HTML on the Worker (`react-dom/server`) and ship no client JS except the hydrated
-CFP form island (react + react-dom ≈ 45 KB gzip, inside the 60 KB budget; if it gets tight,
-alias `preact/compat` at build time — no component changes). The payoff is that the form
-renderer and conditional-logic display are written once and reused in the public wizard, the
-admin form-builder preview, and portal task forms. Hono's own JSX is not used.
+**One JSX idiom, two build targets.** Everything is written against the React API; the weight
+question is settled per bundle, because it only ever mattered on the public island:
+
+- **Public build** — aliases `react`/`react-dom` to **`preact/compat`** in Vite. Pages are
+  rendered to HTML on the Worker with `preact-render-to-string` and ship no client JS except
+  the hydrated CFP form island (preact + compat ≈ 13 KB gzip vs React's ≈ 45 KB, leaving the
+  60 KB budget mostly for the form logic itself). Compat risk is near-zero here: the island is
+  entirely first-party code.
+- **Admin build** — bundles **real React**. Its 250 KB budget absorbs React easily, and the
+  hard parts of this product (virtualised grids via TanStack Table/Virtual, agenda drag-drop
+  via dnd-kit) get maximum third-party compatibility. *Optional follow-up, off the critical
+  path:* if an early smoke test shows dnd-kit and TanStack behave under `preact/compat`, the
+  admin can be aliased too.
+
+The payoff is unchanged: the form renderer and conditional-logic display are written once and
+reused in the public wizard, the admin form-builder preview, and portal task forms. Hono's own
+JSX is not used. (Svelte was rejected — full idiom change days before the deadline, thinner
+grid/dnd ecosystem; Astro was rejected — it still needs an island framework, so it adds a
+meta-framework overlapping Hono rather than replacing React.)
 
 ---
 
