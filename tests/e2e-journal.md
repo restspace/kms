@@ -125,3 +125,137 @@ RUN_TIME_BUDGET 6 h · ERROR_BATCH 5.
   2 skipped (already notified)".
 - notes: no plan edits — both observations were app defects, not plan bugs. browser-pilot did
   not wedge (neither fix needs a drag). DB left seeded.
+
+## 2026-08-09T07:24Z · phase S · iteration 1 · orchestrator
+- interruption: the parent process exited mid-run and took the wrangler dev server with it.
+  Restarted `wrangler dev` (the sandboxed background shell cannot hold a listening socket —
+  it must run unsandboxed); health 200 again.
+- database NOT reset: nothing touched it between the stop and the restart, so the runner's
+  own records are intact and it resumes the same iteration rather than restarting it.
+- runner resumed with instructions to re-brief browser-pilot (its daemon died with the parent).
+- quarantine: —
+
+## 2026-08-09T08:35Z · phase S · tooling note · orchestrator
+- browser-pilot wedge FIXED upstream (C:\dev\browser-pilot d6da824 "Bound tool execution by
+  the instruction deadline"). The global CLI is symlinked to that checkout but runs from
+  `dist/`, which was a day stale — rebuilt it (`npm run build`, artifacts only, no source
+  edits). Verified in dist/agent/loop.js:75-81: executeTool is now raced against
+  `deadline - Date.now()` with an abort signal, so a hung tool call reports blocked instead
+  of running past `--timeout`.
+- the daemon serving phase S still holds the old code in memory; the fix takes effect on its
+  next restart. In force from phase U onward.
+- the kill/stop/re-brief/retry mitigation stays in the runner prompts as a belt-and-braces
+  fallback.
+
+## 2026-08-09T08:45Z · phase S · iteration 1 · runner
+- baseline: seeded ok | build ok | health 200 | RUNID s-01 (dev server restarted mid-run by the
+  orchestrator after the parent process exited; DB not reset, run continued from M4.6)
+- outcome: 2 defects, 2 test-plan bugs, 1 unimplemented, 0 flakes
+- steps: last step reached = M6.11 — plan complete (S0.1 → M6.11, all 75 steps attempted)
+- quarantine: none
+- notes:
+  - D1 · M1.1 — Call for Speakers 2026 card renders "Closes Sep 16, 2026"; seed stores
+    2026-09-16T06:59:00Z = Sep 15 23:59 in the event timezone (America/Los_Angeles). Close date
+    is formatted in UTC, not the event tz, so it reads one day late. Same string on the
+    Dashboard Today → Submission Forms tab.
+  - D2 · M1.4 — Welcome Screen "Page Heading" accepts 20 characters against a stated 15-char
+    limit; the counter renders "20/15" rather than the input being hard-capped.
+  - TP1 · M3.6/M3.11 — a newly created evaluation plan always has 0 submissions: routing to a
+    plan happens only through a form's routing rules at submission time, and there is no admin
+    control to move an existing submission onto a plan. Assign on the new plan correctly reports
+    "s-01 Round 2 — Programme committee: 0 assignments across 0 submissions". M3.7/M3.8/M3.11
+    were driven against Round 1 — Track leads instead and passed there.
+  - TP2 · M1.8 — Headshot is a contact-scoped library field, so it is offered on Participant
+    Information, not Abstract Information; the Add Field dialog on Abstract Information correctly
+    says "No unused library fields match." Step passed once run on the right step.
+  - U1 · M4.14 — FR-AGENDA-9 confirmed unimplemented: no publish/unpublish control anywhere in
+    the Agenda header or view bar (matches the plan's own note).
+  - browser-pilot did not wedge on either drag step (M1.7, M4.12); both passed first try with
+    --max-turns 70/80.
+
+## 2026-08-09T07:54Z · phase S · environment note · orchestrator
+- wrangler dev CRASHED mid-fix with an empty `X [ERROR]` immediately after a hot-reload
+  following an asset rebuild (log: wrangler-2026-08-09_07-23-56_825.log — Sentry reporting
+  disabled, no stack). Not an app fault; the worker had been serving 200s right up to it.
+- restarted unsandboxed in the background; health 200 within seconds. Fixer notified so it
+  re-drives anything attempted during the outage and does not misclassify a connection
+  failure as a defect.
+- second server death of the run. If it recurs, prefer a full stop/start around each
+  `npm run build` rather than relying on wrangler's hot-reload.
+
+## 2026-08-09T08:10Z · phase S · iteration 1 · fixer
+- baseline: reseeded ok | typecheck ok | build ok | health 200 (after the orchestrator's restart)
+- outcome: 2 defects fixed, 2 test-plan bugs corrected, 1 deferred (unbuilt feature)
+- F1 · M1.1 · fixed · 2a6241e — Forms list and Dashboard Today each carried a private `fmtDate`
+  that formatted in the viewer's timezone, so `2026-09-16T06:59:00Z` read as Sep 16 instead of
+  Sep 15 in `America/Los_Angeles` (NFR-12). Added one shared `fmtDateInTz` helper
+  (`apps/admin/src/utils/dates.ts`) and threaded the event timezone in from `me.event.timezone`
+  (Forms) and `data.event.timezone` (Dashboard); the same helper also fixes the Created / due-at
+  columns that shared the cause. Re-driven: Forms card meta now `Closes Sep 15, 2026`, Dashboard →
+  Today → Submission Forms now `closes Sep 15, 2026`.
+- F2 · M1.4 · fixed · 892c62b — `maxLength` only constrains typing, so a programmatic fill left
+  Page Heading holding 20 chars with a `20/15` counter. docs/04 §1 and docs/02 both state a hard
+  15-char cap (already truncated server-side in `formsAdmin.ts:20`), so the field was wrong, not
+  the counter; clamped on change. Re-driven: typing 20 chars yields counter `15/15`, value length 15.
+- F3 · M3.6/M3.11 · plan-corrected · 97520cf — **plan correction, not an app change.** A plan
+  created in M3.4 can never have submissions: routing happens only via a form's routing rules at
+  submission time (`FormBuilder.tsx:888`) and there is no admin control to move a submission onto
+  a plan, so `N assignments across M submissions` was unreachable. M3.6, M3.8 and M3.11 now drive
+  the seeded `Round 1 — Track leads` plan; M3.12's expectation drops the round-2 wording that
+  inherited the assumption. Re-driven M3.6: `Round 1 — Track leads: 18 assignments across 6 submissions`.
+- F4 · M1.8 · plan-corrected · 5794989 — **plan correction, not an app change.** Headshot is a
+  `contact`-scoped library field (`seed.sql:88`), so the builder correctly offers it only on
+  Participant Information; the step now names that step. Re-driven: Headshot (type `file`) added
+  at the bottom of the Participant Information question list.
+- F5 · M4.14 · deferred — FR-AGENDA-9 agenda publish/unpublish is unbuilt, confirmed by source:
+  `agenda_published` exists in the schema (`0001_init.sql:38`), the core type and the agenda
+  payload (`apps/api/src/routes/agenda.ts:125`) but is never written and never read by the SPA,
+  and no publish control exists in `apps/admin/src/agenda`. Implementing it means a PATCH endpoint
+  on the event plus a go-live control and published-state affordance on the Agenda header —
+  feature work, out of scope for an unattended run. Plan step left as-is; it documents a real gap.
+- steps: re-driven M1.1, M1.4, M1.8, M3.6 (all pass)
+- quarantine: none
+- notes: DB left seeded. `npm run typecheck` and `npm run build` both pass. Four separate commits,
+  one per finding.
+
+## 2026-08-09T08:00Z · phase S · iteration 2 · orchestrator
+- baseline: server STOPPED first, then seed ok | build ok | typecheck clean | server restarted
+  | health 200 | browser-pilot stopped (daemon now picks up the deadline fix)
+- changed procedure: the server is now stopped around the build rather than relying on
+  wrangler's hot-reload, which crashed it during the iteration-1 fixes.
+- quarantine: —
+- notes: run id `s-02`. Iteration-1 findings: 2 defects fixed (2a6241e event-timezone date
+  formatting, 892c62b Page Heading cap), 2 plan corrections (97520cf, 5794989), 1 deferred
+  (M4.14 FR-AGENDA-9 publish/unpublish — unbuilt feature, not fixed by design).
+
+## 2026-08-09T10:08Z · phase S · iteration 2 · runner
+- baseline: reset ok (pre-prepared by orchestrator) | build ok | health 200
+- outcome: 0 defects, 1 test-plan bug (M1.10), 1 unimplemented (M4.14, known/accepted), 2 turn-cap retries (M1.10, M1.16)
+- steps: last step reached = M6.11 — plan complete, S0.1 through M6.11
+- quarantine: none
+- notes: all four iteration-1 fixes re-proved — M1.1 "Closes Sep 15, 2026" on both the Forms
+  list and Dashboard → Today → Submission Forms; M1.4 Page Heading hard-caps at 15 with a
+  15/15 counter; M3.6/3.8/3.11/3.12 drove the seeded "Round 1 — Track leads" plan cleanly;
+  M1.8 Headshot library field added on Participant Information. M1.10's "Format equals
+  Workshop" condition is unreachable — the Logic dialog only offers earlier questions in the
+  same step, so Format (Abstract Information) cannot be referenced from Participant
+  Information; re-run with Biography and the Conditional chip appeared, so the feature is
+  correct and the plan text is wrong. M4.14 re-confirmed: no publish/unpublish control in the
+  Agenda header or view bar.
+
+## 2026-08-09T09:10Z · phase S · outcome · orchestrator
+- **PHASE S PASSED** — iteration 2 ran the full 75-step plan on a clean baseline with
+  0 defects. All four iteration-1 changes re-proved (event-tz dates read "Closes Sep 15, 2026";
+  Page Heading clamps to 15/15; the seeded Round 1 plan drives assignment/scoring; Headshot
+  adds on Participant Information).
+- iterations: 2 of 8. quarantine: — (none).
+- flakes: M1.10 and M1.16 both hit the agent turn cap on the first attempt and passed on rerun
+  with a raised --max-turns. Agent budget, not app behaviour. No browser-pilot wedges this
+  iteration — the deadline fix held.
+- TEST-PLAN BUG corrected by the orchestrator: M1.10 asked for a condition "Format equals
+  Workshop", but Format lives on a later step and the Logic editor deliberately offers only
+  earlier questions on the SAME step ("Only earlier questions can be referenced, so rules can
+  never cycle"). FR-FORM-9 is correct; the plan's fixture was wrong. Step now references the
+  earlier Biography question and states the constraint.
+- deferred to a human: M4.14 · FR-AGENDA-9 agenda publish/unpublish is unbuilt.
+- next: phase U (unhappy paths), 63 steps.
