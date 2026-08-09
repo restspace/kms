@@ -377,7 +377,11 @@ export default function App() {
 
   const handleChecklist = useCallback((ids: string[]) => {
     setCheckedIds(ids)
-    setBulkNote(null)
+    // Only a fresh selection supersedes the previous action's outcome. The
+    // post-action refetch re-emits an empty checklist, and clearing the note
+    // on that made the result of a bulk send (notably a fully-skipped repeat
+    // send) vanish with the bar.
+    if (ids.length > 0) setBulkNote(null)
   }, [])
 
   // Rebuilding on checklistResetKey both clears checks and refetches lists —
@@ -410,9 +414,13 @@ export default function App() {
       try {
         if (action === 'send_decisions') {
           const r = await sendDecisions(checkedIds)
+          const sent = r.accepted + r.declined
+          const other = r.skipped - r.skipped_notified
           setBulkNote(
-            `${r.accepted} accepted, ${r.declined} declined, ${r.tasks_assigned} tasks assigned` +
-              (r.skipped > 0 ? `, ${r.skipped} skipped (not in a queue)` : ''),
+            `${sent} decision ${sent === 1 ? 'email' : 'emails'} sent — ` +
+              `${r.accepted} accepted, ${r.declined} declined, ${r.tasks_assigned} tasks assigned` +
+              (r.skipped_notified > 0 ? `; ${r.skipped_notified} skipped (already notified)` : '') +
+              (other > 0 ? `; ${other} skipped (not in a queue)` : ''),
           )
         } else {
           const r = await bulkStatus(checkedIds, action)

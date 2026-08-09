@@ -149,20 +149,27 @@ evaluationRoutes.post('/submissions/send-decisions', async (c) => {
   const placeholders = ids.map(() => '?').join(', ');
   const { results } = await db
     .prepare(
-      `SELECT s.id, s.code, s.title, s.status, s.submitter_contact_id,
+      `SELECT s.id, s.code, s.title, s.status, s.notified_at, s.submitter_contact_id,
               c.email AS submitter_email, c.first_name AS submitter_first_name
        FROM submissions s
        LEFT JOIN contacts c ON c.id = s.submitter_contact_id
-       WHERE s.event_id = ? AND s.id IN (${placeholders}) AND s.status IN ('accept_queue', 'decline_queue')`,
+       WHERE s.event_id = ? AND s.id IN (${placeholders})`,
     )
     .bind(session.eventId, ...ids)
-    .all<{ id: string; code: string; title: string; status: string; submitter_contact_id: string | null; submitter_email: string | null; submitter_first_name: string | null }>();
+    .all<{ id: string; code: string; title: string; status: string; notified_at: string | null; submitter_contact_id: string | null; submitter_email: string | null; submitter_first_name: string | null }>();
+
+  // Rows outside the queues are skipped; split out those already notified so
+  // the UI can say "nothing re-sent" rather than a bare zero (docs/06 §5).
+  const queued = results.filter((s) => s.status === 'accept_queue' || s.status === 'decline_queue');
+  const skippedNotified = results.filter(
+    (s) => s.status !== 'accept_queue' && s.status !== 'decline_queue' && s.notified_at !== null,
+  ).length;
 
   let accepted = 0;
   let declined = 0;
   let tasksAssigned = 0;
   const ts = nowIso();
-  for (const s of results) {
+  for (const s of queued) {
     const isAccept = s.status === 'accept_queue';
     await db
       .prepare('UPDATE submissions SET status = ?, notified_at = ?, updated_at = ? WHERE id = ?')
@@ -190,7 +197,14 @@ evaluationRoutes.post('/submissions/send-decisions', async (c) => {
       tasksAssigned += await autoAssignAcceptTasks(c, session.eventId, s, event.name, event.slug);
     }
   }
-  return c.json({ ok: true, accepted, declined, tasks_assigned: tasksAssigned, skipped: ids.length - results.length });
+  return c.json({
+    ok: true,
+    accepted,
+    declined,
+    tasks_assigned: tasksAssigned,
+    skipped: ids.length - queued.length,
+    skipped_notified: skippedNotified,
+  });
 });
 
 // GET /submissions/:id/detail — the workspace detail tab payload.

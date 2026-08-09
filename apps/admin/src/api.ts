@@ -269,7 +269,7 @@ export const bulkStatus = (ids: string[], status: string) =>
     body: JSON.stringify({ ids, status }),
   })
 export const sendDecisions = (ids: string[]) =>
-  request<{ ok: boolean; accepted: number; declined: number; tasks_assigned: number; skipped: number }>(
+  request<{ ok: boolean; accepted: number; declined: number; tasks_assigned: number; skipped: number; skipped_notified: number }>(
     '/app/api/submissions/send-decisions',
     { method: 'POST', body: JSON.stringify({ ids }) },
   )
