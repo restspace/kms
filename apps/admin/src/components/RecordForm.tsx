@@ -131,6 +131,9 @@ export const RecordForm: React.FC<RecordFormProps> = ({
 
   const handleSubmit = useCallback(async (event: React.FormEvent) => {
     event.preventDefault();
+    // A new attempt clears the previous failure, so a stale flash never sits
+    // beside a fresh validation error.
+    setSubmitError(null);
     const missing: Record<string, string> = {};
     for (const [key, prop] of properties) {
       if (requiredFields.has(key) && prop.type !== 'boolean' && isEmpty(valueRef.current[key])) {
@@ -142,7 +145,6 @@ export const RecordForm: React.FC<RecordFormProps> = ({
       return;
     }
     setIsSubmitting(true);
-    setSubmitError(null);
     try {
       const success = await onSubmit(valueRef.current);
       if (!success) {

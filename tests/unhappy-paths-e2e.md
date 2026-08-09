@@ -192,7 +192,7 @@ baseline is one `npm run seed:local` away.
 | M6.2 | `do "reload the builder for the Call for Speakers 2026 form, confirm the Internal Form Name is back to its stored value, then Reopen the form from the Forms list so its status is Open again"` | Nothing was silently clobbered; fixture restored |
 | M6.3 | `do "in the builder for the Call for Speakers 2026 form, open Edit on the Title question, clear the Label field and report the state of the Save button"` | Disabled — a question cannot lose its label — **FR-FORM-7** |
 | M6.4 | `do "in the workspace Speakers tab, create a contact using the existing email ada@example.com and report the error message shown"` | `A contact with this email already exists for this event.` (409 `email_exists`) — **FR-REV-5** |
-| M6.5 | `do "in the workspace Speakers tab, create a contact with the email field left empty and report the error message shown"` | `An email address is required.` (400 `email_required`) — **FR-REV-5** |
+| M6.5 | `do "in the workspace Speakers tab, create a contact with the email field left empty and report the error message shown next to the Email field"` | Inline `This field is required` under Email, no POST sent — the client blocks before the server's 400 `email_required` can fire — **FR-REV-5** |
 | M6.6 | `do "using fetch_source, call /api/v1/events with the header 'Authorization: Bearer kms_deadbeefdeadbeef' and report the HTTP status and error code"` | 401 `invalid_token` — **FR-PLAT-5** |
 | M6.7 | `do "using fetch_source, call /api/v1/events with no Authorization header and no session cookie, and report the HTTP status and the message text"` | 401 `unauthenticated` naming Settings → API tokens — **FR-PLAT-5** |
 | M6.8 | `do "as an admin, use fetch_source on /api/v1/events/00000000-0000-4000-8000-000000000000/submissions and report the HTTP status and error code"` | 404 `event_not_found` — **NFR-5** |
@@ -200,6 +200,11 @@ baseline is one `npm run seed:local` away.
 | M6.10 | `do "as an admin, POST to /api/v1/events/<event id>/submissions/<SESS-4 id>/status with {\"status\":\"banana\"} and report the HTTP status and error code"` | 422 `invalid_status` listing the seven valid statuses — **FR-PLAT-5** |
 | M6.11 | `do "as an admin, use fetch_source on /api/v1/events/<event id>/submissions?status=banana and report whether the unknown filter value errors or is ignored"` | Ignored, never an error — the documented `unknown_filters` convention — **FR-PLAT-5** |
 | M6.12 | `do "as an admin, use fetch_source on /app/api/meta and confirm it documents the forms_update 409 conflict convention verbatim"` | `PUT /app/api/forms/:id accepts expected_updated_at; a stale value yields 409 …` — self-description matches M6.1 |
+
+> **Note (corrected in u-01f):** M6.5 originally expected the server's 400 `email_required`. The
+> Speakers form validates required fields client-side, so no POST is ever sent from this surface
+> and the server branch is unreachable here. The step now asserts the inline validation that
+> actually occurs; the 400 is still covered by the REST API, not by this form.
 
 ---
 
