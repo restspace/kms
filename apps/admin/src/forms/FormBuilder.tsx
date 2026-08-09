@@ -296,7 +296,7 @@ function WelcomeStep({ form, patch }: { form: FormRow; patch: (c: Partial<FormRo
         <label>
           Page Heading *<span className="bcount">{(form.page_heading ?? '').length}/15</span>
         </label>
-        <input type="text" maxLength={15} value={form.page_heading ?? ''} onChange={(e) => patch({ page_heading: e.target.value })} />
+        <input type="text" maxLength={15} value={form.page_heading ?? ''} onChange={(e) => patch({ page_heading: e.target.value.slice(0, 15) })} />
         <p className="bhelp">Hard 15-character cap, shown as the compact public header.</p>
       </div>
       <label className="btoggle">
