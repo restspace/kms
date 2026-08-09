@@ -501,6 +501,19 @@ export interface DataListProps<T = any, TFilters extends Record<string, any> = R
 const DEFAULT_ROW_HEIGHT = 32;
 const DEFAULT_BATCH_SIZE = 50;
 const DEFAULT_MOBILE_BREAKPOINT_WIDTH = 640;
+/**
+ * How many times a list will fetch its first page without a single successful
+ * response before it gives up and shows the error banner (D1). Counts both hard
+ * failures and stale-signature re-arms; a success or an explicit Retry resets
+ * the budget.
+ */
+const MAX_LOAD_ATTEMPTS = 6;
+/**
+ * How long a spent attempt budget stays spent. A runaway reload loop churns the
+ * query signature in milliseconds, so it never gets a fresh budget; a human
+ * changing a filter a second later always does.
+ */
+const LOAD_FAILURE_COOLDOWN_MS = 1000;
 const CHECKBOX_COLUMN_WIDTH = '36px';
 const ROW_DRAG_SUPPRESSED_INPUT_TYPES = new Set([
   '',
@@ -988,6 +1001,22 @@ export const DataList = <T extends Record<string, any>, TFilters extends Record<
    * initial-load effect has to re-run to notice.
    */
   const [staleLoadRecoveryTick, setStaleLoadRecoveryTick] = useState(0);
+  /**
+   * Circuit breaker for a source that keeps failing (D1). Two things used to be
+   * able to spin without bound: a fetch that rejects the moment it is retried,
+   * and the stale-signature recovery above re-arming a load that immediately
+   * goes stale again. Both are counted here — deliberately *not* per signature,
+   * since the pathological case is a signature that keeps churning — and both
+   * stop at `MAX_LOAD_ATTEMPTS`, leaving the error banner and its Retry button
+   * (which restores the budget). A successful page also resets the counters, so
+   * an intermittent source is never punished for an earlier blip.
+   */
+  const attemptsRef = useRef<{ failures: number; rearms: number; at: number; message: string | null }>({
+    failures: 0,
+    rearms: 0,
+    at: 0,
+    message: null,
+  });
 
   /**
    * Load more items from the data source
@@ -1021,10 +1050,21 @@ export const DataList = <T extends Record<string, any>, TFilters extends Record<
           // already emptied `items` and the kick-off effect may have spent its
           // one shot on this very request, which would strand the grid on
           // loader rows with items=[], endReached=false and no error.
+          attemptsRef.current.rearms += 1;
+          if (attemptsRef.current.rearms > MAX_LOAD_ATTEMPTS) {
+            // The signature is churning faster than the source can answer;
+            // re-arming again would just add another request to the pile.
+            attemptsRef.current.at = Date.now();
+            attemptsRef.current.message = 'The list kept being reloaded before it could finish.';
+            setLoadError(attemptsRef.current.message);
+            setEndReached(true);
+            return;
+          }
           needsInitialLoadRef.current = true;
           setStaleLoadRecoveryTick((tick) => tick + 1);
           return;
         }
+        attemptsRef.current = { failures: 0, rearms: 0, at: 0, message: null };
         setItems((prev) => (from === 0 ? result.items : prev.concat(result.items)));
 
         if (result.total !== undefined && result.total !== null) {
@@ -1038,13 +1078,25 @@ export const DataList = <T extends Record<string, any>, TFilters extends Record<
           setEndReached(true);
         }
       } catch (e) {
-        console.error('DataList loadMoreItems error:', e);
+        const message = e instanceof Error ? e.message : 'Unexpected error.';
+        attemptsRef.current.failures += 1;
+        attemptsRef.current.at = Date.now();
+        attemptsRef.current.message = message;
+        if (attemptsRef.current.failures <= MAX_LOAD_ATTEMPTS) {
+          console.error('DataList loadMoreItems error:', e);
+        }
         if (querySignatureRef.current === requestSignature) {
-          setLoadError(e instanceof Error ? e.message : 'Unexpected error.');
+          setLoadError(message);
           // Stop the infinite loader from hammering a failing source; the error
           // banner's Retry button re-opens loading. Must stay signature-guarded:
           // a stale request failing after a reload would otherwise mark the
           // fresh empty list as complete and wipe the selection.
+          setEndReached(true);
+        } else if (attemptsRef.current.failures >= MAX_LOAD_ATTEMPTS) {
+          // Failing *and* stale, repeatedly: whatever keeps moving the
+          // signature is not going to make this source answer, so surface the
+          // failure rather than letting the kick-off effect try again.
+          setLoadError(message);
           setEndReached(true);
         }
       } finally {
@@ -1076,6 +1128,8 @@ export const DataList = <T extends Record<string, any>, TFilters extends Record<
   /** Re-open loading after a fetch error; the effect below kicks off the fetch. */
   const handleRetryLoad = useCallback(() => {
     setLoadError(null);
+    // An explicit Retry is the user asking for a fresh budget.
+    attemptsRef.current = { failures: 0, rearms: 0, at: 0, message: null };
     needsInitialLoadRef.current = true;
     setEndReached(false);
   }, []);
@@ -1089,6 +1143,21 @@ export const DataList = <T extends Record<string, any>, TFilters extends Record<
     }
     if (items.length !== 0) {
       return;
+    }
+
+    const attempts = attemptsRef.current;
+    if (attempts.failures >= MAX_LOAD_ATTEMPTS || attempts.rearms > MAX_LOAD_ATTEMPTS) {
+      if (Date.now() - attempts.at < LOAD_FAILURE_COOLDOWN_MS) {
+        // Budget spent (D1). The reset effect clears `loadError` on every
+        // signature change, so re-assert it here — otherwise a churning
+        // signature would keep the banner invisible while the source is
+        // hammered, which is exactly the runaway the smoke test caught.
+        needsInitialLoadRef.current = false;
+        setLoadError(attempts.message ?? 'The list could not be loaded.');
+        setEndReached(true);
+        return;
+      }
+      attemptsRef.current = { failures: 0, rearms: 0, at: 0, message: null };
     }
 
     // Kick off the first page load. In most cases `InfiniteLoader` triggers this automatically,

@@ -1268,6 +1268,13 @@ export const DataTabManager: React.FC<DataTabManagerProps> = ({
    * a stale request from re-firing on unrelated tab changes.
    */
   const handledTabRequestToken = useRef<number | null>(null);
+  /**
+   * The configKey the most recent activate request is steering towards, held
+   * until the reducer state actually shows it active. `onActiveTabChange` reads
+   * it to stay quiet about the tabs the workspace passes *through* on the way
+   * there — see that effect for why an echoed intermediate is so expensive.
+   */
+  const steeringConfigKey = useRef<string | null>(null);
   useEffect(() => {
     if (!activeTabRequest || handledTabRequestToken.current === activeTabRequest.token) {
       return;
@@ -1279,6 +1286,7 @@ export const DataTabManager: React.FC<DataTabManagerProps> = ({
       return; // tabs not initialized yet; retry when state.tabs changes
     }
     handledTabRequestToken.current = activeTabRequest.token;
+    steeringConfigKey.current = activeTabRequest.configKey;
     dispatch({ type: 'SET_ACTIVE_TAB', payload: { index } });
   }, [activeTabRequest, state.tabs]);
 
@@ -1321,7 +1329,26 @@ export const DataTabManager: React.FC<DataTabManagerProps> = ({
     if (!onActiveTabChange) {
       return;
     }
+    // A pending (unhandled) activate request is about to move the active tab:
+    // reporting the tab that happens to be active *right now* would tell the
+    // host about a state that never existed for the user. When the host mirrors
+    // that report back into an activate request (the admin shell mirrors it
+    // into the URL, which feeds `activeTabRequest`), the two effects trade
+    // stale values forever — every flip remounts the active tab's DataList and
+    // fires a fresh page request, which is what pinned the workspace on
+    // "Loading…" and eventually exhausted the browser's socket pool.
+    if (activeTabRequest && handledTabRequestToken.current !== activeTabRequest.token) {
+      return;
+    }
     const activeTab = state.tabs[state.activeTabIndex];
+    if (steeringConfigKey.current !== null) {
+      if (activeTab?.configKey !== steeringConfigKey.current) {
+        // Still mid-flight (the SET_ACTIVE_TAB dispatched above lands on the
+        // next commit); say nothing until the requested tab is really active.
+        return;
+      }
+      steeringConfigKey.current = null;
+    }
     if (!activeTab) {
       if (lastActiveTabId.current !== null) {
         lastActiveTabId.current = null;
@@ -1338,7 +1365,7 @@ export const DataTabManager: React.FC<DataTabManagerProps> = ({
         configKey: activeTab.configKey
       });
     }
-  }, [onActiveTabChange, state.activeTabIndex, state.tabs]);
+  }, [onActiveTabChange, state.activeTabIndex, state.tabs, activeTabRequest]);
 
   /**
    * Handle tab click
@@ -1458,7 +1485,17 @@ export const DataTabManager: React.FC<DataTabManagerProps> = ({
       }
     };
 
-    return [...tabOptions, filterOption];
+    // D2: without this the read-only detail panel was unreachable on any tab
+    // that can also be edited — double-click prefers the edit form whenever the
+    // config has `schema` + `onUpsert`, and nothing else opened a detail tab.
+    // (Contacts' headshot + "Invite to portal" panel lived behind exactly that
+    // gap.) Offered here rather than stealing the double-click so the two tabs
+    // that have both keep the same gesture.
+    const detailOption = tabConfig
+      ? [{ label: 'View details', hint: 'read-only', onClick: openDetailTab }]
+      : [];
+
+    return [...tabOptions, ...detailOption, filterOption];
   }, [config, listContextMenu, notifyRecordsChanged, queryClient, state.globalFilterSources, requestChildTabReplace, resolveItemTitle]);
 
   /**
@@ -1602,14 +1639,28 @@ export const DataTabManager: React.FC<DataTabManagerProps> = ({
     const options: ContextMenuOption[] = [];
 
     if (tab.type === 'list') {
+      const tabConfig = config[tab.configKey];
+      // Mirrors the row context menu (D2): this opens the read-only detail
+      // panel. It used to route through the double-click handler, which on an
+      // editable tab (contacts, submissions) opens the *edit* form instead —
+      // leaving the detail panel with no way in at all.
       options.push({
-        label: 'Detail',
-        hint: 'double-click',
-        disabled: !selectedItem,
+        label: 'View details',
+        hint: 'read-only',
+        disabled: !selectedItem || !tabConfig,
         onClick: () => {
           closeMenu();
-          if (!selectedItem) return;
-          handleItemDoubleClick(tab.id, tab.configKey)(selectedItem, 0, {} as React.MouseEvent);
+          if (!selectedItem || !tabConfig) return;
+          dispatch({
+            type: 'OPEN_DETAIL_TAB',
+            payload: {
+              item: selectedItem,
+              configKey: tab.configKey,
+              parentTabId: tab.id,
+              replace: true,
+              title: `Detail: ${resolveItemTitle(selectedItem, tabConfig)}`
+            }
+          });
         }
       });
       options.push({
@@ -1641,7 +1692,7 @@ export const DataTabManager: React.FC<DataTabManagerProps> = ({
     }
 
     return options;
-  }, [tabContextMenu, state.tabs, state.tabSelections, state.globalFilterSources, handleItemDoubleClick, handleTabClose, platformModifierHint]);
+  }, [tabContextMenu, state.tabs, state.tabSelections, state.globalFilterSources, config, resolveItemTitle, handleTabClose, platformModifierHint]);
 
   /**
    * Handle selection change in a list

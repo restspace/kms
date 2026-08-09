@@ -8,6 +8,7 @@ import {
   type PublicRoom,
   type PublicSession,
 } from '../publicData'
+import { toParagraphs } from './richText'
 
 export interface AgendaWidgetProps {
   eventSlug: string
@@ -311,6 +312,17 @@ export function AgendaWidget({ eventSlug, filter }: AgendaWidgetProps) {
     [feed, selectedId],
   )
 
+  /**
+   * Descriptions are organiser-authored rich text (HTML). The modal renders
+   * text nodes, so splitting the raw value on blank lines printed the markup
+   * verbatim ("<p>…</p>"); `toParagraphs` strips the tags and keeps the
+   * paragraphing — the same treatment SessionsWidget's cards get.
+   */
+  const descriptionParagraphs = useMemo(
+    () => (selected?.description ? toParagraphs(selected.description) : []),
+    [selected],
+  )
+
   // Escape closes the detail overlay; focus moves into it on open so keyboard
   // and screen-reader users land on the content they just opened.
   useEffect(() => {
@@ -512,9 +524,9 @@ export function AgendaWidget({ eventSlug, filter }: AgendaWidgetProps) {
                 </>
               )}
             </dl>
-            {selected.description ? (
+            {descriptionParagraphs.length > 0 ? (
               <div className="ag-panel-desc">
-                {selected.description.split(/\n{2,}/).map((para, i) => (
+                {descriptionParagraphs.map((para, i) => (
                   <p key={i}>{para}</p>
                 ))}
               </div>

@@ -6,6 +6,9 @@ import {
   type PublicFeedFilter,
   type PublicSession,
 } from '../publicData'
+// Session descriptions come through as organiser-authored rich text (HTML);
+// the shared helper strips tags so the card shows plain, truncatable text.
+import { stripHtml } from './richText'
 
 export interface SessionsWidgetProps {
   eventSlug: string
@@ -24,15 +27,6 @@ function formatTimeRange(startsAt: string, endsAt: string): string {
   const start = new Date(startsAt).toLocaleTimeString(undefined, opts)
   const end = new Date(endsAt).toLocaleTimeString(undefined, opts)
   return `${start} – ${end}`
-}
-
-/** Session descriptions come through as organiser-authored rich text (HTML);
- * strip tags and collapse whitespace so the card shows plain, truncatable text. */
-function stripHtml(html: string): string {
-  return html
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
 }
 
 function SessionCard({

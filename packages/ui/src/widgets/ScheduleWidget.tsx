@@ -7,6 +7,7 @@ import {
   type PublicFeedFilter,
   type PublicSession,
 } from '../publicData'
+import { stripHtml } from './richText'
 
 export interface ScheduleWidgetProps {
   eventSlug: string
@@ -91,7 +92,9 @@ function buildMyScheduleIcs(eventSlug: string, eventName: string, sessions: Publ
   ]
   for (const s of sessions) {
     const room = s.room_id ? rooms.get(s.room_id) ?? null : null
-    const descriptionParts = [s.description ?? '', s.speakers.length > 0 ? `Speakers: ${s.speakers.join(', ')}` : ''].filter(
+    // Calendar clients show DESCRIPTION as plain text: HTML from the session
+    // description has to be stripped or the invite reads "<p>…</p>".
+    const descriptionParts = [stripHtml(s.description ?? ''), s.speakers.length > 0 ? `Speakers: ${s.speakers.join(', ')}` : ''].filter(
       (p) => p !== '',
     )
     lines.push('BEGIN:VEVENT')

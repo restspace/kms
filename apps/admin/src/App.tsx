@@ -60,6 +60,7 @@ import {
   type BulkJobPollHandle,
 } from './workspace/messaging'
 import { openImportWizard } from './workspace/ImportWizard'
+import { resolveTargetEventId } from './utils/importTarget'
 import {
   EventFilterChip,
   EventFilterSelect,
@@ -432,6 +433,7 @@ function buildWorkspaceConfig(
   onCreateEvent: () => void,
   onSelectEvent: (eventId: string) => void,
   contactFields: ContactFieldDef[],
+  eventFilterId: string | null,
 ): Record<string, TabConfig> {
   // Export buttons (M6): each tab downloads its current view — active filters
   // and anchor included — through the public REST API's export endpoint.
@@ -439,23 +441,27 @@ function buildWorkspaceConfig(
   // on "All events" the download covers the *current* event only.
   const exportFor = (resource: 'contacts' | 'submissions' | 'tasks' | 'messages') => ({
     buildUrl: (format: 'csv' | 'xlsx', query: { filters: Record<string, unknown>; sort?: { field: string; direction: 'asc' | 'desc' } }) => {
-      const { event_id: scopedEvent, ...rest } = query.filters as Record<string, unknown>
-      const eventId = typeof scopedEvent === 'string' && scopedEvent ? scopedEvent : currentEventId
+      const { event_id: _scopedEvent, ...rest } = query.filters as Record<string, unknown>
+      // Same resolution as the import guard (D3): the sidebar scope is not in
+      // `filters`, so it has to be consulted explicitly. "All events" still
+      // falls back to the session event — the export endpoint is single-event.
+      const eventId = resolveTargetEventId(eventFilterId, query.filters as Record<string, unknown>) ?? currentEventId
       return buildExportUrl(eventId, resource, format, rest, query.sort)
     },
   })
   /**
    * Import entry point (FR-REV-8). An import writes into exactly one event, so
-   * "All events" has no target: the tab's live `event_id` filter is the target,
-   * and its absence is explained rather than silently defaulted to the session
-   * event. `reload` refetches the grid once the wizard has committed.
+   * "All events" has no target: the sidebar's event scope (or an explicit
+   * `event_id` filter) is the target, and its absence is explained rather than
+   * silently defaulted to the session event. `reload` refetches the grid once
+   * the wizard has committed.
    */
   const importAction = (target: 'sessions' | 'contacts', label: string) => ({
     id: `import-${target}`,
     label: '↥ IMPORT',
     title: `Import ${label} from a CSV or XLSX file (column mapping + dry run first)`,
     onClick: ({ filters, reload }: { filters: Record<string, unknown>; reload: () => void }) => {
-      const eventId = typeof filters.event_id === 'string' && filters.event_id ? filters.event_id : ''
+      const eventId = resolveTargetEventId(eventFilterId, filters)
       if (!eventId) {
         void appAlert(
           `An import has to know which event it is writing into. Pick a single event in the sidebar (the filter is on "All events"), then import ${label}.`,
@@ -1125,6 +1131,7 @@ export default function App() {
         openCreateEvent,
         onSelectEvent,
         contactFields,
+        eventFilterId,
       ),
     [
       handleChecklist,
@@ -1145,14 +1152,36 @@ export default function App() {
     [workspaceConfig],
   )
 
-  // Route → tab: re-fire the DataTabManager activate request whenever the URL
-  // names a different tab (including a fresh deep link on load).
+  /**
+   * Route → tab: re-fire the DataTabManager activate request whenever the URL
+   * names a different tab (including a fresh deep link on load).
+   *
+   * `reportedTab` closes the loop the other way: a tab the workspace itself
+   * reported is already active there, so echoing it back as a fresh activate
+   * request only feeds the manager stale intermediates. Together with the
+   * manager's own guard this is what stopped the dashboard deep-link from
+   * oscillating between Speakers and the requested tab (each flip remounted
+   * the grid and fired another page request — "Loading…" forever, then
+   * net::ERR_INSUFFICIENT_RESOURCES).
+   */
+  const reportedTab = useRef<string | null>(null)
   useEffect(() => {
+    if (view !== 'workspace') {
+      // The manager unmounts with the view, taking its "already active" state
+      // with it — so does the record of what it last reported.
+      reportedTab.current = null
+      return
+    }
     if (!route.tab) return
+    if (reportedTab.current === route.tab) return
     setWsTabRequest((prev) =>
       prev?.configKey === route.tab ? prev : { configKey: route.tab as string, token: (prev?.token ?? 0) + 1 },
     )
-  }, [route.tab])
+    // `view` is a dependency so re-entering the workspace re-asserts the URL's
+    // tab: a sidebar sub-tab link clicked from Settings leaves `route.tab`
+    // unchanged when it names the tab the URL already carried, and without
+    // this the freshly mounted manager would just land on its default tab.
+  }, [route.tab, view])
 
   /**
    * Route → open detail tab. `handledRec` also absorbs selections reported *by*
@@ -1193,6 +1222,7 @@ export default function App() {
    */
   const handleActiveTabChange = useCallback((tab: { type: string; configKey: string } | null) => {
     if (!tab || tab.type !== 'list') return
+    reportedTab.current = tab.configKey
     navigate({ tab: tab.configKey }, { replace: currentRoute().tab === null })
   }, [])
 

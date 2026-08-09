@@ -1,6 +1,9 @@
 import { useEffect, useState } from 'react'
 import { fetchSpeakers, type PublicSpeaker } from '../publicData'
 import { SpeakerAvatar } from './SpeakersWidget'
+// Biographies can carry organiser/portal-authored HTML (the admin detail panel
+// strips it the same way) — this page renders text nodes, so tags would show.
+import { stripHtml } from './richText'
 
 export interface SpeakerDetailWidgetProps {
   eventSlug: string
@@ -46,7 +49,7 @@ export function SpeakerDetailWidget({ eventSlug, speakerId }: SpeakerDetailWidge
           )}
         </div>
       </div>
-      {speaker.bio && <p className="speaker-detail-bio">{speaker.bio}</p>}
+      {speaker.bio && <p className="speaker-detail-bio">{stripHtml(speaker.bio)}</p>}
       {speaker.sessions.length > 0 && (
         <>
           <h3>Sessions</h3>

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { fetchSpeakers, type PublicSpeaker, type SpeakersFeed } from '../publicData'
 import { SpeakerAvatar } from './SpeakersWidget'
+import { stripHtml } from './richText'
 
 export interface GalleryWidgetProps {
   eventSlug: string
@@ -43,7 +44,7 @@ function SpeakerModal({ speaker, onClose }: { speaker: PublicSpeaker; onClose: (
             )}
           </div>
         </div>
-        {speaker.bio && <p className="speaker-detail-bio">{speaker.bio}</p>}
+        {speaker.bio && <p className="speaker-detail-bio">{stripHtml(speaker.bio)}</p>}
         {speaker.sessions.length > 0 && (
           <>
             <h3>Sessions</h3>
