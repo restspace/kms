@@ -259,3 +259,132 @@ RUN_TIME_BUDGET 6 h · ERROR_BATCH 5.
   earlier Biography question and states the constraint.
 - deferred to a human: M4.14 · FR-AGENDA-9 agenda publish/unpublish is unbuilt.
 - next: phase U (unhappy paths), 63 steps.
+
+## 2026-08-09T09:12Z · phase U · iteration 1 · orchestrator
+- baseline: server stopped → migrate ok | seed ok | build ok | typecheck clean → server
+  restarted | health 200 | browser-pilot stopped
+- **tree state**: the repo has 26 uncommitted files from work done in PARALLEL with this run
+  (apps/api submit/session/filestore/mailer, FormBuilder, packages email/core incl. new
+  html.ts + unit tests, docs/15-winning-moves.md, package-lock). They arrived after the run
+  started. Typecheck and build pass with them present. Phase U therefore exercises a MIXED
+  tree — findings may belong to that parallel work rather than to the committed app, and
+  must be attributed carefully.
+- orchestrator error corrected: a `git add -A` swept that parallel work into commit f50bbff.
+  Reset --soft and re-committed only my own files as a652625; the 26 files are untouched and
+  still uncommitted.
+- quarantine: —
+- notes: run id `u-01`. 63 steps.
+
+## 2026-08-09T11:45Z · phase U · iteration 1 · runner
+- baseline: reset ok (pre-prepared) | build ok | health 200
+- outcome: 2 defects, 1 test-plan bug, 2 unimplemented, 2 flakes
+- steps: last step reached = M6.12 (plan complete, all 63 steps attempted)
+- quarantine: —
+- notes: DEFECT M4.9 — moving an already-invited session (SESS-1, invited=1 in /app/api/agenda)
+  via the Move dialog applies silently; the docs/07 §6 "Moving an invited session / Skip the email"
+  confirm dialog never appears, even after a full reload. DEFECT M6.4 — POST /app/api/contacts
+  correctly returns 409 email_exists but RecordForm shows the generic "The record could not be
+  saved."; the mapped string "A contact with this email already exists for this event." in
+  apps/admin/src/api.ts is discarded. TEST-PLAN M6.5 — client-side required validation blocks the
+  POST, so the 400 email_required message never reaches the user (inline "This field is required"
+  is shown instead). UNIMPLEMENTED: no session capacity editor anywhere (M4.10), so
+  ROOM_CAPACITY_EXCEEDED is unreachable; file_requests.allowed_types/max_size_mb still unread
+  (M2.9 note). Flakes: M3.7 (detail tab opens from the row menu, not a click), M6.1 (Internal Form
+  Name lives on the Welcome Screen builder step).
+
+## 2026-08-09T13:20Z · phase U · iteration 1 · fixer
+- baseline: reseeded (seed:local) | typecheck ok | build ok | health 200
+- outcome: 3 fixed (M6.4, M6.5, M1.9/M1.10), 1 not reproduced (M4.9), 2 deferred as
+  unimplemented (M4.10, M2.9), 1 accepted as-is (M4.5)
+- steps: re-driven = M6.4, M6.5, M1.9/M1.9a, M4.9
+- quarantine: —
+- notes:
+  **Tooling fallback:** browser-pilot could not run — its LLM provider returned
+  `403 NOT_ENOUGH_BALANCE` on the first `do`. All re-drives used **agent-browser** instead, per
+  §0's fallback rule.
+
+  **F1 · M4.9 · NOT REPRODUCED (no fix, no commit).** On a clean seed no session is invited at
+  all (`calendar_invites` is empty), so the U-run's `invited=1` came from that run's own invite
+  send. I recreated the condition (inserted a `method='REQUEST'` calendar invite for SESS-1,
+  confirmed `/app/api/agenda` reports `invited=1`) and drove the Move dialog twice — once opened
+  with the `M` key from the Day grid changing only the room, once by double-clicking the SESS-1
+  row in List view and changing the start time. Both raised the *"Moving an invited session /
+  Skip the email"* confirm; choosing **Skip the email** applied and persisted the move
+  (`room_id` changed, `invited` still 1) with no message queued. The Move dialog's Save does go
+  through `commitSchedule`, i.e. the same guard as the drag path — there is nothing to reroute.
+  Returned `deferred (not reproducible)` rather than changing working code on a symptom I cannot
+  see.
+
+  **F2 · M6.4 · FIXED · b82fe2a.** The 409 message was not lost, it was misplaced: DataTabManager's
+  create/edit submit handlers caught the `ApiError`, showed it in a modal ("Save failed: A contact
+  with this email already exists…") and returned `false`, leaving RecordForm to paint the generic
+  inline flash. The handlers now rethrow, so RecordForm's own catch renders the server's message
+  inline and the redundant modal is gone. Re-driven: Speakers → Add new record → email
+  `ada@example.com` → Create ⇒ inline *"A contact with this email already exists for this event."*,
+  no modal.
+
+  **F3 · M6.5 · FIXED + PLAN CORRECTED · 2a93248.** App half: RecordForm's early return on a missing
+  required field left `submitError` set, so a previous failure's flash sat beside a fresh inline
+  error; the flash is now cleared at the top of every submit attempt. Plan half — **correcting the
+  plan IS the fix**, stated explicitly: M6.5 expected the server's 400 `email_required`, but the
+  Speakers form validates required fields client-side and never sends the POST, so that branch is
+  unreachable from this surface. The step now asserts the inline *"This field is required"*, with a
+  note recording the drift. Re-driven: submit empty ⇒ inline required error only; then duplicate
+  email ⇒ specific flash; then clear email and submit ⇒ flash gone, only the inline error.
+
+  **F4 · M1.9/M1.10 · FIXED · 7618a38.** The Close Date input parsed with `new Date(value)` —
+  viewer-timezone — so `2026-08-01T00:00` stored `2026-07-31T23:00Z`. NFR-12 governs the write side
+  too. Added `isoToLocalInput` / `localInputToIso` to `apps/admin/src/utils/dates.ts`, built on the
+  agenda's existing `utcToLocal`/`localToUtc` rather than a second copy of the tz math, and threaded
+  the event timezone FormsSection → FormBuilder → SettingsStep. Checked the rest of the SPA: this is
+  the **only** `datetime-local` write site (RecordForm renders the control but passes the string
+  through untouched), so the shared cause is fixed once. Re-driven: typed `2026-08-01T00:00`, saved
+  ⇒ stored `2026-08-01T07:00:00.000Z` (= midnight PDT), full reload ⇒ field reads back
+  `2026-08-01T00:00` and the forms list says *"Closes Aug 1, 2026"*. New step **M1.9a** added to the
+  plan asserting exactly that round trip.
+
+  **F5 · M4.10 and M2.9 · DEFERRED, not built (as instructed).** Confirmed in source: (a) no surface
+  sets a session capacity — `capacity` appears in the SPA only as a *room* attribute
+  (`agenda/dialogs.tsx:104`, `RoomsBoard.tsx:88`, `AgendaSection.tsx:310`), and the Move dialog
+  offers Date/Start/Duration/Room only, so `ROOM_CAPACITY_EXCEEDED` in `packages/core/src/agenda.ts`
+  can never fire; (b) `file_requests.allowed_types` / `max_size_mb` appear only in
+  `packages/db/migrations/0001_init.sql` and `packages/db/seed/seed.sql` — no `apps/` or `packages/`
+  code reads either column.
+
+  **Accepted, not fixed (recorded deliberately): M4.5.** Typing 0 into the Move dialog's Duration is
+  rejected by `min="5"` and the save refused, but the field settles back on the existing 30 rather
+  than visibly clamping to 5. No zero-length session can be created, so the behaviour is safe.
+
+## 2026-08-09T11:10Z · RUN END · orchestrator
+- **Stopped by request after the phase U fixer completed.** Phase U iteration 2 and phase R
+  were NOT run.
+- outcomes: P PASSED (2 iters) · S PASSED (2 iters) · U HALTED(stopped by request) after
+  iteration 1 + its fixes · R NOT RUN.
+- Because U's second pass never ran, its four fixes (b82fe2a, 2a93248, 7618a38 and the M6.5
+  plan correction) are individually re-driven but NOT re-proved by a full clean-baseline pass.
+  Because R never ran, the primary plan has not been re-proved against the S and U fixes —
+  most relevant for 7618a38, which changes datetime write behaviour in an area P exercises.
+- UNRESOLVED, needs a human: M4.9. The runner saw an invited session move silently through
+  the Move dialog, reproduced after a full reload with /app/api/agenda reporting invited=1.
+  The fixer could not reproduce it: on a clean seed `calendar_invites` is empty, so it
+  recreated the state by inserting a method='REQUEST' invite, drove the dialog twice (M-key
+  from the Day grid, and List-view row double-click) and BOTH raised the prompt. MoveDialog
+  .onSave already calls the same `commitSchedule` guard as the drag path
+  (AgendaSection.tsx:537), so it changed no code rather than fix an unobservable symptom.
+  The two observations differ in how `invited` was established — a real-send during the U run
+  vs a synthetic invite row — so the trigger is not yet understood. NOT closed.
+- deferred, unbuilt features (all confirmed absent in source, none faked):
+  - FR-AGENDA-9 agenda publish/unpublish — `agenda_published` written by nothing, no control.
+  - ROOM_CAPACITY_EXCEEDED — `capacity` exists only as a ROOM attribute; no session-capacity
+    input anywhere, so the guard in packages/core/src/agenda.ts cannot fire.
+  - file_requests.allowed_types / max_size_mb — present in migrations + seed, read by no code.
+- accepted as safe, not fixed: M4.5 duration 0 is refused via min="5" but the field settles
+  back to the existing value rather than visibly clamping to 5. No zero-length session is
+  ever created.
+- **tooling: browser-pilot's LLM provider returned 403 NOT_ENOUGH_BALANCE** during the U
+  fixes. All of that agent's re-drives used agent-browser via the §0 fallback. Top the
+  balance up before the next run.
+- repo: 18 commits from this run, each one finding. 32 files remain uncommitted — parallel
+  work by others, deliberately untouched; the M1.9 fix staged only its own four hunks of
+  FormBuilder.tsx via a filtered `git apply --cached`.
+- final state: typecheck pass, build pass, health 200, database seeded.
