@@ -529,7 +529,7 @@ export default function App() {
             )}
           </>
         ) : view === 'forms' && !isReviewer ? (
-          <FormsSection eventSlug={me.event.slug} />
+          <FormsSection eventSlug={me.event.slug} timezone={me.event.timezone} />
         ) : view === 'evaluation' && !isReviewer ? (
           <EvaluationSection />
         ) : view === 'agenda' && !isReviewer ? (

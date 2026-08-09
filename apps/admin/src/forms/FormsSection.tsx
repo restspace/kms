@@ -8,6 +8,7 @@ import {
   type FormRow,
 } from '../api'
 import { appConfirm } from '../components/dialogs'
+import { fmtDateInTz } from '../utils/dates'
 import { FormBuilder } from './FormBuilder'
 import './forms.css'
 
@@ -16,15 +17,7 @@ import './forms.css'
  * opening into the 6-step builder wizard.
  */
 
-const fmtDate = (iso: string | null): string => {
-  if (!iso) return ''
-  const d = new Date(iso)
-  return Number.isNaN(d.getTime())
-    ? iso
-    : d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
-}
-
-export function FormsSection({ eventSlug }: { eventSlug: string }) {
+export function FormsSection({ eventSlug, timezone }: { eventSlug: string; timezone: string }) {
   const [forms, setForms] = useState<FormRow[] | null>(null)
   const [openFormId, setOpenFormId] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -90,7 +83,7 @@ export function FormsSection({ eventSlug }: { eventSlug: string }) {
                   </div>
                   <div className="form-card-meta">
                     {f.submission_count ?? 0} submissions · {f.draft_count ?? 0} drafts
-                    {f.close_at ? ` · Closes ${fmtDate(f.close_at)}` : ''} · Created {fmtDate(f.created_at)}
+                    {f.close_at ? ` · Closes ${fmtDateInTz(f.close_at, timezone)}` : ''} · Created {fmtDateInTz(f.created_at, timezone)}
                   </div>
                 </div>
                 <div className="form-card-actions" onClick={(e) => e.stopPropagation()}>

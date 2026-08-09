@@ -5,6 +5,7 @@ import {
   type DashboardNudge,
   type DashboardPayload,
 } from '../api'
+import { fmtDateInTz } from '../utils/dates'
 import './dashboard.css'
 
 /**
@@ -47,14 +48,6 @@ type TodayTab = (typeof TODAY_TABS)[number]['key']
 
 const fmtDay = (iso: string): string =>
   new Date(`${iso}T12:00:00Z`).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
-
-const fmtDate = (iso: string | null): string => {
-  if (!iso) return ''
-  const d = new Date(iso)
-  return Number.isNaN(d.getTime())
-    ? iso
-    : d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
-}
 
 const statusLabelText = (s: string): string => s.replace(/_/g, ' ')
 
@@ -405,7 +398,7 @@ function TodayBoard({ data, tab, onTab, onNudge, onNavigate }: {
                 <div>
                   <div className="db-form-name">{f.internal_name}</div>
                   <div className="db-form-sub">
-                    {f.status}{f.close_at ? ` · closes ${fmtDate(f.close_at)}` : ''}
+                    {f.status}{f.close_at ? ` · closes ${fmtDateInTz(f.close_at, data.event.timezone)}` : ''}
                   </div>
                 </div>
                 <div className="db-form-counts">
@@ -446,7 +439,7 @@ function TodayBoard({ data, tab, onTab, onNudge, onNavigate }: {
                     <td><span className={`status-chip status-${r.status}`}>{statusLabelText(r.status)}</span></td>
                     <td>{r.track_name ?? ''}</td>
                     <td>{r.submitter_name ?? ''}</td>
-                    <td>{fmtDate(r.created_at)}</td>
+                    <td>{fmtDateInTz(r.created_at, data.event.timezone)}</td>
                   </tr>
                 ))}
               </tbody>
@@ -641,7 +634,7 @@ function TrackingBoard({ data, busy, onRemind, onSpeaker }: {
                         {row.name}
                       </button>
                     </td>
-                    <td>{fmtDate(row.due_at)}</td>
+                    <td>{fmtDateInTz(row.due_at, data.event.timezone)}</td>
                     <td className="db-overdue">{row.days_overdue} day{row.days_overdue === 1 ? '' : 's'}</td>
                     <td>
                       <button disabled={busy} onClick={() => onRemind([row.assignment_id])}>Send reminder</button>
