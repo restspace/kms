@@ -52,6 +52,64 @@ export async function cleanupExpiredAuthTokens(db: D1Database): Promise<number> 
   return result.meta.changes ?? 0;
 }
 
+/**
+ * Core of the magic-link request, factored out so the public CFP wizard's
+ * Account step (submit.tsx — an *existing* email must never be silently
+ * signed in) can reuse exactly the same demo-carve-out and send logic as the
+ * portal's own `/auth/request` form, instead of re-deriving it.
+ */
+export async function requestMagicLink(
+  c: Context<AppEnv>,
+  args: { email: string; event: { id: string; name: string }; redirectTo?: string | null },
+): Promise<{ devLink: string | null }> {
+  const db = createDb(c.env.DB);
+  const contact = await db.contacts.upsertByEmail(args.event.id, args.email);
+
+  // One request path serves both destinations (the role decides where the
+  // callback lands), so the link is minted as 'portal-login'; the callback
+  // accepts every sign-in purpose. Only the hash reaches D1.
+  const { raw: token, statement } = await mintToken(c.env.DB, {
+    contactId: contact.id,
+    eventId: args.event.id,
+    purpose: 'portal-login',
+    redirectTo: args.redirectTo,
+  });
+  await statement.run();
+  const hash = await sha256hex(token);
+
+  const link = `${c.env.APP_URL}/auth/callback?t=${token}`;
+
+  const dev = c.env.DEV_MODE === 'on';
+  // Demo carve-out (docs/12 §2): the landing page's one-click logins use seeded
+  // contacts whose @example.com addresses can't receive mail, so on the public
+  // demo instance (DEMO_RESET=on) the link is shown inline and the email is
+  // skipped — a send to those addresses could only bounce. Only the two seeded
+  // demo addresses qualify; everyone else gets the mail path, and DEV_MODE
+  // stays off in production.
+  let demoInline = false;
+  if (!dev && c.env.DEMO_RESET === 'on') {
+    const demo = await demoLogins(c.env.DB);
+    demoInline =
+      args.email === demo?.adminEmail?.toLowerCase() || args.email === demo?.speakerEmail?.toLowerCase();
+  }
+  const showLink = dev || demoInline;
+
+  if (!demoInline) {
+    // Through the template pipeline (docs/08): message_log row, outbox retry,
+    // immediate attempt. The token hash keys idempotency — one send per link.
+    // The rendered body carries the link; mailer never logs message content.
+    await sendTemplated(c, {
+      templateKey: 'magic_link',
+      eventId: args.event.id,
+      contactId: contact.id,
+      toEmail: contact.email,
+      entityId: hash,
+      context: { event: { name: args.event.name }, magic_link: link },
+    });
+  }
+  return { devLink: showLink ? link : null };
+}
+
 // POST /auth/request — accept form or JSON {email, event_slug}, mint + email a magic link.
 authRoutes.post('/request', async (c) => {
   const { email, event_slug, redirect_to } = await readBody(c);
@@ -70,62 +128,20 @@ authRoutes.post('/request', async (c) => {
     return c.html(page('Event not found', '<h1>Event not found</h1><p>We could not find that event.</p>'), 404);
   }
 
-  const contact = await db.contacts.upsertByEmail(event.id, normalisedEmail);
+  const { devLink: link } = await requestMagicLink(c, { email: normalisedEmail, event, redirectTo: redirect_to });
 
-  // One request path serves both destinations (the role decides where the
-  // callback lands), so the link is minted as 'portal-login'; the callback
-  // accepts every sign-in purpose. Only the hash reaches D1.
-  const { raw: token, statement } = await mintToken(c.env.DB, {
-    contactId: contact.id,
-    eventId: event.id,
-    purpose: 'portal-login',
-    redirectTo: redirect_to,
-  });
-  await statement.run();
-  const hash = await sha256hex(token);
-
-  const link = `${c.env.APP_URL}/auth/callback?t=${token}`;
-
-  const dev = c.env.DEV_MODE === 'on';
-  // Demo carve-out (docs/12 §2): the landing page's one-click logins use seeded
-  // contacts whose @example.com addresses can't receive mail, so on the public
-  // demo instance (DEMO_RESET=on) the link is shown inline and the email is
-  // skipped — a send to those addresses could only bounce. Only the two seeded
-  // demo addresses qualify; everyone else gets the mail path, and DEV_MODE
-  // stays off in production.
-  let demoInline = false;
-  if (!dev && c.env.DEMO_RESET === 'on') {
-    const demo = await demoLogins(c.env.DB);
-    demoInline =
-      normalisedEmail === demo?.adminEmail?.toLowerCase() ||
-      normalisedEmail === demo?.speakerEmail?.toLowerCase();
-  }
-  const showLink = dev || demoInline;
-
-  if (!demoInline) {
-    // Through the template pipeline (docs/08): message_log row, outbox retry,
-    // immediate attempt. The token hash keys idempotency — one send per link.
-    // The rendered body carries the link; mailer never logs message content.
-    await sendTemplated(c, {
-      templateKey: 'magic_link',
-      eventId: event.id,
-      contactId: contact.id,
-      toEmail: contact.email,
-      entityId: hash,
-      context: { event: { name: event.name }, magic_link: link },
-    });
-  }
   if (json) {
-    return c.json(showLink ? { ok: true, dev_link: link } : { ok: true });
+    return c.json(link !== null ? { ok: true, dev_link: link } : { ok: true });
   }
-  const devBlock = showLink
-    ? `<div class="devlink"><strong>${dev ? 'DEV_MODE' : 'Demo login'}</strong> — your sign-in link:<br><a href="${esc(link)}">${esc(link)}</a></div>`
-    : '';
+  const devBlock =
+    link !== null
+      ? `<div class="devlink"><strong>${c.env.DEV_MODE === 'on' ? 'DEV_MODE' : 'Demo login'}</strong> — your sign-in link:<br><a href="${esc(link)}">${esc(link)}</a></div>`
+      : '';
   return c.html(
     page(
       'Check your email',
       `<h1>Check your email</h1>
-<p>If <strong>${esc(contact.email)}</strong> is valid, a sign-in link for <strong>${esc(event.name)}</strong> is on its way.</p>
+<p>If <strong>${esc(normalisedEmail)}</strong> is valid, a sign-in link for <strong>${esc(event.name)}</strong> is on its way.</p>
 <p class="muted">The link expires in 15 minutes and can only be used once.</p>${devBlock}`,
     ),
   );

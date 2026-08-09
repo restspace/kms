@@ -32,6 +32,10 @@ export interface ContactRow {
   mobile_phone: string | null
   biography: string | null
   pronouns: string | null
+  /** Served via `/files/<id>` — an authenticated admin session has fileAuth
+   * access. `c.*` in the contacts resource query already selects this; it
+   * was just missing from this interface (W2-E). */
+  headshot_asset_id: string | null
   /** organiser-only; never rendered in portal/public surfaces */
   notes: string | null
   created_at: string
@@ -60,10 +64,16 @@ export interface SubmissionRow {
   updated_at: string
 }
 
-class ApiError extends Error {
+/**
+ * `details` carries the parsed error body (F13: duplicate-contact recovery
+ * needs `existing_id` off `{ error: 'email_exists', existing_id }`, not just
+ * the human-readable message `readableError` renders).
+ */
+export class ApiError extends Error {
   constructor(
     message: string,
     readonly status: number,
+    readonly details?: Record<string, unknown>,
   ) {
     super(message)
   }
@@ -71,7 +81,12 @@ class ApiError extends Error {
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, {
-    headers: { accept: 'application/json', ...(init?.body ? { 'content-type': 'application/json' } : {}) },
+    // Only JSON bodies get the header: a FormData body must keep the
+    // browser-generated multipart boundary (the import upload path).
+    headers: {
+      accept: 'application/json',
+      ...(typeof init?.body === 'string' ? { 'content-type': 'application/json' } : {}),
+    },
     ...init,
   })
   if (res.status === 401) {
@@ -82,7 +97,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const body = (await res.json().catch(() => null)) as Record<string, unknown> | null
   if (!res.ok) {
     const code = body && typeof body.error === 'string' ? body.error : `HTTP ${res.status}`
-    throw new ApiError(readableError(code), res.status)
+    throw new ApiError(readableError(code), res.status, body ?? undefined)
   }
   return body as T
 }
@@ -111,6 +126,19 @@ export const switchEvent = (eventId: string) =>
 // Events (FR-EVT-1/2: create; agenda publish flag rides the same PATCH)
 // ---------------------------------------------------------------------------
 
+/** A repeatable Rooms/Tracks row from the create-event dialog or the settings
+ * editor. Blank rows are dropped server-side, so the client never needs to
+ * pre-filter an in-progress "add another" row. */
+export interface RoomDraft {
+  name: string
+  capacity?: number | null
+}
+
+export interface TrackDraft {
+  name: string
+  color?: string | null
+}
+
 export interface CreateEventInput {
   name: string
   slug: string
@@ -121,10 +149,28 @@ export interface CreateEventInput {
   starts_at: string
   ends_at: string
   description?: string | null
+  rooms?: RoomDraft[]
+  tracks?: TrackDraft[]
 }
 
 export const createEvent = (data: CreateEventInput) =>
   request<{ ok: boolean; id: string }>('/app/api/events', { method: 'POST', body: JSON.stringify(data) })
+
+/** A row of the workspace Events tab (W2-E) — GET /app/api/events. */
+export interface EventListRow {
+  id: string
+  name: string
+  slug: string
+  starts_at: string
+  ends_at: string
+  agenda_published: boolean
+  role: string
+  speaker_count: number
+  submission_count: number
+}
+
+/** The org's accessible events (event-as-filter model), each with cheap counts. */
+export const getEvents = () => request<{ items: EventListRow[] }>('/app/api/events')
 
 export const patchEvent = (id: string, patch: { agenda_published?: boolean } & Record<string, unknown>) =>
   request<{ ok: boolean }>(`/app/api/events/${id}`, { method: 'PATCH', body: JSON.stringify(patch) })
@@ -132,6 +178,45 @@ export const patchEvent = (id: string, patch: { agenda_published?: boolean } & R
 /** Agenda go-live control (FR-AGENDA-9) — thin wrapper over the events PATCH. */
 export const setAgendaPublished = (eventId: string, published: boolean) =>
   patchEvent(eventId, { agenda_published: published })
+
+// ---------------------------------------------------------------------------
+// Rooms & tracks CRUD (deferred-gap item: create/rename/delete for the event's
+// rooms and tracks — the agenda builder's Add Session dialog needs real
+// options, not just "No room"/"No track").
+// ---------------------------------------------------------------------------
+
+export interface RoomRow {
+  id: string
+  event_id: string
+  name: string
+  capacity: number | null
+  position: number
+  notes: string | null
+}
+
+export interface TrackRow {
+  id: string
+  event_id: string
+  name: string
+  color: string | null
+  position: number
+}
+
+export const listRooms = () => request<{ items: RoomRow[] }>('/app/api/rooms')
+export const createRoom = (data: { name: string; capacity?: number | null; notes?: string | null }) =>
+  request<RoomRow>('/app/api/rooms', { method: 'POST', body: JSON.stringify(data) })
+export const updateRoom = (id: string, data: Record<string, unknown>) =>
+  request<RoomRow>(`/app/api/rooms/${id}`, { method: 'PUT', body: JSON.stringify(data) })
+export const deleteRoom = (id: string) =>
+  request<{ ok: boolean }>(`/app/api/rooms/${id}`, { method: 'DELETE' })
+
+export const listTracks = () => request<{ items: TrackRow[] }>('/app/api/tracks')
+export const createTrack = (data: { name: string; color?: string | null }) =>
+  request<TrackRow>('/app/api/tracks', { method: 'POST', body: JSON.stringify(data) })
+export const updateTrack = (id: string, data: Record<string, unknown>) =>
+  request<TrackRow>(`/app/api/tracks/${id}`, { method: 'PUT', body: JSON.stringify(data) })
+export const deleteTrack = (id: string) =>
+  request<{ ok: boolean }>(`/app/api/tracks/${id}`, { method: 'DELETE' })
 
 // ---------------------------------------------------------------------------
 // Tasks CRUD (deferred-gap item: tasks were read-only in admin)
@@ -321,6 +406,8 @@ export interface SubmissionDetail {
   submission: Record<string, unknown>
   answers: Array<{ label: string; value_json: string | null }>
   participants: Array<{
+    /** submission_participants.id — the target for role changes/removal (F14). */
+    participant_id: string
     role: string
     is_primary_contact: number
     contact_id: string
@@ -329,10 +416,20 @@ export interface SubmissionDetail {
     email: string
     has_bio: number
     has_headshot: number
+    headshot_asset_id: string | null
   }>
   reviews: Array<{ reviewer_name: string | null; weighted_total: number | null; comment: string | null; conflict_of_interest: number }>
   tags: string[]
 }
+
+/**
+ * Role vocabulary for submission_participants (F14/ABS-11) — must track the
+ * CHECK constraint in packages/db/migrations/0008_participant_roles.sql and
+ * @kms/core's ALL_PARTICIPANT_ROLES. Duplicated here (rather than importing
+ * @kms/core into the admin bundle) the same way SUBMISSION_STATUSES-style
+ * vocabularies already live client-side in workspace/extras.tsx.
+ */
+export const PARTICIPANT_ROLES = ['speaker', 'co-speaker', 'moderator', 'panelist', 'co-author', 'co-presenter'] as const
 
 export interface EvaluationOverview {
   plans: Array<{ id: string; name: string; description: string | null; status: string; anonymise_submitters: number; scoring_scale_min: number; scoring_scale_max: number }>
@@ -360,6 +457,114 @@ export const sendDecisions = (ids: string[]) =>
     { method: 'POST', body: JSON.stringify({ ids }) },
   )
 export const getSubmissionDetail = (id: string) => request<SubmissionDetail>(`/app/api/submissions/${id}/detail`)
+
+// ---------------------------------------------------------------------------
+// Submission edit + participants (F14/ABS-11): the fuller edit surface — the
+// admin edit form previously only reached title/description/format via the
+// notes/status side-channels; this is the general field PUT plus the
+// add/change-role/remove-participant endpoints that let an organiser attach
+// a co-speaker (or co-author/co-presenter) retroactively.
+// ---------------------------------------------------------------------------
+
+export const createSubmission = (data: Record<string, unknown>) =>
+  request<Record<string, unknown>>('/app/api/submissions', { method: 'POST', body: JSON.stringify(data) })
+
+export const updateSubmission = (id: string, data: Record<string, unknown>) =>
+  request<Record<string, unknown>>(`/app/api/submissions/${id}`, { method: 'PUT', body: JSON.stringify(data) })
+
+export const addSubmissionParticipant = (
+  submissionId: string,
+  data: { contact_id: string; role: string; is_primary_contact?: boolean },
+) =>
+  request<{ ok: boolean; id: string }>(`/app/api/submissions/${submissionId}/participants`, {
+    method: 'POST',
+    body: JSON.stringify(data),
+  })
+
+export const updateSubmissionParticipantRole = (submissionId: string, participantId: string, role: string) =>
+  request<{ ok: boolean }>(`/app/api/submissions/${submissionId}/participants/${participantId}`, {
+    method: 'PUT',
+    body: JSON.stringify({ role }),
+  })
+
+export const removeSubmissionParticipant = (submissionId: string, participantId: string) =>
+  request<{ ok: boolean }>(`/app/api/submissions/${submissionId}/participants/${participantId}`, {
+    method: 'DELETE',
+  })
+
+// ---------------------------------------------------------------------------
+// Files: version chains and comment threads (lane W2-C)
+// ---------------------------------------------------------------------------
+
+export interface FileVersion {
+  upload_id: string
+  file_request_id: string
+  contact_id: string
+  submission_id: string | null
+  file_asset_id: string
+  uploaded_at: string
+  version: number
+  is_current: number
+  filename: string
+  content_type: string | null
+  size_bytes: number | null
+  uploader_name: string | null
+  uploader_email: string | null
+}
+
+export interface FileComment {
+  id: string
+  file_request_upload_id: string
+  file_asset_id: string
+  author_contact_id: string | null
+  author_role: string
+  author_name: string | null
+  body: string
+  created_at: string
+  version: number
+}
+
+export interface FileChain {
+  versions: FileVersion[]
+  comments: FileComment[]
+}
+
+/** One row per chain (current version) for the files library / per-submission tab. */
+export interface FileLibraryRow extends FileVersion {
+  event_id: string
+  request_title: string | null
+  submission_code: string | null
+  submission_title: string | null
+  version_count: number
+  comment_count: number
+}
+
+const fileQuery = (params: Record<string, string | number | undefined>): string => {
+  const qs = new URLSearchParams()
+  for (const [k, v] of Object.entries(params)) if (v !== undefined && v !== '') qs.set(k, String(v))
+  const s = qs.toString()
+  return s ? `?${s}` : ''
+}
+
+export const getFileLibrary = (params: {
+  submission_id?: string
+  contact_id?: string
+  event_id?: string
+  q?: string
+  from?: number
+  size?: number
+} = {}) => request<{ items: FileLibraryRow[]; total: number }>(`/app/api/files/library${fileQuery(params)}`)
+
+export const getFileChain = (uploadId: string) => request<FileChain>(`/app/api/files/chains/${uploadId}`)
+
+export const getTaskAssignmentFiles = (assignmentId: string) =>
+  request<FileChain>(`/app/api/files/task-assignments/${assignmentId}`)
+
+export const addFileComment = (uploadId: string, body: string) =>
+  request<{ ok: boolean; id: string; comments: FileComment[] }>(`/app/api/files/uploads/${uploadId}/comments`, {
+    method: 'POST',
+    body: JSON.stringify({ body }),
+  })
 
 export const getEvaluationOverview = () => request<EvaluationOverview>('/app/api/evaluation/overview')
 export const createPlan = (name: string) =>
@@ -609,3 +814,123 @@ export const saveReview = (assignmentId: string, body: Record<string, unknown>) 
     `/app/api/review/assignments/${assignmentId}`,
     { method: 'POST', body: JSON.stringify(body) },
   )
+
+// ---------------------------------------------------------------------------
+// Import wizard + files bundle (FR-REV-8)
+// ---------------------------------------------------------------------------
+
+export type ImportTarget = 'sessions' | 'contacts'
+export type ImportRowAction = 'create' | 'update' | 'merge' | 'skip' | 'error'
+
+export interface ImportField {
+  key: string
+  label: string
+  aliases?: string[]
+  required?: boolean
+  hint?: string
+}
+
+export interface ImportPlanRow {
+  row: number
+  action: ImportRowAction
+  message: string | null
+  errors: string[]
+  label: string
+  values: Record<string, string>
+  targetId: string | null
+  mergeFields: string[] | null
+}
+
+export interface ImportPlan {
+  target: ImportTarget
+  headers: string[]
+  mapping: string[]
+  rows: ImportPlanRow[]
+  summary: Record<ImportRowAction | 'total', number>
+  newTracks: string[]
+  newRooms: string[]
+  unmapped: string[]
+  /** the parsed grid, posted back on re-map and commit so nothing re-uploads */
+  rows_raw: string[][]
+  fields: ImportField[]
+  event_id: string
+}
+
+/** First pass: upload the file, auto-map its headers and dry-run the result. */
+export async function importPreviewFile(
+  target: ImportTarget,
+  eventId: string,
+  file: File,
+): Promise<ImportPlan> {
+  const form = new FormData()
+  form.set('target', target)
+  form.set('event_id', eventId)
+  form.set('file', file)
+  return request<ImportPlan>('/app/api/import/preview', { method: 'POST', body: form })
+}
+
+/** Re-run the dry run after the organiser edits the column mapping. */
+export const importPreviewMapping = (
+  target: ImportTarget,
+  eventId: string,
+  headers: string[],
+  rows: string[][],
+  mapping: string[],
+) =>
+  request<ImportPlan>('/app/api/import/preview', {
+    method: 'POST',
+    body: JSON.stringify({ target, event_id: eventId, headers, rows, mapping }),
+  })
+
+export const importCommit = (
+  target: ImportTarget,
+  eventId: string,
+  headers: string[],
+  rows: string[][],
+  mapping: string[],
+) =>
+  request<{ ok: boolean; summary: Record<string, number>; applied: Record<string, number> }>(
+    '/app/api/import/commit',
+    {
+      method: 'POST',
+      body: JSON.stringify({ target, event_id: eventId, headers, rows, mapping }),
+    },
+  )
+
+/**
+ * ZIP of the current version of every file attached to the selected
+ * submissions. POST (a grid selection is unbounded) with a blob download, so
+ * this cannot go through `request`, which expects JSON.
+ */
+export async function downloadFilesBundle(submissionIds: string[]): Promise<number> {
+  const res = await fetch('/app/api/export/files.zip', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ submission_ids: submissionIds }),
+  })
+  if (res.status === 401) {
+    window.location.assign('/app')
+    throw new ApiError('Signed out', 401)
+  }
+  if (!res.ok) {
+    const body = (await res.json().catch(() => null)) as { error?: string } | null
+    throw new ApiError(
+      body?.error === 'no_files'
+        ? 'None of the selected submissions has a file attached.'
+        : body?.error === 'bundle_too_large'
+          ? 'That selection is too large to bundle — download it in smaller batches.'
+          : readableError(body?.error ?? `HTTP ${res.status}`),
+      res.status,
+    )
+  }
+  const blob = await res.blob()
+  const url = URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = /filename="([^"]+)"/.exec(res.headers.get('content-disposition') ?? '')?.[1] ?? 'submission-files.zip'
+  document.body.appendChild(anchor)
+  anchor.click()
+  anchor.remove()
+  URL.revokeObjectURL(url)
+  return Number(res.headers.get('x-bundle-entries') ?? 0)
+}

@@ -1,0 +1,124 @@
+/* Import wizard (FR-REV-8). Lives inside the shared ModalDialog shell, so
+   only the wizard's own internals are styled here. */
+
+.import-error {
+  border: 1px solid var(--danger, #dc2626);
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin-bottom: 12px;
+  color: var(--danger, #dc2626);
+  font-size: 13px;
+}
+
+.import-file-step p,
+.import-done p {
+  margin: 0 0 12px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.import-scope,
+.import-busy,
+.import-note {
+  color: var(--text-muted);
+}
+
+.import-map-step h4 {
+  margin: 16px 0 8px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+
+.import-map-step h4:first-child {
+  margin-top: 0;
+}
+
+.import-summary {
+  margin-left: 8px;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--text);
+  font-weight: 600;
+}
+
+.import-mapping {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 6px 12px;
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.import-mapping-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.import-column-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-muted);
+}
+
+.import-note {
+  font-size: 12px;
+  margin: 6px 0;
+}
+
+.import-preview {
+  max-height: 320px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.import-preview table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.import-preview th,
+.import-preview td {
+  text-align: left;
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+
+.import-preview thead th {
+  position: sticky;
+  top: 0;
+  background: var(--surface);
+  z-index: 1;
+}
+
+.import-preview tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.import-badge {
+  display: inline-block;
+  border-radius: 999px;
+  padding: 1px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.import-badge-create { border-color: #16a34a; color: #16a34a; }
+.import-badge-update { border-color: #2563eb; color: #2563eb; }
+.import-badge-merge { border-color: #7c3aed; color: #7c3aed; }
+.import-badge-error { border-color: #dc2626; color: #dc2626; }
+
+.data-list-toolbar-actions.after-export {
+  left: max(96px, calc(env(safe-area-inset-left) + 96px));
+}

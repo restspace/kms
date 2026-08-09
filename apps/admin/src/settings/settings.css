@@ -38,6 +38,24 @@
   font-size: 13px;
 }
 
+.settings-rt-columns {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 24px;
+}
+
+.settings-rt-columns h3 {
+  font-size: 13px;
+  margin: 0 0 8px;
+  color: var(--text-muted);
+}
+
+@media (max-width: 560px) {
+  .settings-rt-columns {
+    grid-template-columns: 1fr;
+  }
+}
+
 .settings-empty {
   color: var(--text-faint, var(--text-muted));
   font-size: 13px;

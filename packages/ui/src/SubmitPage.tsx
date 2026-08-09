@@ -167,7 +167,7 @@ export function SubmitPage({ data }: { data: SubmitBootstrap }) {
 
   // Account step state
   const [loginEmail, setLoginEmail] = useState('')
-  const [loginState, setLoginState] = useState<'idle' | 'sending' | 'sent'>('idle')
+  const [loginState, setLoginState] = useState<'idle' | 'sending' | 'sent' | 'created'>('idle')
   const [devLink, setDevLink] = useState<string | null>(null)
 
   const abstractQuestions = useMemo(
@@ -235,6 +235,12 @@ export function SubmitPage({ data }: { data: SubmitBootstrap }) {
     return () => clearTimeout(t)
   }, [done, countdown])
 
+  // Account step (docs/04 §5 step 2): an unrecognised email gets a real
+  // account and an in-wizard session right away — no email round trip, which
+  // matters on a deployment with no working mail provider. An email that is
+  // already registered never gets silently signed in; it falls back to the
+  // normal sign-in mechanism (a real magic-link email, or the inline demo
+  // link for the two seeded addresses).
   const requestLogin = useCallback(async () => {
     const email = loginEmail.trim()
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
@@ -244,24 +250,31 @@ export function SubmitPage({ data }: { data: SubmitBootstrap }) {
     setStepError(null)
     setLoginState('sending')
     try {
-      const res = await fetch('/auth/request', {
+      const res = await fetch(`${data.base_path}/account`, {
         method: 'POST',
-        headers: { 'content-type': 'application/json', accept: 'application/json' },
-        body: JSON.stringify({
-          email,
-          event_slug: event.slug,
-          redirect_to: data.base_path,
-        }),
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ email }),
       })
-      const body = (await res.json().catch(() => ({}))) as { dev_link?: string; error?: string }
+      const body = (await res.json().catch(() => ({}))) as {
+        status?: 'created' | 'existing'
+        dev_link?: string | null
+        error?: string
+      }
       if (!res.ok) throw new Error(body.error ?? `Request failed (${res.status})`)
+      if (body.status === 'created') {
+        // The response already set the session cookie — reload into the
+        // authenticated bootstrap rather than faking viewer state client-side.
+        setLoginState('created')
+        window.location.assign(data.base_path)
+        return
+      }
       setDevLink(body.dev_link ?? null)
       setLoginState('sent')
     } catch {
       setLoginState('idle')
-      setStepError('Could not request a sign-in link. Please try again.')
+      setStepError('Could not sign you in. Please try again.')
     }
-  }, [loginEmail, event.slug, data.base_path])
+  }, [loginEmail, data.base_path])
 
   // ------------------------------------------------------------------
   // Step navigation with per-step validation
@@ -459,9 +472,9 @@ export function SubmitPage({ data }: { data: SubmitBootstrap }) {
           ) : (
             <>
               <p>
-                Enter your email and we will send you a sign-in link. Signing in creates your
-                speaker portal, where you can track this submission, complete tasks and update
-                your profile.
+                Enter your email to get started. New here? We will set up your speaker account
+                right away, no email required, so you can keep going. Already signed up? We will
+                send you a sign-in link instead.
               </p>
               <div className="sb-field">
                 <label htmlFor="sb-email">Email address</label>
@@ -471,27 +484,31 @@ export function SubmitPage({ data }: { data: SubmitBootstrap }) {
                   value={loginEmail}
                   placeholder="you@example.com"
                   required
+                  disabled={loginState === 'sending' || loginState === 'created'}
                   onChange={(e) => setLoginEmail(e.currentTarget.value)}
                 />
               </div>
               {loginState === 'sent' ? (
                 <>
                   <p className="sb-muted">
-                    Check your email — the link signs you in and returns you to this form.
+                    An account already exists for that email — check your inbox for a sign-in
+                    link, which returns you to this form.
                   </p>
                   {devLink && (
                     <p className="sb-devlink">
-                      DEV_MODE: <a href={devLink}>use your sign-in link</a>
+                      Demo login: <a href={devLink}>use your sign-in link</a>
                     </p>
                   )}
                 </>
+              ) : loginState === 'created' ? (
+                <p className="sb-muted">Setting up your account…</p>
               ) : (
                 <button
                   className="sb-button sb-primary"
                   disabled={loginState === 'sending' || !loginEmail.trim()}
                   onClick={() => void requestLogin()}
                 >
-                  {loginState === 'sending' ? 'Sending…' : 'Email me a sign-in link'}
+                  {loginState === 'sending' ? 'Continuing…' : 'Continue'}
                 </button>
               )}
               <Nav onBack={goBack} />

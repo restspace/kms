@@ -13,6 +13,7 @@ import { Hono } from 'hono';
 import type { Context } from 'hono';
 import { renderToString } from 'preact-render-to-string';
 import {
+  ALL_PARTICIPANT_ROLES,
   applyRouting,
   discardHiddenAnswers,
   isValidEmailShape,
@@ -28,11 +29,12 @@ import {
 } from '@kms/core';
 import { Page, SubmitPage, type SubmitBootstrap, type SubmitViewer } from '@kms/ui';
 import type { AppEnv } from '../env';
-import { attemptImmediate, prepareTemplated, type PreparedEmail } from '../mailer';
+import { attemptImmediate, prepareTemplated, sendTemplated, type PreparedEmail } from '../mailer';
 import { bumpEventRevision } from '../revision';
 import { isSubmissionCodeCollision, nextSessionCodeSql, peekNextSessionCode } from '../sessionCode';
-import { getSession, type SessionPayload } from '../session';
-import { CONFIRM_TTL_SECONDS, mintToken } from '../tokens';
+import { createSessionToken, getSession, setSessionCookie, type SessionPayload } from '../session';
+import { CONFIRM_TTL_SECONDS, mintToken, sha256hex } from '../tokens';
+import { requestMagicLink } from './auth';
 import { loadQuestions } from './formsAdmin';
 
 export const submitRoutes = new Hono<AppEnv>();
@@ -283,6 +285,99 @@ submitRoutes.get('/:slug/:formId', async (c) => {
 });
 
 // ---------------------------------------------------------------------------
+// POST /submit/:slug/:formId/account — the Account step (docs/04 §5 step 2).
+//
+// The magic-link round trip (/auth/request) is the only sign-in path the
+// portal exposes, and on a deployment with no working email provider that
+// is a dead end for anyone who is not one of the two seeded demo addresses
+// (docs/12's carve-out). This endpoint gives a genuinely new speaker a
+// working account without an email round trip:
+//
+//   - unrecognised email  -> a contact row is created and the caller is
+//     signed in immediately (session cookie set in the response), so the
+//     wizard can proceed to the Submission step with no further round trip.
+//     A magic-link email is still queued best-effort for a return visit —
+//     queueing is fire-and-forget and never blocks or fails the response.
+//   - already-registered email -> never silently bind the caller to
+//     somebody else's identity. Falls back to the existing sign-in
+//     mechanism (requestMagicLink: a real email, or the demo inline link
+//     for the two seeded addresses) exactly as /auth/request would.
+//
+// The existence check and the insert are one atomic, race-free statement
+// (INSERT ... ON CONFLICT DO NOTHING RETURNING id) — two concurrent calls
+// for the same brand-new email can only ever produce one "created" winner,
+// mirroring the atomicity discipline the submit batch below uses.
+// ---------------------------------------------------------------------------
+
+submitRoutes.post('/:slug/:formId/account', async (c) => {
+  const ctx = await loadContext(c.env.DB, c.req.param('slug'), c.req.param('formId'));
+  if (!ctx) return c.notFound();
+  if (ctx.closed) return c.json({ error: 'form_closed' }, 409);
+
+  const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+  const email = (typeof body.email === 'string' ? body.email : '').trim().toLowerCase();
+  if (!isValidEmailShape(email)) {
+    return c.json({ error: 'invalid_email' }, 400);
+  }
+
+  const db = c.env.DB;
+  const ts = new Date().toISOString();
+  const redirectTo = `/submit/${ctx.event.slug}/${ctx.form.id}`;
+
+  const inserted = await db
+    .prepare(
+      `INSERT INTO contacts (id, event_id, email, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT (event_id, email) DO NOTHING
+       RETURNING id`,
+    )
+    .bind(crypto.randomUUID(), ctx.event.id, email, ts, ts)
+    .first<{ id: string }>();
+
+  if (!inserted) {
+    // A contact already exists for this email (self-registered before, added
+    // as a co-speaker by someone else, seeded demo data — the reason is
+    // deliberately not distinguished). Offer the normal sign-in path instead
+    // of auto-authenticating into a record that might not belong to whoever
+    // is typing.
+    const { devLink } = await requestMagicLink(c, { email, event: ctx.event, redirectTo });
+    return c.json({ ok: true, status: 'existing', dev_link: devLink });
+  }
+
+  // Brand-new contact: no event_users row exists yet, so the session's role
+  // resolves to the same 'speaker' default the portal already applies.
+  const sessionToken = await createSessionToken(
+    { contactId: inserted.id, eventId: ctx.event.id, eventSlug: ctx.event.slug, email, role: 'speaker' },
+    c.env.SESSION_SECRET,
+  );
+  setSessionCookie(c, sessionToken);
+
+  // Best-effort magic link for a return visit — must never block or fail
+  // the response the wizard is waiting on.
+  try {
+    const { raw, statement } = await mintToken(db, {
+      contactId: inserted.id,
+      eventId: ctx.event.id,
+      purpose: 'portal-login',
+      redirectTo,
+    });
+    await statement.run();
+    await sendTemplated(c, {
+      templateKey: 'magic_link',
+      eventId: ctx.event.id,
+      contactId: inserted.id,
+      toEmail: email,
+      entityId: await sha256hex(raw),
+      context: { event: { name: ctx.event.name }, magic_link: `${c.env.APP_URL}/auth/callback?t=${raw}` },
+    });
+  } catch (err) {
+    console.error('best-effort magic link on account creation failed:', err instanceof Error ? err.message : err);
+  }
+
+  return c.json({ ok: true, status: 'created' });
+});
+
+// ---------------------------------------------------------------------------
 // POST /submit/:slug/:formId/draft — autosave (docs/04 §5 step 3)
 // ---------------------------------------------------------------------------
 
@@ -443,7 +538,9 @@ async function findRecentDuplicate(
 const IDENTITY_FIELD_KEYS = ['first_name', 'last_name', 'email', 'mobile_phone', 'biography'] as const;
 type IdentityKey = (typeof IDENTITY_FIELD_KEYS)[number];
 
-const PARTICIPANT_ROLES = new Set(['speaker', 'co-speaker', 'moderator', 'panelist']);
+// F14/ABS-11: canonical vocabulary now lives in @kms/core (ALL_PARTICIPANT_ROLES),
+// shared with the admin add-participant endpoint (routes/evaluation.ts).
+const PARTICIPANT_ROLES = new Set<string>(ALL_PARTICIPANT_ROLES);
 
 interface ParticipantInput {
   role: string;

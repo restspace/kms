@@ -31,7 +31,11 @@ export default defineConfig({
     emptyOutDir: true,
     target: 'es2022',
     rollupOptions: {
-      input: { hello: r('src/hello.client.tsx'), submit: r('src/submit.client.tsx') },
+      input: {
+        hello: r('src/hello.client.tsx'),
+        submit: r('src/submit.client.tsx'),
+        event: r('src/event.client.tsx'),
+      },
       output: { entryFileNames: '[name].js', chunkFileNames: '[name]-[hash].js' },
     },
   },

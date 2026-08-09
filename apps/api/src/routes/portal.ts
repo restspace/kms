@@ -11,6 +11,7 @@ import {
   isValidUrlShape,
   redactInternal,
   validateAnswers,
+  visibleQuestionIds,
   type AnswerValue,
   type Answers,
   type Event,
@@ -29,6 +30,16 @@ import { attemptImmediate, prepareTemplated, sendTemplated, type PreparedEmail }
 import { bumpEventRevision } from '../revision';
 import { loadQuestions } from './formsAdmin';
 import { clearSessionCookie, getSession, type SessionPayload } from '../session';
+import {
+  addComment,
+  appendUploadVersion,
+  formatBytes,
+  loadChainVersions,
+  loadThread,
+  MAX_COMMENT_CHARS,
+  type FileCommentRow,
+  type FileVersionRow,
+} from '../fileVersions';
 
 export const portalRoutes = new Hono<AppEnv>();
 
@@ -106,6 +117,18 @@ dl.detail dd{margin:0;overflow-wrap:anywhere}
 .field-err{color:#b91c1c;font-size:.82rem;margin:.25rem 0 0}
 [aria-invalid=true]{border-color:#dc2626}
 .qhelp{color:#6b7280;font-size:.82rem;margin:.15rem 0 0}
+.vlist{list-style:none;margin:.3rem 0 .6rem;padding:0}
+.vrow{display:flex;align-items:baseline;gap:.5rem;flex-wrap:wrap;padding:.4rem 0;border-bottom:1px solid #f3f4f6}
+.vrow:last-child{border-bottom:0}
+.vtag{font-size:.72rem;font-weight:700;border-radius:4px;padding:.05rem .4rem;background:#f3f4f6;color:#4b5563}
+.vtag.current{background:#dcfce7;color:#15803d}
+.vmeta{color:#6b7280;font-size:.8rem}
+.thread{margin:.5rem 0 0;border-top:1px solid #f3f4f6;padding-top:.6rem}
+.cmt{border-left:3px solid #e5e7eb;padding:.15rem 0 .15rem .6rem;margin-bottom:.5rem}
+.cmt.staff{border-left-color:#2563eb}
+.cmt .chead{font-size:.8rem;color:#6b7280}
+.cmt .chead strong{color:#1f2937}
+.cmt .cbody{white-space:pre-wrap;overflow-wrap:anywhere}
 `;
 
 type PortalSection = 'home' | 'submissions' | 'profile' | 'tasks';
@@ -804,6 +827,89 @@ async function loadFileRequest(
     .first<FileRequestPolicyRow>();
 }
 
+// ---------------------------------------------------------------------------
+// File version chain + comment thread (lane W2-C). A file-request task is not
+// "done" the moment the first file lands: decks get redrafted, and organisers
+// leave notes on them. The upload control therefore survives completion, each
+// upload appends a version, and every version stays individually downloadable
+// through /files/:id (fileAuth matches the speaker on file_request_uploads.
+// contact_id, which superseded rows still satisfy).
+// ---------------------------------------------------------------------------
+
+interface FileChain {
+  versions: FileVersionRow[];
+  comments: FileCommentRow[];
+}
+
+const fmtDateTime = (iso: string | null): string => {
+  if (!iso) return '';
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime())
+    ? iso
+    : d.toLocaleString('en-US', {
+        month: 'short',
+        day: 'numeric',
+        year: 'numeric',
+        hour: 'numeric',
+        minute: '2-digit',
+      });
+};
+
+/** Newest first, current version flagged; every row links to /files/:id. */
+function versionListHtml(versions: FileVersionRow[]): string {
+  if (versions.length === 0) return '';
+  const rows = [...versions]
+    .sort((a, b) => b.version - a.version)
+    .map(
+      (v) => `<li class="vrow">
+<a href="/files/${esc(v.file_asset_id)}">${esc(v.filename)}</a>
+<span class="vtag${v.is_current === 1 ? ' current' : ''}">v${v.version}${v.is_current === 1 ? ' · Current' : ''}</span>
+<span class="vmeta">${esc(formatBytes(v.size_bytes))} · ${esc(fmtDateTime(v.uploaded_at))}</span>
+</li>`,
+    )
+    .join('');
+  return `<p class="small" style="margin:.2rem 0 0"><strong>Uploaded file${
+    versions.length === 1 ? '' : ` — ${versions.length} versions`
+  }</strong></p>
+<ul class="vlist">${rows}</ul>`;
+}
+
+/**
+ * One thread per chain, not per version: a comment is anchored to the version
+ * it was written against (shown as "on v1") but stays in the same conversation
+ * after a re-upload, so an organiser reply lands under the speaker's note
+ * rather than in a thread the speaker has to go looking for.
+ */
+function threadHtml(base: string, chain: FileChain, errors: FieldError[]): string {
+  const current = chain.versions.find((v) => v.is_current === 1) ?? chain.versions[chain.versions.length - 1];
+  if (!current) return '';
+  const multi = chain.versions.length > 1;
+  const items =
+    chain.comments.length === 0
+      ? '<p class="small muted" style="margin:.2rem 0">No comments yet.</p>'
+      : chain.comments
+          .map(
+            (m) => `<div class="cmt${m.author_role === 'speaker' ? '' : ' staff'}">
+<div class="chead"><strong>${esc(m.author_name ?? 'Someone')}</strong>${
+              m.author_role === 'speaker' ? '' : ' <span class="vtag">Organiser</span>'
+            } · ${esc(fmtDateTime(m.created_at))}${multi ? ` · on v${m.version}` : ''}</div>
+<div class="cbody">${esc(m.body)}</div></div>`,
+          )
+          .join('');
+  return `<div class="thread">
+<p class="small" style="margin:0 0 .3rem"><strong>Comments</strong> <span class="muted">(visible to the organisers)</span></p>
+${items}
+<form method="post" action="${base}/files/${esc(current.upload_id)}/comments">
+<label for="${esc(fieldId('comment'))}" class="small">Add a comment</label>
+<textarea id="${esc(fieldId('comment'))}" name="comment" rows="2" maxlength="${MAX_COMMENT_CHARS}"${invalidAttrs(
+    errors,
+    'comment',
+  )} placeholder="e.g. Draft deck — final version coming Friday."></textarea>
+${fieldErrorHtml(errors, 'comment')}
+<p><button type="submit" class="secondary">Post comment</button></p>
+</form></div>`;
+}
+
 interface TaskRenderOpts {
   portalForm: { title: string | null; questions: PortalFormQuestion[] } | null;
   policy: UploadPolicy;
@@ -811,14 +917,46 @@ interface TaskRenderOpts {
   errors: FieldError[];
   /** posted values for *this* assignment only, keyed by control name */
   posted: Record<string, string>;
+  /** version chain + comment thread for a file-request task, when it has one */
+  chain: FileChain | null;
+}
+
+/**
+ * The upload control, shown for an open task and again once it is complete.
+ * `hasVersions` only changes the wording: the POST target is the same, and the
+ * server decides whether the file starts the chain or extends it.
+ */
+function uploadFormHtml(
+  action: string,
+  policy: UploadPolicy,
+  errors: FieldError[],
+  hasVersions: boolean,
+): string {
+  return `<form method="post" action="${action}" enctype="multipart/form-data">
+<label for="${esc(fieldId('upload'))}">${hasVersions ? 'Upload a new version' : 'File'} <span class="muted small">(${esc(
+    describeUploadPolicy(policy),
+  )})</span></label>
+<input type="file" id="${esc(fieldId('upload'))}" name="upload" required accept="${esc(
+    [...policy.allowedTypes].join(','),
+  )}"${invalidAttrs(errors, 'upload')}>
+${fieldErrorHtml(errors, 'upload')}
+<p><button type="submit">${hasVersions ? 'Upload new version' : 'Upload &amp; complete'}</button></p></form>`;
 }
 
 function taskActionHtml(base: string, t: TaskAssignmentRow, opts: TaskRenderOpts): string {
-  if (t.status === 'complete') {
-    return `<p class="small muted">Completed ${esc(fmtDate(t.completed_at))}.</p>`;
-  }
-  const { portalForm, policy, errors, posted } = opts;
+  const { portalForm, policy, errors, posted, chain } = opts;
   const action = `${base}/tasks/${esc(t.assignment_id)}/complete`;
+  // A completed file-request task keeps its upload control: completion means
+  // "we have something", not "you may never send a better version".
+  if (t.status === 'complete') {
+    if (t.action_type !== 'file_upload') {
+      return `<p class="small muted">Completed ${esc(fmtDate(t.completed_at))}.</p>`;
+    }
+    return `<p class="small muted">Completed ${esc(fmtDate(t.completed_at))}.</p>
+${chain ? versionListHtml(chain.versions) : ''}
+${uploadFormHtml(action, policy, errors, chain !== null && chain.versions.length > 0)}
+${chain ? threadHtml(base, chain, errors) : ''}`;
+  }
   switch (t.action_type) {
     case 'acknowledge':
       return `<form method="post" action="${action}">
@@ -835,14 +973,7 @@ ${url ? `<p><a class="btn secondary" href="${esc(url)}" target="_blank" rel="noo
 <p><button type="submit">Mark as done</button></p></form>`;
     }
     case 'file_upload':
-      return `<form method="post" action="${action}" enctype="multipart/form-data">
-<label for="${esc(fieldId('upload'))}">File <span class="muted small">(${esc(describeUploadPolicy(policy))})</span></label>
-<input type="file" id="${esc(fieldId('upload'))}" name="upload" required accept="${esc([...policy.allowedTypes].join(','))}"${invalidAttrs(
-        errors,
-        'upload',
-      )}>
-${fieldErrorHtml(errors, 'upload')}
-<p><button type="submit">Upload &amp; complete</button></p></form>`;
+      return uploadFormHtml(action, policy, errors, false);
     case 'portal_form': {
       if (!portalForm || portalForm.questions.length === 0) {
         return '<p class="small muted">This form is not available yet.</p>';
@@ -914,6 +1045,21 @@ async function tasksPageHtml(c: Context<AppEnv>, ctx: PortalCtx, opts: TasksPage
     if (row) requests.set(requestId, row);
   }
 
+  // Version chains + threads for the file-request tasks on this page. Loaded
+  // per assignment (one page holds a handful of tasks at most); the chain is
+  // keyed by request + contact + submission, matching what the POST appends to.
+  const chains = new Map<string, FileChain>();
+  for (const t of assignments) {
+    if (t.action_type !== 'file_upload' || !t.file_request_id) continue;
+    const versions = await loadChainVersions(c.env.DB, {
+      fileRequestId: t.file_request_id,
+      contactId: ctx.session.contactId,
+      submissionId: t.submission_id,
+    });
+    if (versions.length === 0) continue;
+    chains.set(t.assignment_id, { versions, comments: await loadThread(c.env.DB, versions) });
+  }
+
   const renderTask = (t: TaskAssignmentRow): string => {
     const isTarget = t.assignment_id === opts.assignmentId;
     return `<div class="task" id="a-${esc(t.assignment_id)}">
@@ -930,6 +1076,7 @@ ${t.submission_code ? `<div class="small muted">For <span class="code">${esc(t.s
       policy: uploadPolicyFor(t.file_request_id ? requests.get(t.file_request_id) ?? null : null),
       errors: isTarget ? errors : [],
       posted: isTarget ? posted : {},
+      chain: chains.get(t.assignment_id) ?? null,
     })}</div>
 </div>`;
   };
@@ -977,10 +1124,14 @@ portalRoutes.post('/:slug/tasks/:assignmentId/complete', async (c) => {
     .bind(assignmentId, ctx.session.contactId, ctx.event.id)
     .first<TaskAssignmentRow>();
   if (!row) return back('!Task not found.');
-  if (row.status === 'complete') return back('Task already complete.');
+  // A completed file-upload task stays open for new versions (lane W2-C);
+  // every other action type is genuinely one-shot.
+  const reupload = row.status === 'complete' && row.action_type === 'file_upload';
+  if (row.status === 'complete' && !reupload) return back('Task already complete.');
 
   const ts = new Date().toISOString();
   let responseId: string | null = null;
+  let newVersion = 0;
 
   if (row.action_type === 'file_upload') {
     const body = await c.req.parseBody();
@@ -1001,12 +1152,17 @@ portalRoutes.post('/:slug/tasks/:assignmentId/complete', async (c) => {
     if ('error' in saved) return invalid([{ key: 'upload', message: saved.error }]);
     responseId = saved.id;
     if (row.file_request_id) {
-      await c.env.DB.prepare(
-        `INSERT INTO file_request_uploads (id, file_request_id, contact_id, submission_id, file_asset_id, uploaded_at)
-         VALUES (?, ?, ?, ?, ?, ?)`,
-      )
-        .bind(crypto.randomUUID(), row.file_request_id, ctx.session.contactId, row.submission_id, saved.id, ts)
-        .run();
+      // Appends version N+1 and demotes the previous current row in one batch.
+      const appended = await appendUploadVersion(
+        c.env.DB,
+        {
+          fileRequestId: row.file_request_id,
+          contactId: ctx.session.contactId,
+          submissionId: row.submission_id,
+        },
+        { assetId: saved.id, uploadedAt: ts },
+      );
+      newVersion = appended.version;
     }
   } else if (row.action_type === 'acknowledge') {
     const body = await c.req.parseBody();
@@ -1061,12 +1217,55 @@ portalRoutes.post('/:slug/tasks/:assignmentId/complete', async (c) => {
   }
   // external_link needs no payload \u2014 the button press is the confirmation.
 
+  // response_id always points at the newest bytes; completed_at records the
+  // first completion, so a re-upload does not rewrite when the task was done.
   await c.env.DB.prepare(
-    `UPDATE task_assignments SET status = 'complete', completed_at = ?, response_id = ? WHERE id = ?`,
+    `UPDATE task_assignments
+     SET status = 'complete', completed_at = COALESCE(completed_at, ?), response_id = ?
+     WHERE id = ?`,
   )
     .bind(ts, responseId, assignmentId)
     .run();
+  if (reupload) {
+    return back(newVersion > 1 ? `Version ${newVersion} uploaded.` : 'New version uploaded.');
+  }
   return back('Task completed \u2014 thank you!');
+});
+
+// POST /:slug/files/:uploadId/comments \u2014 a speaker's note on one version of
+// their own upload. Ownership is the upload row's contact_id, so a speaker can
+// only comment on files they uploaded; organisers post to the admin endpoint
+// and both sides read the same thread.
+portalRoutes.post('/:slug/files/:uploadId/comments', async (c) => {
+  const ctx = await loadPortalCtx(c);
+  if (ctx instanceof Response) return ctx;
+  const base = `/portal/${ctx.event.slug}`;
+  const uploadId = c.req.param('uploadId');
+  const back = (msg: string) => c.redirect(`${base}/tasks?m=${encodeURIComponent(msg)}`);
+
+  const upload = await c.env.DB.prepare(
+    `SELECT u.id, u.file_asset_id, fa.event_id
+     FROM file_request_uploads u
+     JOIN file_assets fa ON fa.id = u.file_asset_id
+     WHERE u.id = ? AND u.contact_id = ?`,
+  )
+    .bind(uploadId, ctx.session.contactId)
+    .first<{ id: string; file_asset_id: string; event_id: string }>();
+  if (!upload || upload.event_id !== ctx.event.id) return back('!File not found.');
+
+  const body = await c.req.parseBody();
+  const text = typeof body.comment === 'string' ? body.comment : '';
+  const created = await addComment(c.env.DB, {
+    eventId: ctx.event.id,
+    uploadId: upload.id,
+    assetId: upload.file_asset_id,
+    authorContactId: ctx.session.contactId,
+    authorRole: 'speaker',
+    authorName: displayName(ctx.contact),
+    body: text,
+  });
+  if (!created) return back('!Write a comment before posting.');
+  return back('Comment posted.');
 });
 
 // ---------------------------------------------------------------------------
@@ -1145,7 +1344,27 @@ const answerText = (v: AnswerValue): string =>
 const answerList = (v: AnswerValue): string[] =>
   Array.isArray(v) ? v.map(String) : v === null || v === undefined || v === '' ? [] : [String(v)];
 
-function editControlHtml(q: QuestionDef, value: AnswerValue, errors: FieldError[]): string {
+/**
+ * Show-when visibility (docs/02 §3, docs/04 §3) is honoured on the edit page
+ * the same way the create wizard honours it (CFP-02 fix): a field whose
+ * `visibility` rule evaluates to hidden against the current answers is not
+ * rendered at all on first paint (the wrapper below is server-filtered by
+ * `visibleQuestionIds` in `editPageHtml`), and the inline script re-derives
+ * visibility as the speaker edits controlling fields, without a page reload
+ * — the portal is otherwise a plain POST/redirect surface (see file banner),
+ * so this is the one bit of client JS the edit form needs. Hidden fields are
+ * `disabled` client-side so they are excluded from the POST body entirely,
+ * matching `discardHiddenAnswers` on the server: the existing established
+ * convention (`forms.ts` — "Answers for hidden questions are discarded,
+ * never stored") is that a field's stored answer is *dropped*, not kept,
+ * the moment it is hidden and the form is saved — the same thing already
+ * happens on every create-wizard submit. The edit page now matches that
+ * exactly rather than inventing a "keep it around" rule of its own; if a
+ * speaker flips Format to Workshop and back before saving, the workshop
+ * duration they had typed is gone, same as it would be on a fresh
+ * submission.
+ */
+function editControlHtml(q: QuestionDef, value: AnswerValue, errors: FieldError[], visible: boolean): string {
   const id = esc(fieldId(q.id));
   const name = esc(`q_${q.id}`);
   const aria = invalidAttrs(errors, q.id);
@@ -1154,20 +1373,26 @@ function editControlHtml(q: QuestionDef, value: AnswerValue, errors: FieldError[
   const help = q.help_text ? `<p class="qhelp">${esc(q.help_text)}</p>` : '';
   const label = `<label for="${id}">${esc(q.label)}${star}</label>`;
   const maxlen = q.max_chars ? ` maxlength="${q.max_chars}"` : '';
+  const wrap = (inner: string) =>
+    `<div class="qfield" id="${esc(`qwrap-${q.id}`)}"${visible ? '' : ' style="display:none"'}>${inner}</div>`;
 
   switch (q.type) {
     case 'heading':
-      return `<h3 style="margin:1.2rem 0 .2rem;font-size:.95rem">${esc(q.label)}</h3>${help}`;
+      return wrap(`<h3 style="margin:1.2rem 0 .2rem;font-size:.95rem">${esc(q.label)}</h3>${help}`);
     case 'textarea':
     case 'wysiwyg':
-      return `${label}<textarea id="${id}" name="${name}" rows="6"${maxlen}${aria}>${esc(answerText(value))}</textarea>${help}${err}`;
+      return wrap(
+        `${label}<textarea id="${id}" name="${name}" rows="6"${maxlen}${aria}>${esc(answerText(value))}</textarea>${help}${err}`,
+      );
     case 'dropdown':
-      return `${label}<select id="${id}" name="${name}"${aria}><option value="">Select\u2026</option>${(q.options ?? [])
-        .map(
-          (o) =>
-            `<option value="${esc(o.value)}"${o.value === answerText(value) ? ' selected' : ''}>${esc(o.label)}</option>`,
-        )
-        .join('')}</select>${help}${err}`;
+      return wrap(
+        `${label}<select id="${id}" name="${name}"${aria}><option value="">Select\u2026</option>${(q.options ?? [])
+          .map(
+            (o) =>
+              `<option value="${esc(o.value)}"${o.value === answerText(value) ? ' selected' : ''}>${esc(o.label)}</option>`,
+          )
+          .join('')}</select>${help}${err}`,
+      );
     case 'radio': {
       const chosen = answerText(value);
       const items = (q.options ?? [])
@@ -1178,7 +1403,7 @@ function editControlHtml(q: QuestionDef, value: AnswerValue, errors: FieldError[
             )}"${o.value === chosen ? ' checked' : ''}${aria}> ${esc(o.label)}</label>`,
         )
         .join('');
-      return `${label}${items}${help}${err}`;
+      return wrap(`${label}${items}${help}${err}`);
     }
     case 'multiselect': {
       const chosen = new Set(answerList(value));
@@ -1190,14 +1415,18 @@ function editControlHtml(q: QuestionDef, value: AnswerValue, errors: FieldError[
             )}"${chosen.has(o.value) ? ' checked' : ''}${aria}> ${esc(o.label)}</label>`,
         )
         .join('');
-      return `${label}${items}${help}${err}`;
+      return wrap(`${label}${items}${help}${err}`);
     }
     case 'checkbox':
-      return `<label class="small" style="font-weight:400"><input type="checkbox" id="${id}" name="${name}" value="yes"${
-        value === true || value === 'yes' ? ' checked' : ''
-      }${aria}> ${esc(q.label)}${star}</label>${help}${err}`;
+      return wrap(
+        `<label class="small" style="font-weight:400"><input type="checkbox" id="${id}" name="${name}" value="yes"${
+          value === true || value === 'yes' ? ' checked' : ''
+        }${aria}> ${esc(q.label)}${star}</label>${help}${err}`,
+      );
     case 'file':
-      return `${label}<p class="small muted">Uploaded files are managed from your Tasks page; the current attachment is left as it is.</p>${help}`;
+      return wrap(
+        `${label}<p class="small muted">Uploaded files are managed from your Tasks page; the current attachment is left as it is.</p>${help}`,
+      );
     default: {
       const type =
         q.type === 'number'
@@ -1213,7 +1442,9 @@ function editControlHtml(q: QuestionDef, value: AnswerValue, errors: FieldError[
                   : q.type === 'datetime'
                     ? 'datetime-local'
                     : 'text';
-      return `${label}<input type="${type}" id="${id}" name="${name}" value="${esc(answerText(value))}"${maxlen}${aria}>${help}${err}`;
+      return wrap(
+        `${label}<input type="${type}" id="${id}" name="${name}" value="${esc(answerText(value))}"${maxlen}${aria}>${help}${err}`,
+      );
     }
   }
 }
@@ -1229,20 +1460,93 @@ function editPageHtml(
   const base = `/portal/${esc(ctx.event.slug)}`;
   const detail = `${base}/submissions/${esc(submission.id)}`;
   const decided = submission.status === 'accepted' || submission.status === 'accept_queue' || submission.status === 'decline_queue';
+  const visible = visibleQuestionIds(questions, answers);
   return portalPage(
     ctx,
     'submissions',
     `${errorSummaryHtml(errors)}<div class="card">
 <h2><span class="code">${esc(submission.code)}</span> Edit submission ${statusChipHtml(submission.status)}</h2>
 ${decided ? '<p class="small muted">This submission already has a decision \u2014 the organisers are notified of any change you save.</p>' : ''}
-<form method="post" action="${detail}/edit">
-${questions.map((q) => editControlHtml(q, answers[q.id], errors)).join('\n')}
+<form method="post" action="${detail}/edit" id="edit-submission-form">
+${questions.map((q) => editControlHtml(q, answers[q.id], errors, visible.has(q.id))).join('\n')}
 <p style="margin-top:1.2rem"><button type="submit">Save changes</button>
 <a class="btn secondary" style="margin-left:.5rem" href="${detail}">Cancel</a></p>
 </form>
-</div>`,
+</div>
+${editVisibilityScript(questions)}`,
     flash,
   );
+}
+
+/**
+ * Re-evaluate show-when visibility client-side as the speaker edits a
+ * controlling field, mirroring `visibleQuestionIds`/`evalRule` from
+ * `@kms/core` (kept in sync by hand \u2014 this file has no bundler step to share
+ * the module with, see the file banner's "island-free" note). A hidden
+ * field's inputs are `disabled` so the browser excludes them from the POST
+ * body, matching the server's `discardHiddenAnswers`; the field's own stored
+ * value is untouched until (and unless) the speaker submits while it is
+ * visible again.
+ */
+function editVisibilityScript(questions: QuestionDef[]): string {
+  const withRules = questions.filter((q) => q.visibility !== null);
+  if (withRules.length === 0) return '';
+  const spec = questions.map((q) => ({ id: q.id, rule: q.visibility ?? null }));
+  return `<script>
+(function(){
+var Q=${JSON.stringify(spec)};
+function isEmpty(v){return v===undefined||v===null||v===false||(typeof v==='string'&&v.trim()==='')||(Array.isArray(v)&&v.length===0);}
+function asArray(v){return Array.isArray(v)?v.map(String):isEmpty(v)?[]:[String(v)];}
+function fieldValue(qid){
+  var els=document.getElementsByName('q_'+qid);
+  if(!els.length)return undefined;
+  if(els[0].type==='checkbox'){
+    if(els.length===1)return els[0].checked;
+    var out=[];for(var i=0;i<els.length;i++){if(els[i].checked)out.push(els[i].value);}return out;
+  }
+  if(els[0].type==='radio'){
+    for(var j=0;j<els.length;j++){if(els[j].checked)return els[j].value;}
+    return undefined;
+  }
+  return els[0].value;
+}
+function evalCond(c,answers){
+  var v=answers[c.question_id];
+  switch(c.op){
+    case 'equals':return asArray(v).length===1&&asArray(v)[0]===String(c.value);
+    case 'not_equals':return !(asArray(v).length===1&&asArray(v)[0]===String(c.value));
+    case 'contains':return asArray(v).indexOf(String(c.value))!==-1;
+    case 'not_contains':return asArray(v).indexOf(String(c.value))===-1;
+    case 'is_any_of':var wanted=Array.isArray(c.value)?c.value.map(String):[String(c.value)];return asArray(v).some(function(x){return wanted.indexOf(x)!==-1;});
+    case 'is_empty':return isEmpty(v);
+    case 'is_not_empty':return !isEmpty(v);
+    case 'gt':return typeof v==='number'&&v>Number(c.value);
+    case 'lt':return typeof v==='number'&&v<Number(c.value);
+    default:return false;
+  }
+}
+function evalRule(rule,answers){
+  if(!rule.conditions||rule.conditions.length===0)return true;
+  var results=rule.conditions.map(function(c){return evalCond(c,answers);});
+  var matched=rule.match==='any'?results.some(Boolean):results.every(Boolean);
+  return rule.action==='hide'?!matched:matched;
+}
+function recompute(){
+  var effective={};
+  Q.forEach(function(q){
+    var vis=q.rule?evalRule(q.rule,effective):true;
+    var wrap=document.getElementById('qwrap-'+q.id);
+    if(wrap)wrap.style.display=vis?'':'none';
+    var els=document.getElementsByName('q_'+q.id);
+    for(var i=0;i<els.length;i++){els[i].disabled=!vis;}
+    if(vis)effective[q.id]=fieldValue(q.id);
+  });
+}
+var form=document.getElementById('edit-submission-form');
+if(form){form.addEventListener('input',recompute);form.addEventListener('change',recompute);}
+recompute();
+})();
+</script>`;
 }
 
 /** Read one posted edit form back into Answers, typed per question. */

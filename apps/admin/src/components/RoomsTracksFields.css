@@ -1,0 +1,64 @@
+/* Repeatable Rooms/Tracks rows — shared by CreateEventDialog and the settings
+   Rooms & Tracks card (RoomsTracksFields.tsx). */
+
+.rt-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.rt-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.rt-row-name {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.rt-row-extra {
+  flex: 0 0 6rem;
+  width: 6rem;
+}
+
+.rt-row-color {
+  flex: 0 0 2.6rem;
+  width: 2.6rem;
+  height: 2rem;
+  padding: 2px;
+}
+
+.rt-row-remove {
+  flex: 0 0 auto;
+  width: 1.8rem;
+  height: 1.8rem;
+  line-height: 1;
+  padding: 0;
+  border-radius: 999px;
+  border: 1px solid var(--border-strong);
+  background: transparent;
+  cursor: pointer;
+}
+
+.rt-row-remove:hover:not(:disabled) {
+  background: var(--danger-soft);
+  border-color: var(--danger-border);
+  color: var(--danger-strong);
+}
+
+.rt-add {
+  align-self: flex-start;
+  background: transparent;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius);
+  padding: 0.35rem 0.75rem;
+  cursor: pointer;
+  font-size: 0.85rem;
+  color: var(--text);
+}
+
+.rt-row-saving {
+  opacity: 0.6;
+}

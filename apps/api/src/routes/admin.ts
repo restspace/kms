@@ -68,5 +68,11 @@ adminRoutes.get('/', async (c) => {
       503,
     );
   }
-  return c.html(await shell.text());
+  // The admin SPA must never be framed (lane W3-A made framing an explicit,
+  // per-surface decision: the public /e/:slug pages opt *in*, this opts out).
+  // X-Frame-Options for older agents, CSP frame-ancestors for current ones.
+  return c.html(await shell.text(), 200, {
+    'x-frame-options': 'DENY',
+    'content-security-policy': "frame-ancestors 'none'",
+  });
 });

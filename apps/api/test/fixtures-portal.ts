@@ -85,6 +85,12 @@ export async function createQuestion(
     section?: 'abstract' | 'participant';
     maxChars?: number | null;
     options?: Array<{ value: string; label: string }> | null;
+    /** ConditionalRule json — show/hide this question based on an earlier one's answer. */
+    visibility?: {
+      action: 'show' | 'hide';
+      match: 'all' | 'any';
+      conditions: Array<{ question_id: string; op: string; value?: unknown }>;
+    } | null;
   },
 ): Promise<string> {
   const fieldId = `fld-${crypto.randomUUID()}`;
@@ -96,10 +102,19 @@ export async function createQuestion(
     .bind(fieldId, eventId, opts.key, opts.label, opts.type ?? 'text', opts.options ? JSON.stringify(opts.options) : null, opts.maxChars ?? null)
     .run();
   await env.DB.prepare(
-    `INSERT INTO form_questions (id, form_id, section, field_id, label, position, required)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO form_questions (id, form_id, section, field_id, label, position, required, visibility)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
   )
-    .bind(questionId, formId, opts.section ?? 'abstract', fieldId, opts.label, opts.position ?? 0, opts.required ? 1 : 0)
+    .bind(
+      questionId,
+      formId,
+      opts.section ?? 'abstract',
+      fieldId,
+      opts.label,
+      opts.position ?? 0,
+      opts.required ? 1 : 0,
+      opts.visibility ? JSON.stringify(opts.visibility) : null,
+    )
     .run();
   return questionId;
 }

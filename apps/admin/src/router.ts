@@ -26,6 +26,7 @@ export const VIEW_KEYS = [
   'evaluation',
   'review',
   'agenda',
+  'embeds',
   'settings',
 ] as const
 

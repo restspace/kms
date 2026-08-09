@@ -124,7 +124,8 @@
 
 .detail-panel .review-row .rev-comment { color: var(--text-secondary); margin-top: 2px; }
 
-.detail-panel .part-row {
+.detail-panel .part-row,
+.record-form .part-row {
   display: flex;
   align-items: center;
   gap: var(--space-2);
@@ -133,6 +134,52 @@
 }
 
 .detail-panel .part-row .part-flags { margin-left: auto; color: var(--text-muted); font-size: var(--text-caption); }
+
+/* Participant headshot thumbnail (manual-QA follow-up): reuses the
+   .contact-headshot/-fallback classes from shell.css at list-row scale
+   instead of the 64px contact-detail size. */
+.detail-panel .part-row .part-headshot,
+.record-form .part-row .part-headshot {
+  width: 28px;
+  height: 28px;
+  font-size: 11px;
+  flex: none;
+}
+
+/* F14/ABS-11: the submission edit form's participant row — role select and
+   remove button ride the row's right edge, mirroring the read-only detail
+   panel's .part-flags placement above. */
+.record-form .part-row select { margin-left: auto; }
+.record-form .part-row .record-form-delete {
+  padding: 2px var(--space-2);
+  font-size: var(--text-caption);
+}
+
+/* Contact-search results under the "Add participant" input. */
+.record-form .contact-picker-results {
+  list-style: none;
+  margin: var(--space-1) 0 0;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  max-height: 160px;
+  overflow-y: auto;
+}
+
+.record-form .contact-picker-results li button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: var(--space-1) var(--space-2);
+  border: none;
+  background: none;
+  cursor: pointer;
+  font-size: var(--text-grid);
+  color: var(--text);
+}
+
+.record-form .contact-picker-results li button:hover:not(:disabled) { background: var(--surface-hover); }
+.record-form .contact-picker-results li button:disabled { color: var(--text-faint); cursor: default; }
 
 /* --- evaluation section --- */
 
@@ -203,6 +250,78 @@
   font: inherit;
   font-size: var(--text-label);
 }
+
+/* Evaluation: inline create/edit affordances and the empty/error states.
+   Replaces the old window.prompt() flow, which automation and some browsers
+   suppress outright. */
+
+.eval-newplan { display: flex; align-items: center; gap: var(--space-2); margin-left: auto; }
+.eval-newplan input {
+  padding: 4px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: var(--text-label);
+  min-width: 180px;
+}
+
+.eval-error { display: flex; align-items: center; gap: var(--space-3); flex-wrap: wrap; }
+
+.eval-empty {
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--surface);
+  padding: var(--space-4);
+  max-width: 560px;
+}
+.eval-empty h2 { margin: 0 0 var(--space-2); font-size: var(--text-base); }
+.eval-empty p { margin: 0 0 var(--space-2); color: var(--text-muted); font-size: var(--text-grid); }
+
+.eval-card .eval-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: var(--text-base);
+  font-weight: 700;
+  padding: 2px 4px;
+}
+.eval-card .eval-title:hover { border-color: var(--border); }
+.eval-card .eval-title:focus { border-color: var(--border-strong); background: var(--surface); outline: none; }
+
+.eval-anon {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-label);
+  color: var(--text-muted);
+  padding: var(--space-1) 0;
+}
+
+.crit-add {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  border-top: 1px solid var(--border);
+  padding-top: var(--space-2);
+  margin-top: var(--space-1);
+}
+.crit-add input {
+  padding: 3px 6px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: var(--text-label);
+}
+.crit-add input[type='text'], .crit-add input:not([type]) { flex: 1 1 auto; min-width: 0; }
+.crit-add input[type='number'] { width: 56px; }
 
 /* --- reviewer workspace --- */
 

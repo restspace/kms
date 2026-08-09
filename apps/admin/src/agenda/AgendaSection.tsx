@@ -644,7 +644,20 @@ export function AgendaSection({
           >
             {published ? 'Unpublish' : 'Publish'}
           </button>
-          <button className="primary" onClick={() => setShowAdd(true)}>+ Add Session</button>
+          <button
+            className="primary"
+            onClick={() => {
+              // Rooms/tracks can be added from Settings without leaving this
+              // screen open in another tab; the board's `data` is otherwise
+              // only refreshed on mount or after a mutation, so a room added
+              // moments ago could still be missing from this dialog's list
+              // without an explicit resync right before it opens.
+              reload()
+              setShowAdd(true)
+            }}
+          >
+            + Add Session
+          </button>
         </div>
       </header>
 

@@ -1,7 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
 import { isValidUrlShape } from '@kms/core';
 import { ModalDialog } from './dialogs';
-import { createEvent, type CreateEventInput } from '../api';
+import { createEvent, type CreateEventInput, type RoomDraft, type TrackDraft } from '../api';
+import {
+  RoomsRepeatableField,
+  TracksRepeatableField,
+  type RoomDraftRow,
+  type TrackDraftRow,
+} from './RoomsTracksFields';
 import './RecordForm.css';
 
 /**
@@ -61,6 +67,8 @@ export function CreateEventDialog({ open, onClose, defaultTimezone, onCreated }:
   const [startsAt, setStartsAt] = useState('');
   const [endsAt, setEndsAt] = useState('');
   const [description, setDescription] = useState('');
+  const [rooms, setRooms] = useState<RoomDraftRow[]>([]);
+  const [tracks, setTracks] = useState<TrackDraftRow[]>([]);
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -79,6 +87,8 @@ export function CreateEventDialog({ open, onClose, defaultTimezone, onCreated }:
     setStartsAt('');
     setEndsAt('');
     setDescription('');
+    setRooms([]);
+    setTracks([]);
     setErrors({});
     setSubmitError(null);
   }, [open, defaultTimezone]);
@@ -119,6 +129,15 @@ export function CreateEventDialog({ open, onClose, defaultTimezone, onCreated }:
     if (Object.keys(validation).length > 0) return;
     setIsSubmitting(true);
     try {
+      const roomDrafts: RoomDraft[] = rooms
+        .filter((r) => r.name.trim())
+        .map((r) => ({
+          name: r.name.trim(),
+          capacity: r.capacity.trim() === '' ? null : Number(r.capacity),
+        }));
+      const trackDrafts: TrackDraft[] = tracks
+        .filter((t) => t.name.trim())
+        .map((t) => ({ name: t.name.trim(), color: t.color.trim() || null }));
       const payload: CreateEventInput = {
         name: name.trim(),
         slug: slug.trim(),
@@ -129,6 +148,8 @@ export function CreateEventDialog({ open, onClose, defaultTimezone, onCreated }:
         starts_at: startsAt,
         ends_at: endsAt,
         description: description.trim() || null,
+        rooms: roomDrafts,
+        tracks: trackDrafts,
       };
       const result = await createEvent(payload);
       onCreated(result.id);
@@ -280,6 +301,14 @@ export function CreateEventDialog({ open, onClose, defaultTimezone, onCreated }:
             onChange={(e) => setDescription((e.target as HTMLTextAreaElement).value.slice(0, MAX_DESCRIPTION))}
             disabled={isSubmitting}
           />
+        </div>
+        <div className="record-form-field">
+          <label>Rooms</label>
+          <RoomsRepeatableField rows={rooms} onChange={setRooms} disabled={isSubmitting} />
+        </div>
+        <div className="record-form-field">
+          <label>Tracks</label>
+          <TracksRepeatableField rows={tracks} onChange={setTracks} disabled={isSubmitting} />
         </div>
       </form>
     </ModalDialog>

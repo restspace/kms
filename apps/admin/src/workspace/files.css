@@ -1,0 +1,122 @@
+/* File version chains + comment threads (lane W2-C), shared by the Tasks tab
+   detail, the submission detail panel and the Files library tab. */
+
+.file-chain {
+  margin: 8px 0 16px;
+}
+
+.file-chain-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 13px;
+}
+
+.file-chain-head .fname {
+  font-weight: 600;
+}
+
+.file-versions {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+  border: 1px solid var(--border, #e5e7eb);
+  border-radius: 6px;
+}
+
+.file-versions li {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 6px 10px;
+  font-size: 13px;
+  border-bottom: 1px solid var(--border, #e5e7eb);
+}
+
+.file-versions li:last-child {
+  border-bottom: 0;
+}
+
+.file-vtag {
+  font-size: 11px;
+  font-weight: 700;
+  border-radius: 4px;
+  padding: 1px 6px;
+  background: var(--surface-2, #f3f4f6);
+  color: var(--text-muted, #6b7280);
+}
+
+.file-vtag.current {
+  background: #dcfce7;
+  color: #15803d;
+}
+
+.file-vmeta {
+  color: var(--text-muted, #6b7280);
+  font-size: 12px;
+  margin-left: auto;
+}
+
+.file-thread {
+  margin-top: 10px;
+}
+
+.file-comment {
+  border-left: 3px solid var(--border, #e5e7eb);
+  padding: 2px 0 2px 8px;
+  margin-bottom: 8px;
+  font-size: 13px;
+}
+
+.file-comment.speaker {
+  border-left-color: #f59e0b;
+}
+
+.file-comment .fc-head {
+  color: var(--text-muted, #6b7280);
+  font-size: 12px;
+}
+
+.file-comment .fc-head strong {
+  color: var(--text, #1f2937);
+}
+
+.file-comment .fc-body {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.file-reply {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.file-reply textarea {
+  width: 100%;
+  font: inherit;
+  font-size: 13px;
+  padding: 6px 8px;
+  border: 1px solid var(--border, #d1d5db);
+  border-radius: 6px;
+  resize: vertical;
+}
+
+.file-reply-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.file-empty {
+  color: var(--text-muted, #6b7280);
+  font-size: 13px;
+}
+
+.file-error {
+  color: var(--danger, #dc2626);
+  font-size: 12px;
+}

@@ -96,23 +96,42 @@ adminApiRoutes.route('/agenda', agendaRoutes);
 // Dashboards (docs/09) — aggregates with ETag polling, reminder sends.
 adminApiRoutes.route('/dashboard', dashboardRoutes);
 
+// Last-resort safety net: any exception that escapes a route handler below
+// (this file's own, or a mounted sub-router's) used to propagate past Hono
+// entirely and come back to the browser as a bare network-level "Failed to
+// fetch" rather than a status code the UI could render (manual review: the
+// Review section and a freshly created event's workspace both died this
+// way). Individual hot paths get their own try/catch for a precise error
+// code; this is the floor under everything else in /app/api.
+adminApiRoutes.onError((err, c) => {
+  console.error(`${c.req.method} ${c.req.path} failed`, err);
+  const message = err instanceof Error ? err.message : 'unknown_error';
+  return c.json({ error: 'internal_error', message }, 500);
+});
+
 // GET /app/api/builder-meta — everything the builder's pickers need: the
 // field library, and routing-rule targets (tracks, tags, evaluation plans).
 adminApiRoutes.get('/builder-meta', async (c) => {
   const session = c.get('session');
   const db = c.env.DB;
-  const [fields, tracks, tags, plans] = await Promise.all([
-    db.prepare('SELECT id, key, label, type, scope, options, max_chars, system FROM field_definitions WHERE event_id = ? ORDER BY label').bind(session.eventId).all(),
-    db.prepare('SELECT id, name, color FROM tracks WHERE event_id = ? ORDER BY position').bind(session.eventId).all(),
-    db.prepare('SELECT id, name, color FROM tags WHERE event_id = ? ORDER BY name').bind(session.eventId).all(),
-    db.prepare('SELECT id, name, status FROM evaluation_plans WHERE event_id = ? ORDER BY name').bind(session.eventId).all(),
-  ]);
-  return c.json({
-    fields: fields.results,
-    tracks: tracks.results,
-    tags: tags.results,
-    plans: plans.results,
-  });
+  try {
+    const [fields, tracks, tags, plans] = await Promise.all([
+      db.prepare('SELECT id, key, label, type, scope, options, max_chars, system FROM field_definitions WHERE event_id = ? ORDER BY label').bind(session.eventId).all(),
+      db.prepare('SELECT id, name, color FROM tracks WHERE event_id = ? ORDER BY position').bind(session.eventId).all(),
+      db.prepare('SELECT id, name, color FROM tags WHERE event_id = ? ORDER BY name').bind(session.eventId).all(),
+      db.prepare('SELECT id, name, status FROM evaluation_plans WHERE event_id = ? ORDER BY name').bind(session.eventId).all(),
+    ]);
+    return c.json({
+      fields: fields.results,
+      tracks: tracks.results,
+      tags: tags.results,
+      plans: plans.results,
+    });
+  } catch (err) {
+    console.error('GET /builder-meta failed', err);
+    const message = err instanceof Error ? err.message : 'unknown_error';
+    return c.json({ error: 'builder_meta_failed', message }, 500);
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -621,7 +640,13 @@ adminApiRoutes.post('/:resource/query', async (c) => {
     return c.json(result);
   } catch (err) {
     if (err instanceof QueryError) return c.json({ error: err.code }, 400);
-    throw err;
+    // A D1/runtime failure here used to rethrow past this handler entirely —
+    // the client (DataList) sees a bare network-level "Failed to fetch"
+    // instead of a renderable error. Surface it as structured JSON instead
+    // (manual review: workspace item lists dying with no message).
+    console.error(`POST /${resource}/query failed`, err);
+    const message = err instanceof Error ? err.message : 'unknown_error';
+    return c.json({ error: 'query_failed', message }, 500);
   }
 });
 
@@ -650,6 +675,23 @@ function pickContactFields(raw: unknown): Record<string, string | null> {
   return out;
 }
 
+/**
+ * F13: the contacts UNIQUE (event_id, email) violation is caught by matching
+ * the D1 error text, not a pre-check — so the offending row's id has to be
+ * looked up after the fact. Returns null (never throws) if the lookup itself
+ * fails; the client falls back to the plain error message with no recovery
+ * button rather than a 500.
+ */
+async function findContactIdByEmail(c: Context<ApiEnv>, email: string | null | undefined): Promise<string | null> {
+  if (!email) return null;
+  const session = c.get('session');
+  const row = await c.env.DB.prepare('SELECT id FROM contacts WHERE event_id = ? AND lower(email) = lower(?)')
+    .bind(session.eventId, email)
+    .first<{ id: string }>()
+    .catch(() => null);
+  return row?.id ?? null;
+}
+
 adminApiRoutes.post('/contacts', async (c) => {
   const session = c.get('session');
   const fields = pickContactFields(await c.req.json().catch(() => ({})));
@@ -667,7 +709,7 @@ adminApiRoutes.post('/contacts', async (c) => {
       .run();
   } catch (err) {
     const message = err instanceof Error ? err.message : '';
-    if (message.includes('UNIQUE')) return c.json({ error: 'email_exists' }, 409);
+    if (message.includes('UNIQUE')) return c.json({ error: 'email_exists', existing_id: await findContactIdByEmail(c, fields.email) }, 409);
     throw err;
   }
   await bumpEventRevision(c.env, session.eventId);
@@ -693,7 +735,7 @@ adminApiRoutes.put('/contacts/:id', async (c) => {
       if (result.meta.changes === 0) return c.json({ error: 'not_found' }, 404);
     } catch (err) {
       const message = err instanceof Error ? err.message : '';
-      if (message.includes('UNIQUE')) return c.json({ error: 'email_exists' }, 409);
+      if (message.includes('UNIQUE')) return c.json({ error: 'email_exists', existing_id: await findContactIdByEmail(c, fields.email) }, 409);
       throw err;
     }
     await bumpEventRevision(c.env, session.eventId);
@@ -922,6 +964,227 @@ adminApiRoutes.delete('/tasks/:id', async (c) => {
 });
 
 // ---------------------------------------------------------------------------
+// Rooms & tracks CRUD (deferred-gap item: the tables existed with event_id +
+// position, but only agendaPayload ever SELECTed them — a freshly created
+// event offered nothing but "No room" / "No track" in the Add Session dialog,
+// which fails an eval scenario outright). Deletes null the reference on any
+// session that pointed at the room/track rather than blocking the delete or
+// cascading the session away — a session losing its room/track is a much
+// smaller surprise than a session disappearing.
+// ---------------------------------------------------------------------------
+
+const ROOM_TRACK_NAME_MAX_CHARS = 200;
+
+interface RoomFields {
+  values: Record<string, string | number | null>;
+  error?: string;
+}
+
+function pickRoomFields(raw: unknown, { requireName }: { requireName: boolean }): RoomFields {
+  const body = (raw ?? {}) as Record<string, unknown>;
+  const values: Record<string, string | number | null> = {};
+  const fail = (error: string): RoomFields => ({ values: {}, error });
+
+  if (requireName || 'name' in body) {
+    const name = typeof body.name === 'string' ? body.name.trim() : '';
+    if (!name) return fail('name_required');
+    values.name = name.slice(0, ROOM_TRACK_NAME_MAX_CHARS);
+  }
+  if ('capacity' in body) {
+    const capacity = parseCapacityValue(body.capacity);
+    if (capacity === undefined) return fail('invalid_capacity');
+    values.capacity = capacity;
+  }
+  if ('notes' in body) {
+    const v = body.notes;
+    if (v === null || v === '') values.notes = null;
+    else if (typeof v === 'string') values.notes = v.trim().slice(0, 2000);
+    else return fail('invalid_notes');
+  }
+  return { values };
+}
+
+/** Optional non-negative integer; `undefined` = not supplied/invalid (shared shape with agenda.ts's parseCapacity). */
+function parseCapacityValue(value: unknown): number | null | undefined {
+  if (value === undefined) return undefined;
+  if (value === null || value === '') return null;
+  const n = Number(value);
+  return Number.isInteger(n) && n >= 0 ? n : undefined;
+}
+
+const roomRow = (db: D1Database, id: string, eventId: string) =>
+  db.prepare('SELECT id, event_id, name, capacity, position, notes FROM rooms WHERE id = ? AND event_id = ?')
+    .bind(id, eventId)
+    .first();
+
+// GET /app/api/rooms — the event's rooms, position order (settings + agenda builder).
+adminApiRoutes.get('/rooms', async (c) => {
+  const session = c.get('session');
+  const { results } = await c.env.DB.prepare(
+    'SELECT id, event_id, name, capacity, position, notes FROM rooms WHERE event_id = ? ORDER BY position',
+  )
+    .bind(session.eventId)
+    .all();
+  return c.json({ items: results });
+});
+
+adminApiRoutes.post('/rooms', async (c) => {
+  const session = c.get('session');
+  if (!isWriter(session.role)) return c.json({ error: 'forbidden' }, 403);
+  const { values, error } = pickRoomFields(await c.req.json().catch(() => ({})), { requireName: true });
+  if (error) return c.json({ error }, 400);
+
+  const id = crypto.randomUUID();
+  await c.env.DB.prepare(
+    `INSERT INTO rooms (id, event_id, name, capacity, notes, position)
+     SELECT ?1, ?2, ?3, ?4, ?5, COALESCE((SELECT MAX(position) + 1 FROM rooms WHERE event_id = ?2), 0)`,
+  )
+    .bind(id, session.eventId, values.name, values.capacity ?? null, values.notes ?? null)
+    .run();
+  await bumpEventRevision(c.env, session.eventId);
+  return c.json(await roomRow(c.env.DB, id, session.eventId), 201);
+});
+
+adminApiRoutes.put('/rooms/:id', async (c) => {
+  const session = c.get('session');
+  if (!isWriter(session.role)) return c.json({ error: 'forbidden' }, 403);
+  const id = c.req.param('id');
+  const { values, error } = pickRoomFields(await c.req.json().catch(() => ({})), { requireName: false });
+  if (error) return c.json({ error }, 400);
+
+  const cols = Object.keys(values);
+  if (cols.length > 0) {
+    const result = await c.env.DB.prepare(
+      `UPDATE rooms SET ${cols.map((k) => `${k} = ?`).join(', ')} WHERE id = ? AND event_id = ?`,
+    )
+      .bind(...cols.map((k) => values[k]), id, session.eventId)
+      .run();
+    if (result.meta.changes === 0) return c.json({ error: 'not_found' }, 404);
+    await bumpEventRevision(c.env, session.eventId);
+  }
+  const row = await roomRow(c.env.DB, id, session.eventId);
+  if (!row) return c.json({ error: 'not_found' }, 404);
+  return c.json(row);
+});
+
+// DELETE /rooms/:id — any session scheduled "in" this room keeps its slot but
+// loses the room reference; a deleted room must never leave a dangling id
+// that the agenda board can no longer resolve to a name.
+adminApiRoutes.delete('/rooms/:id', async (c) => {
+  const session = c.get('session');
+  if (!isWriter(session.role)) return c.json({ error: 'forbidden' }, 403);
+  const id = c.req.param('id');
+  const db = c.env.DB;
+  const results = await db.batch([
+    db.prepare('UPDATE submissions SET room_id = NULL WHERE room_id = ? AND event_id = ?').bind(id, session.eventId),
+    db.prepare('DELETE FROM rooms WHERE id = ? AND event_id = ?').bind(id, session.eventId),
+  ]);
+  if ((results[1]?.meta.changes ?? 0) === 0) return c.json({ error: 'not_found' }, 404);
+  await bumpEventRevision(c.env, session.eventId);
+  return c.json({ ok: true });
+});
+
+interface TrackFields {
+  values: Record<string, string | number | null>;
+  error?: string;
+}
+
+function pickTrackFields(raw: unknown, { requireName }: { requireName: boolean }): TrackFields {
+  const body = (raw ?? {}) as Record<string, unknown>;
+  const values: Record<string, string | number | null> = {};
+  const fail = (error: string): TrackFields => ({ values: {}, error });
+
+  if (requireName || 'name' in body) {
+    const name = typeof body.name === 'string' ? body.name.trim() : '';
+    if (!name) return fail('name_required');
+    values.name = name.slice(0, ROOM_TRACK_NAME_MAX_CHARS);
+  }
+  if ('color' in body) {
+    const v = body.color;
+    if (v === null || v === '') values.color = null;
+    else if (typeof v === 'string') values.color = v.trim().slice(0, 20);
+    else return fail('invalid_color');
+  }
+  return { values };
+}
+
+const trackRow = (db: D1Database, id: string, eventId: string) =>
+  db.prepare('SELECT id, event_id, name, color, position FROM tracks WHERE id = ? AND event_id = ?')
+    .bind(id, eventId)
+    .first();
+
+// GET /app/api/tracks — the event's tracks, position order.
+adminApiRoutes.get('/tracks', async (c) => {
+  const session = c.get('session');
+  const { results } = await c.env.DB.prepare(
+    'SELECT id, event_id, name, color, position FROM tracks WHERE event_id = ? ORDER BY position',
+  )
+    .bind(session.eventId)
+    .all();
+  return c.json({ items: results });
+});
+
+adminApiRoutes.post('/tracks', async (c) => {
+  const session = c.get('session');
+  if (!isWriter(session.role)) return c.json({ error: 'forbidden' }, 403);
+  const { values, error } = pickTrackFields(await c.req.json().catch(() => ({})), { requireName: true });
+  if (error) return c.json({ error }, 400);
+
+  const id = crypto.randomUUID();
+  await c.env.DB.prepare(
+    `INSERT INTO tracks (id, event_id, name, color, position)
+     SELECT ?1, ?2, ?3, ?4, COALESCE((SELECT MAX(position) + 1 FROM tracks WHERE event_id = ?2), 0)`,
+  )
+    .bind(id, session.eventId, values.name, values.color ?? null)
+    .run();
+  await bumpEventRevision(c.env, session.eventId);
+  return c.json(await trackRow(c.env.DB, id, session.eventId), 201);
+});
+
+adminApiRoutes.put('/tracks/:id', async (c) => {
+  const session = c.get('session');
+  if (!isWriter(session.role)) return c.json({ error: 'forbidden' }, 403);
+  const id = c.req.param('id');
+  const { values, error } = pickTrackFields(await c.req.json().catch(() => ({})), { requireName: false });
+  if (error) return c.json({ error }, 400);
+
+  const cols = Object.keys(values);
+  if (cols.length > 0) {
+    const result = await c.env.DB.prepare(
+      `UPDATE tracks SET ${cols.map((k) => `${k} = ?`).join(', ')} WHERE id = ? AND event_id = ?`,
+    )
+      .bind(...cols.map((k) => values[k]), id, session.eventId)
+      .run();
+    if (result.meta.changes === 0) return c.json({ error: 'not_found' }, 404);
+    await bumpEventRevision(c.env, session.eventId);
+  }
+  const row = await trackRow(c.env.DB, id, session.eventId);
+  if (!row) return c.json({ error: 'not_found' }, 404);
+  return c.json(row);
+});
+
+// DELETE /tracks/:id — same null-the-reference semantics as rooms, plus the
+// M6 submission_tracks junction (multi-track, 0006_features.sql) which has no
+// application-level cleanup path otherwise.
+adminApiRoutes.delete('/tracks/:id', async (c) => {
+  const session = c.get('session');
+  if (!isWriter(session.role)) return c.json({ error: 'forbidden' }, 403);
+  const id = c.req.param('id');
+  const db = c.env.DB;
+  const results = await db.batch([
+    db.prepare('UPDATE submissions SET track_id = NULL WHERE track_id = ? AND event_id = ?').bind(id, session.eventId),
+    db.prepare(
+      `DELETE FROM submission_tracks WHERE track_id = ?
+       AND submission_id IN (SELECT id FROM submissions WHERE event_id = ?)`,
+    ).bind(id, session.eventId),
+    db.prepare('DELETE FROM tracks WHERE id = ? AND event_id = ?').bind(id, session.eventId),
+  ]);
+  if ((results[2]?.meta.changes ?? 0) === 0) return c.json({ error: 'not_found' }, 404);
+  await bumpEventRevision(c.env, session.eventId);
+  return c.json({ ok: true });
+});
+
+// ---------------------------------------------------------------------------
 // Events: create (FR-EVT-1/2) + patch (agenda publish rides the same route)
 // ---------------------------------------------------------------------------
 
@@ -929,12 +1192,83 @@ const EVENT_TYPES = ['conference', 'workshop', 'summit', 'meetup', 'other'];
 const SLUG_RE = /^[a-z0-9-]{2,64}$/;
 const DESCRIPTION_MAX_CHARS = 1000;
 
-const isoOrNull = (value: unknown): string | null =>
-  typeof value === 'string' && value.trim() !== '' && !Number.isNaN(Date.parse(value))
-    ? new Date(value).toISOString()
-    : null;
-
 const looksLikeUrl = (value: string): boolean => /^https?:\/\/[^\s.]+\.[^\s]+$/i.test(value.trim());
+
+// ---------------------------------------------------------------------------
+// Event date parsing: CreateEventDialog's <input type="date"> submits bare
+// "YYYY-MM-DD" strings. Naively doing `new Date("2027-05-12").toISOString()`
+// parses that as UTC midnight, which — rendered back in the event's own
+// timezone by apps/admin/src/agenda/timeUtils.ts eventDays() — lands one
+// calendar day early for any timezone west of UTC (e.g. a US event configured
+// for May 12–14 rendered as May 11–13). Bare dates must instead be read as
+// local midnight IN THE EVENT'S TIMEZONE. Full ISO instants (with time/zone,
+// e.g. from the REST API or older stored rows) are left untouched.
+//
+// This mirrors apps/admin/src/agenda/timeUtils.ts's utcToLocal/localToUtc
+// two-pass technique, duplicated here rather than imported because the API
+// worker and the admin SPA are separate build targets that do not share a
+// runtime package for this.
+// ---------------------------------------------------------------------------
+
+const BARE_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+const eventDateDtfCache = new Map<string, Intl.DateTimeFormat>();
+function eventDateDtf(tz: string): Intl.DateTimeFormat {
+  let f = eventDateDtfCache.get(tz);
+  if (!f) {
+    f = new Intl.DateTimeFormat('en-CA', {
+      timeZone: tz,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    });
+    eventDateDtfCache.set(tz, f);
+  }
+  return f;
+}
+
+function utcToLocalDay(iso: string, tz: string): { day: string; minutes: number } {
+  const parts = eventDateDtf(tz).formatToParts(new Date(iso));
+  const get = (type: string) => parts.find((p) => p.type === type)?.value ?? '00';
+  const hour = Number(get('hour')) % 24; // en-CA can emit "24" at midnight
+  return { day: `${get('year')}-${get('month')}-${get('day')}`, minutes: hour * 60 + Number(get('minute')) };
+}
+
+/** Wall clock (day, minutes) in `tz` -> UTC ISO. Two-pass offset refinement. */
+function localDayToUtc(day: string, minutes: number, tz: string): string {
+  const [y, m, d] = day.split('-').map(Number);
+  const target = Date.UTC(y as number, (m as number) - 1, d as number, 0, minutes);
+  let ts = target;
+  for (let i = 0; i < 2; i++) {
+    const local = utcToLocalDay(new Date(ts).toISOString(), tz);
+    const [ly, lm, ld] = local.day.split('-').map(Number);
+    const localTs = Date.UTC(ly as number, (lm as number) - 1, ld as number, 0, local.minutes);
+    ts += target - localTs;
+  }
+  return new Date(ts).toISOString();
+}
+
+/**
+ * starts_at/ends_at accept either a full ISO instant (unchanged behaviour) or
+ * a bare YYYY-MM-DD. Bare dates resolve to local midnight in `tz`; `end`
+ * dates resolve to the *end* of that local day (the next local midnight minus
+ * 1ms) so the configured last day is still the last day agenda/eventDays()
+ * shows, not the first minute of it.
+ */
+export function eventDateToIso(value: unknown, tz: string, end: boolean): string | null {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (trimmed === '') return null;
+  if (BARE_DATE_RE.test(trimmed)) {
+    if (!end) return localDayToUtc(trimmed, 0, tz);
+    const nextLocalMidnight = localDayToUtc(trimmed, 24 * 60, tz);
+    return new Date(Date.parse(nextLocalMidnight) - 1).toISOString();
+  }
+  return Number.isNaN(Date.parse(trimmed)) ? null : new Date(trimmed).toISOString();
+}
 
 interface EventFields {
   values: Record<string, string | number | null>;
@@ -942,8 +1276,15 @@ interface EventFields {
 }
 
 /** FR-EVT-2 fields, shared by create and patch. `theme` carries the description
- * (0001_init.sql:34 — the events table has no `description` column). */
-function pickEventFields(raw: unknown, { require: mustHave }: { require: boolean }): EventFields {
+ * (0001_init.sql:34 — the events table has no `description` column).
+ * `defaultTz` is the timezone bare starts_at/ends_at dates resolve against
+ * when the payload doesn't itself carry a `timezone` (create: the env
+ * default that will be used if none is given; patch: the event's current
+ * stored timezone). */
+function pickEventFields(
+  raw: unknown,
+  { require: mustHave, defaultTz }: { require: boolean; defaultTz: string },
+): EventFields {
   const body = (raw ?? {}) as Record<string, unknown>;
   const values: Record<string, string | number | null> = {};
   const fail = (error: string): EventFields => ({ values: {}, error });
@@ -985,13 +1326,14 @@ function pickEventFields(raw: unknown, { require: mustHave }: { require: boolean
     }
     values.timezone = v;
   }
+  const effectiveTz = (values.timezone as string | undefined) ?? defaultTz;
   if (mustHave || 'starts_at' in body) {
-    const starts = isoOrNull(body.starts_at);
+    const starts = eventDateToIso(body.starts_at, effectiveTz, false);
     if (!starts) return fail('invalid_starts_at');
     values.starts_at = starts;
   }
   if (mustHave || 'ends_at' in body) {
-    const ends = isoOrNull(body.ends_at);
+    const ends = eventDateToIso(body.ends_at, effectiveTz, true);
     if (!ends) return fail('invalid_ends_at');
     values.ends_at = ends;
   }
@@ -1010,16 +1352,66 @@ function pickEventFields(raw: unknown, { require: mustHave }: { require: boolean
   return { values };
 }
 
+interface NamedRow {
+  name: string;
+  extra: string | number | null;
+}
+
+/** Repeatable rooms/tracks rows from the create-event dialog. Blank rows (an
+ * empty "add another" row the user never filled in) are dropped rather than
+ * rejected — the dialog's UX is add-a-row-then-maybe-fill-it. */
+function parseNamedRows(raw: unknown, extraKey: 'capacity' | 'color'): NamedRow[] | null {
+  if (raw === undefined) return [];
+  if (!Array.isArray(raw)) return null;
+  const out: NamedRow[] = [];
+  for (const item of raw) {
+    let name = '';
+    let extra: string | number | null = null;
+    if (typeof item === 'string') {
+      name = item.trim();
+    } else if (item && typeof item === 'object' && !Array.isArray(item)) {
+      const obj = item as Record<string, unknown>;
+      name = typeof obj.name === 'string' ? obj.name.trim() : '';
+      if (extraKey === 'capacity') {
+        if ('capacity' in obj) {
+          const capacity = parseCapacityValue(obj.capacity);
+          if (capacity === undefined) return null;
+          extra = capacity;
+        }
+      } else {
+        const color = obj.color;
+        if (color === null || color === undefined || color === '') extra = null;
+        else if (typeof color === 'string') extra = color.trim().slice(0, 20);
+        else return null;
+      }
+    } else {
+      return null;
+    }
+    if (!name) continue;
+    out.push({ name: name.slice(0, ROOM_TRACK_NAME_MAX_CHARS), extra });
+  }
+  return out;
+}
+
 // POST /app/api/events — a new event inside the creator's organisation. The
 // creator lands in it as an owner, which needs a contacts row too: contacts
 // are event-scoped, so the seat and its person are created with the event.
+// Optional `rooms`/`tracks` arrays (repeatable fields in the create-event
+// dialog) are inserted in the same batch so the agenda builder's Add Session
+// dialog has real options from the first save, not just "No room"/"No track".
 adminApiRoutes.post('/events', async (c) => {
   const session = c.get('session');
   if (!isWriter(session.role)) return c.json({ error: 'forbidden' }, 403);
   const db = c.env.DB;
 
-  const { values, error } = pickEventFields(await c.req.json().catch(() => ({})), { require: true });
+  const body = await c.req.json().catch(() => ({}));
+  const { values, error } = pickEventFields(body, { require: true, defaultTz: c.env.EVENT_DEFAULT_TZ });
   if (error) return c.json({ error }, 400);
+  const rawBody = (body ?? {}) as Record<string, unknown>;
+  const rooms = parseNamedRows(rawBody.rooms, 'capacity');
+  if (rooms === null) return c.json({ error: 'invalid_rooms' }, 400);
+  const tracks = parseNamedRows(rawBody.tracks, 'color');
+  if (tracks === null) return c.json({ error: 'invalid_tracks' }, 400);
 
   const org = await db.prepare('SELECT org_id FROM events WHERE id = ?')
     .bind(session.eventId).first<{ org_id: string }>();
@@ -1057,6 +1449,14 @@ adminApiRoutes.post('/events', async (c) => {
         `INSERT INTO event_users (event_id, contact_id, role, invited_at, accepted_at)
          VALUES (?, ?, 'owner', ?, ?)`,
       ).bind(id, contactId, ts, ts),
+      ...rooms.map((r, i) =>
+        db.prepare('INSERT INTO rooms (id, event_id, name, capacity, position) VALUES (?, ?, ?, ?, ?)')
+          .bind(crypto.randomUUID(), id, r.name, r.extra, i),
+      ),
+      ...tracks.map((t, i) =>
+        db.prepare('INSERT INTO tracks (id, event_id, name, color, position) VALUES (?, ?, ?, ?, ?)')
+          .bind(crypto.randomUUID(), id, t.name, t.extra, i),
+      ),
     ]);
   } catch (err) {
     const message = err instanceof Error ? err.message : '';
@@ -1077,7 +1477,22 @@ adminApiRoutes.patch('/events/:id', async (c) => {
   if (!isWriter(seat?.role ?? session.role)) return c.json({ error: 'forbidden' }, 403);
 
   const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
-  const { values, error } = pickEventFields(body, { require: false });
+
+  // Bare starts_at/ends_at dates (see eventDateToIso) resolve against the
+  // *current* stored timezone when the patch doesn't also change it, so fetch
+  // the current row up front whenever either date field is present — this
+  // also covers the pre-existing range-check re-query below, one query
+  // instead of two.
+  let current: { starts_at: string; ends_at: string; timezone: string } | null = null;
+  if ('starts_at' in body || 'ends_at' in body) {
+    current = await c.env.DB.prepare('SELECT starts_at, ends_at, timezone FROM events WHERE id = ?')
+      .bind(eventId).first<{ starts_at: string; ends_at: string; timezone: string }>();
+  }
+
+  const { values, error } = pickEventFields(body, {
+    require: false,
+    defaultTz: current?.timezone ?? c.env.EVENT_DEFAULT_TZ,
+  });
   if (error) return c.json({ error }, 400);
 
   if ('agenda_published' in body) {
@@ -1089,8 +1504,6 @@ adminApiRoutes.patch('/events/:id', async (c) => {
   // A patch that only re-sends starts_at/ends_at must still be range-checked
   // against the stored value it does not carry.
   if (typeof values.starts_at === 'string' || typeof values.ends_at === 'string') {
-    const current = await c.env.DB.prepare('SELECT starts_at, ends_at FROM events WHERE id = ?')
-      .bind(eventId).first<{ starts_at: string; ends_at: string }>();
     const starts = (values.starts_at as string | undefined) ?? current?.starts_at ?? '';
     const ends = (values.ends_at as string | undefined) ?? current?.ends_at ?? '';
     if (starts && ends && Date.parse(ends) < Date.parse(starts)) {
@@ -1114,6 +1527,51 @@ adminApiRoutes.patch('/events/:id', async (c) => {
   }
   await bumpEventRevision(c.env, eventId);
   return c.json({ ok: true });
+});
+
+// GET /app/api/events — the workspace Events tab (W2-E): the org's
+// accessible events (event-as-filter model, docs/12) with the fields a list
+// row needs plus two cheap counts. Both counts are single grouped queries
+// over the same accessible id set rather than one query per event.
+adminApiRoutes.get('/events', async (c) => {
+  const accessible = await accessibleEvents(c);
+  if (accessible.length === 0) return c.json({ items: [] });
+  const ids = accessible.map((e) => e.event_id);
+  const placeholders = ids.map(() => '?').join(', ');
+  const db = c.env.DB;
+  const [eventsResult, contactCounts, submissionCounts] = await Promise.all([
+    db
+      .prepare(
+        `SELECT id, name, slug, starts_at, ends_at, agenda_published
+         FROM events WHERE id IN (${placeholders}) ORDER BY starts_at DESC`,
+      )
+      .bind(...ids)
+      .all<{ id: string; name: string; slug: string; starts_at: string; ends_at: string; agenda_published: number }>(),
+    db
+      .prepare(`SELECT event_id, COUNT(*) AS n FROM contacts WHERE event_id IN (${placeholders}) GROUP BY event_id`)
+      .bind(...ids)
+      .all<{ event_id: string; n: number }>(),
+    db
+      .prepare(`SELECT event_id, COUNT(*) AS n FROM submissions WHERE event_id IN (${placeholders}) GROUP BY event_id`)
+      .bind(...ids)
+      .all<{ event_id: string; n: number }>(),
+  ]);
+  const byId = new Map(accessible.map((e) => [e.event_id, e]));
+  const contactsById = new Map(contactCounts.results.map((r) => [r.event_id, r.n]));
+  const submissionsById = new Map(submissionCounts.results.map((r) => [r.event_id, r.n]));
+  return c.json({
+    items: eventsResult.results.map((e) => ({
+      id: e.id,
+      name: e.name,
+      slug: e.slug,
+      starts_at: e.starts_at,
+      ends_at: e.ends_at,
+      agenda_published: e.agenda_published === 1,
+      role: byId.get(e.id)?.role ?? 'reviewer',
+      speaker_count: contactsById.get(e.id) ?? 0,
+      submission_count: submissionsById.get(e.id) ?? 0,
+    })),
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1246,18 +1704,27 @@ async function listWorkspaceEvents(c: Context<ApiEnv>): Promise<AdminEventRow[]>
 // reviewer seats appear here too, not just owner/admin ones.
 adminApiRoutes.get('/me', async (c) => {
   const session = c.get('session');
-  const [event, events] = await Promise.all([
-    c.env.DB.prepare('SELECT id, name, slug, starts_at, ends_at, timezone FROM events WHERE id = ?')
-      .bind(session.eventId)
-      .first(),
-    listWorkspaceEvents(c),
-  ]);
-  return c.json({
-    email: session.email,
-    role: session.role,
-    event,
-    events: events.map(({ id, name, slug, starts_at, ends_at }) => ({ id, name, slug, starts_at, ends_at })),
-  });
+  try {
+    const [event, events] = await Promise.all([
+      c.env.DB.prepare('SELECT id, name, slug, starts_at, ends_at, timezone FROM events WHERE id = ?')
+        .bind(session.eventId)
+        .first(),
+      listWorkspaceEvents(c),
+    ]);
+    return c.json({
+      email: session.email,
+      role: session.role,
+      event,
+      events: events.map(({ id, name, slug, starts_at, ends_at }) => ({ id, name, slug, starts_at, ends_at })),
+    });
+  } catch (err) {
+    // A fresh event / seat-less legacy session shape must never crash the
+    // workspace shell outright — surface a structured error instead of
+    // letting the exception propagate as a network-level failure.
+    console.error('GET /me failed', err);
+    const message = err instanceof Error ? err.message : 'unknown_error';
+    return c.json({ error: 'me_failed', message }, 500);
+  }
 });
 
 // POST /app/api/switch-event { event_id } — re-mint the session for another

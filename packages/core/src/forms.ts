@@ -355,7 +355,17 @@ export function applyRouting(config: RoutingConfig | null | undefined, answers: 
 // Participant roles config (submission_forms.participant_roles json)
 // ---------------------------------------------------------------------------
 
-export type ParticipantRole = 'speaker' | 'co-speaker' | 'moderator' | 'panelist';
+export type ParticipantRole = 'speaker' | 'co-speaker' | 'moderator' | 'panelist' | 'co-author' | 'co-presenter';
+
+/**
+ * Canonical role vocabulary (F14/ABS-11) — the single source of truth other
+ * modules should import from rather than hand-rolling their own Set. Must
+ * stay in lockstep with the `submission_participants.role` CHECK constraint
+ * (packages/db/migrations/0008_participant_roles.sql).
+ */
+export const ALL_PARTICIPANT_ROLES: readonly ParticipantRole[] = [
+  'speaker', 'co-speaker', 'moderator', 'panelist', 'co-author', 'co-presenter',
+];
 
 export interface ParticipantRoleConfig {
   role: ParticipantRole;
@@ -472,7 +482,7 @@ export function validateRoutingConfig(value: unknown, basePath = 'routing_rules'
   return issues;
 }
 
-const PARTICIPANT_ROLES: ReadonlySet<string> = new Set(['speaker', 'co-speaker', 'moderator', 'panelist']);
+const PARTICIPANT_ROLES: ReadonlySet<string> = new Set(ALL_PARTICIPANT_ROLES);
 
 /** Validate a submission_forms.participant_roles value. Empty array = no issues. */
 export function validateParticipantRolesConfig(value: unknown, basePath = 'participant_roles'): ConfigIssue[] {

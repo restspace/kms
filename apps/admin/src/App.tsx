@@ -5,8 +5,10 @@ import type {
   DataSourceResult,
 } from './components/DataList'
 import {
+  ApiError,
   bulkStatus,
   createContact,
+  createSubmission,
   createTask,
   deleteContact,
   getMe,
@@ -15,16 +17,21 @@ import {
   sendDecisions,
   switchEvent,
   updateContact,
+  updateSubmission,
   updateSubmissionStatus,
   type ContactRow,
   type Me,
   type MessageRow,
   type SubmissionRow,
   type TaskAssignmentRow,
+  getFileLibrary,
+  type FileLibraryRow,
+  getEvents,
+  type EventListRow,
 } from './api'
-import { buildExportUrl } from './api'
+import { buildExportUrl, downloadFilesBundle } from './api'
 import { appAlert, appConfirm } from './components/dialogs'
-import { RecordForm } from './components/RecordForm'
+import { RecordForm, RecordFormActionableError } from './components/RecordForm'
 import { CreateEventDialog } from './components/CreateEventDialog'
 import { FormsSection } from './forms/FormsSection'
 import { SettingsSection } from './settings/SettingsSection'
@@ -32,13 +39,17 @@ import { EvaluationSection } from './evaluation/EvaluationSection'
 import { AgendaSection } from './agenda/AgendaSection'
 import { DashboardSection, type AppNavTarget } from './dashboard/DashboardSection'
 import { ReviewerWorkspace } from './review/ReviewerWorkspace'
+import { EmbedsSection } from './embeds/EmbedsSection'
 import {
   BulkBar,
   StatusChipsFilter,
   SubmissionDetailPanel,
+  SubmissionEditForm,
   SUBMISSION_STATUSES,
   statusLabel,
 } from './workspace/extras'
+import { FileLibraryDetail, TaskFilesPanel, formatBytes } from './workspace/FilePanels'
+import { openImportWizard } from './workspace/ImportWizard'
 import {
   EventFilterChip,
   EventFilterSelect,
@@ -48,6 +59,7 @@ import {
   type EventScopeValue,
 } from './eventScope'
 import { currentRoute, navigate, useRoute, type ViewKey } from './router'
+import { AdminErrorBoundary } from './components/AdminErrorBoundary'
 import './shell.css'
 
 /**
@@ -71,6 +83,7 @@ const NAV_ITEMS: ReadonlyArray<{ key: ViewKey; label: string; soon: string | nul
   { key: 'evaluation', label: 'Evaluation', soon: null },
   { key: 'review', label: 'Review', soon: null },
   { key: 'agenda', label: 'Agenda', soon: null },
+  { key: 'embeds', label: 'Embeds', soon: null },
   { key: 'settings', label: 'Settings', soon: null },
 ]
 
@@ -83,6 +96,34 @@ const fmtDate = (iso: string | null | undefined): string => {
 
 const contactName = (c: ContactRow): string =>
   [c.first_name, c.last_name].filter(Boolean).join(' ') || c.email
+
+const initials = (c: ContactRow): string => {
+  const parts = [c.first_name, c.last_name].filter(Boolean) as string[]
+  if (parts.length > 0) return parts.map((p) => p[0]?.toUpperCase() ?? '').join('')
+  return (c.email[0] ?? '?').toUpperCase()
+}
+
+/**
+ * Speaker headshot (manual-QA item 3): the contacts query already selects
+ * `c.*`, which includes `headshot_asset_id` — it just wasn't on the
+ * `ContactRow` TS interface. Served through `/files/<id>`, which an
+ * authenticated admin session already has access to via fileAuth. Falls back
+ * to an initials avatar when no headshot is on file.
+ */
+const ContactHeadshot = ({ item }: { item: ContactRow }) =>
+  item.headshot_asset_id ? (
+    <img
+      className="contact-headshot"
+      src={`/files/${item.headshot_asset_id}`}
+      alt={`${contactName(item)} headshot`}
+      width={64}
+      height={64}
+    />
+  ) : (
+    <div className="contact-headshot contact-headshot-fallback" aria-hidden="true">
+      {initials(item)}
+    </div>
+  )
 
 const stripHtml = (html: string): string => {
   const el = document.createElement('div')
@@ -107,6 +148,26 @@ const speakerSchema = {
     pronouns: { type: 'string', title: 'Pronouns' },
     biography: { type: 'string', format: 'textarea', title: 'Biography' },
     notes: { type: 'string', format: 'textarea', title: 'Internal notes' },
+  },
+}
+
+/**
+ * F14/ABS-11: the base schema for submissions. This drives the "+ New"
+ * generic RecordForm (a manual submission has no track/room/participants
+ * yet) and satisfies `TabConfig.schema`'s edit-gating requirement; the real
+ * edit surface is `SubmissionEditForm` (workspace/extras.tsx, wired below as
+ * `editComponent`) — it needs a dynamic track/room picker and a participant
+ * editor RecordForm's static JSON-Schema can't express.
+ */
+const submissionSchema = {
+  type: 'object',
+  required: ['title'],
+  properties: {
+    title: { type: 'string', title: 'Title' },
+    description: { type: 'string', format: 'textarea', title: 'Description' },
+    format: { type: 'string', title: 'Format' },
+    level: { type: 'string', title: 'Level' },
+    language: { type: 'string', title: 'Language' },
   },
 }
 
@@ -155,9 +216,34 @@ const TaskCreateForm = ({ initialValues, onSubmit, onCancel, title, onDirtyChang
 )
 
 /** Workspace tab keys addressable by dashboard deep-links. */
-type WorkspaceTabKey = 'speakers' | 'submissions' | 'tasks' | 'messages'
+type WorkspaceTabKey = 'speakers' | 'submissions' | 'tasks' | 'messages' | 'files' | 'events'
 
-const WORKSPACE_TAB_KEYS: readonly WorkspaceTabKey[] = ['speakers', 'submissions', 'tasks', 'messages']
+const WORKSPACE_TAB_KEYS: readonly WorkspaceTabKey[] = ['speakers', 'submissions', 'tasks', 'messages', 'files', 'events']
+
+/**
+ * Events tab dataSource (manual-QA item 1: no way to list/switch events from
+ * the workspace). Module-level — not eventFilterId-scoped like the other
+ * tabs' sources (the Events tab always shows the org's accessible events
+ * regardless of the workspace filter) — so its identity never changes and it
+ * never needs to be part of `buildScopedSources`. `GET /app/api/events`
+ * doesn't paginate (the accessible set is small), so this just slices the
+ * one response client-side.
+ */
+const eventsDataSource = async (params: DataSourceParams): Promise<DataSourceResult<EventListRow>> => {
+  const { items } = await getEvents()
+  const q = typeof params.filters.q === 'string' ? params.filters.q.trim().toLowerCase() : ''
+  const filtered = q ? items.filter((e) => e.name.toLowerCase().includes(q) || e.slug.toLowerCase().includes(q)) : items
+  const sorted = params.sort
+    ? [...filtered].sort((a, b) => {
+        const field = params.sort!.field as keyof EventListRow
+        const av = a[field]
+        const bv = b[field]
+        const cmp = av === bv ? 0 : av > bv ? 1 : -1
+        return params.sort!.direction === 'desc' ? -cmp : cmp
+      })
+    : filtered
+  return { items: sorted.slice(params.from, params.from + params.size), total: sorted.length }
+}
 
 const isWorkspaceTabKey = (value: string | null): value is WorkspaceTabKey =>
   value !== null && (WORKSPACE_TAB_KEYS as readonly string[]).includes(value)
@@ -198,22 +284,65 @@ async function loadWorkspaceRecord(
   return null
 }
 
-/** Workspace tab configs against the Worker's generic query endpoints. */
-function buildWorkspaceConfig(
-  onChecklist: (ids: string[]) => void,
-  checklistResetKey: number,
-  seeds: WorkspaceSeeds,
-  currentEventId: string,
-  eventFilterId: string | null,
-): Record<string, TabConfig> {
-  // Event as a filter dimension: with no `event_id` the Worker returns every
-  // event this staff email can reach, so the tabs span the organisation.
+/**
+ * Event-scoped `dataSource` functions, one per workspace resource, keyed only
+ * by `eventFilterId` — see `useScopedSources` below for why these must be
+ * memoized independently of `buildWorkspaceConfig`'s other inputs (seeds,
+ * checklistResetKey, ...).
+ */
+interface ScopedSources {
+  contacts: (params: DataSourceParams) => Promise<DataSourceResult<ContactRow>>
+  submissions: (params: DataSourceParams) => Promise<DataSourceResult<unknown>>
+  tasks: (params: DataSourceParams) => Promise<DataSourceResult<TaskAssignmentRow>>
+  messages: (params: DataSourceParams) => Promise<DataSourceResult<MessageRow>>
+  files: (params: DataSourceParams) => Promise<DataSourceResult<FileLibraryRow>>
+}
+
+/**
+ * Builds the `ScopedSources` above. Pulled out of `buildWorkspaceConfig` and
+ * memoized in `App` on `[eventFilterId]` alone (manual-QA item 2): before
+ * this split, every dashboard-bubble click or search keystroke rebuilt
+ * *all five* dataSource closures (via `mergedSeeds`/`checklistResetKey`
+ * changing), and DataList treats a new `dataSource` identity as a reason to
+ * wipe `items` and refetch (see DataList.tsx's `dataSourceVersion` effect) —
+ * every grid, not just the one whose filter actually changed. That's the
+ * ~2s cross-tab reset/refetch jitter after a bubble click.
+ */
+function buildScopedSources(eventFilterId: string | null): ScopedSources {
   const scoped = <T,>(resource: 'contacts' | 'submissions' | 'messages' | 'tasks') => {
     const base = queryResource<T>(resource)
     if (!eventFilterId) return base
     return (params: DataSourceParams): Promise<DataSourceResult<T>> =>
       base({ ...params, filters: { ...params.filters, event_id: eventFilterId } })
   }
+  return {
+    contacts: scoped<ContactRow>('contacts'),
+    submissions: scoped('submissions'),
+    tasks: scoped<TaskAssignmentRow>('tasks'),
+    messages: scoped<MessageRow>('messages'),
+    files: (params: DataSourceParams): Promise<DataSourceResult<FileLibraryRow>> =>
+      getFileLibrary({
+        from: params.from,
+        size: params.size,
+        event_id: eventFilterId ?? undefined,
+        submission_id: typeof params.filters.submission_id === 'string' ? params.filters.submission_id : undefined,
+        contact_id: typeof params.filters.contact_id === 'string' ? params.filters.contact_id : undefined,
+        q: typeof params.filters.q === 'string' ? params.filters.q : undefined,
+      }),
+  }
+}
+
+/** Workspace tab configs against the Worker's generic query endpoints. */
+function buildWorkspaceConfig(
+  onChecklist: (ids: string[]) => void,
+  checklistResetKey: number,
+  seeds: WorkspaceSeeds,
+  currentEventId: string,
+  currentEventName: string,
+  scopedSources: ScopedSources,
+  onCreateEvent: () => void,
+  onSelectEvent: (eventId: string) => void,
+): Record<string, TabConfig> {
   // Export buttons (M6): each tab downloads its current view — active filters
   // and anchor included — through the public REST API's export endpoint.
   // KNOWN LIMITATION: the export endpoint is single-event, so with the filter
@@ -225,11 +354,39 @@ function buildWorkspaceConfig(
       return buildExportUrl(eventId, resource, format, rest, query.sort)
     },
   })
+  /**
+   * Import entry point (FR-REV-8). An import writes into exactly one event, so
+   * "All events" has no target: the tab's live `event_id` filter is the target,
+   * and its absence is explained rather than silently defaulted to the session
+   * event. `reload` refetches the grid once the wizard has committed.
+   */
+  const importAction = (target: 'sessions' | 'contacts', label: string) => ({
+    id: `import-${target}`,
+    label: '↥ IMPORT',
+    title: `Import ${label} from a CSV or XLSX file (column mapping + dry run first)`,
+    onClick: ({ filters, reload }: { filters: Record<string, unknown>; reload: () => void }) => {
+      const eventId = typeof filters.event_id === 'string' && filters.event_id ? filters.event_id : ''
+      if (!eventId) {
+        void appAlert(
+          `An import has to know which event it is writing into. Pick a single event in the sidebar (the filter is on "All events"), then import ${label}.`,
+          'Choose a target event',
+        )
+        return
+      }
+      openImportWizard({
+        target,
+        eventId,
+        eventName: eventId === currentEventId ? currentEventName : eventId,
+        onImported: reload,
+      })
+    },
+  })
+
   /** Cross-event provenance column; hidden on mobile where width is scarce. */
   const eventColumn = { field: 'event_name', header: 'Event', width: '140px', sortable: false, mobileHidden: true }
   const speakers: TabConfig<ContactRow> = {
     displayTitle: 'Speakers',
-    dataSource: scoped<ContactRow>('contacts'),
+    dataSource: scopedSources.contacts,
     getItemId: (item) => item.id,
     getItemTitle: contactName,
     columns: [
@@ -242,8 +399,13 @@ function buildWorkspaceConfig(
     ],
     detailComponent: ({ item, onEdit }) => (
       <div className="detail-panel">
-        <h2>{contactName(item)}</h2>
-        <div className="detail-sub">{item.job_title ? `${item.job_title} · ` : ''}{item.company ?? ''}</div>
+        <div className="detail-panel-head">
+          <ContactHeadshot item={item} />
+          <div>
+            <h2>{contactName(item)}</h2>
+            <div className="detail-sub">{item.job_title ? `${item.job_title} · ` : ''}{item.company ?? ''}</div>
+          </div>
+        </div>
         <dl>
           <dt>Email</dt><dd>{item.email}</dd>
           {item.mobile_phone && <><dt>Mobile</dt><dd>{item.mobile_phone}</dd></>}
@@ -262,9 +424,34 @@ function buildWorkspaceConfig(
     globalFilterSets: { id: 'contact_id' },
     globalFilterReceives: { submission_id: 'submission_id' },
     exportConfig: exportFor('contacts'),
+    toolbarActions: [importAction('contacts', 'speakers')],
     schema: speakerSchema,
-    onUpsert: async (data, existing?: ContactRow) =>
-      existing ? updateContact(existing.id, data) : createContact(data),
+    // F13: a duplicate email is a validation rule worth keeping, but the
+    // form used to be a dead end — the organiser had no way back to the
+    // contact that already owns the address. The API now echoes its id on
+    // the 409 (adminApi.ts's `email_exists`); surface it as a recovery
+    // action next to the error rather than silently guessing which record
+    // to open (consistent with the importer's fill-blanks-only merge: never
+    // clobber, always land the organiser on the real record instead).
+    onUpsert: async (data, existing?: ContactRow) => {
+      try {
+        return existing ? await updateContact(existing.id, data) : await createContact(data)
+      } catch (err) {
+        if (
+          err instanceof ApiError &&
+          err.status === 409 &&
+          err.details?.error === 'email_exists' &&
+          typeof err.details.existing_id === 'string'
+        ) {
+          const existingId = err.details.existing_id
+          throw new RecordFormActionableError(err.message, {
+            label: 'Open existing contact',
+            onClick: () => navigate({ v: 'workspace', tab: 'speakers', rec: existingId }),
+          })
+        }
+        throw err
+      }
+    },
     onDelete: async (item) => {
       const confirmed = await appConfirm(
         `Delete ${contactName(item)}? Their submissions remain, unattributed; ` +
@@ -279,7 +466,7 @@ function buildWorkspaceConfig(
 
   const submissions: TabConfig<SubmissionRow & { rating: number | null; notified_at: string | null; review_count: number }> = {
     displayTitle: 'Submissions',
-    dataSource: scoped('submissions'),
+    dataSource: scopedSources.submissions as (params: DataSourceParams) => Promise<DataSourceResult<SubmissionRow & { rating: number | null; notified_at: string | null; review_count: number }>>,
     getItemId: (item) => item.id,
     titleField: 'title',
     initialSort: { field: 'created_at', direction: 'desc' },
@@ -345,11 +532,46 @@ function buildWorkspaceConfig(
     globalFilterSets: { id: 'submission_id' },
     globalFilterReceives: { contact_id: 'contact_id' },
     exportConfig: exportFor('submissions'),
+    toolbarActions: [
+      importAction('sessions', 'sessions'),
+      {
+        // Latest version only (is_current), one folder per submission — the
+        // server owns both rules; see routes/importExport.ts.
+        id: 'files-zip',
+        label: '↓ FILES',
+        title: 'Download the current version of every file attached to the checked submissions, as a ZIP',
+        disabled: ({ checkedIds }: { checkedIds: string[] }) =>
+          checkedIds.length === 0 && 'Check one or more submissions to download their files',
+        onClick: async ({ checkedIds }: { checkedIds: string[] }) => {
+          try {
+            await downloadFilesBundle(checkedIds)
+          } catch (err) {
+            await appAlert(err instanceof Error ? err.message : 'The download failed.', 'Download files')
+          }
+        },
+      },
+    ],
+    // F14/ABS-11: row double-click now opens a real edit form — previously
+    // submissions had neither `schema` nor `onUpsert`, so double-click fell
+    // through to the read-only detail panel and there was no way to fix a
+    // title/track/room, let alone add a co-speaker after the fact. `schema`
+    // still backs the generic "+ New" create form (a fresh manual submission
+    // has no participants yet); `editComponent` overrides *editing* with the
+    // fuller custom form (track/room pickers + participant management).
+    schema: submissionSchema,
+    editComponent: SubmissionEditForm,
+    onUpsert: async (data, existing) => {
+      const saved = existing ? await updateSubmission(existing.id, data) : await createSubmission(data)
+      // Mirrors the Tasks tab's cast (line ~589): the write response's shape
+      // only needs to satisfy TabConfig's generic signature here — the
+      // list refetch after save is what the grid actually renders from.
+      return saved as unknown as SubmissionRow & { rating: number | null; notified_at: string | null; review_count: number }
+    },
   }
 
   const tasks: TabConfig<TaskAssignmentRow> = {
     displayTitle: 'Tasks',
-    dataSource: scoped<TaskAssignmentRow>('tasks'),
+    dataSource: scopedSources.tasks,
     getItemId: (item) => item.id,
     getItemTitle: (item) => item.task_title,
     columns: [
@@ -396,6 +618,8 @@ function buildWorkspaceConfig(
           {item.due_at && <><dt>Due</dt><dd>{fmtDate(item.due_at)}</dd></>}
           {item.completed_at && <><dt>Completed</dt><dd>{fmtDate(item.completed_at)}</dd></>}
         </dl>
+        {/* The file the task produced — invisible to organisers before W2-C. */}
+        <TaskFilesPanel assignmentId={item.id} actionType={item.action_type} />
       </div>
     ),
     // Receive both anchors (docs/12 M3); anchoring a task narrows other tabs
@@ -421,7 +645,7 @@ function buildWorkspaceConfig(
 
   const messages: TabConfig<MessageRow> = {
     displayTitle: 'Messages',
-    dataSource: scoped<MessageRow>('messages'),
+    dataSource: scopedSources.messages,
     getItemId: (item) => item.id,
     getItemTitle: (item) => item.subject ?? item.template_key ?? item.id,
     initialSort: { field: 'created_at', direction: 'desc' },
@@ -481,11 +705,112 @@ function buildWorkspaceConfig(
     messages.filterConfig = { initialFilters: seeds.messages, defaultFilters: {}, FilterComponent: NullFilter }
   }
 
+  // Files library (W2-C): one row per version chain, so a count of versions is
+  // meaningful and the current file is a single row. It reads its own endpoint
+  // rather than the generic query endpoint — the rows are chains, not records.
+  const files: TabConfig<FileLibraryRow> = {
+    displayTitle: 'Files',
+    dataSource: scopedSources.files,
+    getItemId: (item) => item.upload_id,
+    getItemTitle: (item) => item.filename,
+    columns: [
+      {
+        field: 'filename',
+        header: 'File',
+        width: '1.6fr',
+        render: (value: string, item) => (
+          <a href={`/files/${item.file_asset_id}`} target="_blank" rel="noopener" onClick={(e) => e.stopPropagation()}>
+            {value}
+          </a>
+        ),
+      },
+      { field: 'uploader_name', header: 'Uploaded by', render: (value: string | null, item) => value ?? item.uploader_email ?? '' },
+      { field: 'submission_code', header: 'For', width: '80px', mobileHidden: true },
+      { field: 'size_bytes', header: 'Size', width: '90px', render: (value: number | null) => formatBytes(value) },
+      { field: 'version_count', header: 'Versions', width: '90px' },
+      { field: 'uploaded_at', header: 'Uploaded', width: '110px', render: (value: string) => fmtDate(value) },
+      eventColumn,
+    ],
+    detailComponent: ({ item }) => <FileLibraryDetail item={item} />,
+    globalFilterReceives: { contact_id: 'contact_id', submission_id: 'submission_id' },
+  }
+
+  // Events tab (manual-QA item 1): the org's accessible events, always
+  // unscoped by `eventFilterId` (see `eventsDataSource`'s doc comment) — you
+  // need to see every event to switch into one. A row click fires
+  // `onSelectionChange` below and moves the workspace's event filter (the
+  // same "event as a filter dimension" mechanism as the sidebar's
+  // `EventFilterSelect`), rather than opening a detail tab.
+  const events: TabConfig<EventListRow> = {
+    displayTitle: 'Events',
+    dataSource: eventsDataSource,
+    getItemId: (item) => item.id,
+    getItemTitle: (item) => item.name,
+    columns: [
+      { field: 'name', header: 'Name', width: '2fr', sortable: true },
+      {
+        field: 'starts_at',
+        header: 'Dates',
+        width: '1.4fr',
+        sortable: true,
+        render: (_value: string, item) => `${fmtDate(item.starts_at)} – ${fmtDate(item.ends_at)}`,
+      },
+      {
+        field: 'agenda_published',
+        header: 'Agenda',
+        width: '100px',
+        render: (value: boolean) => (
+          <span className={`status-chip status-${value ? 'accepted' : 'pending'}`}>
+            {value ? 'Published' : 'Draft'}
+          </span>
+        ),
+      },
+      { field: 'speaker_count', header: 'Speakers', width: '90px', mobileHidden: true },
+      { field: 'submission_count', header: 'Submissions', width: '100px', mobileHidden: true },
+      { field: 'role', header: 'Your role', width: '100px', mobileHidden: true },
+    ],
+    detailComponent: ({ item }) => (
+      <div className="detail-panel">
+        <h2>{item.name}</h2>
+        <div className="detail-sub">{fmtDate(item.starts_at)} – {fmtDate(item.ends_at)}</div>
+        <dl>
+          <dt>Agenda</dt><dd>{item.agenda_published ? 'Published' : 'Draft'}</dd>
+          <dt>Speakers</dt><dd>{item.speaker_count}</dd>
+          <dt>Submissions</dt><dd>{item.submission_count}</dd>
+          <dt>Your role</dt><dd>{item.role}</dd>
+        </dl>
+        <div className="detail-actions">
+          <button onClick={() => onSelectEvent(item.id)}>Switch to this event</button>
+        </div>
+      </div>
+    ),
+    // A single click on a row already switches the event — see
+    // `onSelectionChange` below. The detail tab (and its own button) stays
+    // reachable as a fallback for keyboard/assistive navigation that opens a
+    // row without firing DataList's click-selection path.
+    onSelectionChange: (item) => {
+      if (item) onSelectEvent(item.id)
+    },
+    // "+ New event" opens the existing modal (App.tsx) rather than an inline
+    // create tab — CreateEventDialog owns real validation (slug pattern,
+    // timezone, date ordering) a second implementation shouldn't duplicate.
+    // The create tab DataTabManager opens on click is cancelled immediately.
+    createComponent: ({ onCancel }: CreateFormProps) => {
+      useEffect(() => {
+        onCreateEvent()
+        onCancel()
+      }, [])
+      return null
+    },
+  }
+
   return {
     speakers: speakers as TabConfig,
     submissions: submissions as TabConfig,
     tasks: tasks as TabConfig,
     messages: messages as TabConfig,
+    files: files as TabConfig,
+    events: events as TabConfig,
   }
 }
 
@@ -605,11 +930,36 @@ export default function App() {
     return out
   }, [routeSeeds, wsPreset])
 
+  // Manual-QA item 2: memoized independently of `mergedSeeds`/`checklistResetKey`
+  // so a dashboard-bubble click or a search keystroke doesn't hand every grid a
+  // new `dataSource` identity (see `buildScopedSources`'s doc comment for what
+  // that costs — a several-second cross-tab reset/refetch jitter).
+  const scopedSources = useMemo(() => buildScopedSources(eventFilterId), [eventFilterId])
+
+  const openCreateEvent = useCallback(() => setCreateEventOpen(true), [])
+
+  // Events tab row click (manual-QA item 1): moves the workspace event filter
+  // to the clicked event — the same mechanism as the sidebar's
+  // `EventFilterSelect`, so a concrete event also rebinds the session (via
+  // `applyEventCookie` inside `setFilter`) the way picking it from the
+  // dropdown always has.
+  const onSelectEvent = useCallback((eventId: string) => setFilter(eventId), [setFilter])
+
   // Rebuilding on checklistResetKey both clears checks and refetches lists —
   // exactly what a bulk action needs.
   const workspaceConfig = useMemo(
-    () => buildWorkspaceConfig(handleChecklist, checklistResetKey, mergedSeeds, me?.event.id ?? '', eventFilterId),
-    [handleChecklist, checklistResetKey, mergedSeeds, me?.event.id, eventFilterId],
+    () =>
+      buildWorkspaceConfig(
+        handleChecklist,
+        checklistResetKey,
+        mergedSeeds,
+        me?.event.id ?? '',
+        me?.event.name ?? '',
+        scopedSources,
+        openCreateEvent,
+        onSelectEvent,
+      ),
+    [handleChecklist, checklistResetKey, mergedSeeds, me?.event.id, me?.event.name, eventFilterId, scopedSources, openCreateEvent, onSelectEvent],
   )
 
   const workspaceTabs = useMemo(
@@ -832,6 +1182,7 @@ export default function App() {
         </div>
       </aside>
       <main className="shell-main" style={{ position: 'relative' }}>
+        <AdminErrorBoundary section={NAV_ITEMS.find((i) => i.key === view)?.label ?? view} resetKey={`${view}:${me.event.id}`}>
         {view === 'workspace' && !isReviewer ? (
           <>
             {wsPreset?.label && (
@@ -848,7 +1199,7 @@ export default function App() {
             )}
             <DataTabManager
               config={workspaceConfig}
-              defaultTabs={['speakers', 'submissions', 'tasks', 'messages']}
+              defaultTabs={['speakers', 'submissions', 'tasks', 'messages', 'files', 'events']}
               activeTabRequest={wsTabRequest}
               detailRequest={detailRequest}
               onActiveTabChange={handleActiveTabChange}
@@ -899,6 +1250,11 @@ export default function App() {
           />
         ) : view === 'dashboard' && !isReviewer ? (
           <DashboardSection key={me.event.id} onNavigate={handleNavigate} />
+        ) : view === 'embeds' && !isReviewer ? (
+          <div className="section-with-event" key={me.event.id}>
+            <EventScopeNote scope={scope} />
+            <EmbedsSection me={me} />
+          </div>
         ) : view === 'settings' && !isReviewer ? (
           <div className="section-with-event" key={me.event.id}>
             <EventScopeNote scope={scope} />
@@ -912,6 +1268,7 @@ export default function App() {
             <p>This section arrives with a later milestone.</p>
           </div>
         )}
+        </AdminErrorBoundary>
       </main>
     </div>
     </EventScopeProvider>

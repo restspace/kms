@@ -17,6 +17,10 @@
 }
 
 .record-form-submit-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
   margin-bottom: var(--space-3);
   padding: var(--space-2) var(--space-3);
   border: 1px solid var(--danger-border);
@@ -24,6 +28,18 @@
   background: var(--danger-soft);
   color: var(--danger-strong);
   font-size: var(--text-grid);
+}
+
+.record-form-submit-error-action {
+  flex: 0 0 auto;
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--danger-border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--danger-strong);
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
 }
 
 .record-form-fields {

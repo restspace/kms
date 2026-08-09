@@ -171,11 +171,41 @@ Decision emails are idempotent — re-running the action does not double-send (s
 **Import Sessions** — CSV/XLSX upload with a column-mapping step, a dry-run preview showing
 create/update/error counts, and `client_session_id` as the upsert key.
 
+**Import Speakers** — the same wizard against contacts. Both run
+`POST /app/api/import/preview` (multipart on the first pass, JSON to re-run the dry run after a
+mapping edit) then `POST /app/api/import/commit`, which re-plans server-side and applies the whole
+plan in one `db.batch()`. Implementation: `apps/api/src/importer.ts`,
+`apps/api/src/routes/importExport.ts`, `apps/admin/src/workspace/ImportWizard.tsx`.
+
+Decisions worth knowing:
+
+- **Target event.** An import writes into exactly one event; with the workspace filter on
+  "All events" the button explains that instead of defaulting, and the server answers
+  `event_required`.
+- **Mapping.** Headers are auto-mapped by normalised name (key/label/alias exact match first,
+  then containment), each field used at most once; every column stays user-adjustable and
+  unmapped columns are ignored.
+- **Sessions upsert key.** `client_session_id` when that column is mapped and non-empty, else
+  `code`, else always create. New rows get a `SESS-n` code from the shared allocator and
+  `source = 'import'`; a row carrying a start time lands `accepted`, one without lands `pending`.
+- **Rooms and tracks** arrive as *names*, matched case-insensitively against the event's library.
+  Unknown names are **created** — listed up front in the preview so the dry run never hides a write.
+- **Speaker dedupe** is by lower-cased email within the event: a new email creates, a known email
+  **merges fill-blanks only** (an existing non-empty value is never overwritten) and is reported as
+  merged, or skipped when there is nothing blank to fill. Duplicate emails inside one file skip
+  after the first.
+- **XLSX** is parsed in-Worker with fflate (an .xlsx is a zip of XML parts), the mirror of the
+  export writer. Known gap: a cell *formatted* as a date arrives as its serial number and is
+  reported as an invalid value — ISO-8601 text imports cleanly.
+
 **Export .CSV / .XLSX** — respects the current filters and visible columns; includes participant
 columns flattened (`speaker_1_name`, `speaker_1_email`, …).
 
-**Download files bundle** — ZIP of all files attached to the filtered submissions, organised
-`<code>-<title>/<filename>`.
+**Download files bundle** — check submissions in the grid and hit **↓ FILES**:
+`POST /app/api/export/files.zip` returns a ZIP organised `<code>-<title>/<filename>`, holding the
+**current version only** of each attached upload (`file_request_uploads.is_current = 1`), so a deck
+re-uploaded three times contributes one entry. Name collisions inside a folder gain a ` (2)` suffix.
+Built in memory with fflate, capped at 250 files / 80 MB (`bundle_too_large` above that).
 
 ---
 

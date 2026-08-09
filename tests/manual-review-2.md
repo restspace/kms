@@ -1,0 +1,5 @@
+- There's no Event tab in the Workspace allowing an event to be added or listing events etc
+- ALSO CHECK bubbles on dashboard link to Workspace but the screen jitters fast for a couple secs then it doesn't seem to filter as desired.
+- Detail form scrollbar is in the middle of the working area, not right side of it- Show the speaker's headshot on the speaker/contact detail (admin only shows bio/headshot ticks, never the image; serve via /files/<headshot_asset_id>)
+- List the uploaded file on the Tasks tab for completed file_upload tasks (link the file_request_uploads row's file_asset_id, currently invisible to organisers)
+- Show slides (submission-scoped file_request_uploads) on the submission detail, with /files/ download links

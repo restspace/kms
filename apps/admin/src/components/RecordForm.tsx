@@ -61,6 +61,26 @@ interface PropertySchema {
 const isEmpty = (value: unknown): boolean =>
   value === undefined || value === null || (typeof value === 'string' && value.trim() === '');
 
+/**
+ * A submit-time error with a recovery affordance (F13: duplicate-contact
+ * dead end). `onSubmit` throws this instead of a plain Error to have the
+ * form render an extra button next to the error message — e.g. "Open the
+ * existing contact" alongside "A contact with this email already exists".
+ */
+export class RecordFormActionableError extends Error {
+  constructor(
+    message: string,
+    readonly action: { label: string; onClick: () => void },
+  ) {
+    super(message);
+  }
+}
+
+interface SubmitError {
+  message: string;
+  action?: { label: string; onClick: () => void };
+}
+
 export const RecordForm: React.FC<RecordFormProps> = ({
   schema,
   initialValues,
@@ -84,7 +104,7 @@ export const RecordForm: React.FC<RecordFormProps> = ({
     return seeded;
   });
   const [errors, setErrors] = useState<Record<string, string>>({});
-  const [submitError, setSubmitError] = useState<string | null>(null);
+  const [submitError, setSubmitError] = useState<SubmitError | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const initialSignatureRef = useRef<string | null>(null);
   const valueRef = useRef(value);
@@ -191,10 +211,14 @@ export const RecordForm: React.FC<RecordFormProps> = ({
     try {
       const success = await onSubmit(valueRef.current);
       if (!success) {
-        setSubmitError('The record could not be saved.');
+        setSubmitError({ message: 'The record could not be saved.' });
       }
     } catch (err) {
-      setSubmitError(err instanceof Error ? err.message : 'Unexpected error.');
+      if (err instanceof RecordFormActionableError) {
+        setSubmitError({ message: err.message, action: err.action });
+      } else {
+        setSubmitError({ message: err instanceof Error ? err.message : 'Unexpected error.' });
+      }
     } finally {
       setIsSubmitting(false);
     }
@@ -318,7 +342,14 @@ export const RecordForm: React.FC<RecordFormProps> = ({
         <h2>{title}</h2>
       </div>
       {submitError && (
-        <div className="record-form-submit-error" role="alert">{submitError}</div>
+        <div className="record-form-submit-error" role="alert">
+          <span>{submitError.message}</span>
+          {submitError.action && (
+            <button type="button" className="record-form-submit-error-action" onClick={submitError.action.onClick}>
+              {submitError.action.label}
+            </button>
+          )}
+        </div>
       )}
       <div className="record-form-fields">
         {properties.map(([key, prop]) => renderField(key, prop))}

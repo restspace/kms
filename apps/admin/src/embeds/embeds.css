@@ -1,0 +1,241 @@
+/* Embeds (EMB-15): snippet generator for the five public widgets. */
+
+.embeds {
+  padding: var(--space-5, 20px);
+  overflow-y: auto;
+  height: 100%;
+  box-sizing: border-box;
+}
+
+.embeds-head h2 {
+  font-size: 18px;
+  margin: 0 0 6px;
+}
+
+.embeds-head .muted {
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.5;
+  margin: 0 0 12px;
+  max-width: 70ch;
+}
+
+.embeds-warn {
+  background: color-mix(in srgb, var(--warning, #f59e0b) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--warning, #f59e0b) 40%, transparent);
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-size: 13px;
+  margin: 0 0 14px;
+  max-width: 70ch;
+}
+
+.embeds-grid {
+  display: grid;
+  grid-template-columns: minmax(320px, 26rem) minmax(0, 1fr);
+  gap: 18px;
+  align-items: start;
+}
+
+@media (max-width: 1080px) {
+  .embeds-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.embeds-field {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px 14px 14px;
+  margin: 0 0 14px;
+}
+
+.embeds-field legend {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  padding: 0 4px;
+}
+
+.embeds-field[disabled] {
+  opacity: 0.55;
+}
+
+.embeds-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.embeds-card {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  text-align: left;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+}
+
+.embeds-card:hover {
+  border-color: var(--accent, #4f46e5);
+}
+
+.embeds-card.is-active {
+  border-color: var(--accent, #4f46e5);
+  background: color-mix(in srgb, var(--accent, #4f46e5) 10%, transparent);
+}
+
+.embeds-card-title {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.embeds-card-blurb {
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
+.embeds-radios {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.embeds-radio {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.embeds-radio.is-disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.embeds-radio > span {
+  display: flex;
+  flex-direction: column;
+}
+
+.embeds-radio-blurb {
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
+.embeds-check {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  font-size: 13px;
+  margin: 6px 0;
+  cursor: pointer;
+}
+
+.embeds-accent {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-top: 6px;
+}
+
+.embeds-accent-hex {
+  width: 9ch;
+}
+
+.embeds-label {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  margin: 10px 0 4px;
+}
+
+.embeds-note {
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.45;
+  margin: 6px 0 0;
+}
+
+.embeds-field select,
+.embeds-field input[type='text'],
+.embeds-field input[type='number'] {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg, transparent);
+  color: inherit;
+  font: inherit;
+  font-size: 13px;
+}
+
+.embeds-output {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+}
+
+.embeds-snippet,
+.embeds-preview {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px 14px;
+  min-width: 0;
+}
+
+.embeds-snippet-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.embeds-snippet-head h3 {
+  font-size: 13px;
+  margin: 0;
+}
+
+.embeds-snippet textarea {
+  width: 100%;
+  box-sizing: border-box;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg, transparent);
+  color: inherit;
+  resize: vertical;
+}
+
+.embeds-url {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  word-break: break-all;
+  margin: 0;
+}
+
+.embeds-preview-frame {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg, #fff);
+  display: block;
+}

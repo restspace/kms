@@ -154,6 +154,107 @@ describe('portal submission editing', () => {
     expect((await getEdit(id, coCookie)).status).toBe(200);
   });
 
+  it('hides a conditional field on the edit page when the controlling answer does not match (CFP-02)', async () => {
+    const formatQ = await createQuestion(eventId, formId, {
+      key: 'format',
+      label: 'Format',
+      type: 'dropdown',
+      position: 2,
+      options: [
+        { value: 'talk', label: 'Talk' },
+        { value: 'workshop', label: 'Workshop' },
+      ],
+    });
+    const durationQ = await createQuestion(eventId, formId, {
+      key: 'duration',
+      label: 'Workshop duration',
+      position: 3,
+      visibility: { action: 'show', match: 'all', conditions: [{ question_id: formatQ, op: 'equals', value: 'workshop' }] },
+    });
+    const id = await seedSubmission('accepted');
+    await setAnswer(id, formatQ, 'talk'); // controlling field does NOT match "workshop"
+    await setAnswer(id, durationQ, '90 minutes'); // a leftover/stale answer from before
+
+    const res = await getEdit(id);
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    // The field must not be rendered visibly: either absent, or present but
+    // wrapped in a hidden container (no `required` blocking, no leaked value
+    // as a visible control) — the wrapper carries the question id either way.
+    const wrapMatch = html.match(new RegExp(`id="qwrap-${durationQ}"[^>]*`));
+    expect(wrapMatch).not.toBeNull();
+    expect(wrapMatch?.[0]).toContain('display:none');
+  });
+
+  it('shows a conditional field on the edit page when the controlling answer matches (CFP-02)', async () => {
+    const formatQ = await createQuestion(eventId, formId, {
+      key: 'format',
+      label: 'Format',
+      type: 'dropdown',
+      position: 2,
+      options: [
+        { value: 'talk', label: 'Talk' },
+        { value: 'workshop', label: 'Workshop' },
+      ],
+    });
+    const durationQ = await createQuestion(eventId, formId, {
+      key: 'duration',
+      label: 'Workshop duration',
+      position: 3,
+      visibility: { action: 'show', match: 'all', conditions: [{ question_id: formatQ, op: 'equals', value: 'workshop' }] },
+    });
+    const id = await seedSubmission('accepted');
+    await setAnswer(id, formatQ, 'workshop');
+    await setAnswer(id, durationQ, '90 minutes');
+
+    const res = await getEdit(id);
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    const wrapMatch = html.match(new RegExp(`id="qwrap-${durationQ}"[^>]*`));
+    expect(wrapMatch).not.toBeNull();
+    expect(wrapMatch?.[0]).not.toContain('display:none');
+    expect(html).toContain('90 minutes');
+  });
+
+  it('does not require a hidden conditional field on save, and drops its stored answer once it is hidden', async () => {
+    const formatQ = await createQuestion(eventId, formId, {
+      key: 'format',
+      label: 'Format',
+      type: 'dropdown',
+      position: 2,
+      options: [
+        { value: 'talk', label: 'Talk' },
+        { value: 'workshop', label: 'Workshop' },
+      ],
+    });
+    const durationQ = await createQuestion(eventId, formId, {
+      key: 'duration',
+      label: 'Workshop duration',
+      position: 3,
+      required: true,
+      visibility: { action: 'show', match: 'all', conditions: [{ question_id: formatQ, op: 'equals', value: 'workshop' }] },
+    });
+    const id = await seedSubmission('accepted');
+    await setAnswer(id, formatQ, 'workshop');
+    await setAnswer(id, durationQ, '90 minutes');
+
+    // Speaker switches Format away from Workshop and saves without ever
+    // touching the now-hidden, otherwise-required duration field.
+    const res = await postEdit(id, {
+      [`q_${titleQ}`]: 'Original title',
+      [`q_${summaryQ}`]: 'Original summary',
+      [`q_${formatQ}`]: 'talk',
+    });
+    expect(res.status).toBe(302); // not blocked by the hidden required field
+
+    const stored = await env.DB.prepare(
+      'SELECT value_json FROM submission_answers WHERE submission_id = ? AND question_id = ?',
+    )
+      .bind(id, durationQ)
+      .first<{ value_json: string } | null>();
+    expect(stored).toBeNull(); // discarded, matching discardHiddenAnswers everywhere else
+  });
+
   it('re-renders with preserved input when a required answer is blank', async () => {
     const id = await seedSubmission('accepted');
     const res = await postEdit(id, { [`q_${titleQ}`]: '', [`q_${summaryQ}`]: 'Kept summary text' });

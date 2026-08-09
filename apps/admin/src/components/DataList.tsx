@@ -289,6 +289,28 @@ export interface DataListExportConfig {
   title?: string;
 }
 
+/**
+ * A custom button beside the export buttons at the bottom-left of a list
+ * (FR-REV-8's "Import" and "Download files (ZIP)"). The handler receives the
+ * same live query the export buttons build their URL from, plus the list's
+ * checked ids and a `reload` that refetches the grid once the action's own
+ * dialog has finished writing.
+ */
+export interface DataListToolbarAction {
+  /** Stable identity for the button's React key. */
+  id: string;
+  label: string;
+  title?: string;
+  /** Renders disabled with `title` explaining why (e.g. nothing selected). */
+  disabled?: (ctx: { checkedIds: string[] }) => string | false;
+  onClick: (ctx: {
+    filters: Record<string, any>;
+    sort?: { field: string; direction: 'asc' | 'desc' };
+    checkedIds: string[];
+    reload: () => void;
+  }) => void | Promise<void>;
+}
+
 export interface DataListRowDragPayload {
   sourceType: string;
   id: string;
@@ -443,6 +465,8 @@ export interface DataListProps<T = any, TFilters extends Record<string, any> = R
   onLocalChecksChange?: (checkedIds: string[]) => void;
   /** When provided, CSV/XLSX export buttons render at the bottom-left. */
   exportConfig?: DataListExportConfig;
+  /** Extra buttons rendered alongside the export buttons (see the interface). */
+  toolbarActions?: DataListToolbarAction[];
   rowHeight?: number;
   /**
    * Width breakpoint (px) below which the list switches to mobile card layout.
@@ -614,6 +638,7 @@ export const DataList = <T extends Record<string, any>, TFilters extends Record<
   restoredState,
   onLocalChecksChange,
   exportConfig,
+  toolbarActions,
   rowHeight = DEFAULT_ROW_HEIGHT,
   mobileBreakpointWidth,
   mobileRowHeight,
@@ -667,7 +692,7 @@ export const DataList = <T extends Record<string, any>, TFilters extends Record<
   const [draftErrors, setDraftErrors] = useState<Set<string>>(() => new Set());
   const [isCommittingDraft, setIsCommittingDraft] = useState(false);
   // Bumped after a successful fast-add commit to refetch through querySignature.
-  const [fastAddReloadCounter, setFastAddReloadCounter] = useState(0);
+  const [localReloadCounter, setLocalReloadCounter] = useState(0);
   const draftRowRef = useRef<HTMLDivElement | null>(null);
   // Anchor row for item-anchored drafts; re-arm reseeds from the same anchor.
   const draftAnchorRef = useRef<T | null>(null);
@@ -716,8 +741,8 @@ export const DataList = <T extends Record<string, any>, TFilters extends Record<
     [sortState]
   );
   const querySignature = useMemo(
-    () => `${globalFilterSignature}:${localFilterSignature}:${sortSignature}:${dataSourceVersion}:${stableSerialize(reloadKey ?? null)}:${fastAddReloadCounter}`,
-    [globalFilterSignature, localFilterSignature, sortSignature, dataSourceVersion, reloadKey, fastAddReloadCounter]
+    () => `${globalFilterSignature}:${localFilterSignature}:${sortSignature}:${dataSourceVersion}:${stableSerialize(reloadKey ?? null)}:${localReloadCounter}`,
+    [globalFilterSignature, localFilterSignature, sortSignature, dataSourceVersion, reloadKey, localReloadCounter]
   );
   const summarySignature = useMemo(
     () => `${globalFilterSignature}:${localFilterSignature}:${stableSerialize(reloadKey ?? null)}`,
@@ -952,6 +977,19 @@ export const DataList = <T extends Record<string, any>, TFilters extends Record<
   }, [filterConfig]);
 
   /**
+   * True while the current query signature still owes an initial page load.
+   * Declared above `loadMoreItems` so a response that lands on a superseded
+   * signature can re-arm the load instead of dropping it on the floor.
+   */
+  const needsInitialLoadRef = useRef(true);
+  /**
+   * Bumped when a discarded (stale-signature) response would otherwise leave
+   * the list empty with nothing scheduled. State — not a ref — because the
+   * initial-load effect has to re-run to notice.
+   */
+  const [staleLoadRecoveryTick, setStaleLoadRecoveryTick] = useState(0);
+
+  /**
    * Load more items from the data source
    */
   const loadMoreItems = useCallback(
@@ -966,7 +1004,11 @@ export const DataList = <T extends Record<string, any>, TFilters extends Record<
         : undefined;
       const requestSignature = querySignature;
 
-      const key = `${from}:${size}:${stableSerialize(filters)}:${stableSerialize(sort ?? null)}`;
+      // Scope the de-dupe key to the query signature: two requests for the same
+      // page can belong to different signatures (a reload key, a new dataSource
+      // identity), and an unscoped key lets a stale request's `finally` free the
+      // slot a fresh request is holding — or block that fresh request outright.
+      const key = `${requestSignature}:${from}:${size}:${stableSerialize(filters)}:${stableSerialize(sort ?? null)}`;
 
       if (inFlight.current.has(key)) return;
       inFlight.current.add(key);
@@ -974,6 +1016,13 @@ export const DataList = <T extends Record<string, any>, TFilters extends Record<
       try {
         const result = await dataSource({ from, size, filters, sort });
         if (querySignatureRef.current !== requestSignature) {
+          // The query moved on while this was in flight, so the payload is not
+          // ours to render. Re-arm the initial load: the reset effect has
+          // already emptied `items` and the kick-off effect may have spent its
+          // one shot on this very request, which would strand the grid on
+          // loader rows with items=[], endReached=false and no error.
+          needsInitialLoadRef.current = true;
+          setStaleLoadRecoveryTick((tick) => tick + 1);
           return;
         }
         setItems((prev) => (from === 0 ? result.items : prev.concat(result.items)));
@@ -1002,7 +1051,11 @@ export const DataList = <T extends Record<string, any>, TFilters extends Record<
         inFlight.current.delete(key);
       }
     },
-    [endReached, items.length, batchSize, buildFilters, sortState, dataSource, onTotalChange]
+    // `querySignature` must stay in here: without it this callback keeps a
+    // stale `requestSignature` whenever the signature moves for a reason the
+    // other deps can't see (reload key, dataSource identity, fast-add counter),
+    // and every response it produces is then discarded as stale.
+    [endReached, items.length, batchSize, buildFilters, sortState, dataSource, onTotalChange, querySignature]
   );
 
   /**
@@ -1015,8 +1068,6 @@ export const DataList = <T extends Record<string, any>, TFilters extends Record<
     setTotalCount(null);
     inFlight.current.clear();
   }, [querySignature]);
-
-  const needsInitialLoadRef = useRef(true);
 
   useEffect(() => {
     needsInitialLoadRef.current = true;
@@ -1045,7 +1096,11 @@ export const DataList = <T extends Record<string, any>, TFilters extends Record<
     // `inFlight` de-dupes concurrent calls, so this is safe even if `InfiniteLoader` also requests.
     needsInitialLoadRef.current = false;
     void loadMoreItems(0, Math.max(0, batchSize - 1));
-  }, [batchSize, endReached, items.length, loadMoreItems]);
+    // `querySignature` and the recovery tick are listed so this re-runs after a
+    // signature change or a discarded response even when nothing else moved —
+    // an already-empty list keeps `items.length`/`endReached` identical, so
+    // without them the re-armed flag would never be read again.
+  }, [batchSize, endReached, items.length, loadMoreItems, querySignature, staleLoadRecoveryTick]);
 
   useEffect(() => {
     if (items.length === 0) {
@@ -1627,7 +1682,7 @@ export const DataList = <T extends Record<string, any>, TFilters extends Record<
         } else {
           setDraftItem(null);
         }
-        setFastAddReloadCounter((count) => count + 1);
+        setLocalReloadCounter((count) => count + 1);
       }
     } finally {
       setIsCommittingDraft(false);
@@ -2151,6 +2206,38 @@ export const DataList = <T extends Record<string, any>, TFilters extends Record<
                       ↓ {format.toUpperCase()}
                     </button>
                   ))}
+                </div>
+              )}
+              {toolbarActions && toolbarActions.length > 0 && !isMobile && (
+                <div
+                  className={`data-list-export-buttons data-list-toolbar-actions ${hasSummaryData ? 'with-summary-row' : ''} ${exportConfig ? 'after-export' : ''}`}
+                >
+                  {toolbarActions.map((action) => {
+                    const checkedIds = Array.from(checkedItemIds);
+                    const blocked = action.disabled?.({ checkedIds }) ?? false;
+                    return (
+                      <button
+                        key={action.id}
+                        type="button"
+                        className="data-list-export-button"
+                        disabled={Boolean(blocked)}
+                        title={blocked || action.title || action.label}
+                        onClick={() => {
+                          const sort = sortState.field && sortState.direction
+                            ? { field: sortState.field, direction: sortState.direction }
+                            : undefined;
+                          void action.onClick({
+                            filters: mergedFilters,
+                            sort,
+                            checkedIds,
+                            reload: () => setLocalReloadCounter((count) => count + 1),
+                          });
+                        }}
+                      >
+                        {action.label}
+                      </button>
+                    );
+                  })}
                 </div>
               )}
               {fastAdd && !isMobile && (

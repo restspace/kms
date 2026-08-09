@@ -8,6 +8,7 @@ import {
   type Me,
 } from '../api'
 import { appAlert, appConfirm } from '../components/dialogs'
+import { RoomsTracksCard } from './RoomsTracksCard'
 import './settings.css'
 
 /**
@@ -177,6 +178,8 @@ export function SettingsSection({ me }: { me: Me }) {
           </table>
         )}
       </section>
+
+      <RoomsTracksCard />
 
       <section className="settings-card">
         <h2>API docs</h2>

@@ -1,0 +1,183 @@
+// Shared data-access module for the public event pages (sessions, speakers,
+// agenda, schedule, gallery widgets). One `fetch` wrapper + one set of types
+// per feed, so every widget lane reads the same shapes off the same two
+// endpoints (apps/api/src/routes/landing.ts):
+//   GET /e/:slug/agenda.json    — published sessions, rooms, tracks, days
+//   GET /e/:slug/speakers.json  — published speaker directory
+//
+// Both feeds 404 with { error: 'not_found' } until the organiser flips
+// `agenda_published`; `fetchAgenda`/`fetchSpeakers` surface that as `null`
+// rather than throwing, so a widget can render a "not published yet" state
+// without a try/catch of its own.
+
+export interface PublicEvent {
+  name: string;
+  slug: string;
+  timezone: string;
+}
+
+export interface PublicRoom {
+  id: string;
+  name: string;
+  capacity: number | null;
+}
+
+export interface PublicTrack {
+  id: string;
+  name: string;
+  color: string | null;
+}
+
+export interface PublicSessionSpeaker {
+  id: string;
+  name: string;
+  title: string | null;
+  company: string | null;
+}
+
+export interface PublicSession {
+  id: string;
+  code: string;
+  title: string;
+  description: string | null;
+  format: string | null;
+  level: string | null;
+  capacity: number | null;
+  track_id: string | null;
+  room_id: string | null;
+  starts_at: string;
+  ends_at: string;
+  /** YYYY-MM-DD in the event's own timezone (docs/07 §8). */
+  day: string;
+  /** Display names only — never emails (public payload, PII-redacted). */
+  speakers: string[];
+  /**
+   * EMB-01: same speakers as `speakers`, with title/company for the card
+   * (nullable — never emails/phones, same PII boundary as speakers.json).
+   * Additive alongside `speakers` (kept as plain names) so consumers still
+   * reading the string-array shape are unaffected.
+   */
+  speaker_details: PublicSessionSpeaker[];
+}
+
+export interface AgendaFeed {
+  event: PublicEvent;
+  days: string[];
+  rooms: PublicRoom[];
+  tracks: PublicTrack[];
+  sessions: PublicSession[];
+}
+
+export interface PublicSpeakerSession {
+  id: string;
+  title: string;
+}
+
+export interface PublicSpeaker {
+  id: string;
+  name: string;
+  title: string | null;
+  company: string | null;
+  bio: string | null;
+  /** Always null until a public-safe asset route exists (see landing.ts). */
+  headshot_url: string | null;
+  sessions: PublicSpeakerSession[];
+}
+
+export interface SpeakersFeed {
+  event: PublicEvent;
+  /** Sorted by surname, then full name, server-side. */
+  speakers: PublicSpeaker[];
+}
+
+/** Base path for a slug's feeds — kept in one place so a URL-shape change is a one-line edit. */
+export function agendaJsonUrl(slug: string): string {
+  return `/e/${encodeURIComponent(slug)}/agenda.json`;
+}
+
+export function speakersJsonUrl(slug: string): string {
+  return `/e/${encodeURIComponent(slug)}/speakers.json`;
+}
+
+export function agendaIcsUrl(slug: string): string {
+  return `/e/${encodeURIComponent(slug)}/agenda.ics`;
+}
+
+/** null on 404 (not yet published) or any network/parse failure; throws on nothing. */
+export async function fetchAgenda(slug: string): Promise<AgendaFeed | null> {
+  try {
+    const res = await fetch(agendaJsonUrl(slug));
+    if (!res.ok) return null;
+    return (await res.json()) as AgendaFeed;
+  } catch {
+    return null;
+  }
+}
+
+export async function fetchSpeakers(slug: string): Promise<SpeakersFeed | null> {
+  try {
+    const res = await fetch(speakersJsonUrl(slug));
+    if (!res.ok) return null;
+    return (await res.json()) as SpeakersFeed;
+  } catch {
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Embed/deep-link filters (lane W3-A, rubric EMB-15).
+//
+// The public pages accept `?track=` and `?day=` so an organiser can embed or
+// link a *slice* of the agenda ("just the Platform track", "just day two").
+// The feeds themselves are unchanged: filtering happens here, over the fetched
+// payload, so every widget applies the same rule and no widget needs its own
+// query-param handling. `track` matches a track id or a track name
+// (case-insensitive) — ids are opaque, names are what an organiser types.
+// ---------------------------------------------------------------------------
+
+export interface PublicFeedFilter {
+  /** Track id or (case-insensitive) track name. */
+  track?: string | null;
+  /** Day key, YYYY-MM-DD in the event timezone. */
+  day?: string | null;
+}
+
+/** True when the filter would change nothing. */
+export function isEmptyFilter(filter: PublicFeedFilter | null | undefined): boolean {
+  return !filter || (!filter.track && !filter.day);
+}
+
+/**
+ * Narrow a feed to the sessions a filter selects, recomputing `days` and
+ * `tracks` so the widgets' day tabs and track facets only offer what survives.
+ * Returns the input untouched for an empty filter (and passes `null` through,
+ * so a widget can pipe `fetchAgenda(...)` straight into it).
+ */
+export function applyFeedFilter(
+  feed: AgendaFeed | null,
+  filter?: PublicFeedFilter | null,
+): AgendaFeed | null {
+  if (!feed || isEmptyFilter(filter)) return feed;
+  const wanted = (filter?.track ?? '').trim().toLowerCase();
+  const trackIds = new Set(
+    feed.tracks
+      .filter((t) => t.id.toLowerCase() === wanted || (t.name ?? '').trim().toLowerCase() === wanted)
+      .map((t) => t.id),
+  );
+  const day = (filter?.day ?? '').trim();
+
+  const sessions = feed.sessions.filter((s) => {
+    if (wanted && !(s.track_id !== null && trackIds.has(s.track_id))) return false;
+    if (day && s.day !== day) return false;
+    return true;
+  });
+
+  const keptDays = new Set(sessions.map((s) => s.day));
+  const keptTracks = new Set(sessions.map((s) => s.track_id).filter((id): id is string => id !== null));
+  return {
+    ...feed,
+    days: feed.days.filter((d) => keptDays.has(d)),
+    tracks: feed.tracks.filter((t) => keptTracks.has(t.id)),
+    sessions,
+  };
+}

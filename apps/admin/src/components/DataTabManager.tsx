@@ -2,7 +2,7 @@ import React, { createContext, useCallback, useContext, useEffect, useMemo, useR
 import { useQueries, useQueryClient } from '@tanstack/react-query';
 import { DataList, ColumnDefinition, DataListQuery, DataSourceParams, DataSourceResult } from './DataList';
 import { appAlert, ModalDialog } from './dialogs';
-import type { DataListExportConfig, DataListFastAddConfig, DataListFilterConfig, DataListRowDragConfig, DataListRowDropConfig, DataListSummaryDataSource } from './DataList';
+import type { DataListExportConfig, DataListFastAddConfig, DataListFilterConfig, DataListRowDragConfig, DataListRowDropConfig, DataListSummaryDataSource, DataListToolbarAction } from './DataList';
 import { RecordForm } from './RecordForm';
 import { ContextMenu, type ContextMenuOption } from './ContextMenu';
 import { generateRandomId, toReadableText } from '../utility';
@@ -237,6 +237,11 @@ export interface TabConfig<T = any> {
    * Optional CSV/XLSX export buttons on the list view (see DataListExportConfig).
    */
   exportConfig?: DataListExportConfig;
+  /**
+   * Optional extra buttons beside the export buttons on the list view — the
+   * workspace hangs "Import" and "Download files (ZIP)" here (FR-REV-8).
+   */
+  toolbarActions?: DataListToolbarAction[];
   /**
    * Optional hook to observe the merged filters + sort state from the list view.
    */
@@ -2478,6 +2483,7 @@ export const DataTabManager: React.FC<DataTabManagerProps> = ({
           globalFilter={globalFiltersByTab[tab.id]}
           filterConfig={tabConfig.filterConfig}
           exportConfig={tabConfig.exportConfig}
+          toolbarActions={tabConfig.toolbarActions}
           onQueryChange={handleQueryChange}
           getSummaryData={tabConfig.getSummaryData}
           initialSort={tabConfig.initialSort}
