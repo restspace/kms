@@ -313,6 +313,17 @@ evaluationRoutes.put('/submissions/:id', async (c) => {
     sets.push(`${field} = ?`);
     params.push(v === '' ? null : v);
   }
+  // content_approved (0010 migration, CNT-12/w3): the public-visibility gate,
+  // independent of the acceptance `status`. Accepts booleans and 0/1 so both
+  // a checkbox-style client and a raw toggle can drive it.
+  if ('content_approved' in body) {
+    const v = body.content_approved;
+    if (v !== true && v !== false && v !== 0 && v !== 1) {
+      return c.json({ error: 'invalid_content_approved' }, 400);
+    }
+    sets.push('content_approved = ?');
+    params.push(v === true || v === 1 ? 1 : 0);
+  }
   if ('track_id' in body) {
     const v = body.track_id;
     if (v === null || v === '') {
@@ -443,6 +454,33 @@ evaluationRoutes.put('/submissions/:id/participants/:participantId', async (c) =
   return c.json({ ok: true });
 });
 
+// PUT /submissions/:id/participants/:participantId/confirm { confirmed: boolean }
+//
+// SPK-04/w2: confirmed_at previously only got set once, automatically, when
+// a submitter added themself as a participant (submit.tsx) — there was no
+// endpoint to change it afterwards, so the dashboard's "Confirmed N /
+// Awaiting confirmation M" stat (routes/dashboard.ts, keyed off this same
+// column) was effectively read-only trivia: an organiser could see it but
+// never act on it, and a co-speaker added later by staff could never be
+// marked confirmed at all. This lets an organiser flip it either way from
+// the submission's participant list (workspace/extras.tsx).
+evaluationRoutes.put('/submissions/:id/participants/:participantId/confirm', async (c) => {
+  const session = c.get('session');
+  if (!isWriter(session.role)) return c.json({ error: 'forbidden' }, 403);
+  const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+  const confirmed = body.confirmed === true || body.confirmed === 1;
+  const result = await c.env.DB.prepare(
+    `UPDATE submission_participants SET confirmed_at = ?
+     WHERE id = ? AND submission_id = ?
+       AND submission_id IN (SELECT id FROM submissions WHERE event_id = ?)`,
+  )
+    .bind(confirmed ? nowIso() : null, c.req.param('participantId'), c.req.param('id'), session.eventId)
+    .run();
+  if (result.meta.changes === 0) return c.json({ error: 'not_found' }, 404);
+  await bumpEventRevision(c.env, session.eventId);
+  return c.json({ ok: true, confirmed });
+});
+
 /** DELETE /submissions/:id/participants/:participantId */
 evaluationRoutes.delete('/submissions/:id/participants/:participantId', async (c) => {
   const session = c.get('session');
@@ -487,7 +525,7 @@ evaluationRoutes.get('/submissions/:id/detail', async (c) => {
        WHERE a.submission_id = ? ORDER BY q.position`,
     ).bind(id).all(),
     db.prepare(
-      `SELECT sp.id AS participant_id, sp.role, sp.position, sp.is_primary_contact, c.id AS contact_id,
+      `SELECT sp.id AS participant_id, sp.role, sp.position, sp.is_primary_contact, sp.confirmed_at, c.id AS contact_id,
               c.first_name, c.last_name, c.email,
               CASE WHEN c.biography IS NOT NULL AND c.biography != '' THEN 1 ELSE 0 END AS has_bio,
               CASE WHEN c.headshot_asset_id IS NOT NULL THEN 1 ELSE 0 END AS has_headshot,

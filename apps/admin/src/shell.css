@@ -290,6 +290,32 @@
   padding-top: var(--space-3);
 }
 
+/* Organiser messaging (SPK-06 / SPK-13): the invite button's inline result
+   note, and the compose form's own status wording. */
+.detail-panel .detail-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.compose-note-ok,
+.compose-note-error {
+  font-size: var(--text-label);
+}
+
+.compose-note-ok {
+  color: var(--text-faint);
+}
+
+.compose-note-error {
+  color: var(--danger);
+}
+
+.compose-form .record-form-field select[multiple] {
+  width: 100%;
+}
+
 .detail-panel .detail-actions {
   margin-top: var(--space-4);
 }

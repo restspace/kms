@@ -57,7 +57,7 @@ publicAssetRoutes.get('/e/:slug/speakers/:speakerId/headshot', async (c) => {
            SELECT 1 FROM submission_participants sp
            JOIN submissions s ON s.id = sp.submission_id
            WHERE sp.contact_id = c.id AND s.event_id = ?2
-             AND s.status = 'accepted' AND s.starts_at IS NOT NULL AND s.ends_at IS NOT NULL
+             AND s.status = 'accepted' AND s.content_approved = 1 AND s.starts_at IS NOT NULL AND s.ends_at IS NOT NULL
          )`,
     )
     .bind(speakerId, event.id)

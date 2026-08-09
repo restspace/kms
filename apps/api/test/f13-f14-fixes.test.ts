@@ -240,3 +240,102 @@ describe('F14/ABS-11: submission participants', () => {
     expect(typeof body.participants[0].participant_id).toBe('string');
   });
 });
+
+// SPK-04/w2: confirmed_at (submission_participants) previously only got set
+// once, automatically, at submit time (submit.tsx) — the dashboard's
+// "Confirmed N / Awaiting confirmation M" stat (routes/dashboard.ts) read it
+// but nothing ever wrote to it again. PUT .../participants/:id/confirm is
+// the organiser-facing control that closes that gap.
+describe('SPK-04/w2: PUT /app/api/submissions/:id/participants/:id/confirm', () => {
+  it('is null (awaiting) by default when an organiser adds a participant', async () => {
+    const eventId = await seedEvent();
+    const admin = await seedStaff(eventId, 'admin');
+    const submissionId = await seedSubmission(eventId);
+    const contactId = await seedContact(eventId);
+    const added = await api(`/submissions/${submissionId}/participants`, admin.cookie, {
+      contact_id: contactId,
+      role: 'speaker',
+    }, 'POST');
+    const { id: participantId } = await added.json() as { id: string };
+
+    const row = await env.DB.prepare('SELECT confirmed_at FROM submission_participants WHERE id = ?')
+      .bind(participantId).first<{ confirmed_at: string | null }>();
+    expect(row?.confirmed_at).toBeNull();
+  });
+
+  it('sets confirmed_at when confirmed: true, and it round-trips through GET .../detail', async () => {
+    const eventId = await seedEvent();
+    const admin = await seedStaff(eventId, 'admin');
+    const submissionId = await seedSubmission(eventId);
+    const contactId = await seedContact(eventId);
+    const added = await api(`/submissions/${submissionId}/participants`, admin.cookie, {
+      contact_id: contactId,
+      role: 'speaker',
+    }, 'POST');
+    const { id: participantId } = await added.json() as { id: string };
+
+    const res = await api(`/submissions/${submissionId}/participants/${participantId}/confirm`, admin.cookie, { confirmed: true }, 'PUT');
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ ok: true, confirmed: true });
+
+    const row = await env.DB.prepare('SELECT confirmed_at FROM submission_participants WHERE id = ?')
+      .bind(participantId).first<{ confirmed_at: string | null }>();
+    expect(typeof row?.confirmed_at).toBe('string');
+
+    const detail = await api(`/submissions/${submissionId}/detail`, admin.cookie, undefined, 'GET');
+    const body = await detail.json() as { participants: Array<{ participant_id: string; confirmed_at: string | null }> };
+    expect(body.participants[0].confirmed_at).not.toBeNull();
+  });
+
+  it('clears confirmed_at when confirmed: false (reversible, not one-way)', async () => {
+    const eventId = await seedEvent();
+    const admin = await seedStaff(eventId, 'admin');
+    const submissionId = await seedSubmission(eventId);
+    const contactId = await seedContact(eventId);
+    const added = await api(`/submissions/${submissionId}/participants`, admin.cookie, {
+      contact_id: contactId,
+      role: 'speaker',
+    }, 'POST');
+    const { id: participantId } = await added.json() as { id: string };
+    await api(`/submissions/${submissionId}/participants/${participantId}/confirm`, admin.cookie, { confirmed: true }, 'PUT');
+
+    const res = await api(`/submissions/${submissionId}/participants/${participantId}/confirm`, admin.cookie, { confirmed: false }, 'PUT');
+    expect(res.status).toBe(200);
+    const row = await env.DB.prepare('SELECT confirmed_at FROM submission_participants WHERE id = ?')
+      .bind(participantId).first<{ confirmed_at: string | null }>();
+    expect(row?.confirmed_at).toBeNull();
+  });
+
+  it('404s for a participant on another event\'s submission', async () => {
+    const eventA = await seedEvent();
+    const eventB = await seedEvent();
+    const adminA = await seedStaff(eventA, 'admin');
+    const submissionB = await seedSubmission(eventB);
+    const contactB = await seedContact(eventB);
+    const staffB = await seedStaff(eventB, 'admin');
+    const added = await api(`/submissions/${submissionB}/participants`, staffB.cookie, {
+      contact_id: contactB,
+      role: 'speaker',
+    }, 'POST');
+    const { id: participantId } = await added.json() as { id: string };
+
+    const res = await api(`/submissions/${submissionB}/participants/${participantId}/confirm`, adminA.cookie, { confirmed: true }, 'PUT');
+    expect(res.status).toBe(404);
+  });
+
+  it('refuses reviewers', async () => {
+    const eventId = await seedEvent();
+    const admin = await seedStaff(eventId, 'admin');
+    const reviewer = await seedStaff(eventId, 'reviewer');
+    const submissionId = await seedSubmission(eventId);
+    const contactId = await seedContact(eventId);
+    const added = await api(`/submissions/${submissionId}/participants`, admin.cookie, {
+      contact_id: contactId,
+      role: 'speaker',
+    }, 'POST');
+    const { id: participantId } = await added.json() as { id: string };
+
+    const res = await api(`/submissions/${submissionId}/participants/${participantId}/confirm`, reviewer.cookie, { confirmed: true }, 'PUT');
+    expect(res.status).toBe(403);
+  });
+});

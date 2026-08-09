@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { DataTabManager, TabConfig, type CreateFormProps } from './components/DataTabManager'
 import type {
   DataSourceParams,
@@ -13,12 +13,14 @@ import {
   deleteContact,
   getMe,
   getSubmissionDetail,
+  listContactFields,
   queryResource,
   sendDecisions,
   switchEvent,
   updateContact,
   updateSubmission,
   updateSubmissionStatus,
+  type ContactFieldDef,
   type ContactRow,
   type Me,
   type MessageRow,
@@ -42,6 +44,7 @@ import { ReviewerWorkspace } from './review/ReviewerWorkspace'
 import { EmbedsSection } from './embeds/EmbedsSection'
 import {
   BulkBar,
+  ConfirmationChipsFilter,
   StatusChipsFilter,
   SubmissionDetailPanel,
   SubmissionEditForm,
@@ -49,6 +52,13 @@ import {
   statusLabel,
 } from './workspace/extras'
 import { FileLibraryDetail, TaskFilesPanel, formatBytes } from './workspace/FilePanels'
+import {
+  ComposeForm,
+  PortalInviteButton,
+  describeSettledJob,
+  pollBulkJob,
+  type BulkJobPollHandle,
+} from './workspace/messaging'
 import { openImportWizard } from './workspace/ImportWizard'
 import {
   EventFilterChip,
@@ -149,6 +159,83 @@ const speakerSchema = {
     biography: { type: 'string', format: 'textarea', title: 'Biography' },
     notes: { type: 'string', format: 'textarea', title: 'Internal notes' },
   },
+}
+
+/**
+ * SPK-15: per-event custom fields on speaker/contact records. RecordForm's
+ * static JSON-Schema can express these cleanly (a select is just an enum, a
+ * multiline field is `format: 'textarea'`) as long as each one gets its own
+ * flat top-level schema key — RecordForm falls back to a raw-JSON textarea
+ * for nested objects, which is why values travel as `cf__<definition key>`
+ * on the form rather than nested under a `custom_fields` property. The API
+ * wants that nested shape though (`POST/PUT /contacts { custom_fields: {…} }`,
+ * validated against the event's definitions) — `splitCustomFieldsFromFormData`
+ * below re-nests them just before the request goes out.
+ */
+const CONTACT_FIELD_PREFIX = 'cf__'
+
+const parseContactFieldOptions = (json: string | null): string[] => {
+  if (!json) return []
+  try {
+    const parsed = JSON.parse(json)
+    return Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === 'string') : []
+  } catch {
+    return []
+  }
+}
+
+const parseContactFieldValues = (json: string | null | undefined): Record<string, string> => {
+  if (!json) return {}
+  try {
+    const parsed = JSON.parse(json)
+    return parsed && typeof parsed === 'object' ? (parsed as Record<string, string>) : {}
+  } catch {
+    return {}
+  }
+}
+
+/** Extra `speakerSchema.properties` entries for the event's custom fields. */
+const customFieldSchemaProperties = (defs: ContactFieldDef[]): Record<string, Record<string, unknown>> => {
+  const props: Record<string, Record<string, unknown>> = {}
+  for (const def of defs) {
+    if (def.type === 'select') {
+      props[CONTACT_FIELD_PREFIX + def.key] = { type: 'string', title: def.label, enum: parseContactFieldOptions(def.options) }
+    } else if (def.type === 'multiline') {
+      props[CONTACT_FIELD_PREFIX + def.key] = { type: 'string', format: 'textarea', title: def.label }
+    } else {
+      props[CONTACT_FIELD_PREFIX + def.key] = { type: 'string', title: def.label }
+    }
+  }
+  return props
+}
+
+/** A contacts-query row, flattened with `cf__<key>` so RecordForm's initialValues seeding (a plain key match against the schema) finds the current custom-field values on edit. */
+const attachCustomFieldFormKeys = (item: ContactRow, defs: ContactFieldDef[]): ContactRow => {
+  if (defs.length === 0) return item
+  const values = parseContactFieldValues(item.custom_fields_json)
+  const flat: Record<string, unknown> = {}
+  for (const def of defs) flat[CONTACT_FIELD_PREFIX + def.key] = values[def.key] ?? ''
+  return { ...item, ...flat } as ContactRow
+}
+
+/** Reverses `attachCustomFieldFormKeys` at submit time: pulls the `cf__` keys back out of the form data into the nested `custom_fields` shape the API expects, leaving the fixed fields untouched. */
+const splitCustomFieldsFromFormData = (
+  data: Record<string, unknown>,
+  defs: ContactFieldDef[],
+): Record<string, unknown> => {
+  if (defs.length === 0) return data
+  const fields: Record<string, unknown> = {}
+  const customFields: Record<string, unknown> = {}
+  let hasCustom = false
+  for (const [key, value] of Object.entries(data)) {
+    if (key.startsWith(CONTACT_FIELD_PREFIX)) {
+      hasCustom = true
+      customFields[key.slice(CONTACT_FIELD_PREFIX.length)] = value === undefined || value === '' ? null : value
+    } else {
+      fields[key] = value
+    }
+  }
+  return hasCustom ? { ...fields, custom_fields: customFields } : fields
 }
 
 /**
@@ -268,6 +355,7 @@ async function loadWorkspaceRecord(
   tab: WorkspaceTabKey,
   id: string,
   eventFilterId: string | null,
+  contactFieldDefs: ContactFieldDef[] = [],
 ): Promise<unknown | null> {
   if (tab === 'speakers') {
     const result = await queryResource<ContactRow>('contacts')({
@@ -275,7 +363,8 @@ async function loadWorkspaceRecord(
       size: 1,
       filters: { contact_id: id, ...(eventFilterId ? { event_id: eventFilterId } : {}) },
     })
-    return result.items[0] ?? null
+    const item = result.items[0]
+    return item ? attachCustomFieldFormKeys(item, contactFieldDefs) : null
   }
   if (tab === 'submissions') {
     const detail = await getSubmissionDetail(id)
@@ -342,6 +431,7 @@ function buildWorkspaceConfig(
   scopedSources: ScopedSources,
   onCreateEvent: () => void,
   onSelectEvent: (eventId: string) => void,
+  contactFields: ContactFieldDef[],
 ): Record<string, TabConfig> {
   // Export buttons (M6): each tab downloads its current view — active filters
   // and anchor included — through the public REST API's export endpoint.
@@ -384,48 +474,100 @@ function buildWorkspaceConfig(
 
   /** Cross-event provenance column; hidden on mobile where width is scarce. */
   const eventColumn = { field: 'event_name', header: 'Event', width: '140px', sortable: false, mobileHidden: true }
+  // SPK-15: the grid/detail item needs `cf__<key>` flat keys so a subsequent
+  // "Edit" seeds RecordForm's initialValues correctly (see
+  // attachCustomFieldFormKeys' doc comment) — wrapping the shared dataSource
+  // here, rather than in buildScopedSources, keeps that source's identity
+  // stable across a contactFields refetch (it's memoized on eventFilterId
+  // alone; see buildScopedSources' doc comment for why that matters).
+  const speakersDataSource = async (params: DataSourceParams): Promise<DataSourceResult<ContactRow>> => {
+    const result = await scopedSources.contacts(params)
+    return { ...result, items: result.items.map((item) => attachCustomFieldFormKeys(item, contactFields)) }
+  }
   const speakers: TabConfig<ContactRow> = {
     displayTitle: 'Speakers',
-    dataSource: scopedSources.contacts,
+    dataSource: speakersDataSource,
     getItemId: (item) => item.id,
     getItemTitle: contactName,
+    // SPK-04: roster filter/column mirroring the dashboard's per-submission
+    // Confirmed/Awaiting split, but at the contact level (adminApi.ts's
+    // `confirmation` derived column — confirmed/awaiting/null, null covering
+    // both "not a participant" and the seed default before any filter chip
+    // is chosen).
+    filterConfig: {
+      initialFilters: { confirmation: '', ...(seeds.speakers ?? {}) },
+      defaultFilters: { confirmation: '' },
+      FilterComponent: ConfirmationChipsFilter,
+    },
     columns: [
       { field: 'first_name', header: 'First name', sortable: true },
       { field: 'last_name', header: 'Last name', sortable: true },
       { field: 'email', header: 'Email', width: '1.5fr', sortable: true, mobileRow: 2 },
       { field: 'company', header: 'Company', sortable: true },
       { field: 'job_title', header: 'Job title', mobileHidden: true },
+      {
+        field: 'confirmation',
+        header: 'Confirmation',
+        width: '120px',
+        mobileHidden: true,
+        render: (value: string | null) =>
+          value === 'confirmed' ? (
+            <span className="status-chip status-accepted">Confirmed</span>
+          ) : value === 'awaiting' ? (
+            <span className="status-chip status-pending">Awaiting</span>
+          ) : (
+            <span style={{ color: 'var(--text-faint)' }}>—</span>
+          ),
+      },
       eventColumn,
     ],
-    detailComponent: ({ item, onEdit }) => (
-      <div className="detail-panel">
-        <div className="detail-panel-head">
-          <ContactHeadshot item={item} />
-          <div>
-            <h2>{contactName(item)}</h2>
-            <div className="detail-sub">{item.job_title ? `${item.job_title} · ` : ''}{item.company ?? ''}</div>
+    detailComponent: ({ item, onEdit }) => {
+      const customValues = parseContactFieldValues(item.custom_fields_json)
+      return (
+        <div className="detail-panel">
+          <div className="detail-panel-head">
+            <ContactHeadshot item={item} />
+            <div>
+              <h2>{contactName(item)}</h2>
+              <div className="detail-sub">{item.job_title ? `${item.job_title} · ` : ''}{item.company ?? ''}</div>
+            </div>
+          </div>
+          <dl>
+            <dt>Email</dt><dd>{item.email}</dd>
+            {item.mobile_phone && <><dt>Mobile</dt><dd>{item.mobile_phone}</dd></>}
+            {item.pronouns && <><dt>Pronouns</dt><dd>{item.pronouns}</dd></>}
+            {item.event_name && <><dt>Event</dt><dd>{item.event_name}</dd></>}
+            {contactFields.map((def) =>
+              customValues[def.key] ? (
+                <Fragment key={def.id}>
+                  <dt>{def.label}</dt><dd>{customValues[def.key]}</dd>
+                </Fragment>
+              ) : null,
+            )}
+            <dt>Created</dt><dd>{fmtDate(item.created_at)}</dd>
+          </dl>
+          {item.biography && <div className="detail-body">{stripHtml(item.biography)}</div>}
+          {/*
+            * SPK-06: the organiser can now put a known contact into the speaker
+            * portal directly. Deliberately outside the `onEdit` guard — inviting
+            * is not an edit, and the panel renders without `onEdit` in read-only
+            * contexts where the invite is still the useful action.
+            */}
+          <div className="detail-actions">
+            {onEdit && <button onClick={onEdit}>Edit</button>}
+            <PortalInviteButton contactId={item.id} contactName={contactName(item)} />
           </div>
         </div>
-        <dl>
-          <dt>Email</dt><dd>{item.email}</dd>
-          {item.mobile_phone && <><dt>Mobile</dt><dd>{item.mobile_phone}</dd></>}
-          {item.pronouns && <><dt>Pronouns</dt><dd>{item.pronouns}</dd></>}
-          {item.event_name && <><dt>Event</dt><dd>{item.event_name}</dd></>}
-          <dt>Created</dt><dd>{fmtDate(item.created_at)}</dd>
-        </dl>
-        {item.biography && <div className="detail-body">{stripHtml(item.biography)}</div>}
-        {onEdit && (
-          <div className="detail-actions">
-            <button onClick={onEdit}>Edit</button>
-          </div>
-        )}
-      </div>
-    ),
+      )
+    },
     globalFilterSets: { id: 'contact_id' },
     globalFilterReceives: { submission_id: 'submission_id' },
     exportConfig: exportFor('contacts'),
     toolbarActions: [importAction('contacts', 'speakers')],
-    schema: speakerSchema,
+    schema: {
+      ...speakerSchema,
+      properties: { ...speakerSchema.properties, ...customFieldSchemaProperties(contactFields) },
+    },
     // F13: a duplicate email is a validation rule worth keeping, but the
     // form used to be a dead end — the organiser had no way back to the
     // contact that already owns the address. The API now echoes its id on
@@ -434,8 +576,9 @@ function buildWorkspaceConfig(
     // to open (consistent with the importer's fill-blanks-only merge: never
     // clobber, always land the organiser on the real record instead).
     onUpsert: async (data, existing?: ContactRow) => {
+      const payload = splitCustomFieldsFromFormData(data, contactFields)
       try {
-        return existing ? await updateContact(existing.id, data) : await createContact(data)
+        return existing ? await updateContact(existing.id, payload) : await createContact(payload)
       } catch (err) {
         if (
           err instanceof ApiError &&
@@ -690,14 +833,24 @@ function buildWorkspaceConfig(
     ),
     globalFilterReceives: { contact_id: 'contact_id' },
     exportConfig: exportFor('messages'),
+    // SPK-13: the tab was read-only history — there was no way to write to
+    // speakers from the workspace at all. `createComponent` (the Tasks tab's
+    // pattern) opens the compose form from '+ New' without also making
+    // message_log rows look editable, which needs `schema` as well.
+    createComponent: ComposeForm,
+    // ComposeForm does its own POST and job polling — it only calls
+    // `onSubmit` once the organiser dismisses the result, to close the tab
+    // and refetch the list so the new per-recipient rows appear. Nothing is
+    // created here, hence the empty stand-in row.
+    onUpsert: async () => ({}) as MessageRow,
   }
 
   // Dashboard deep-link seeds (M5 stretch) and URL-restored q/flt: tabs without
   // their own filter UI still honour seeded local filters; the preset bar in App
-  // clears them.
-  if (seeds.speakers) {
-    speakers.filterConfig = { initialFilters: seeds.speakers, defaultFilters: {}, FilterComponent: NullFilter }
-  }
+  // clears them. Speakers now has its own filterConfig (confirmation chips)
+  // declared above, which already folds seeds.speakers into initialFilters —
+  // e.g. a `missing_assets` deep-link seed rides alongside the chip filter's
+  // `confirmation` key instead of replacing the whole filter UI.
   if (seeds.tasks) {
     tasks.filterConfig = { initialFilters: seeds.tasks, defaultFilters: {}, FilterComponent: NullFilter }
   }
@@ -834,6 +987,19 @@ export default function App() {
   const [bulkBusy, setBulkBusy] = useState(false)
   const [bulkNote, setBulkNote] = useState<string | null>(null)
 
+  // SPK-15: the Speakers tab's custom-field definitions, scoped to the
+  // current session event (new/edited contacts always write there — same
+  // scope adminApiRoutes.post('/contacts') uses). Settings' "Speaker fields"
+  // card writes these live; a manual reload picks up a change made there
+  // mid-session (no revision-bumped polling for this small a surface).
+  const [contactFields, setContactFields] = useState<ContactFieldDef[]>([])
+  useEffect(() => {
+    if (!me) return
+    listContactFields()
+      .then((r) => setContactFields(r.items))
+      .catch(() => {})
+  }, [me?.event.id])
+
   const refreshMe = useCallback(async () => {
     const m = await getMe()
     setMe(m)
@@ -958,8 +1124,20 @@ export default function App() {
         scopedSources,
         openCreateEvent,
         onSelectEvent,
+        contactFields,
       ),
-    [handleChecklist, checklistResetKey, mergedSeeds, me?.event.id, me?.event.name, eventFilterId, scopedSources, openCreateEvent, onSelectEvent],
+    [
+      handleChecklist,
+      checklistResetKey,
+      mergedSeeds,
+      me?.event.id,
+      me?.event.name,
+      eventFilterId,
+      scopedSources,
+      openCreateEvent,
+      onSelectEvent,
+      contactFields,
+    ],
   )
 
   const workspaceTabs = useMemo(
@@ -990,7 +1168,7 @@ export default function App() {
     handledRec.current = key
     if (!REC_RESTORABLE.includes(tab)) return
     let cancelled = false
-    void loadWorkspaceRecord(tab, rec, eventFilterId)
+    void loadWorkspaceRecord(tab, rec, eventFilterId, contactFields)
       .then((item) => {
         if (cancelled) return
         if (!item) {
@@ -1005,7 +1183,7 @@ export default function App() {
     return () => {
       cancelled = true
     }
-  }, [route, view, eventFilterId])
+  }, [route, view, eventFilterId, contactFields])
 
   /**
    * Workspace → route: active list tab. Detail tabs keep the parent's key. The
@@ -1056,21 +1234,54 @@ export default function App() {
     navigate({ v: 'workspace', tab: target.tab, rec: null })
   }, [])
 
+  /**
+   * CFP-14: send-decisions stopped sending in-request when it moved behind
+   * bulk_jobs (sweep item P2-19) — but the note kept quoting the *planned*
+   * counts the POST echoes back, so the organiser read "12 decision emails
+   * sent" the instant they clicked, before the cron expander had queued a
+   * single one (and whatever the provider later did with them). It now polls
+   * the job like the dashboard's remind-all does and reports what message_log
+   * actually recorded. The skipped counts stay attached throughout: they are
+   * decided in-request (rows outside a queue / already notified) and the job
+   * knows nothing about them.
+   */
+  const decisionPollRef = useRef<BulkJobPollHandle | null>(null)
+  useEffect(() => () => decisionPollRef.current?.cancel(), [])
+
   const runBulk = useCallback(
     async (action: 'accept_queue' | 'decline_queue' | 'pending' | 'send_decisions') => {
       if (checkedIds.length === 0) return
+      decisionPollRef.current?.cancel()
       setBulkBusy(true)
+      let polling = false
       try {
         if (action === 'send_decisions') {
           const r = await sendDecisions(checkedIds)
-          const sent = r.accepted + r.declined
+          const planned = r.accepted + r.declined
           const other = r.skipped - r.skipped_notified
-          setBulkNote(
-            `${sent} decision ${sent === 1 ? 'email' : 'emails'} sent — ` +
-              `${r.accepted} accepted, ${r.declined} declined, ${r.tasks_assigned} tasks assigned` +
-              (r.skipped_notified > 0 ? `; ${r.skipped_notified} skipped (already notified)` : '') +
-              (other > 0 ? `; ${other} skipped (not in a queue)` : ''),
-          )
+          const skippedNote =
+            (r.skipped_notified > 0 ? `; ${r.skipped_notified} skipped (already notified)` : '') +
+            (other > 0 ? `; ${other} skipped (not in a queue)` : '')
+          const plan = `${r.accepted} accepted, ${r.declined} declined`
+          if (!r.job_id) {
+            // Nothing was in a decision queue, so no job exists to poll.
+            setBulkNote(`No decision emails to send${skippedNote}`)
+          } else {
+            polling = true
+            setBulkNote(`Queueing ${planned} decision ${planned === 1 ? 'email' : 'emails'} (${plan})…`)
+            decisionPollRef.current = pollBulkJob(r.job_id, {
+              onProgress: (job) =>
+                setBulkNote(`Sending decisions… ${job.enqueued}/${job.total ?? planned} processed (${plan})`),
+              onSettled: (job) => {
+                setBulkNote(`${describeSettledJob(job, 'decision email')} ${plan}${skippedNote}`)
+                setBulkBusy(false)
+              },
+              onError: (message) => {
+                setBulkNote(message)
+                setBulkBusy(false)
+              },
+            })
+          }
         } else {
           const r = await bulkStatus(checkedIds, action)
           setBulkNote(`${r.changed} moved to ${statusLabel(action)}`)
@@ -1078,9 +1289,12 @@ export default function App() {
         setCheckedIds([])
         setChecklistResetKey((k) => k + 1)
       } catch (e) {
+        polling = false
         setBulkNote(e instanceof Error ? e.message : 'Action failed')
       } finally {
-        setBulkBusy(false)
+        // The poll owns `bulkBusy` from here when one is running: the bar must
+        // stay disabled until the job settles, not just until the POST returns.
+        if (!polling) setBulkBusy(false)
       }
     },
     [checkedIds],

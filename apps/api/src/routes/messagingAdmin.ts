@@ -1,0 +1,374 @@
+// Organiser-triggered messaging surfaces that don't fit adminApi.ts's
+// generic CRUD tables. Lives in its own file (like filesAdmin.ts) and mounts
+// at /app/api/messaging from app.ts, immediately after the /app/api mount so
+// the shared admin guard still runs first. The guard is re-resolved
+// defensively below so this router is correct even if the mount order ever
+// changes (same convention as filesAdmin.ts).
+//
+// Currently covers SPK-06 (portal invitation): an organiser inviting a known
+// contact into their speaker portal via the same magic-link seam every other
+// sign-in link uses (docs/03 §5, docs/08 §3) — message_log + outbox, so a
+// missing provider queues/fails visibly instead of erroring the request.
+
+import { Hono } from 'hono';
+import { can } from '@kms/core';
+import { DEFAULT_TEMPLATES } from '@kms/email';
+import type { Actor } from '@kms/core';
+import type { AccessEnv } from '../access';
+import { getRevalidatedPrivilegedSession } from '../session';
+import { sendTemplated } from '../mailer';
+import { mintToken, sha256hex } from '../tokens';
+
+export const messagingAdminRoutes = new Hono<AccessEnv>();
+
+messagingAdminRoutes.use('*', async (c, next) => {
+  if (!c.get('session')) {
+    const session = await getRevalidatedPrivilegedSession(c);
+    if (!session) return c.json({ error: 'unauthenticated' }, 401);
+    const actor: Actor = { contactId: session.contactId, email: session.email, role: session.role };
+    if (!can(actor, 'admin.view')) return c.json({ error: 'forbidden' }, 403);
+    c.set('session', session);
+  }
+  await next();
+});
+
+interface ContactRow {
+  id: string;
+  email: string;
+}
+
+/**
+ * POST /app/api/messaging/invite-portal { contact_id }
+ *
+ * Mints a portal-login token for an existing contact in the current event
+ * and sends it through the same `magic_link` template/seam `/auth/request`
+ * uses, so status lands in message_log exactly like every other send (no
+ * separate success path to keep in sync, no bespoke provider handling).
+ * Idempotency key is the token hash (mirrors requestMagicLink) — a caller
+ * retrying the request mints a fresh token/link each time by design; the
+ * dedupe guarantee mailer.ts provides is "one send per token", not "one
+ * invite per contact".
+ */
+messagingAdminRoutes.post('/invite-portal', async (c) => {
+  const session = c.get('session');
+  const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+  const contactId = typeof body.contact_id === 'string' ? body.contact_id : '';
+  if (!contactId) return c.json({ error: 'contact_id_required' }, 400);
+
+  const db = c.env.DB;
+  const [event, contact] = await Promise.all([
+    db.prepare('SELECT id, name FROM events WHERE id = ?').bind(session.eventId).first<{ id: string; name: string }>(),
+    db
+      .prepare('SELECT id, email FROM contacts WHERE id = ? AND event_id = ?')
+      .bind(contactId, session.eventId)
+      .first<ContactRow>(),
+  ]);
+  if (!event) return c.json({ error: 'not_found' }, 404);
+  if (!contact) return c.json({ error: 'contact_not_found' }, 404);
+
+  const { raw: token, statement } = await mintToken(db, {
+    contactId: contact.id,
+    eventId: session.eventId,
+    purpose: 'portal-login',
+  });
+  await statement.run();
+  const hash = await sha256hex(token);
+  const link = `${c.env.APP_URL}/auth/callback?t=${token}`;
+
+  const outcome = await sendTemplated(c, {
+    templateKey: 'magic_link',
+    eventId: session.eventId,
+    contactId: contact.id,
+    toEmail: contact.email,
+    entityId: hash,
+    context: { event: { name: event.name }, magic_link: link },
+  });
+
+  return c.json({ ok: true, outcome });
+});
+
+// ---------------------------------------------------------------------------
+// SPK-13: organiser compose. The Messages tab was read-only history — there
+// was no way to write to speakers from the workspace at all. Rather than
+// inventing a second sending path, a compose snapshots its (subject, body,
+// resolved recipient ids) into a `bulk_jobs` row exactly like send-decisions
+// does, and the cron expander (jobs/bulkJobs.ts, kind 'compose') renders the
+// body per recipient through the normal merge-field/theme/message_log/outbox
+// machinery. The organiser therefore gets the same live sent/failed counts
+// from `GET /app/api/bulk-jobs/:id` and the same per-recipient audit trail in
+// the Messages tab, for free.
+// ---------------------------------------------------------------------------
+
+/**
+ * Merge fields a composed message may use. Also served to the UI (compose
+ * hint + the Settings → Email templates card) so the documented list and the
+ * context the expander actually builds cannot drift apart.
+ */
+export const COMPOSE_MERGE_FIELDS: ReadonlyArray<{ field: string; description: string }> = [
+  { field: 'first_name', description: 'Recipient first name (falls back to "there")' },
+  { field: 'last_name', description: 'Recipient last name' },
+  { field: 'full_name', description: 'First + last name, or the email address' },
+  { field: 'email', description: 'Recipient email address' },
+  { field: 'company', description: 'Recipient company' },
+  { field: 'job_title', description: 'Recipient job title' },
+  { field: 'event.name', description: 'Event name' },
+  { field: 'portal_url', description: 'Link to the speaker portal' },
+];
+
+export type ComposeAudience = 'all_contacts' | 'speakers' | 'accepted_speakers' | 'selected';
+
+const COMPOSE_AUDIENCES: readonly ComposeAudience[] = ['all_contacts', 'speakers', 'accepted_speakers', 'selected'];
+
+export interface ComposeRecipient {
+  id: string;
+  email: string;
+  first_name: string | null;
+  last_name: string | null;
+  company: string | null;
+  job_title: string | null;
+}
+
+/**
+ * Resolve an audience to a de-duplicated list of contacts in this event.
+ *
+ *  - `all_contacts`      every contact on the event with an email
+ *  - `speakers`          anyone attached to a submission (submitter or a
+ *                        `submission_participants` row) — the workspace's
+ *                        working definition of "speaker"
+ *  - `accepted_speakers` the same, narrowed to accepted submissions
+ *  - `selected`          exactly the ids the organiser checked, filtered to
+ *                        this event (a foreign id is dropped rather than
+ *                        erroring: the selection may come from a stale grid)
+ *
+ * Resolution happens once, at compose time, and the ids are frozen into the
+ * job — the same snapshot discipline expandSendDecisions uses, so a contact
+ * created while the job drains doesn't silently join the send.
+ */
+export async function resolveAudience(
+  db: D1Database,
+  eventId: string,
+  audience: ComposeAudience,
+  contactIds: string[],
+): Promise<ComposeRecipient[]> {
+  const select = 'SELECT id, email, first_name, last_name, company, job_title FROM contacts';
+  const hasEmail = "email IS NOT NULL AND TRIM(email) != ''";
+  if (audience === 'selected') {
+    if (contactIds.length === 0) return [];
+    const placeholders = contactIds.map(() => '?').join(', ');
+    const { results } = await db
+      .prepare(`${select} WHERE event_id = ? AND id IN (${placeholders}) AND ${hasEmail} ORDER BY id`)
+      .bind(eventId, ...contactIds)
+      .all<ComposeRecipient>();
+    return results;
+  }
+  if (audience === 'all_contacts') {
+    const { results } = await db
+      .prepare(`${select} WHERE event_id = ? AND ${hasEmail} ORDER BY id`)
+      .bind(eventId)
+      .all<ComposeRecipient>();
+    return results;
+  }
+  const statusClause = audience === 'accepted_speakers' ? "AND s.status = 'accepted'" : '';
+  const { results } = await db
+    .prepare(
+      `${select} WHERE event_id = ?1 AND ${hasEmail} AND id IN (
+         SELECT s.submitter_contact_id FROM submissions s
+          WHERE s.event_id = ?1 AND s.submitter_contact_id IS NOT NULL ${statusClause}
+         UNION
+         SELECT p.contact_id FROM submission_participants p
+           JOIN submissions s ON s.id = p.submission_id
+          WHERE s.event_id = ?1 ${statusClause}
+       ) ORDER BY id`,
+    )
+    .bind(eventId)
+    .all<ComposeRecipient>();
+  return results;
+}
+
+/**
+ * The compose textarea holds plain text; template bodies are HTML fragments
+ * (the theme wrapper supplies the document). Convert once, at compose time:
+ * escape the organiser's text so a stray `<` cannot become markup, then turn
+ * blank lines into paragraphs and single newlines into `<br>` so the message
+ * reads the way it was typed.
+ *
+ * `{{merge.fields}}` survive escaping untouched (no HTML-special characters),
+ * and their *values* are escaped separately by renderTemplate's merge
+ * transform — so the two escapes compose correctly rather than double-encoding.
+ */
+export function composeBodyToHtml(text: string): string {
+  const escaped = text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+  return escaped
+    .split(/\r?\n\s*\r?\n/)
+    .map((para) => para.trim())
+    .filter((para) => para !== '')
+    .map((para) => `<p>${para.replace(/\r?\n/g, '<br>')}</p>`)
+    .join('\n');
+}
+
+/**
+ * POST /app/api/messaging/compose
+ *   { subject, body, audience?, contact_ids?: string[] } → 202 { job_id, total }
+ *
+ * Snapshot-and-return: no provider work happens in-request. `total` is the
+ * resolved recipient count, so the UI can say what it is about to do before
+ * the first poll of `GET /app/api/bulk-jobs/:id` comes back.
+ */
+messagingAdminRoutes.post('/compose', async (c) => {
+  const session = c.get('session');
+  const db = c.env.DB;
+  const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+  const subject = typeof body.subject === 'string' ? body.subject.trim() : '';
+  const messageBody = typeof body.body === 'string' ? body.body.trim() : '';
+  if (!subject) return c.json({ error: 'subject_required' }, 400);
+  if (!messageBody) return c.json({ error: 'body_required' }, 400);
+
+  const contactIds = Array.isArray(body.contact_ids)
+    ? body.contact_ids.filter((v): v is string => typeof v === 'string')
+    : [];
+  const requested = typeof body.audience === 'string' ? body.audience : contactIds.length > 0 ? 'selected' : '';
+  if (!COMPOSE_AUDIENCES.includes(requested as ComposeAudience)) return c.json({ error: 'audience_invalid' }, 400);
+  const audience = requested as ComposeAudience;
+
+  const recipients = await resolveAudience(db, session.eventId, audience, contactIds);
+  if (recipients.length === 0) return c.json({ error: 'no_recipients' }, 400);
+
+  const jobId = crypto.randomUUID();
+  const ts = new Date().toISOString();
+  await db
+    .prepare(
+      `INSERT INTO bulk_jobs (id, event_id, kind, status, params_json, total, enqueued, created_by, created_at, updated_at)
+       VALUES (?, ?, 'compose', 'pending', ?, ?, 0, ?, ?, ?)`,
+    )
+    .bind(
+      jobId,
+      session.eventId,
+      JSON.stringify({
+        subject,
+        body: composeBodyToHtml(messageBody),
+        body_text: messageBody,
+        contact_ids: recipients.map((r) => r.id),
+      }),
+      recipients.length,
+      session.contactId,
+      ts,
+      ts,
+    )
+    .run();
+
+  return c.json({ ok: true, job_id: jobId, total: recipients.length, audience }, 202);
+});
+
+/**
+ * GET /app/api/messaging/compose/audiences — recipient counts per audience,
+ * so the compose form can label each option with what it will actually reach
+ * instead of making the organiser guess.
+ */
+messagingAdminRoutes.get('/compose/audiences', async (c) => {
+  const session = c.get('session');
+  const db = c.env.DB;
+  const items = await Promise.all(
+    (['all_contacts', 'speakers', 'accepted_speakers'] as const).map(async (audience) => ({
+      audience,
+      count: (await resolveAudience(db, session.eventId, audience, [])).length,
+    })),
+  );
+  return c.json({ items, merge_fields: COMPOSE_MERGE_FIELDS });
+});
+
+// ---------------------------------------------------------------------------
+// SPK-14: template visibility. `email_templates` overrides have driven every
+// send since docs/08 but had no UI — the only way to reword a system email
+// was SQL. These two routes are the whole surface: list the code defaults
+// alongside whatever this event overrides, and upsert/clear one override.
+// ---------------------------------------------------------------------------
+
+interface TemplateOverrideRow {
+  key: string;
+  subject: string | null;
+  body_richtext: string | null;
+  enabled: number;
+  updated_at: string;
+}
+
+/** GET /app/api/messaging/templates → defaults + this event's overrides. */
+messagingAdminRoutes.get('/templates', async (c) => {
+  const session = c.get('session');
+  const { results } = await c.env.DB.prepare(
+    'SELECT key, subject, body_richtext, enabled, updated_at FROM email_templates WHERE event_id = ?',
+  )
+    .bind(session.eventId)
+    .all<TemplateOverrideRow>();
+  const byKey = new Map(results.map((r) => [r.key, r]));
+
+  // DEFAULT_TEMPLATES is the canonical key list; an override for a key that
+  // no longer ships as a default would otherwise be invisible *and*
+  // un-clearable, so any extra keys are appended rather than dropped.
+  const keys = [
+    ...Object.keys(DEFAULT_TEMPLATES),
+    ...results.map((r) => r.key).filter((k) => !(k in DEFAULT_TEMPLATES)),
+  ];
+  const items = keys.map((key) => {
+    const override = byKey.get(key);
+    const fallback = DEFAULT_TEMPLATES[key];
+    return {
+      key,
+      default_subject: fallback?.subject ?? null,
+      default_body: fallback?.body ?? null,
+      subject: override?.subject ?? null,
+      body_richtext: override?.body_richtext ?? null,
+      enabled: override ? override.enabled : 1,
+      overridden: Boolean(override && (override.subject || override.body_richtext || override.enabled === 0)),
+      updated_at: override?.updated_at ?? null,
+    };
+  });
+  return c.json({ items, merge_fields: COMPOSE_MERGE_FIELDS });
+});
+
+/**
+ * PUT /app/api/messaging/templates/:key { subject?, body_richtext?, enabled? }
+ *
+ * Upsert of one per-event override. An empty string clears that half of the
+ * override and the code default takes over again (renderTemplate already
+ * treats empty as absent) — that is what the card's "Reset" sends. Keys are
+ * restricted to the shipped defaults: an override for an unknown key would
+ * never render, so accepting one only creates dead rows.
+ */
+messagingAdminRoutes.put('/templates/:key', async (c) => {
+  const session = c.get('session');
+  const key = c.req.param('key');
+  if (!(key in DEFAULT_TEMPLATES)) return c.json({ error: 'unknown_template' }, 404);
+  const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+
+  const norm = (v: unknown): string | null => (typeof v === 'string' && v.trim() !== '' ? v : null);
+  const subject = norm(body.subject);
+  const bodyRichtext = norm(body.body_richtext);
+  const enabled = body.enabled === false || body.enabled === 0 ? 0 : 1;
+  const ts = new Date().toISOString();
+
+  await c.env.DB.prepare(
+    `INSERT INTO email_templates (id, event_id, key, name, subject, body_richtext, enabled, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT (event_id, key) DO UPDATE SET
+       subject = excluded.subject,
+       body_richtext = excluded.body_richtext,
+       enabled = excluded.enabled,
+       updated_at = excluded.updated_at`,
+  )
+    .bind(crypto.randomUUID(), session.eventId, key, key, subject, bodyRichtext, enabled, ts)
+    .run();
+
+  return c.json({
+    ok: true,
+    key,
+    subject,
+    body_richtext: bodyRichtext,
+    enabled,
+    overridden: Boolean(subject || bodyRichtext || enabled === 0),
+    updated_at: ts,
+  });
+});

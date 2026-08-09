@@ -81,6 +81,18 @@ interface FormContext {
 /** No limit configured: bind a sentinel so the guard SQL stays one shape. */
 const NO_LIMIT = Number.MAX_SAFE_INTEGER;
 
+/**
+ * Whether a form is closed to new submissions and edits right now. Shared
+ * with the portal edit routes (portal.ts) so "closed" means exactly one
+ * thing everywhere: explicit status='closed', or close_at in the past.
+ * close_at is a full ISO instant (set via the admin's tz-aware datetime
+ * picker — apps/admin/src/utils/dates.ts localInputToIso), never a bare
+ * date, so this comparison needs no timezone handling of its own.
+ */
+export function isFormClosed(form: { status: string; close_at: string | null }): boolean {
+  return form.status === 'closed' || (form.close_at !== null && new Date(form.close_at).getTime() < Date.now());
+}
+
 async function loadContext(db: D1Database, slug: string, formId: string): Promise<FormContext | null> {
   const event = await db
     .prepare('SELECT id, name, slug, timezone, default_submission_limit FROM events WHERE slug = ?')
@@ -93,8 +105,7 @@ async function loadContext(db: D1Database, slug: string, formId: string): Promis
     .first<FormRow>();
   if (!form) return null;
   const questions = (await loadQuestions(db, form.id)) as unknown as QuestionDef[];
-  const closed =
-    form.status === 'closed' || (form.close_at !== null && new Date(form.close_at).getTime() < Date.now());
+  const closed = isFormClosed(form);
   return {
     event,
     form,

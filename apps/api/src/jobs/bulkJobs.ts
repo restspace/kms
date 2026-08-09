@@ -25,7 +25,7 @@ const RECIPIENTS_PER_TICK = 50;
 interface BulkJobRow {
   id: string;
   event_id: string;
-  kind: 'send-decisions' | 'send-confirmations' | 'remind-tasks';
+  kind: 'send-decisions' | 'send-confirmations' | 'remind-tasks' | 'compose';
   status: string;
   params_json: string;
   total: number | null;
@@ -267,6 +267,99 @@ async function expandRemindTasks(env: Env, job: BulkJobRow, limit: number): Prom
 }
 
 // ---------------------------------------------------------------------------
+// compose (organiser-authored message, params written by messagingAdmin.ts)
+// ---------------------------------------------------------------------------
+
+interface ComposeParams {
+  subject: string;
+  body: string;
+  contact_ids: string[];
+}
+
+/**
+ * Same shape as expandSendDecisions: the recipient list was frozen at compose
+ * time, so a tick is just "take the next `limit` ids and queue one render
+ * each". The subject/body ride along as an inline template
+ * (`queueTemplated`'s `template` arg) rather than an email_templates row, so
+ * merge fields, theming, the text alternative and message_log dedupe all
+ * behave exactly as they do for a system template — the only difference is
+ * where the two strings came from.
+ *
+ * Merge context is per recipient (`{{first_name}}`, `{{email}}`, …) plus the
+ * shared event/portal values; the field list is documented to organisers as
+ * COMPOSE_MERGE_FIELDS in messagingAdmin.ts and must be kept in step with it.
+ */
+async function expandCompose(env: Env, job: BulkJobRow, limit: number): Promise<void> {
+  const db = env.DB;
+  const params = JSON.parse(job.params_json) as ComposeParams;
+  const event = await db
+    .prepare('SELECT id, name, slug FROM events WHERE id = ?')
+    .bind(job.event_id)
+    .first<{ id: string; name: string; slug: string }>();
+  if (!event) {
+    await failJob(db, job.id, 'event_not_found');
+    return;
+  }
+
+  const total = job.total ?? params.contact_ids.length;
+  const slice = params.contact_ids.slice(job.enqueued, job.enqueued + limit);
+  if (slice.length > 0) {
+    const placeholders = slice.map(() => '?').join(', ');
+    const { results: contacts } = await db
+      .prepare(
+        `SELECT id, email, first_name, last_name, company, job_title
+         FROM contacts WHERE event_id = ? AND id IN (${placeholders})`,
+      )
+      .bind(job.event_id, ...slice)
+      .all<{
+        id: string; email: string; first_name: string | null; last_name: string | null;
+        company: string | null; job_title: string | null;
+      }>();
+    const byId = new Map(contacts.map((c) => [c.id, c]));
+
+    // Iterate the *snapshot* order, not the query results: a contact deleted
+    // between compose and expansion is skipped without shifting the offset,
+    // so `enqueued` stays a truthful cursor into contact_ids.
+    for (const contactId of slice) {
+      const contact = byId.get(contactId);
+      if (!contact) continue;
+      const fullName = [contact.first_name, contact.last_name].filter(Boolean).join(' ') || contact.email;
+      const recipientContext = {
+        first_name: contact.first_name ?? 'there',
+        last_name: contact.last_name ?? '',
+        full_name: fullName,
+        email: contact.email,
+        company: contact.company ?? '',
+        job_title: contact.job_title ?? '',
+      };
+      await queueTemplated(db, {
+        templateKey: 'compose',
+        eventId: job.event_id,
+        contactId: contact.id,
+        toEmail: contact.email,
+        entityId: `${job.id}:${contact.id}`,
+        template: { subject: params.subject, body: params.body },
+        context: {
+          ...recipientContext,
+          // Also reachable under the names system templates use, so an
+          // organiser copying wording out of a template keeps working.
+          speaker: recipientContext,
+          contact: recipientContext,
+          event: { name: event.name },
+          portal_url: `${env.APP_URL}/portal/${event.slug}`,
+        },
+      });
+    }
+  }
+
+  const enqueued = Math.min(params.contact_ids.length, job.enqueued + slice.length);
+  await db
+    .prepare(`UPDATE bulk_jobs SET enqueued = ?, status = ?, updated_at = ? WHERE id = ?`)
+    .bind(enqueued, enqueued >= total ? 'done' : 'running', nowIso(), job.id)
+    .run();
+}
+
+// ---------------------------------------------------------------------------
 
 /** Cron entry point: claim one job, expand up to `limit` recipients, repeat next tick. */
 export async function sweepBulkJobs(env: Env, limit = RECIPIENTS_PER_TICK): Promise<void> {
@@ -282,6 +375,9 @@ export async function sweepBulkJobs(env: Env, limit = RECIPIENTS_PER_TICK): Prom
         break;
       case 'remind-tasks':
         await expandRemindTasks(env, job, limit);
+        break;
+      case 'compose':
+        await expandCompose(env, job, limit);
         break;
       default:
         await failJob(env.DB, job.id, `unknown bulk_jobs kind: ${job.kind as string}`);

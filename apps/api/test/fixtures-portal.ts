@@ -60,14 +60,28 @@ export async function setContactNotes(contactId: string, notes: string): Promise
 
 export async function createSubmissionForm(
   eventId: string,
-  overrides: Partial<{ id: string; notifyAdminsOnUpdate: string[] }> = {},
+  overrides: Partial<{
+    id: string;
+    notifyAdminsOnUpdate: string[];
+    status: 'open' | 'closed';
+    closeAt: string | null;
+  }> = {},
 ): Promise<string> {
   const id = overrides.id ?? `form-${crypto.randomUUID()}`;
   await env.DB.prepare(
-    `INSERT INTO submission_forms (id, event_id, internal_name, notify_admins_on_update, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO submission_forms (id, event_id, internal_name, status, close_at, notify_admins_on_update, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
   )
-    .bind(id, eventId, 'CFP', overrides.notifyAdminsOnUpdate ? JSON.stringify(overrides.notifyAdminsOnUpdate) : null, ts, ts)
+    .bind(
+      id,
+      eventId,
+      'CFP',
+      overrides.status ?? 'open',
+      overrides.closeAt ?? null,
+      overrides.notifyAdminsOnUpdate ? JSON.stringify(overrides.notifyAdminsOnUpdate) : null,
+      ts,
+      ts,
+    )
     .run();
   return id;
 }

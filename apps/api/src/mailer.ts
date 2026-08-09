@@ -27,6 +27,16 @@ export interface SendTemplatedArgs {
   version?: number | string;
   context: Record<string, unknown>;
   ics?: IcsPayload;
+  /**
+   * Ad-hoc template body supplied by the caller instead of looked up from
+   * `email_templates`/DEFAULT_TEMPLATES (SPK-13: the organiser compose flow
+   * writes its subject/body once into a bulk_jobs snapshot, then renders it
+   * per recipient here). Everything downstream — merge fields, theming, the
+   * text alternative, message_log, outbox — is unchanged, so a composed
+   * message is as traceable as a templated one. The theme still comes from
+   * the event.
+   */
+  template?: { subject: string; body: string };
 }
 
 export interface OutboxEmailPayload extends OutgoingEmail {
@@ -52,6 +62,21 @@ async function loadOverride(
     : { override: null, themeId: null };
 }
 
+/**
+ * The (subject, body) pair for a send: an inline `args.template` when the
+ * caller brought its own (compose), otherwise the event's DB override — with
+ * the code default filled in by renderTemplate when neither supplies one.
+ */
+async function resolveOverride(
+  db: D1Database,
+  args: SendTemplatedArgs,
+): Promise<{ override: TemplateOverride | null; themeId: string | null }> {
+  if (args.template) {
+    return { override: { subject: args.template.subject, body_richtext: args.template.body, enabled: 1 }, themeId: null };
+  }
+  return loadOverride(db, args.eventId, args.templateKey);
+}
+
 async function loadTheme(db: D1Database, eventId: string, themeId: string | null): Promise<ThemeConfig | null> {
   if (themeId) {
     const row = await db.prepare('SELECT * FROM email_themes WHERE id = ?').bind(themeId).first<ThemeConfig>();
@@ -75,7 +100,7 @@ export async function queueTemplated(
   db: D1Database,
   args: SendTemplatedArgs,
 ): Promise<{ outcome: SendOutcome; payload?: OutboxEmailPayload }> {
-  const { override, themeId } = await loadOverride(db, args.eventId, args.templateKey);
+  const { override, themeId } = await resolveOverride(db, args);
   const theme = await loadTheme(db, args.eventId, themeId);
   const rendered = renderTemplate(args.templateKey, override, theme, args.context);
   if (!rendered) return { outcome: 'template_disabled' };
@@ -121,7 +146,7 @@ export interface PreparedEmail {
  * or do nothing and let the cron sweep deliver it.
  */
 export async function prepareTemplated(db: D1Database, args: SendTemplatedArgs): Promise<PreparedEmail | null> {
-  const { override, themeId } = await loadOverride(db, args.eventId, args.templateKey);
+  const { override, themeId } = await resolveOverride(db, args);
   const theme = await loadTheme(db, args.eventId, themeId);
   const rendered = renderTemplate(args.templateKey, override, theme, args.context);
   if (!rendered) return null;

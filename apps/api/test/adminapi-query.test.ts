@@ -143,6 +143,93 @@ describe('POST /app/api/:resource/query — keyset pagination', () => {
     });
     expect(body.items.map((r) => r.code)).toEqual(['SESS-HIGH', 'SESS-LOW']);
   });
+
+  it('sorts an unscored submission last on rating, in both directions', async () => {
+    const eventId = await seedEvent();
+    const admin = await seedStaff(eventId, 'admin');
+    const plan = `plan-${crypto.randomUUID().slice(0, 8)}`;
+    await env.DB.prepare(
+      `INSERT INTO evaluation_plans (id, event_id, name, status, created_at) VALUES (?, ?, 'P', 'active', ?)`,
+    ).bind(plan, eventId, '2026-08-01T00:00:00Z').run();
+    const low = await seedSubmission(eventId, { code: 'SESS-LOW' });
+    const high = await seedSubmission(eventId, { code: 'SESS-HIGH' });
+    const unscored = await seedSubmission(eventId, { code: 'SESS-NONE' });
+    for (const [id, value] of [[low, 2.5], [high, 4.75]] as const) {
+      await env.DB.prepare('UPDATE submissions SET evaluation_plan_id = ?, rating_cache = ? WHERE id = ?')
+        .bind(plan, JSON.stringify({ [plan]: value }), id)
+        .run();
+    }
+    // The unscored submission still carries the plan (so `rating` resolves via
+    // json_extract) but has no rating_cache entry for it — NULL, not zero.
+    await env.DB.prepare('UPDATE submissions SET evaluation_plan_id = ? WHERE id = ?').bind(plan, unscored).run();
+
+    const asc = await query(admin.cookie, 'submissions', {
+      size: 10,
+      filters: {},
+      sort: { field: 'rating', direction: 'asc' },
+    });
+    expect(asc.body.items.map((r) => r.code)).toEqual(['SESS-LOW', 'SESS-HIGH', 'SESS-NONE']);
+
+    const desc = await query(admin.cookie, 'submissions', {
+      size: 10,
+      filters: {},
+      sort: { field: 'rating', direction: 'desc' },
+    });
+    expect(desc.body.items.map((r) => r.code)).toEqual(['SESS-HIGH', 'SESS-LOW', 'SESS-NONE']);
+  });
+});
+
+describe('POST /app/api/:resource/query — contacts confirmation (SPK-04)', () => {
+  /** Three contacts: one with a confirmed submission_participants row, one
+   * with only an unconfirmed row, and one that is not a participant at all. */
+  async function seedRoster() {
+    const eventId = await seedEvent();
+    const admin = await seedStaff(eventId, 'admin');
+    const submission = await seedSubmission(eventId);
+
+    const tag = crypto.randomUUID().slice(0, 8);
+    const confirmed = await seedContact(eventId, { email: 'confirmed@example.com', last_name: 'Aardvark' });
+    await env.DB.prepare(
+      `INSERT INTO submission_participants (id, submission_id, contact_id, role, position, confirmed_at)
+       VALUES (?, ?, ?, 'speaker', 0, '2026-08-01T00:00:00Z')`,
+    ).bind(`sp-confirmed-${tag}`, submission, confirmed).run();
+
+    const awaiting = await seedContact(eventId, { email: 'awaiting@example.com', last_name: 'Baboon' });
+    await env.DB.prepare(
+      `INSERT INTO submission_participants (id, submission_id, contact_id, role, position)
+       VALUES (?, ?, ?, 'co-speaker', 1)`,
+    ).bind(`sp-awaiting-${tag}`, submission, awaiting).run();
+
+    const bystander = await seedContact(eventId, { email: 'bystander@example.com', last_name: 'Coyote' });
+
+    return { admin, confirmed, awaiting, bystander };
+  }
+
+  it('reports the confirmation column: confirmed / awaiting / none', async () => {
+    const { admin } = await seedRoster();
+    const { body } = await query(admin.cookie, 'contacts', { size: 50, filters: {} });
+
+    const byEmail = new Map(body.items.map((r) => [r.email, r.confirmation]));
+    expect(byEmail.get('confirmed@example.com')).toBe('confirmed');
+    expect(byEmail.get('awaiting@example.com')).toBe('awaiting');
+    expect(byEmail.get('bystander@example.com')).toBeNull();
+  });
+
+  it('filters to confirmed only', async () => {
+    const { admin } = await seedRoster();
+    const { body } = await query(admin.cookie, 'contacts', { size: 50, filters: { confirmation: 'confirmed' } });
+
+    const emails = body.items.map((r) => r.email);
+    expect(emails).toEqual(['confirmed@example.com']);
+  });
+
+  it('filters to awaiting only, excluding confirmed and non-participants', async () => {
+    const { admin } = await seedRoster();
+    const { body } = await query(admin.cookie, 'contacts', { size: 50, filters: { confirmation: 'awaiting' } });
+
+    const emails = body.items.map((r) => r.email);
+    expect(emails).toEqual(['awaiting@example.com']);
+  });
 });
 
 describe('POST /app/api/switch-event', () => {

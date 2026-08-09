@@ -234,7 +234,7 @@ landingRoutes.get('/e/:slug/agenda.json', async (c) => {
       .prepare(
         `SELECT id, code, title, description, format, level, capacity, track_id, room_id, starts_at, ends_at
          FROM submissions
-         WHERE event_id = ? AND status = 'accepted' AND starts_at IS NOT NULL AND ends_at IS NOT NULL
+         WHERE event_id = ? AND status = 'accepted' AND content_approved = 1 AND starts_at IS NOT NULL AND ends_at IS NOT NULL
          ORDER BY starts_at, code`,
       )
       .bind(event.id)
@@ -258,7 +258,7 @@ landingRoutes.get('/e/:slug/agenda.json', async (c) => {
          FROM submission_participants sp
          JOIN contacts c ON c.id = sp.contact_id
          JOIN submissions s ON s.id = sp.submission_id
-         WHERE s.event_id = ? AND s.status = 'accepted'
+         WHERE s.event_id = ? AND s.status = 'accepted' AND s.content_approved = 1
            AND s.starts_at IS NOT NULL AND s.ends_at IS NOT NULL
          ORDER BY sp.position`,
       )
@@ -354,7 +354,7 @@ landingRoutes.get('/e/:slug/speakers.json', async (c) => {
        FROM submission_participants sp
        JOIN contacts c ON c.id = sp.contact_id
        JOIN submissions s ON s.id = sp.submission_id
-       WHERE s.event_id = ? AND s.status = 'accepted'
+       WHERE s.event_id = ? AND s.status = 'accepted' AND s.content_approved = 1
          AND s.starts_at IS NOT NULL AND s.ends_at IS NOT NULL
        ORDER BY sp.position`,
     )
@@ -462,7 +462,7 @@ landingRoutes.get('/e/:slug/agenda.ics', async (c) => {
       .prepare(
         `SELECT id, code, title, description, starts_at, ends_at, room_id
          FROM submissions
-         WHERE event_id = ? AND status = 'accepted' AND starts_at IS NOT NULL AND ends_at IS NOT NULL
+         WHERE event_id = ? AND status = 'accepted' AND content_approved = 1 AND starts_at IS NOT NULL AND ends_at IS NOT NULL
          ORDER BY starts_at, code`,
       )
       .bind(event.id)
@@ -488,7 +488,7 @@ landingRoutes.get('/e/:slug/agenda.ics', async (c) => {
          FROM submission_participants sp
          JOIN contacts c ON c.id = sp.contact_id
          JOIN submissions s ON s.id = sp.submission_id
-         WHERE s.event_id = ? AND s.status = 'accepted'
+         WHERE s.event_id = ? AND s.status = 'accepted' AND s.content_approved = 1
            AND s.starts_at IS NOT NULL AND s.ends_at IS NOT NULL
          ORDER BY sp.position`,
       )

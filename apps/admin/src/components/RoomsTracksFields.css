@@ -62,3 +62,38 @@
 .rt-row-saving {
   opacity: 0.6;
 }
+
+/* Contact custom fields card (SPK-15) reuses the rt-row shape with a couple
+   of extra controls: a fixed-width type select and a move-up/move-down pair
+   instead of drag-and-drop reordering. */
+
+.rt-row-type {
+  flex: 0 0 8rem;
+  width: 8rem;
+}
+
+.rt-row-options {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.rt-row-move {
+  flex: 0 0 auto;
+  width: 1.8rem;
+  height: 1.8rem;
+  line-height: 1;
+  padding: 0;
+  border-radius: var(--radius);
+  border: 1px solid var(--border-strong);
+  background: transparent;
+  cursor: pointer;
+}
+
+.rt-row-move:hover:not(:disabled) {
+  background: var(--surface-hover, rgba(0, 0, 0, 0.05));
+}
+
+.rt-row-move:disabled {
+  opacity: 0.35;
+  cursor: default;
+}

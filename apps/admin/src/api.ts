@@ -38,6 +38,13 @@ export interface ContactRow {
   headshot_asset_id: string | null
   /** organiser-only; never rendered in portal/public surfaces */
   notes: string | null
+  /** SPK-15: `{ <contact_field_definitions.key>: value }` json text for this
+   * contact's event, or null when it has no custom-field values set. */
+  custom_fields_json?: string | null
+  /** SPK-04: 'confirmed' (has a confirmed submission_participants row),
+   * 'awaiting' (a participant somewhere, none confirmed), or null/absent
+   * when the contact is not a submission participant at all. */
+  confirmation?: 'confirmed' | 'awaiting' | null
   created_at: string
   updated_at: string
 }
@@ -60,6 +67,8 @@ export interface SubmissionRow {
   submitter_name: string | null
   /** organiser-only; never rendered in portal/public surfaces */
   notes: string | null
+  /** CNT-12/w3 public-feed visibility gate, independent of `status` — default 1. See 0010 migration. */
+  content_approved: number
   created_at: string
   updated_at: string
 }
@@ -217,6 +226,32 @@ export const updateTrack = (id: string, data: Record<string, unknown>) =>
   request<TrackRow>(`/app/api/tracks/${id}`, { method: 'PUT', body: JSON.stringify(data) })
 export const deleteTrack = (id: string) =>
   request<{ ok: boolean }>(`/app/api/tracks/${id}`, { method: 'DELETE' })
+
+// ---------------------------------------------------------------------------
+// Contact custom fields (SPK-15): per-event field definitions for the
+// Speakers tab. `options` travels as a JSON-encoded string[] (only meaningful
+// when type is 'select') — same wire shape D1 stores it in.
+// ---------------------------------------------------------------------------
+
+export interface ContactFieldDef {
+  id: string
+  event_id: string
+  key: string
+  label: string
+  type: 'text' | 'select' | 'multiline'
+  options: string | null
+  position: number
+}
+
+export const listContactFields = () => request<{ items: ContactFieldDef[] }>('/app/api/contact-fields')
+export const createContactField = (data: { label: string; type: ContactFieldDef['type']; options?: string[] | null }) =>
+  request<ContactFieldDef>('/app/api/contact-fields', { method: 'POST', body: JSON.stringify(data) })
+export const updateContactField = (id: string, data: Record<string, unknown>) =>
+  request<ContactFieldDef>(`/app/api/contact-fields/${id}`, { method: 'PUT', body: JSON.stringify(data) })
+export const deleteContactField = (id: string) =>
+  request<{ ok: boolean }>(`/app/api/contact-fields/${id}`, { method: 'DELETE' })
+export const reorderContactFields = (ids: string[]) =>
+  request<{ items: ContactFieldDef[] }>('/app/api/contact-fields/reorder', { method: 'POST', body: JSON.stringify({ ids }) })
 
 // ---------------------------------------------------------------------------
 // Tasks CRUD (deferred-gap item: tasks were read-only in admin)
@@ -410,6 +445,8 @@ export interface SubmissionDetail {
     participant_id: string
     role: string
     is_primary_contact: number
+    /** Set once an organiser confirms this speaker's participation (SPK-04/w2); null = awaiting. */
+    confirmed_at: string | null
     contact_id: string
     first_name: string | null
     last_name: string | null
@@ -452,7 +489,16 @@ export const bulkStatus = (ids: string[], status: string) =>
     body: JSON.stringify({ ids, status }),
   })
 export const sendDecisions = (ids: string[]) =>
-  request<{ ok: boolean; accepted: number; declined: number; tasks_assigned: number; skipped: number; skipped_notified: number }>(
+  request<{
+    ok: boolean
+    accepted: number
+    declined: number
+    tasks_assigned: number
+    skipped: number
+    skipped_notified: number
+    /** CFP-14: null when nothing was in a decision queue; poll it for real sent/failed counts. */
+    job_id: string | null
+  }>(
     '/app/api/submissions/send-decisions',
     { method: 'POST', body: JSON.stringify({ ids }) },
   )
@@ -491,6 +537,18 @@ export const removeSubmissionParticipant = (submissionId: string, participantId:
   request<{ ok: boolean }>(`/app/api/submissions/${submissionId}/participants/${participantId}`, {
     method: 'DELETE',
   })
+
+/**
+ * SPK-04/w2: the dashboard's "Confirmed N / Awaiting confirmation M" stat
+ * reads submission_participants.confirmed_at, which used to be set exactly
+ * once (automatically, at submit time) with no way for an organiser to
+ * change it afterwards. This is the missing control.
+ */
+export const setSubmissionParticipantConfirmed = (submissionId: string, participantId: string, confirmed: boolean) =>
+  request<{ ok: boolean; confirmed: boolean }>(
+    `/app/api/submissions/${submissionId}/participants/${participantId}/confirm`,
+    { method: 'PUT', body: JSON.stringify({ confirmed }) },
+  )
 
 // ---------------------------------------------------------------------------
 // Files: version chains and comment threads (lane W2-C)
@@ -934,3 +992,71 @@ export async function downloadFilesBundle(submissionIds: string[]): Promise<numb
   URL.revokeObjectURL(url)
   return Number(res.headers.get('x-bundle-entries') ?? 0)
 }
+
+// ---------------------------------------------------------------------------
+// Messaging (routes/messagingAdmin.ts): organiser-triggered sends — the
+// portal invite (SPK-06), the compose flow (SPK-13) and the per-event
+// template overrides behind every system email (SPK-14).
+// ---------------------------------------------------------------------------
+
+/** SPK-06: mint a portal magic link for a contact and email it to them. */
+export const invitePortal = (contactId: string) =>
+  request<{ ok: boolean; outcome: 'queued' | 'duplicate' | 'template_disabled' }>(
+    '/app/api/messaging/invite-portal',
+    { method: 'POST', body: JSON.stringify({ contact_id: contactId }) },
+  )
+
+export type ComposeAudience = 'all_contacts' | 'speakers' | 'accepted_speakers' | 'selected'
+
+export interface ComposeAudienceCount {
+  audience: Exclude<ComposeAudience, 'selected'>
+  count: number
+}
+
+export interface MergeField {
+  field: string
+  description: string
+}
+
+export const getComposeAudiences = () =>
+  request<{ items: ComposeAudienceCount[]; merge_fields: MergeField[] }>('/app/api/messaging/compose/audiences')
+
+/**
+ * SPK-13: hand the server a subject/body and an audience; it snapshots a
+ * bulk job and returns its id. Poll `getBulkJob(job_id)` for real sent/failed
+ * counts — nothing was sent by the time this resolves.
+ */
+export const composeMessage = (payload: {
+  subject: string
+  body: string
+  audience: ComposeAudience
+  contact_ids?: string[]
+}) =>
+  request<{ ok: boolean; job_id: string; total: number; audience: ComposeAudience }>('/app/api/messaging/compose', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+
+export interface EmailTemplateRow {
+  key: string
+  default_subject: string | null
+  default_body: string | null
+  subject: string | null
+  body_richtext: string | null
+  enabled: number
+  overridden: boolean
+  updated_at: string | null
+}
+
+export const listEmailTemplates = () =>
+  request<{ items: EmailTemplateRow[]; merge_fields: MergeField[] }>('/app/api/messaging/templates')
+
+/** Empty strings clear that half of the override, restoring the code default. */
+export const updateEmailTemplate = (
+  key: string,
+  data: { subject?: string | null; body_richtext?: string | null; enabled?: boolean },
+) =>
+  request<{ ok: boolean; key: string; overridden: boolean; updated_at: string }>(
+    `/app/api/messaging/templates/${key}`,
+    { method: 'PUT', body: JSON.stringify(data) },
+  )

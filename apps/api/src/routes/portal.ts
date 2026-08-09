@@ -29,6 +29,7 @@ import {
 import { attemptImmediate, prepareTemplated, sendTemplated, type PreparedEmail } from '../mailer';
 import { bumpEventRevision } from '../revision';
 import { loadQuestions } from './formsAdmin';
+import { isFormClosed } from './submit';
 import { clearSessionCookie, getSession, type SessionPayload } from '../session';
 import {
   addComment,
@@ -501,7 +502,12 @@ portalRoutes.get('/:slug/submissions/:id', async (c) => {
     submission.submitter_contact_id === ctx.session.contactId;
   // Editing stays open for every participant until the submission is
   // withdrawn or declined (docs/05 §4); organisers are notified afterwards.
-  const canEdit = !isEditLocked(String(submission.status));
+  // It also closes when the form's own submission window closes, same as
+  // resolveEditTarget enforces server-side — keep the Edit link's presence
+  // consistent with what a click on it would actually allow.
+  const canEdit =
+    !isEditLocked(String(submission.status)) &&
+    !(await isSubmissionFormClosed(c, ctx, (submission.form_id as string | null) ?? null));
 
   return c.html(
     portalPage(
@@ -1281,6 +1287,20 @@ function isEditLocked(status: string): boolean {
   return EDIT_LOCKED_STATUSES.has(status);
 }
 
+/**
+ * A submission's own status aside, its form can also close underneath it
+ * (status flipped to 'closed', or close_at elapsed) — the same "closed"
+ * rule the public wizard enforces (submit.tsx isFormClosed). Manual
+ * submissions (form_id null) are never form-locked.
+ */
+async function isSubmissionFormClosed(c: Context<AppEnv>, ctx: PortalCtx, formId: string | null): Promise<boolean> {
+  if (!formId) return false;
+  const form = await c.env.DB.prepare('SELECT status, close_at FROM submission_forms WHERE id = ? AND event_id = ?')
+    .bind(formId, ctx.event.id)
+    .first<{ status: string; close_at: string | null }>();
+  return form ? isFormClosed(form) : false;
+}
+
 interface EditableSubmissionRow {
   id: string;
   event_id: string;
@@ -1686,6 +1706,16 @@ async function resolveEditTarget(
         `<div class="card"><h2>Editing closed</h2><p class="muted">This submission is ${esc(
           submission.status,
         )} and can no longer be edited. Contact the organisers if something needs to change.</p></div>`,
+      ),
+      403,
+    );
+  }
+  if (await isSubmissionFormClosed(c, ctx, submission.form_id)) {
+    return c.html(
+      portalPage(
+        ctx,
+        'submissions',
+        '<div class="card"><h2>Editing closed</h2><p class="muted">The submission window for this form has closed. Contact the organisers if something needs to change.</p></div>',
       ),
       403,
     );

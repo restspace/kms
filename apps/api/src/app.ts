@@ -14,6 +14,7 @@ import { submitRoutes } from './routes/submit';
 import { landingRoutes } from './routes/landing';
 import { publicAssetRoutes } from './routes/publicAssets';
 import { embedRoutes } from './routes/embed';
+import { messagingAdminRoutes } from './routes/messagingAdmin';
 
 export function createApp() {
   const app = new Hono<AppEnv>();
@@ -40,6 +41,9 @@ export function createApp() {
   // the same reason (the /app/api guard has already populated `session`).
   app.route('/app/api/import', importRoutes);
   app.route('/app/api/export', exportRoutes);
+  // Organiser-triggered sends that don't fit adminApi.ts's generic CRUD
+  // tables (SPK-06 portal invitation); same mount convention as files/import/export.
+  app.route('/app/api/messaging', messagingAdminRoutes);
   app.get('/app/', (c) => c.redirect('/app')); // strict routing: normalise the slash form
   app.route('/app', adminRoutes);
   app.route('/hello', publicRoutes); // SSR + island proof page (commit 8454ce6)

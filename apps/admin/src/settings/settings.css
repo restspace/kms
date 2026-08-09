@@ -199,3 +199,32 @@
   font-size: 13px;
   color: var(--text-muted);
 }
+
+/* Email templates (SPK-14): the expanded per-template editor row. */
+.settings-template-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 0;
+}
+.settings-template-editor label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-faint, #6b7280);
+}
+.settings-template-editor input,
+.settings-template-editor textarea {
+  width: 100%;
+  font: inherit;
+  padding: 6px 8px;
+}
+.settings-template-editor textarea {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  resize: vertical;
+}
+.settings-template-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+}

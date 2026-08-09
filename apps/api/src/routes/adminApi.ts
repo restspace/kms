@@ -202,7 +202,21 @@ const SUBMISSION_STATUSES = new Set([
 const RESOURCE_SPECS: Record<string, Omit<ResourceDef, 'fromSql'>> = {
   contacts: {
     baseFrom: 'FROM contacts c JOIN events ev ON ev.id = c.event_id',
-    selectSql: 'SELECT c.*, ev.name AS event_name',
+    // custom_fields_json: `{ <definition key>: value }` for this contact's
+    // event, NULL when it has none set (json_group_object over zero rows) —
+    // same shape POST/PUT /contacts echo back via contactWithCustomFields.
+    // confirmation: 'confirmed' when at least one submission_participants row
+    // for this contact has confirmed_at set, 'awaiting' when it appears as a
+    // participant but none of its rows are confirmed, NULL when it is not a
+    // participant at all (never invited to confirm — distinct from awaiting).
+    selectSql: `SELECT c.*, ev.name AS event_name,
+        (SELECT json_group_object(d.key, v.value) FROM contact_field_values v
+         JOIN contact_field_definitions d ON d.id = v.field_id WHERE v.contact_id = c.id) AS custom_fields_json,
+        (CASE
+           WHEN EXISTS (SELECT 1 FROM submission_participants sp WHERE sp.contact_id = c.id AND sp.confirmed_at IS NOT NULL) THEN 'confirmed'
+           WHEN EXISTS (SELECT 1 FROM submission_participants sp WHERE sp.contact_id = c.id) THEN 'awaiting'
+           ELSE NULL
+         END) AS confirmation`,
     eventExpr: 'c.event_id',
     idExpr: 'c.id',
     defaultCursorSort: { field: 'last_name', direction: 'asc' },
@@ -240,6 +254,27 @@ const RESOURCE_SPECS: Record<string, Omit<ResourceDef, 'fromSql'>> = {
         };
       },
       contact_id: eq('c.id'),
+      // SPK-04: roster filter mirroring the `confirmation` column above —
+      // kept as its own EXISTS pair rather than wrapping the column expression
+      // so it stays sargable (no correlated subquery inside a WHERE on a
+      // computed SELECT column).
+      confirmation: (value) => {
+        const v = asText(value);
+        if (v === 'confirmed') {
+          return {
+            sql: `EXISTS (SELECT 1 FROM submission_participants sp WHERE sp.contact_id = c.id AND sp.confirmed_at IS NOT NULL)`,
+            params: [],
+          };
+        }
+        if (v === 'awaiting') {
+          return {
+            sql: `EXISTS (SELECT 1 FROM submission_participants sp WHERE sp.contact_id = c.id)
+                  AND NOT EXISTS (SELECT 1 FROM submission_participants sp WHERE sp.contact_id = c.id AND sp.confirmed_at IS NOT NULL)`,
+            params: [],
+          };
+        }
+        return null;
+      },
       // Dashboard deep-link (docs/09 §1): accepted speakers whose programme
       // profile is incomplete.
       missing_assets: (value) =>
@@ -258,6 +293,8 @@ const RESOURCE_SPECS: Record<string, Omit<ResourceDef, 'fromSql'>> = {
       submission_id:
         'Contacts related to this submission: its participants (any role) or its submitter.',
       contact_id: 'Exactly this contact. The global anchor filter uses this.',
+      confirmation:
+        "confirmed → has a submission_participants row with confirmed_at set. awaiting → is a participant somewhere but none of those rows are confirmed. Not a participant at all is neither (its `confirmation` column reads null) and this filter never matches it.",
       missing_assets:
         'true → accepted speakers missing a biography or headshot (the programme-completeness list).',
     },
@@ -590,9 +627,13 @@ export async function queryResource(
   }
 
   // --- classic offset mode (kept one release for the SPA's from/size) -------
+  // A NULL sort value (e.g. an unscored submission's `rating`) always sorts
+  // after every real value, in both directions — SQLite's native NULL-is-
+  // smallest rule would otherwise put unscored rows first on an ASC sort,
+  // ahead of genuinely low scores, which reads as backwards in the grid.
   const orderSql =
     sort && def.sortable[sort.field]
-      ? `${def.sortable[sort.field]} ${sort.direction === 'desc' ? 'DESC' : 'ASC'}`
+      ? `(CASE WHEN ${def.sortable[sort.field]} IS NULL THEN 1 ELSE 0 END) ASC, ${def.sortable[sort.field]} ${sort.direction === 'desc' ? 'DESC' : 'ASC'}`
       : def.defaultSort;
   const listSql = `${def.selectSql} ${def.baseFrom}${whereSql} ORDER BY ${orderSql} LIMIT ? OFFSET ?`;
   const list = await db.prepare(listSql).bind(...params, size, from).all();
@@ -694,45 +735,68 @@ async function findContactIdByEmail(c: Context<ApiEnv>, email: string | null | u
 
 adminApiRoutes.post('/contacts', async (c) => {
   const session = c.get('session');
-  const fields = pickContactFields(await c.req.json().catch(() => ({})));
+  const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+  const fields = pickContactFields(body);
   if (!fields.email) return c.json({ error: 'email_required' }, 400);
 
   const id = crypto.randomUUID();
+  // Validated before the insert, not after: a bad custom-field value must
+  // never leave a contact half-created.
+  const fieldOps = await prepareContactFieldValueOps(c.env.DB, session.eventId, id, body.custom_fields);
+  if (fieldOps.error) return c.json({ error: fieldOps.error, field: fieldOps.field }, 400);
+
   const ts = new Date().toISOString();
   const cols = Object.keys(fields);
   try {
-    await c.env.DB.prepare(
-      `INSERT INTO contacts (id, event_id, created_at, updated_at, ${cols.join(', ')})
-       VALUES (?, ?, ?, ?${', ?'.repeat(cols.length)})`,
-    )
-      .bind(id, session.eventId, ts, ts, ...cols.map((k) => fields[k]))
-      .run();
+    await c.env.DB.batch([
+      c.env.DB.prepare(
+        `INSERT INTO contacts (id, event_id, created_at, updated_at, ${cols.join(', ')})
+         VALUES (?, ?, ?, ?${', ?'.repeat(cols.length)})`,
+      ).bind(id, session.eventId, ts, ts, ...cols.map((k) => fields[k])),
+      ...fieldOps.ops,
+    ]);
   } catch (err) {
     const message = err instanceof Error ? err.message : '';
     if (message.includes('UNIQUE')) return c.json({ error: 'email_exists', existing_id: await findContactIdByEmail(c, fields.email) }, 409);
     throw err;
   }
   await bumpEventRevision(c.env, session.eventId);
-  const row = await c.env.DB.prepare('SELECT * FROM contacts WHERE id = ?').bind(id).first();
+  const row = await contactWithCustomFields(c.env.DB, id);
   return c.json(row, 201);
 });
 
 adminApiRoutes.put('/contacts/:id', async (c) => {
   const session = c.get('session');
   const id = c.req.param('id');
-  const fields = pickContactFields(await c.req.json().catch(() => ({})));
+  const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+  const fields = pickContactFields(body);
   if ('email' in fields && !fields.email) return c.json({ error: 'email_required' }, 400);
 
+  // Custom-field writes need the contact to exist in this event even when no
+  // fixed field changed (the UPDATE below would otherwise be skipped, and
+  // with it the only check that the id belongs to this event).
+  const existing = await c.env.DB.prepare('SELECT id FROM contacts WHERE id = ? AND event_id = ?')
+    .bind(id, session.eventId)
+    .first();
+  if (!existing) return c.json({ error: 'not_found' }, 404);
+
+  const fieldOps = await prepareContactFieldValueOps(c.env.DB, session.eventId, id, body.custom_fields);
+  if (fieldOps.error) return c.json({ error: fieldOps.error, field: fieldOps.field }, 400);
+
   const cols = Object.keys(fields);
+  const statements: D1PreparedStatement[] = [];
   if (cols.length > 0) {
-    try {
-      const result = await c.env.DB.prepare(
+    statements.push(
+      c.env.DB.prepare(
         `UPDATE contacts SET ${cols.map((k) => `${k} = ?`).join(', ')}, updated_at = ?
          WHERE id = ? AND event_id = ?`,
-      )
-        .bind(...cols.map((k) => fields[k]), new Date().toISOString(), id, session.eventId)
-        .run();
-      if (result.meta.changes === 0) return c.json({ error: 'not_found' }, 404);
+      ).bind(...cols.map((k) => fields[k]), new Date().toISOString(), id, session.eventId),
+    );
+  }
+  statements.push(...fieldOps.ops);
+  if (statements.length > 0) {
+    try {
+      await c.env.DB.batch(statements);
     } catch (err) {
       const message = err instanceof Error ? err.message : '';
       if (message.includes('UNIQUE')) return c.json({ error: 'email_exists', existing_id: await findContactIdByEmail(c, fields.email) }, 409);
@@ -740,10 +804,7 @@ adminApiRoutes.put('/contacts/:id', async (c) => {
     }
     await bumpEventRevision(c.env, session.eventId);
   }
-  const row = await c.env.DB.prepare('SELECT * FROM contacts WHERE id = ? AND event_id = ?')
-    .bind(id, session.eventId)
-    .first();
-  if (!row) return c.json({ error: 'not_found' }, 404);
+  const row = await contactWithCustomFields(c.env.DB, id);
   return c.json(row);
 });
 
@@ -1183,6 +1244,218 @@ adminApiRoutes.delete('/tracks/:id', async (c) => {
   await bumpEventRevision(c.env, session.eventId);
   return c.json({ ok: true });
 });
+
+// ---------------------------------------------------------------------------
+// Contact custom fields (SPK-15): per-event field definitions for the
+// Speakers tab (settings-card CRUD), plus the values store the contacts
+// endpoints below read/write. Mirrors the rooms/tracks CRUD shape above —
+// auto position on create, PUT patches whatever keys are present, DELETE
+// cascades its values (contact_field_values.field_id ON DELETE CASCADE).
+// ---------------------------------------------------------------------------
+
+const CONTACT_FIELD_TYPES = new Set(['text', 'select', 'multiline']);
+const CONTACT_FIELD_LABEL_MAX_CHARS = 200;
+const CONTACT_FIELD_VALUE_MAX_CHARS = 2000;
+const CONTACT_FIELD_OPTION_MAX_CHARS = 200;
+
+interface ContactFieldDefFields {
+  values: Record<string, string | number | null>;
+  error?: string;
+}
+
+function pickContactFieldDefFields(raw: unknown, { requireLabel }: { requireLabel: boolean }): ContactFieldDefFields {
+  const body = (raw ?? {}) as Record<string, unknown>;
+  const values: Record<string, string | number | null> = {};
+  const fail = (error: string): ContactFieldDefFields => ({ values: {}, error });
+
+  if (requireLabel || 'label' in body) {
+    const label = typeof body.label === 'string' ? body.label.trim() : '';
+    if (!label) return fail('label_required');
+    values.label = label.slice(0, CONTACT_FIELD_LABEL_MAX_CHARS);
+  }
+  if (requireLabel || 'type' in body) {
+    const type = typeof body.type === 'string' ? body.type : '';
+    if (!CONTACT_FIELD_TYPES.has(type)) return fail('invalid_type');
+    values.type = type;
+  }
+  if ('options' in body) {
+    const raw = body.options;
+    if (raw === null) {
+      values.options = null;
+    } else if (Array.isArray(raw) && raw.every((v) => typeof v === 'string')) {
+      const cleaned = Array.from(
+        new Set(raw.map((v) => v.trim().slice(0, CONTACT_FIELD_OPTION_MAX_CHARS)).filter((v) => v.length > 0)),
+      );
+      values.options = cleaned.length > 0 ? JSON.stringify(cleaned) : null;
+    } else {
+      return fail('invalid_options');
+    }
+  }
+  return { values };
+}
+
+const contactFieldDefRow = (db: D1Database, id: string, eventId: string) =>
+  db.prepare('SELECT id, event_id, key, label, type, options, position FROM contact_field_definitions WHERE id = ? AND event_id = ?')
+    .bind(id, eventId)
+    .first();
+
+// GET /app/api/contact-fields — the event's speaker-record field definitions, position order.
+adminApiRoutes.get('/contact-fields', async (c) => {
+  const session = c.get('session');
+  const { results } = await c.env.DB.prepare(
+    'SELECT id, event_id, key, label, type, options, position FROM contact_field_definitions WHERE event_id = ? ORDER BY position',
+  )
+    .bind(session.eventId)
+    .all();
+  return c.json({ items: results });
+});
+
+adminApiRoutes.post('/contact-fields', async (c) => {
+  const session = c.get('session');
+  if (!isWriter(session.role)) return c.json({ error: 'forbidden' }, 403);
+  const { values, error } = pickContactFieldDefFields(await c.req.json().catch(() => ({})), { requireLabel: true });
+  if (error) return c.json({ error }, 400);
+
+  const id = crypto.randomUUID();
+  // key is derived, not user-editable — matches formsAdmin.ts's "Create Field"
+  // slugging so a field's identity survives a later rename.
+  const key = `custom_${String(values.label).toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '').slice(0, 40)}_${id.slice(0, 4)}`;
+  await c.env.DB.prepare(
+    `INSERT INTO contact_field_definitions (id, event_id, key, label, type, options, position)
+     SELECT ?1, ?2, ?3, ?4, ?5, ?6, COALESCE((SELECT MAX(position) + 1 FROM contact_field_definitions WHERE event_id = ?2), 0)`,
+  )
+    .bind(id, session.eventId, key, values.label, values.type, values.options ?? null)
+    .run();
+  await bumpEventRevision(c.env, session.eventId);
+  return c.json(await contactFieldDefRow(c.env.DB, id, session.eventId), 201);
+});
+
+adminApiRoutes.put('/contact-fields/:id', async (c) => {
+  const session = c.get('session');
+  if (!isWriter(session.role)) return c.json({ error: 'forbidden' }, 403);
+  const id = c.req.param('id');
+  const { values, error } = pickContactFieldDefFields(await c.req.json().catch(() => ({})), { requireLabel: false });
+  if (error) return c.json({ error }, 400);
+
+  const cols = Object.keys(values);
+  if (cols.length > 0) {
+    const result = await c.env.DB.prepare(
+      `UPDATE contact_field_definitions SET ${cols.map((k) => `${k} = ?`).join(', ')} WHERE id = ? AND event_id = ?`,
+    )
+      .bind(...cols.map((k) => values[k]), id, session.eventId)
+      .run();
+    if (result.meta.changes === 0) return c.json({ error: 'not_found' }, 404);
+    await bumpEventRevision(c.env, session.eventId);
+  }
+  const row = await contactFieldDefRow(c.env.DB, id, session.eventId);
+  if (!row) return c.json({ error: 'not_found' }, 404);
+  return c.json(row);
+});
+
+// DELETE /contact-fields/:id — values cascade via contact_field_values.field_id
+// ON DELETE CASCADE; no contact loses its other fields.
+adminApiRoutes.delete('/contact-fields/:id', async (c) => {
+  const session = c.get('session');
+  if (!isWriter(session.role)) return c.json({ error: 'forbidden' }, 403);
+  const id = c.req.param('id');
+  const result = await c.env.DB.prepare('DELETE FROM contact_field_definitions WHERE id = ? AND event_id = ?')
+    .bind(id, session.eventId)
+    .run();
+  if (result.meta.changes === 0) return c.json({ error: 'not_found' }, 404);
+  await bumpEventRevision(c.env, session.eventId);
+  return c.json({ ok: true });
+});
+
+// POST /contact-fields/reorder { ids } — positions follow the given order (formsAdmin.ts's questions/reorder shape).
+adminApiRoutes.post('/contact-fields/reorder', async (c) => {
+  const session = c.get('session');
+  if (!isWriter(session.role)) return c.json({ error: 'forbidden' }, 403);
+  const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+  const ids = Array.isArray(body.ids) ? body.ids.filter((v): v is string => typeof v === 'string') : [];
+  if (ids.length === 0) return c.json({ error: 'ids_required' }, 400);
+
+  await c.env.DB.batch(
+    ids.map((fid, index) =>
+      c.env.DB.prepare('UPDATE contact_field_definitions SET position = ? WHERE id = ? AND event_id = ?')
+        .bind(index, fid, session.eventId),
+    ),
+  );
+  const { results } = await c.env.DB.prepare(
+    'SELECT id, event_id, key, label, type, options, position FROM contact_field_definitions WHERE event_id = ? ORDER BY position',
+  )
+    .bind(session.eventId)
+    .all();
+  return c.json({ items: results });
+});
+
+/**
+ * Validates `body.custom_fields` (an object of `{ <definition key>: string |
+ * null }`) against the event's field definitions and returns the D1
+ * statements to write it — batched alongside the contacts insert/update so a
+ * bad value never leaves a contact half-saved. Returns an `error` (never
+ * throws) on an unknown key, a non-string value, or a `select` value outside
+ * its options; the caller turns that into a 400 before running anything.
+ */
+async function prepareContactFieldValueOps(
+  db: D1Database,
+  eventId: string,
+  contactId: string,
+  raw: unknown,
+): Promise<{ ops: D1PreparedStatement[]; error?: string; field?: string }> {
+  if (raw === undefined) return { ops: [] };
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return { ops: [], error: 'invalid_custom_fields' };
+  const body = raw as Record<string, unknown>;
+  if (Object.keys(body).length === 0) return { ops: [] };
+
+  const { results } = await db
+    .prepare('SELECT id, key, type, options FROM contact_field_definitions WHERE event_id = ?')
+    .bind(eventId)
+    .all<{ id: string; key: string; type: string; options: string | null }>();
+  const byKey = new Map(results.map((d) => [d.key, d]));
+
+  const ops: D1PreparedStatement[] = [];
+  for (const [key, rawValue] of Object.entries(body)) {
+    const def = byKey.get(key);
+    if (!def) return { ops: [], error: 'unknown_field', field: key };
+    if (rawValue === null || rawValue === '' || rawValue === undefined) {
+      ops.push(db.prepare('DELETE FROM contact_field_values WHERE contact_id = ? AND field_id = ?').bind(contactId, def.id));
+      continue;
+    }
+    if (typeof rawValue !== 'string') return { ops: [], error: 'invalid_value', field: key };
+    const value = rawValue.trim().slice(0, CONTACT_FIELD_VALUE_MAX_CHARS);
+    if (def.type === 'select') {
+      let options: string[] = [];
+      try {
+        options = def.options ? JSON.parse(def.options) : [];
+      } catch {
+        options = [];
+      }
+      if (!options.includes(value)) return { ops: [], error: 'invalid_option', field: key };
+    }
+    ops.push(
+      db
+        .prepare(
+          `INSERT INTO contact_field_values (contact_id, field_id, value) VALUES (?, ?, ?)
+           ON CONFLICT (contact_id, field_id) DO UPDATE SET value = excluded.value`,
+        )
+        .bind(contactId, def.id, value),
+    );
+  }
+  return { ops };
+}
+
+/** Contact row plus its custom field values as `{ <key>: value }` json text — same shape (and same NULL-when-empty) as the contacts resource query's `custom_fields_json` column below, so POST/PUT responses match what a subsequent grid refetch would show. */
+async function contactWithCustomFields(db: D1Database, id: string): Promise<Record<string, unknown> | null> {
+  return db
+    .prepare(
+      `SELECT c.*,
+        (SELECT json_group_object(d.key, v.value) FROM contact_field_values v
+         JOIN contact_field_definitions d ON d.id = v.field_id WHERE v.contact_id = c.id) AS custom_fields_json
+       FROM contacts c WHERE c.id = ?`,
+    )
+    .bind(id)
+    .first();
+}
 
 // ---------------------------------------------------------------------------
 // Events: create (FR-EVT-1/2) + patch (agenda publish rides the same route)

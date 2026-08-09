@@ -10,6 +10,7 @@ import {
   PARTICIPANT_ROLES,
   queryResource,
   removeSubmissionParticipant,
+  setSubmissionParticipantConfirmed,
   updateSubmissionNotes,
   updateSubmissionParticipantRole,
   type ContactRow,
@@ -52,6 +53,27 @@ export function StatusChipsFilter({ filters, setFilters }: DataListFilterProps<R
           {statusLabel(s)}
         </button>
       ))}
+    </div>
+  )
+}
+
+/** Roster filter for the Speakers tab's derived `confirmation` column (SPK-04):
+ * confirmed / awaiting a submission_participants.confirmed_at row, or "All"
+ * (no filter — includes non-participants, whose column reads "—"). */
+export function ConfirmationChipsFilter({ filters, setFilters }: DataListFilterProps<Record<string, string>>) {
+  const active = filters.confirmation ?? ''
+  const choose = (value: string) => setFilters((prev) => ({ ...prev, confirmation: value }))
+  return (
+    <div className="chip-filter" role="group" aria-label="Confirmation filter">
+      <button className={active === '' ? 'active' : ''} aria-pressed={active === ''} onClick={() => choose('')}>
+        All
+      </button>
+      <button className={active === 'confirmed' ? 'active' : ''} aria-pressed={active === 'confirmed'} onClick={() => choose('confirmed')}>
+        Confirmed
+      </button>
+      <button className={active === 'awaiting' ? 'active' : ''} aria-pressed={active === 'awaiting'} onClick={() => choose('awaiting')}>
+        Awaiting
+      </button>
     </div>
   )
 }
@@ -266,6 +288,8 @@ export function SubmissionDetailPanel({ id }: { id: string }) {
           </span>
           <span className="part-flags">
             {p.has_bio === 1 ? 'bio ✓' : 'bio –'}
+            {' · '}
+            {p.confirmed_at ? 'confirmed ✓' : 'awaiting confirmation'}
           </span>
         </div>
       ))}
@@ -326,6 +350,10 @@ export function SubmissionEditForm({ initialValues, onSubmit, onCancel, onDelete
     track_id: typeof initialValues?.track_id === 'string' ? initialValues.track_id : '',
     room_id: '',
   })
+  // CNT-12/w3: content_approved (0010 migration) gates the public feeds
+  // independently of acceptance status — default-on so existing/imported
+  // rows stay visible; see the migration comment for full semantics.
+  const [contentApproved, setContentApproved] = useState(initialValues?.content_approved !== 0)
   const [submitError, setSubmitError] = useState<string | null>(null)
   const [isSubmitting, setIsSubmitting] = useState(false)
 
@@ -367,6 +395,7 @@ export function SubmissionEditForm({ initialValues, onSubmit, onCancel, onDelete
         language: fields.language.trim() || null,
         track_id: fields.track_id || null,
         room_id: fields.room_id || null,
+        content_approved: contentApproved,
       })
       if (!ok) setSubmitError('The submission could not be saved.')
     } catch (err) {
@@ -420,6 +449,23 @@ export function SubmissionEditForm({ initialValues, onSubmit, onCancel, onDelete
       await refreshDetail()
     } catch (err) {
       setParticipantError(err instanceof Error ? err.message : 'Could not change role.')
+    } finally {
+      setBusyParticipantId(null)
+    }
+  }
+
+  // SPK-04/w2: the only place an organiser can set a speaker's confirmed
+  // status — see setSubmissionParticipantConfirmed in api.ts for why this
+  // control didn't exist before.
+  const toggleConfirmed = async (participantId: string, next: boolean) => {
+    if (!id) return
+    setBusyParticipantId(participantId)
+    setParticipantError(null)
+    try {
+      await setSubmissionParticipantConfirmed(id, participantId, next)
+      await refreshDetail()
+    } catch (err) {
+      setParticipantError(err instanceof Error ? err.message : 'Could not update confirmation.')
     } finally {
       setBusyParticipantId(null)
     }
@@ -486,6 +532,22 @@ export function SubmissionEditForm({ initialValues, onSubmit, onCancel, onDelete
             {rooms.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
           </select>
         </div>
+        <div className="record-form-field">
+          <label htmlFor="sub-edit-content-approved" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <input
+              id="sub-edit-content-approved"
+              type="checkbox"
+              checked={contentApproved}
+              disabled={isSubmitting}
+              onChange={(e) => { setContentApproved(e.target.checked); onDirtyChange?.(true) }}
+            />
+            Visible in public agenda
+          </label>
+          <p style={{ color: 'var(--text-muted)', fontSize: 12, margin: '2px 0 0' }}>
+            Independent of acceptance status — uncheck to hold an accepted, scheduled
+            session back from the public feeds without rejecting it.
+          </p>
+        </div>
       </div>
 
       <h2 style={{ fontSize: 14 }}>Participants</h2>
@@ -506,6 +568,15 @@ export function SubmissionEditForm({ initialValues, onSubmit, onCancel, onDelete
               {PARTICIPANT_ROLES.map((role) => <option key={role} value={role}>{readableRole(role)}</option>)}
             </select>
             {p.is_primary_contact === 1 && <span style={{ color: 'var(--text-muted)' }}>primary</span>}
+            <button
+              type="button"
+              aria-pressed={p.confirmed_at !== null}
+              disabled={busyParticipantId === p.participant_id}
+              onClick={() => void toggleConfirmed(p.participant_id, p.confirmed_at === null)}
+              title={p.confirmed_at ? `Confirmed ${fmtDate(p.confirmed_at)}` : 'Not yet confirmed'}
+            >
+              {p.confirmed_at ? 'Confirmed ✓' : 'Mark confirmed'}
+            </button>
             <button
               type="button"
               className="record-form-delete"

@@ -9,6 +9,8 @@ import {
 } from '../api'
 import { appAlert, appConfirm } from '../components/dialogs'
 import { RoomsTracksCard } from './RoomsTracksCard'
+import { ContactFieldsCard } from './ContactFieldsCard'
+import { EmailTemplatesCard } from './EmailTemplatesCard'
 import './settings.css'
 
 /**
@@ -180,6 +182,10 @@ export function SettingsSection({ me }: { me: Me }) {
       </section>
 
       <RoomsTracksCard />
+
+      <ContactFieldsCard />
+
+      <EmailTemplatesCard />
 
       <section className="settings-card">
         <h2>API docs</h2>

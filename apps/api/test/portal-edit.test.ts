@@ -268,4 +268,65 @@ describe('portal submission editing', () => {
     const row = await env.DB.prepare('SELECT title FROM submissions WHERE id = ?').bind(id).first<{ title: string }>();
     expect(row?.title).toBe('Original title');
   });
+
+  describe('the submission window closing underneath an in-progress edit (CFP-04/CFP-16)', () => {
+    it('refuses to edit once the form is explicitly closed', async () => {
+      const id = await seedSubmission('accepted');
+      await env.DB.prepare(`UPDATE submission_forms SET status = 'closed' WHERE id = ?`).bind(formId).run();
+
+      const getRes = await getEdit(id);
+      expect(getRes.status).toBe(403);
+      expect(await getRes.text()).toContain('closed');
+
+      const postRes = await postEdit(id, { [`q_${titleQ}`]: 'Sneaky', [`q_${summaryQ}`]: 'Sneaky' });
+      expect(postRes.status).toBe(403);
+      const row = await env.DB.prepare('SELECT title FROM submissions WHERE id = ?').bind(id).first<{ title: string }>();
+      expect(row?.title).toBe('Original title');
+    });
+
+    it('refuses to edit once the form close_at has passed', async () => {
+      const id = await seedSubmission('accepted');
+      await env.DB.prepare(`UPDATE submission_forms SET close_at = '2020-01-01T00:00:00Z' WHERE id = ?`)
+        .bind(formId)
+        .run();
+
+      expect((await getEdit(id)).status).toBe(403);
+      const postRes = await postEdit(id, { [`q_${titleQ}`]: 'Sneaky', [`q_${summaryQ}`]: 'Sneaky' });
+      expect(postRes.status).toBe(403);
+      const row = await env.DB.prepare('SELECT title FROM submissions WHERE id = ?').bind(id).first<{ title: string }>();
+      expect(row?.title).toBe('Original title');
+    });
+
+    it('still allows editing while close_at is in the future', async () => {
+      const id = await seedSubmission('accepted');
+      await env.DB.prepare(`UPDATE submission_forms SET close_at = '2099-01-01T00:00:00Z' WHERE id = ?`)
+        .bind(formId)
+        .run();
+
+      expect((await getEdit(id)).status).toBe(200);
+      const res = await postEdit(id, { [`q_${titleQ}`]: 'Still open', [`q_${summaryQ}`]: 'Still open' });
+      expect(res.status).toBe(302);
+    });
+
+    it('hides the Edit link from the detail page once the form is closed', async () => {
+      const id = await seedSubmission('accepted');
+      await env.DB.prepare(`UPDATE submission_forms SET status = 'closed' WHERE id = ?`).bind(formId).run();
+      const res = await SELF.fetch(`${ORIGIN}/portal/${slug}/submissions/${id}`, { headers: { cookie } });
+      const html = await res.text();
+      expect(html).not.toContain(`/submissions/${id}/edit`);
+    });
+
+    it('manual submissions with no form_id are never form-locked', async () => {
+      // Withdrawn/declined status still locks them, but a null form_id must
+      // not blow up the "is the form closed" lookup.
+      const id = await createSubmission(eventId, {
+        status: 'accepted',
+        submitterContactId: speakerId,
+        formId: null,
+        title: 'Manual entry',
+      });
+      await addParticipant(id, speakerId);
+      expect((await getEdit(id)).status).toBe(403); // no questions to edit either way, but not a 500
+    });
+  });
 });

@@ -1,0 +1,26 @@
+-- 0010 — content-approval gate for public feeds (CNT-12/w3).
+--
+-- The submissions grid's status dropdown (draft/pending/accept_queue/
+-- accepted/decline_queue/declined/withdrawn) is the ACCEPTANCE decision —
+-- whether a talk gets a slot. It is not a publication switch: once a
+-- session is 'accepted' and scheduled (starts_at/ends_at set), every public
+-- feed (agenda.json/speakers.json/agenda.xml/ics, the embed widgets, the
+-- public headshot route) shows it automatically. There was no way for an
+-- organiser to pull one accepted-and-scheduled session out of public view
+-- without rejecting it outright (which would also kick it out of the
+-- schedule and notify the speaker of a decline).
+--
+-- content_approved is that separate gate. Semantics:
+--   1  (default) — eligible for the public feeds once accepted+scheduled.
+--      Existing/imported/seeded rows all get 1, so nothing already public
+--      disappears when this migration runs.
+--   0 — held back from every public feed regardless of status/schedule.
+--      Acceptance status, room and time are untouched — this only hides
+--      the session from attendees while everything else (evaluation,
+--      scheduling, speaker notifications) proceeds normally. An organiser
+--      flips it back to 1 to publish, no re-acceptance needed.
+--
+-- Deliberately NOT folded into the `status` CHECK vocabulary: acceptance
+-- and public-visibility are independent axes (a session can be accepted but
+-- not yet ready to announce, e.g. speaker bio still pending).
+ALTER TABLE submissions ADD COLUMN content_approved INTEGER NOT NULL DEFAULT 1;
