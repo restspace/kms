@@ -1874,8 +1874,10 @@ export const DataTabManager: React.FC<DataTabManagerProps> = ({
         return true;
       } catch (err) {
         console.error('Error creating record:', err);
-        void appAlert(`Failed to save: ${err instanceof Error ? err.message : 'Unexpected error.'}`, 'Save failed');
-        return false;
+        // Rethrow so the form reports the server's own message inline
+        // (e.g. "A contact with this email already exists for this event.")
+        // rather than swallowing it behind a generic failure.
+        throw err;
       }
     };
   }, [config, queryClient, notifyRecordsChanged]);
@@ -1957,8 +1959,8 @@ export const DataTabManager: React.FC<DataTabManagerProps> = ({
         return true;
       } catch (err) {
         console.error('Error updating record:', err);
-        void appAlert(`Failed to save: ${err instanceof Error ? err.message : 'Unexpected error.'}`, 'Save failed');
-        return false;
+        // Rethrow so the form reports the server's own message inline.
+        throw err;
       }
     };
   }, [config, queryClient, notifyRecordsChanged, resolveItemTitle]);
