@@ -11,6 +11,7 @@ import {
   applyRouting,
   discardHiddenAnswers,
   parseParticipantRoles,
+  sanitizeRichHtml,
   validateAnswers,
   type Answers,
   type QuestionDef,
@@ -33,6 +34,7 @@ interface FormRow {
   welcome_message: string | null;
   welcome_message_visible: number;
   collect_participants: number;
+  collection_type: 'abstracts' | 'sessions';
   status: 'open' | 'closed';
   close_at: string | null;
   submission_limit: number | null;
@@ -227,14 +229,14 @@ submitRoutes.get('/:slug/:formId', async (c) => {
       id: form.id,
       external_title: form.external_title ?? form.internal_name,
       page_heading: form.page_heading ?? '',
-      welcome_message: form.welcome_message,
+      welcome_message: sanitizeRichHtml(form.welcome_message),
       welcome_message_visible: form.welcome_message_visible === 1,
       collect_participants: form.collect_participants === 1,
       participant_roles: form.participant_roles,
       close_at: form.close_at,
       submission_limit: ctx.limit,
       auto_redirect_to_portal: form.auto_redirect_to_portal === 1,
-      success_message: form.success_message,
+      success_message: sanitizeRichHtml(form.success_message),
     },
     questions,
     viewer,
@@ -254,6 +256,11 @@ submitRoutes.get('/:slug/:formId', async (c) => {
         <SubmitPage data={data} />
       </Page>,
     );
+  c.header(
+    'content-security-policy',
+    "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' https:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+  );
+  c.header('referrer-policy', 'strict-origin-when-cross-origin');
   return c.html(html, 200, { 'cache-control': 'private, no-store' });
 });
 
@@ -317,7 +324,7 @@ submitRoutes.post('/:slug/:formId/draft', async (c) => {
         ctx.event.id,
         ctx.form.id,
         await nextCode(c.env.DB, ctx.event.id),
-        ctx.form.collect_participants === 1 ? 'abstract' : 'abstract',
+        ctx.form.collection_type === 'sessions' ? 'session' : 'abstract',
         (columns.title as string) ?? 'Untitled draft',
         (columns.description as string) ?? null,
         (columns.format as string) ?? null,
@@ -406,9 +413,9 @@ submitRoutes.post('/:slug/:formId/submit', async (c) => {
   // Participants: the signed-in submitter is always participant 1 / primary.
   let participants = parseParticipants(body.participants);
   const submitterContact = await db
-    .prepare('SELECT email FROM contacts WHERE id = ?')
+    .prepare('SELECT email, first_name, last_name, mobile_phone, biography FROM contacts WHERE id = ?')
     .bind(session.contactId)
-    .first<{ email: string }>();
+    .first<{ email: string; first_name: string | null; last_name: string | null; mobile_phone: string | null; biography: string | null }>();
   if (!submitterContact) return c.json({ error: 'unauthenticated' }, 401);
   if (ctx.form.collect_participants === 1) {
     const submitterIndex = participants.findIndex((p) => p.email === submitterContact.email);
@@ -416,11 +423,39 @@ submitRoutes.post('/:slug/:formId/submit', async (c) => {
       participants = [participants[submitterIndex]!, ...participants.filter((_, i) => i !== submitterIndex)];
     } else if (submitterIndex === -1) {
       participants = [
-        { email: submitterContact.email, first_name: '', last_name: '', mobile_phone: '', biography: '', role: 'speaker' },
+        {
+          email: submitterContact.email,
+          first_name: submitterContact.first_name ?? '',
+          last_name: submitterContact.last_name ?? '',
+          mobile_phone: submitterContact.mobile_phone ?? '',
+          biography: submitterContact.biography ?? '',
+          role: 'speaker',
+        },
         ...participants,
       ];
     }
-    for (const cfg of parseParticipantRoles(ctx.form.participant_roles)) {
+    const roleConfig = parseParticipantRoles(ctx.form.participant_roles);
+    const allowedRoles = new Set(roleConfig.map((cfg) => cfg.role));
+    const seenEmails = new Set<string>();
+    for (const participant of participants) {
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(participant.email)) {
+        return c.json({ error: 'participants_invalid', detail: 'every participant needs a valid email' }, 400);
+      }
+      if (seenEmails.has(participant.email)) {
+        return c.json({ error: 'participants_invalid', detail: `duplicate participant ${participant.email}` }, 400);
+      }
+      seenEmails.add(participant.email);
+      if (!participant.first_name || !participant.last_name) {
+        return c.json({ error: 'participants_invalid', detail: 'first and last name are required' }, 400);
+      }
+      if (participant.first_name.length > 255 || participant.last_name.length > 255 || participant.biography.length > 5000) {
+        return c.json({ error: 'participants_invalid', detail: 'participant profile exceeds its character limit' }, 400);
+      }
+      if (!allowedRoles.has(participant.role as typeof roleConfig[number]['role'])) {
+        return c.json({ error: 'participants_invalid', detail: `role ${participant.role} is not enabled for this form` }, 400);
+      }
+    }
+    for (const cfg of roleConfig) {
       const count = participants.filter((p) => p.role === cfg.role).length;
       if (count < cfg.min) return c.json({ error: 'participants_invalid', detail: `at least ${cfg.min} ${cfg.role}` }, 400);
       if (cfg.max !== null && count > cfg.max) return c.json({ error: 'participants_invalid', detail: `at most ${cfg.max} ${cfg.role}` }, 400);
@@ -453,8 +488,16 @@ submitRoutes.post('/:slug/:formId/submit', async (c) => {
   }
   const routing = applyRouting(routingConfig, answers);
 
-  // Track: routing override wins; else the track answer resolved by name.
-  let trackId: string | null = routing.set_track_id ?? null;
+  // Resolve configured references inside this event. Routing JSON is editable
+  // input, so foreign tenant IDs must not be allowed to cross-link records.
+  let trackId: string | null = null;
+  if (routing.set_track_id) {
+    const row = await db
+      .prepare('SELECT id FROM tracks WHERE id = ? AND event_id = ?')
+      .bind(routing.set_track_id, ctx.event.id)
+      .first<{ id: string }>();
+    trackId = row?.id ?? null;
+  }
   if (!trackId) {
     const trackName = trackAnswer(abstractQuestions, answers);
     if (trackName) {
@@ -466,8 +509,25 @@ submitRoutes.post('/:slug/:formId/submit', async (c) => {
     }
   }
 
-  // Tags: the tags answer (names) plus routing add_tag_ids (ids).
-  const tagIds = new Set<string>(routing.add_tag_ids);
+  let evaluationPlanId: string | null = null;
+  if (routing.assign_evaluation_plan_id) {
+    const row = await db
+      .prepare('SELECT id FROM evaluation_plans WHERE id = ? AND event_id = ?')
+      .bind(routing.assign_evaluation_plan_id, ctx.event.id)
+      .first<{ id: string }>();
+    evaluationPlanId = row?.id ?? null;
+  }
+
+  // Tags: the tags answer (names) plus event-scoped routing tag ids.
+  const tagIds = new Set<string>();
+  if (routing.add_tag_ids.length > 0) {
+    const placeholders = routing.add_tag_ids.map(() => '?').join(', ');
+    const { results } = await db
+      .prepare(`SELECT id FROM tags WHERE event_id = ? AND id IN (${placeholders})`)
+      .bind(ctx.event.id, ...routing.add_tag_ids)
+      .all<{ id: string }>();
+    for (const row of results) tagIds.add(row.id);
+  }
   const tagNames = tagAnswers(abstractQuestions, answers);
   if (tagNames.length > 0) {
     const placeholders = tagNames.map(() => '?').join(', ');
@@ -478,7 +538,10 @@ submitRoutes.post('/:slug/:formId/submit', async (c) => {
     for (const row of results) tagIds.add(row.id);
   }
 
-  const status = routing.set_status ?? 'pending';
+  const routableStatuses = new Set(['pending', 'accept_queue', 'decline_queue']);
+  const status = routing.set_status && routableStatuses.has(routing.set_status)
+    ? routing.set_status
+    : 'pending';
   const columns = systemColumns(abstractQuestions, answers);
   const ts = new Date().toISOString();
   const title = (columns.title as string) ?? 'Untitled';
@@ -507,7 +570,7 @@ submitRoutes.post('/:slug/:formId/submit', async (c) => {
         (columns.ceu_credits as number) ?? null,
         (columns.client_session_id as string) ?? null,
         trackId,
-        routing.assign_evaluation_plan_id ?? null,
+        evaluationPlanId,
         ts,
         submissionId,
       )
@@ -520,13 +583,14 @@ submitRoutes.post('/:slug/:formId/submit', async (c) => {
         `INSERT INTO submissions (id, event_id, form_id, code, kind, title, description, status,
            format, level, language, capacity, ceu_credits, client_session_id, track_id,
            evaluation_plan_id, submitter_contact_id, source, created_at, updated_at)
-         VALUES (?, ?, ?, ?, 'abstract', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'form', ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'form', ?, ?)`,
       )
       .bind(
         submissionId,
         ctx.event.id,
         ctx.form.id,
         code,
+        ctx.form.collection_type === 'sessions' ? 'session' : 'abstract',
         title,
         (columns.description as string) ?? null,
         status,
@@ -537,7 +601,7 @@ submitRoutes.post('/:slug/:formId/submit', async (c) => {
         (columns.ceu_credits as number) ?? null,
         (columns.client_session_id as string) ?? null,
         trackId,
-        routing.assign_evaluation_plan_id ?? null,
+        evaluationPlanId,
         session.contactId,
         ts,
         ts,
@@ -565,8 +629,11 @@ submitRoutes.post('/:slug/:formId/submit', async (c) => {
   ];
   let position = 1;
   for (const p of participants) {
-    const contact = await kdb.contacts.upsertByEmail(ctx.event.id, p.email);
-    // Fill profile fields the participant provided; never blank existing data.
+    const existingContact = await kdb.contacts.getByEmail(ctx.event.id, p.email);
+    const contact = existingContact ?? await kdb.contacts.upsertByEmail(ctx.event.id, p.email);
+    // A submitter may initialise a new co-speaker record, but must not
+    // overwrite another existing speaker's self-managed profile by knowing
+    // only their email address.
     const updates: string[] = [];
     const params: unknown[] = [];
     for (const [column, value] of [
@@ -580,7 +647,7 @@ submitRoutes.post('/:slug/:formId/submit', async (c) => {
         params.push(value);
       }
     }
-    if (updates.length > 0) {
+    if (updates.length > 0 && (!existingContact || contact.id === session.contactId)) {
       await db
         .prepare(`UPDATE contacts SET ${updates.join(', ')}, updated_at = ? WHERE id = ?`)
         .bind(...params, ts, contact.id)
@@ -641,9 +708,9 @@ submitRoutes.post('/:slug/:formId/submit', async (c) => {
     submission_id: submissionId,
     portal_url: `/portal/${ctx.event.slug}`,
     auto_redirect: ctx.form.auto_redirect_to_portal === 1,
-    success_message: ctx.form.success_message,
+    success_message: sanitizeRichHtml(ctx.form.success_message),
     routing: {
-      evaluation_plan_id: routing.assign_evaluation_plan_id ?? null,
+      evaluation_plan_id: evaluationPlanId,
       applied_rule_ids: routing.applied_rule_ids,
       used_fallback: routing.used_fallback,
     },

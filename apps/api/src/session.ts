@@ -120,6 +120,26 @@ export async function getSession<E extends AppEnv>(c: Context<E>): Promise<Sessi
   return verifySessionToken(token, c.env.SESSION_SECRET);
 }
 
+/**
+ * Privileged JWT claims are convenient but cannot outlive a role revocation.
+ * Re-check organiser/reviewer membership at each privileged boundary; speaker
+ * ownership is still verified by the record-scoped portal queries.
+ */
+export async function getRevalidatedPrivilegedSession<E extends AppEnv>(
+  c: Context<E>,
+): Promise<SessionPayload | null> {
+  const session = await getSession(c);
+  if (!session || session.role === 'speaker') return session;
+  const current = await c.env.DB.prepare(
+    `SELECT eu.role FROM event_users eu
+     JOIN contacts ct ON ct.id = eu.contact_id AND ct.event_id = eu.event_id
+     WHERE eu.event_id = ? AND eu.contact_id = ?`,
+  )
+    .bind(session.eventId, session.contactId)
+    .first<{ role: Role }>();
+  return current?.role === session.role ? session : null;
+}
+
 export function setSessionCookie<E extends AppEnv>(c: Context<E>, token: string): void {
   setCookie(c, SESSION_COOKIE, token, {
     httpOnly: true,

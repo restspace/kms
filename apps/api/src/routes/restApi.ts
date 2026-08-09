@@ -9,7 +9,7 @@ import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import type { Context } from 'hono';
 import type { Env } from '../env';
-import { getSession } from '../session';
+import { getRevalidatedPrivilegedSession } from '../session';
 import { RESOURCES, queryResource } from './adminApi';
 import { toCsv, toXlsx } from '../export';
 import { sha256Hex } from '../hashing';
@@ -77,7 +77,7 @@ restApiRoutes.use('*', async (c, next) => {
     return next();
   }
 
-  const session = await getSession(c);
+  const session = await getRevalidatedPrivilegedSession(c);
   if (session && (session.role === 'owner' || session.role === 'admin')) {
     c.set('auth', { via: 'session', eventId: session.eventId });
     return next();

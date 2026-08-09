@@ -190,19 +190,25 @@ export function SubmitPage({ data }: { data: SubmitBootstrap }) {
   }, [done, countdown])
 
   const requestLogin = useCallback(async () => {
-    if (!loginEmail.trim()) return
+    const email = loginEmail.trim()
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      setStepError('Enter a valid email address.')
+      return
+    }
+    setStepError(null)
     setLoginState('sending')
     try {
       const res = await fetch('/auth/request', {
         method: 'POST',
         headers: { 'content-type': 'application/json', accept: 'application/json' },
         body: JSON.stringify({
-          email: loginEmail.trim(),
+          email,
           event_slug: event.slug,
           redirect_to: data.base_path,
         }),
       })
-      const body = (await res.json().catch(() => ({}))) as { dev_link?: string }
+      const body = (await res.json().catch(() => ({}))) as { dev_link?: string; error?: string }
+      if (!res.ok) throw new Error(body.error ?? `Request failed (${res.status})`)
       setDevLink(body.dev_link ?? null)
       setLoginState('sent')
     } catch {
@@ -401,6 +407,7 @@ export function SubmitPage({ data }: { data: SubmitBootstrap }) {
                   type="email"
                   value={loginEmail}
                   placeholder="you@example.com"
+                  required
                   onChange={(e) => setLoginEmail(e.currentTarget.value)}
                 />
               </div>

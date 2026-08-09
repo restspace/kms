@@ -114,6 +114,19 @@ export async function sendTemplated<E extends AppEnv>(c: Context<E>, args: SendT
   const { outcome, payload } = await queueTemplated(db, args);
   if (outcome !== 'queued' || !payload) return outcome;
 
+  // Claim the just-enqueued row before calling the provider. This makes the
+  // request fast path and the cron consumer compete through the same lease;
+  // a crashed attempt is reclaimed by claimDue after the lease expires.
+  const claimed = await db
+    .prepare(
+      `UPDATE outbox SET status = 'in_flight', next_attempt_at = ?
+       WHERE idempotency_key = ? AND status = 'pending'
+       RETURNING id`,
+    )
+    .bind(new Date(Date.now() + 5 * 60_000).toISOString(), payload.log_key)
+    .first<{ id: string }>();
+  if (!claimed) return outcome;
+
   const attempt = deliverEmail(db, c.env, payload)
     .then(() => createDb(db).outbox.markDoneByKey(payload.log_key))
     .catch((err: unknown) => {
@@ -129,6 +142,11 @@ export async function sendTemplated<E extends AppEnv>(c: Context<E>, args: SendT
 
 /** Send one payload and reflect the result in message_log. Throws on failure. */
 export async function deliverEmail(db: D1Database, env: Env, payload: OutboxEmailPayload): Promise<void> {
+  const existing = await db
+    .prepare('SELECT status FROM message_log WHERE idempotency_key = ?')
+    .bind(payload.log_key)
+    .first<{ status: string }>();
+  if (existing?.status === 'sent') return;
   const provider = payload.calendar ? selectCalendarProvider(env) : selectProvider(env);
   try {
     const result = await provider.send(payload);

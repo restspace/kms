@@ -17,6 +17,9 @@ export interface IcsOptions {
   /** local wall-clock in the event zone, e.g. '2026-10-12T09:00:00' */
   startsAtLocal: string;
   endsAtLocal: string;
+  /** UTC instants used when no bundled VTIMEZONE definition exists. */
+  startsAtUtc?: string;
+  endsAtUtc?: string;
   summary: string;
   location: string;
   description: string;
@@ -27,12 +30,23 @@ export interface IcsOptions {
 
 /** RFC 5545 §3.1 — fold content lines at 75 octets with CRLF + space. */
 function fold(line: string): string {
-  let out = '';
-  while (line.length > 74) {
-    out += line.slice(0, 74) + '\r\n ';
-    line = line.slice(74);
+  const encoder = new TextEncoder();
+  const chunks: string[] = [];
+  let current = '';
+  let octets = 0;
+  for (const char of line) {
+    const size = encoder.encode(char).byteLength;
+    if (octets + size > 75 && current !== '') {
+      chunks.push(current);
+      current = ` ${char}`;
+      octets = 1 + size; // continuation lines begin with one folding space
+    } else {
+      current += char;
+      octets += size;
+    }
   }
-  return out + line;
+  chunks.push(current);
+  return chunks.join('\r\n');
 }
 
 /** Escape per RFC 5545 §3.3.11 (TEXT). */
@@ -45,6 +59,9 @@ function icsEscape(value: string): string {
 }
 
 const localStamp = (isoLocal: string): string => isoLocal.replace(/[-:]/g, '').slice(0, 15);
+
+const utcStamp = (isoUtc: string): string =>
+  new Date(isoUtc).toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
 
 /**
  * Minimal VTIMEZONE definitions for common US/EU zones. Clients mostly carry
@@ -115,8 +132,13 @@ const VTIMEZONES: Record<string, string[]> = {
 export function buildIcs(opts: IcsOptions): string {
   const dtstamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
   const tz = VTIMEZONES[opts.timezone];
-  const dtField = (name: string, isoLocal: string): string =>
-    tz ? `${name};TZID=${opts.timezone}:${localStamp(isoLocal)}` : `${name}:${localStamp(isoLocal)}Z`;
+  const dtField = (name: string, isoLocal: string, isoUtc: string | undefined): string => {
+    if (tz) return `${name};TZID=${opts.timezone}:${localStamp(isoLocal)}`;
+    if (!isoUtc) {
+      throw new Error(`UTC instant is required for unsupported timezone ${opts.timezone}`);
+    }
+    return `${name}:${utcStamp(isoUtc)}`;
+  };
 
   const lines = [
     'BEGIN:VCALENDAR',
@@ -128,8 +150,8 @@ export function buildIcs(opts: IcsOptions): string {
     'BEGIN:VEVENT',
     `UID:${opts.uid}`,
     `DTSTAMP:${dtstamp}`,
-    dtField('DTSTART', opts.startsAtLocal),
-    dtField('DTEND', opts.endsAtLocal),
+    dtField('DTSTART', opts.startsAtLocal, opts.startsAtUtc),
+    dtField('DTEND', opts.endsAtLocal, opts.endsAtUtc),
     `SEQUENCE:${opts.sequence}`,
     `SUMMARY:${icsEscape(opts.summary)}`,
     `LOCATION:${icsEscape(opts.location)}`,
@@ -152,9 +174,6 @@ export function buildIcs(opts: IcsOptions): string {
 }
 
 /** UTC compact stamp (YYYYMMDDTHHMMSSZ) for calendar deep links. */
-const utcStamp = (iso: string): string =>
-  new Date(iso).toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
-
 /** Fallback "add to calendar" links for clients that hide the invite part. */
 export function calendarLinks(opts: {
   title: string;

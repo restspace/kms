@@ -17,7 +17,11 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run typecheck
-      - run: npm run build:admin
+      - run: npm test
+      # Exercise both deployable bundles. The Worker serves the public island
+      # and the admin SPA from the same asset directory, so either half failing
+      # makes the deployment unusable.
+      - run: npm run build
 
   deploy:
     needs: build
@@ -50,6 +54,11 @@ jobs:
           cache: npm
 
       - run: npm ci
+        if: steps.creds.outputs.present == 'true'
+
+      # Jobs run on separate machines and dist/ is intentionally gitignored;
+      # rebuild the assets that Wrangler packages with the Worker.
+      - run: npm run build
         if: steps.creds.outputs.present == 'true'
 
       # Migrations apply via `wrangler d1 migrations apply kms --remote` before

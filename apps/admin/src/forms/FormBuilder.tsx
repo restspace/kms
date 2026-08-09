@@ -96,6 +96,8 @@ export function FormBuilder({
   const [savedAt, setSavedAt] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const dirtyRef = useRef(false)
+  const editVersionRef = useRef(0)
+  const saveInFlightRef = useRef(false)
 
   useEffect(() => {
     void Promise.all([getFormDetail(formId), getBuilderMeta()])
@@ -109,16 +111,33 @@ export function FormBuilder({
 
   const patch = useCallback((changes: Partial<FormRow>) => {
     dirtyRef.current = true
+    editVersionRef.current += 1
     setForm((prev) => (prev ? { ...prev, ...changes } : prev))
   }, [])
 
+  useEffect(() => {
+    const guard = (event: BeforeUnloadEvent) => {
+      if (!dirtyRef.current) return
+      event.preventDefault()
+      event.returnValue = ''
+    }
+    window.addEventListener('beforeunload', guard)
+    return () => window.removeEventListener('beforeunload', guard)
+  }, [])
+
   const save = useCallback(async (): Promise<boolean> => {
-    if (!form) return false
+    if (!form || saveInFlightRef.current) return false
+    saveInFlightRef.current = true
+    const savedVersion = editVersionRef.current
     setSaving(true)
     setError(null)
     try {
       const result = await updateForm(form.id, editablePatch(form))
-      setForm((prev) => (prev ? { ...result.form } : prev))
+      if (editVersionRef.current !== savedVersion) {
+        setError('Newer changes were made while saving. Save again to continue.')
+        return false
+      }
+      setForm({ ...result.form })
       dirtyRef.current = false
       setSavedAt(new Date().toLocaleTimeString())
       return true
@@ -126,13 +145,14 @@ export function FormBuilder({
       setError(e instanceof Error ? e.message : 'Save failed')
       return false
     } finally {
+      saveInFlightRef.current = false
       setSaving(false)
     }
   }, [form])
 
   const goToStep = useCallback(
-    (next: StepKey) => {
-      if (dirtyRef.current) void save()
+    async (next: StepKey) => {
+      if (dirtyRef.current && !(await save())) return
       setStep(next)
     },
     [save],
@@ -156,7 +176,10 @@ export function FormBuilder({
   return (
     <div className="forms-section">
       <div className="forms-header">
-        <button className="fbtn" onClick={() => { if (dirtyRef.current) void save(); onClose() }}>← Forms</button>
+        <button className="fbtn" onClick={() => void (async () => {
+          if (dirtyRef.current && !(await save())) return
+          onClose()
+        })()}>← Forms</button>
         <h1>{form.internal_name}</h1>
         {savedAt && <span className="builder-saved">Saved {savedAt}</span>}
         <button className="fbtn" onClick={() => window.open(publicUrl, '_blank')}>View Form</button>

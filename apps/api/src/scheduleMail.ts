@@ -154,6 +154,8 @@ export async function sendScheduleEmails<E extends AppEnv>(
       timezone: session.event_timezone,
       startsAtLocal: utcToLocalIso(session.starts_at, session.event_timezone),
       endsAtLocal: utcToLocalIso(session.ends_at, session.event_timezone),
+      startsAtUtc: session.starts_at,
+      endsAtUtc: session.ends_at,
       summary: `${session.title} — ${session.event_name}`,
       location,
       description: plainDescription,

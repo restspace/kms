@@ -50,10 +50,11 @@ async function readBody(c: Context<AppEnv>) {
 authRoutes.post('/request', async (c) => {
   const { email, event_slug, redirect_to } = await readBody(c);
   const json = wantsJson(c.req.header('accept'));
+  const normalisedEmail = email.trim().toLowerCase();
 
-  if (!email || !event_slug) {
-    if (json) return c.json({ ok: false, error: 'email and event_slug are required' }, 400);
-    return c.html(page('Sign in', '<h1>Missing details</h1><p>Both an email address and an event are required.</p>'), 400);
+  if (!event_slug || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalisedEmail)) {
+    if (json) return c.json({ ok: false, error: 'a valid email and event_slug are required' }, 400);
+    return c.html(page('Sign in', '<h1>Check your details</h1><p>A valid email address and an event are required.</p>'), 400);
   }
 
   const db = createDb(c.env.DB);
@@ -63,7 +64,7 @@ authRoutes.post('/request', async (c) => {
     return c.html(page('Event not found', '<h1>Event not found</h1><p>We could not find that event.</p>'), 404);
   }
 
-  const contact = await db.contacts.upsertByEmail(event.id, email.trim().toLowerCase());
+  const contact = await db.contacts.upsertByEmail(event.id, normalisedEmail);
 
   // 32-byte random token; only its SHA-256 hash is stored (single-use, 15-min TTL).
   const raw = new Uint8Array(32);

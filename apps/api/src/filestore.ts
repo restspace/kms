@@ -9,7 +9,7 @@ import type { Env } from './env';
 export const MAX_HEADSHOT_BYTES = 5 * 1024 * 1024;
 export const MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
 
-export const IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif']);
+export const IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
 export const DOCUMENT_TYPES = new Set([
   'application/pdf',
   'application/vnd.ms-powerpoint',
@@ -37,6 +37,37 @@ export interface FileAssetRow {
   size_bytes: number | null;
 }
 
+function startsWith(bytes: Uint8Array, signature: number[]): boolean {
+  return signature.every((value, index) => bytes[index] === value);
+}
+
+function matchesDeclaredType(contentType: string, bytes: Uint8Array): boolean {
+  const jpeg = startsWith(bytes, [0xff, 0xd8, 0xff]);
+  const png = startsWith(bytes, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  const webp = startsWith(bytes, [0x52, 0x49, 0x46, 0x46]) &&
+    String.fromCharCode(...bytes.slice(8, 12)) === 'WEBP';
+  const pdf = String.fromCharCode(...bytes.slice(0, 5)) === '%PDF-';
+  const zip = startsWith(bytes, [0x50, 0x4b, 0x03, 0x04]) ||
+    startsWith(bytes, [0x50, 0x4b, 0x05, 0x06]) ||
+    startsWith(bytes, [0x50, 0x4b, 0x07, 0x08]);
+  const ole = startsWith(bytes, [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]);
+  switch (contentType) {
+    case 'image/jpeg': return jpeg;
+    case 'image/png': return png;
+    case 'image/webp': return webp;
+    case 'application/pdf': return pdf;
+    case 'application/zip':
+    case 'application/vnd.openxmlformats-officedocument.presentationml.presentation':
+    case 'application/vnd.openxmlformats-officedocument.wordprocessingml.document':
+      return zip;
+    case 'application/vnd.ms-powerpoint':
+    case 'application/msword':
+      return ole;
+    default:
+      return false;
+  }
+}
+
 export async function saveFile(
   env: Env,
   opts: {
@@ -55,10 +86,14 @@ export async function saveFile(
   if (!opts.allowedTypes.has(contentType)) {
     return { error: `File type ${contentType} is not accepted.` };
   }
+  const body = await opts.file.arrayBuffer();
+  if (!matchesDeclaredType(contentType, new Uint8Array(body, 0, Math.min(body.byteLength, 16)))) {
+    return { error: 'File contents do not match the declared file type.' };
+  }
 
   const id = crypto.randomUUID();
   const key = `file:${id}`;
-  await env.KV.put(key, await opts.file.arrayBuffer(), {
+  await env.KV.put(key, body, {
     metadata: { content_type: contentType, filename: opts.file.name },
   });
   await env.DB.prepare(
@@ -73,8 +108,13 @@ export async function saveFile(
 export async function loadFile(
   env: Env,
   id: string,
+  eventId: string,
 ): Promise<{ row: FileAssetRow; body: ArrayBuffer } | null> {
-  const row = await env.DB.prepare('SELECT * FROM file_assets WHERE id = ?').bind(id).first<FileAssetRow>();
+  // Scope metadata before touching the object store. Wrong-tenant probes
+  // should be cheap and must not load another event's bytes into memory.
+  const row = await env.DB.prepare('SELECT * FROM file_assets WHERE id = ? AND event_id = ?')
+    .bind(id, eventId)
+    .first<FileAssetRow>();
   if (!row) return null;
   const body = await env.KV.get(row.key, 'arrayBuffer');
   if (!body) return null;

@@ -39,13 +39,25 @@ function flatten(context: Record<string, unknown>, prefix = ''): Map<string, str
 }
 
 /** Replace {{var.path}} with context values; unknown variables become ''. */
-export function mergeVariables(template: string, context: Record<string, unknown>): string {
+export function mergeVariables(
+  template: string,
+  context: Record<string, unknown>,
+  transform: (value: string) => string = (value) => value,
+): string {
   const vars = flatten(context);
-  return template.replace(/\{\{\s*([\w.]+)\s*\}\}/g, (_, path: string) => vars.get(path) ?? '');
+  return template.replace(
+    /\{\{\s*([\w.]+)\s*\}\}/g,
+    (_, path: string) => transform(vars.get(path) ?? ''),
+  );
 }
 
 const escapeHtml = (s: string): string =>
-  s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 
 /** Crude but dependable HTML→text for the plain-text alternative part. */
 export function htmlToText(html: string): string {
@@ -220,8 +232,11 @@ export function renderTemplate(
     typeof (context.event as Record<string, unknown> | undefined)?.name === 'string'
       ? ((context.event as Record<string, unknown>).name as string)
       : '';
-  const subject = mergeVariables(subjectSource, context);
-  const bodyHtml = mergeVariables(bodySource, context);
+  // Subjects are header-like values, so collapse CR/LF. HTML variables are
+  // escaped by default: public submission titles and speaker names must never
+  // become markup just because a template interpolates them.
+  const subject = mergeVariables(subjectSource, context).replace(/[\r\n]+/g, ' ');
+  const bodyHtml = mergeVariables(bodySource, context, escapeHtml);
   return {
     subject,
     html: applyTheme(bodyHtml, subject, theme, eventName),

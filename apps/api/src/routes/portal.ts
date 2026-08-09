@@ -475,8 +475,8 @@ portalRoutes.get('/:slug/profile', async (c) => {
     links = contact.links ? (JSON.parse(contact.links) as Record<string, string>) : {};
   } catch { /* empty */ }
 
-  const field = (name: string, label: string, value: string | null, type = 'text') =>
-    `<label for="f-${name}">${label}</label><input type="${type}" id="f-${name}" name="${name}" value="${esc(value ?? '')}">`;
+  const field = (name: string, label: string, value: string | null, type = 'text', required = false) =>
+    `<label for="f-${name}">${label}</label><input type="${type}" id="f-${name}" name="${name}" value="${esc(value ?? '')}"${required ? ' required' : ''}>`;
 
   return c.html(
     portalPage(
@@ -488,8 +488,8 @@ portalRoutes.get('/:slug/profile', async (c) => {
 <label for="f-biography">Biography <span class="counter" id="bio-count"></span></label>
 <textarea id="f-biography" name="biography" rows="7" maxlength="5000">${esc(contact.biography ?? '')}</textarea>
 ${field('salutation', 'Salutation', contact.salutation)}
-${field('first_name', 'First Name *', contact.first_name)}
-${field('last_name', 'Last Name *', contact.last_name)}
+${field('first_name', 'First Name *', contact.first_name, 'text', true)}
+${field('last_name', 'Last Name *', contact.last_name, 'text', true)}
 ${field('honorific', 'Honorific', contact.honorific)}
 <label for="f-pronouns">Pronouns</label>
 <select id="f-pronouns" name="pronouns">${PRONOUN_OPTIONS.map(

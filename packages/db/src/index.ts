@@ -18,6 +18,7 @@ interface OutboxDbRow {
 }
 
 const MAX_ATTEMPTS = 8;
+const CLAIM_LEASE_MS = 5 * 60_000;
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -136,22 +137,31 @@ export function createDb(d1: D1Database): Db {
 
       async claimDue(limit: number): Promise<OutboxRow[]> {
         const ts = nowIso();
-        const { results } = await d1
+        const { results: candidates } = await d1
           .prepare(
             `SELECT * FROM outbox
-             WHERE status = 'pending' AND next_attempt_at <= ?
+             WHERE status IN ('pending', 'in_flight') AND next_attempt_at <= ?
              ORDER BY next_attempt_at
              LIMIT ?`,
           )
           .bind(ts, limit)
           .all<OutboxDbRow>();
-        if (results.length === 0) return [];
-        const placeholders = results.map(() => '?').join(', ');
-        await d1
-          .prepare(`UPDATE outbox SET status = 'in_flight' WHERE id IN (${placeholders})`)
-          .bind(...results.map((r) => r.id))
-          .run();
-        return results.map((r) => toOutboxRow(r, 'in_flight'));
+        const claimed: OutboxRow[] = [];
+        const leaseUntil = new Date(Date.now() + CLAIM_LEASE_MS).toISOString();
+        for (const candidate of candidates) {
+          // Conditional UPDATE is the claim: another worker that selected the
+          // same candidate loses once its due timestamp has moved forward.
+          const row = await d1
+            .prepare(
+              `UPDATE outbox SET status = 'in_flight', next_attempt_at = ?
+               WHERE id = ? AND status IN ('pending', 'in_flight') AND next_attempt_at <= ?
+               RETURNING *`,
+            )
+            .bind(leaseUntil, candidate.id, ts)
+            .first<OutboxDbRow>();
+          if (row) claimed.push(toOutboxRow(row, 'in_flight'));
+        }
+        return claimed;
       },
 
       async markDone(id: string): Promise<void> {

@@ -9,7 +9,7 @@ import { can } from '@kms/core';
 import type { Actor, Event } from '@kms/core';
 import type { AppEnv } from '../env';
 import { esc, page } from '../html';
-import { getSession } from '../session';
+import { getRevalidatedPrivilegedSession } from '../session';
 
 export const adminRoutes = new Hono<AppEnv>();
 
@@ -44,7 +44,7 @@ const forbidden = page(
 
 // GET /app — gate, then hand over the built SPA shell.
 adminRoutes.get('/', async (c) => {
-  const session = await getSession(c);
+  const session = await getRevalidatedPrivilegedSession(c);
   if (!session) {
     const events = await createDb(c.env.DB).events.listAll();
     return c.html(adminLoginPage(events), 401);

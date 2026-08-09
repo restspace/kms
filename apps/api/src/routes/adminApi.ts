@@ -10,7 +10,7 @@ import { can } from '@kms/core';
 import type { Actor, Role } from '@kms/core';
 import type { AppEnv, Env } from '../env';
 import { sha256Hex } from '../hashing';
-import { createSessionToken, getSession, setSessionCookie, type SessionPayload } from '../session';
+import { createSessionToken, getRevalidatedPrivilegedSession, setSessionCookie, type SessionPayload } from '../session';
 import { formsAdminRoutes } from './formsAdmin';
 import { evaluationRoutes } from './evaluation';
 import { agendaRoutes } from './agenda';
@@ -24,7 +24,7 @@ export const adminApiRoutes = new Hono<ApiEnv>();
 // Reviewers (docs/06 §4) reach only /me and /app/api/review/*; everything else
 // requires admin.
 adminApiRoutes.use('*', async (c, next) => {
-  const session = await getSession(c);
+  const session = await getRevalidatedPrivilegedSession(c);
   if (!session) return c.json({ error: 'unauthenticated' }, 401);
   const actor: Actor = { contactId: session.contactId, email: session.email, role: session.role };
   if (!can(actor, 'review.view')) return c.json({ error: 'forbidden' }, 403);
