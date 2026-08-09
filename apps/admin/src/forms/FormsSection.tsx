@@ -35,6 +35,7 @@ export function FormsSection({ eventSlug, timezone }: { eventSlug: string; timez
       <FormBuilder
         formId={openFormId}
         eventSlug={eventSlug}
+        timezone={timezone}
         onClose={() => {
           setOpenFormId(null)
           reload()

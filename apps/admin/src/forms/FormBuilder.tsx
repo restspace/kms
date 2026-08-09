@@ -12,6 +12,7 @@ import {
   type FormQuestion,
   type FormRow,
 } from '../api'
+import { isoToLocalInput, localInputToIso } from '../utils/dates'
 
 /**
  * Form builder wizard (docs/04 §2): left rail of steps, content pane, sticky
@@ -79,10 +80,12 @@ function editablePatch(form: FormRow): Record<string, unknown> {
 export function FormBuilder({
   formId,
   eventSlug,
+  timezone,
   onClose,
 }: {
   formId: string
   eventSlug: string
+  timezone: string
   onClose: () => void
 }) {
   const [form, setForm] = useState<FormRow | null>(null)
@@ -212,7 +215,7 @@ export function FormBuilder({
               />
             </>
           )}
-          {step === 'settings' && <SettingsStep form={form} patch={patch} />}
+          {step === 'settings' && <SettingsStep form={form} patch={patch} timezone={timezone} />}
           {step === 'notifications' && <NotificationsStep form={form} patch={patch} />}
 
           <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 24, maxWidth: 680 }}>
@@ -993,24 +996,23 @@ function RolesPanel({ form, patch }: { form: FormRow; patch: (c: Partial<FormRow
 // Step 5 — Form Settings
 // ---------------------------------------------------------------------------
 
-/** ISO ↔ datetime-local (browser-local time; stored as UTC ISO). */
-const isoToLocal = (iso: string | null): string => {
-  if (!iso) return ''
-  const d = new Date(iso)
-  if (Number.isNaN(d.getTime())) return ''
-  const pad = (n: number) => String(n).padStart(2, '0')
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
-}
-
-function SettingsStep({ form, patch }: { form: FormRow; patch: (c: Partial<FormRow>) => void }) {
+function SettingsStep({
+  form,
+  patch,
+  timezone,
+}: {
+  form: FormRow
+  patch: (c: Partial<FormRow>) => void
+  timezone: string
+}) {
   return (
     <section>
       <div className="bfield">
         <label>Close Date</label>
         <input
           type="datetime-local"
-          value={isoToLocal(form.close_at)}
-          onChange={(e) => patch({ close_at: e.target.value ? new Date(e.target.value).toISOString() : null })}
+          value={isoToLocalInput(form.close_at, timezone)}
+          onChange={(e) => patch({ close_at: e.target.value ? localInputToIso(e.target.value, timezone) : null })}
         />
         <p className="bhelp">If set, form and submissions will close after the specified date.</p>
       </div>
