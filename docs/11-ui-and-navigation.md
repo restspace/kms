@@ -58,11 +58,25 @@ sidebar for the bespoke surfaces:
 ```
 Dashboard
 Workspace        (tab workspace: Speakers | Submissions | Tasks | Messages* | Files*)
+  Speakers         (workspace tabs are listed indented under Workspace;
+  Submissions       clicking one opens the workspace on that tab)
+  Tasks
+  Messages
 Forms            (tabs: Call for papers | Portal forms | File requests)
 Evaluation
 Agenda
 Settings         (Event · Library · Email · Portal · Team · API)
 ```
+
+**Events scope the Workspace as a *filter*, not a route.** The sidebar's event
+dropdown is the control surface for a global event filter: "All events" shows every
+event the signed-in staff member can access aggregated in the workspace tabs (each
+row carries an Event column), and picking one event both narrows the workspace and
+sets the *current event* for the per-event surfaces (Dashboard, Forms, Evaluation,
+Agenda, Settings) — without a page reload. FR-EVT-5's "event switcher" is therefore
+an event *filter*; the workspace tab-header row shows the active global-filter
+anchor and the event chip. A "+ New event" affordance next to the dropdown opens
+the Create Event dialog (FR-EVT-1/2).
 
 *\* as time allows — see the cut list in [12 §1](12-build-plan.md).*
 
@@ -86,25 +100,33 @@ Card grid grouped as **Event setup** (Event Details, Record Settings, Portals, S
 
 ## 2. Route map
 
-| Route | Screen |
+The admin SPA lives at `/app` and encodes its state in **query parameters** (the
+event is a filter dimension, not a path segment — see §1). `pushState` is used for
+navigation intents (view, tab, record, form), `replaceState` for parameter tweaks
+(filter, search, agenda day/mode, builder step); Back/refresh/deep links restore
+the full state, including opening a record's detail tab.
+
+| URL | Screen |
 |---|---|
-| `/app` | Org / event chooser |
-| `/app/e/:event/dashboard` | Dashboard (tabbed by dashboard key) |
-| `/app/e/:event/workspace` | Tab workspace (Speakers · Submissions · Tasks · …); detail/create/edit open as child tabs, not routes |
-| `/app/e/:event/forms` | Forms list |
-| `/app/e/:event/forms/:id/edit/:step` | Form builder wizard |
-| `/app/e/:event/evaluation` | Plans list |
-| `/app/e/:event/evaluation/:plan` | Plan config |
-| `/app/e/:event/evaluation/:plan/review` | Reviewer workspace |
-| `/app/e/:event/agenda/:view` | list \| day \| week \| month \| rooms \| conflicts |
-| `/app/e/:event/speakers` / `/:id` | Contacts |
-| `/app/e/:event/tasks` | Tasks + assignments |
-| `/app/e/:event/files` | File library |
-| `/app/e/:event/settings/*` | Settings hub |
+| `/app?v=dashboard` | Dashboard (default view) |
+| `/app?v=workspace&ev=all\|:event&tab=:key&rec=:id&q=:text&flt=:b64` | Tab workspace — event filter, active tab, selected record, search, stable filters |
+| `/app?v=forms` · `&form=:id&fstep=:step` | Forms list / form builder wizard |
+| `/app?v=evaluation` | Plans + criteria |
+| `/app?v=review` | Reviewer workspace |
+| `/app?v=agenda&mode=:view&day=YYYY-MM-DD` | Agenda (list \| day \| week \| rooms \| conflicts) |
+| `/app?v=settings` | Settings hub |
 | `/submit/:slug/:formId` | Public CFP wizard |
 | `/portal/:slug` | Speaker portal (home/submissions/profile/tasks) |
-| `/e/:slug/agenda` | Public agenda |
-| `/embed/:token` | Embed |
+| `/portal/:slug/submissions/:id/edit` | Speaker edits a submission (allowed unless withdrawn/declined) |
+| `/e/:slug/agenda.json` | Public agenda JSON (404 until the agenda is published) |
+
+Known deferred surfaces (recorded gaps, not regressions): portal-form and
+file-request authoring UI, reviewer skip/shortcuts/autosave/anonymisation
+controls, forms-list search/copy-from, track/room/tag CRUD, admin→speaker portal
+impersonation entry point, a public agenda *page* (only the JSON feed exists),
+`/embed/:token`, task-definition edit/delete in the grid, and cross-event export
+(exports remain per-event). Auto-creating a session on acceptance is likewise
+unbuilt and unspecified.
 
 ---
 

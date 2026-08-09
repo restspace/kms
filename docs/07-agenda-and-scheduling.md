@@ -108,12 +108,22 @@ Sessions created directly on the agenda are stored as submissions with `source =
 
 ## 6. Publishing & communications
 
-- **Publish agenda** makes scheduled sessions visible on public surfaces and embeds.
+- **Publish agenda** (header control, Published/Draft chip) sets `events.agenda_published`
+  and gates the public agenda feed `GET /e/:slug/agenda.json` (404 while unpublished).
+  A public agenda *page* and embeds remain unbuilt.
 - Confirming or changing a session's schedule triggers the calendar-invite flow in
   [08 §Calendar invites](08-communications.md): a first schedule sends `METHOD:REQUEST`; a
   time/room change re-sends with `SEQUENCE + 1`; unscheduling sends `METHOD:CANCEL`.
-- Bulk action **"Send schedule confirmations"** for all newly scheduled sessions.
-- A change to a published session shows a "notify speakers?" prompt rather than silently re-sending.
+- Bulk action **"Send schedule confirmations"** enqueues a background bulk job (202 +
+  `job_id`); the cron sweep fans the sends out and the UI polls job progress. Invites
+  therefore appear minutes after the click, not synchronously.
+- Invited sessions can never change silently — enforced **server-side**: a schedule
+  change on a session with a live `METHOD:REQUEST` invite is refused
+  (`409 invite_notify_required`) unless the request carries `notify` (send updates) or
+  `notify_ack` (operator explicitly declined). The client's "notify speakers?" prompt is
+  a UX layer over that guard, so stale client state cannot bypass it (FR-COMM-6).
+- Capacity is editable in the Move/Add Session dialogs and persists to
+  `submissions.capacity`, so `ROOM_CAPACITY_EXCEEDED` (FR-AGENDA-6) is live.
 
 ---
 
