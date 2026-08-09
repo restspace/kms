@@ -104,6 +104,86 @@ export async function queueTemplated(
   return { outcome: 'queued', payload };
 }
 
+export interface PreparedEmail {
+  /** message_log + outbox inserts, both INSERT OR IGNORE — batch-safe on replay */
+  statements: D1PreparedStatement[];
+  payload: OutboxEmailPayload;
+  logKey: string;
+}
+
+/**
+ * Render a templated email into *prepared statements* instead of executing
+ * them, so callers can commit the message_log/outbox rows inside their own
+ * `db.batch` together with the domain writes (sweep item P0-1: the
+ * confirmation email must be part of the submission transaction). Returns
+ * null when the template is disabled for the event. After the batch commits,
+ * pass the PreparedEmail to `attemptImmediate` for the request fast path —
+ * or do nothing and let the cron sweep deliver it.
+ */
+export async function prepareTemplated(db: D1Database, args: SendTemplatedArgs): Promise<PreparedEmail | null> {
+  const { override, themeId } = await loadOverride(db, args.eventId, args.templateKey);
+  const theme = await loadTheme(db, args.eventId, themeId);
+  const rendered = renderTemplate(args.templateKey, override, theme, args.context);
+  if (!rendered) return null;
+
+  const logKey = `${args.templateKey}:${args.contactId ?? 'none'}:${args.entityId}:v${args.version ?? 1}`;
+  const ts = new Date().toISOString();
+  const payload: OutboxEmailPayload = {
+    to: args.toEmail,
+    subject: rendered.subject,
+    text: rendered.text,
+    html: rendered.html,
+    ...(args.ics ? { ics: args.ics, calendar: true } : {}),
+    log_key: logKey,
+  };
+  const statements = [
+    db
+      .prepare(
+        `INSERT OR IGNORE INTO message_log
+           (id, event_id, template_key, to_email, contact_id, subject, status, idempotency_key, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?)`,
+      )
+      .bind(crypto.randomUUID(), args.eventId, args.templateKey, args.toEmail, args.contactId, rendered.subject, logKey, ts),
+    db
+      .prepare(
+        `INSERT OR IGNORE INTO outbox
+           (id, kind, idempotency_key, payload, status, attempts, next_attempt_at, created_at)
+         VALUES (?, 'email', ?, ?, 'pending', 0, ?, ?)`,
+      )
+      .bind(crypto.randomUUID(), logKey, JSON.stringify(payload), ts, ts),
+  ];
+  return { statements, payload, logKey };
+}
+
+/**
+ * Fast-path delivery for a PreparedEmail whose statements have committed:
+ * claim the pending outbox row (losing to a duplicate or an earlier claim is
+ * fine — the sweep owns retries) and send via waitUntil.
+ */
+export async function attemptImmediate<E extends AppEnv>(c: Context<E>, prepared: PreparedEmail): Promise<void> {
+  const db = c.env.DB;
+  const claimed = await db
+    .prepare(
+      `UPDATE outbox SET status = 'in_flight', next_attempt_at = ?
+       WHERE idempotency_key = ? AND status = 'pending'
+       RETURNING id`,
+    )
+    .bind(new Date(Date.now() + 5 * 60_000).toISOString(), prepared.logKey)
+    .first<{ id: string }>();
+  if (!claimed) return;
+
+  const attempt = deliverEmail(db, c.env, prepared.payload)
+    .then(() => createDb(db).outbox.markDoneByKey(prepared.logKey))
+    .catch((err: unknown) => {
+      console.error(`immediate send failed (${prepared.logKey}):`, err instanceof Error ? err.message : 'unknown');
+    });
+  try {
+    c.executionCtx.waitUntil(attempt);
+  } catch {
+    await attempt; // environments without an execution context (tests)
+  }
+}
+
 /**
  * Request-path variant: queue, then attempt delivery via waitUntil so the
  * response never waits on the provider. On success the outbox row is

@@ -22,5 +22,5 @@
     }
   },
   "include": ["apps/**/*.ts", "apps/**/*.tsx", "packages/**/*.ts", "packages/**/*.tsx"],
-  "exclude": ["node_modules", "**/dist", "apps/admin"]
+  "exclude": ["node_modules", "**/dist", "apps/admin", "apps/api/test"]
 }

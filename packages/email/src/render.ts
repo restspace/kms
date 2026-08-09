@@ -100,21 +100,41 @@ export const DEFAULT_TEMPLATES: Record<string, DefaultTemplate> = {
 <p>This link expires in 15 minutes and can only be used once. If you did not request it, you can ignore this email.</p>`,
   },
   submission_confirmation: {
+    // {{portal_url}} carries a purpose-bound single-use magic link minted in
+    // the submission transaction (sweep item P0-3): opening it in a fresh
+    // browser authenticates the submitter into their portal.
     subject: 'Submission received: {{submission.title}} ({{submission.code}})',
     body: `<p>Thanks for your proposal to <strong>{{event.name}}</strong>!</p>
 <p>&ldquo;{{submission.title}}&rdquo; was received as <strong>{{submission.code}}</strong> and is now pending review.</p>
 <p><a href="{{portal_url}}" class="btn">Open your speaker portal</a></p>
 <p>Use your portal to track this submission, complete tasks and keep your speaker profile up to date.</p>`,
   },
+  submission_received_admin: {
+    subject: 'New submission: {{submission.title}} ({{submission.code}}) — {{event.name}}',
+    body: `<p>A new submission arrived for <strong>{{event.name}}</strong>:</p>
+<p><strong>{{submission.title}}</strong> ({{submission.code}}){{submission.track_line}}</p>
+<p>Submitted by {{submitter.name}} &lt;{{submitter.email}}&gt;.</p>
+<p><a href="{{admin_url}}" class="btn">Review it in the workspace</a></p>`,
+  },
+  submission_updated_admin: {
+    subject: 'Submission updated: {{submission.title}} ({{submission.code}}) — {{event.name}}',
+    body: `<p>A submission to <strong>{{event.name}}</strong> was updated:</p>
+<p><strong>{{submission.title}}</strong> ({{submission.code}})</p>
+<p>Updated by {{submitter.name}} &lt;{{submitter.email}}&gt;.</p>
+<p><a href="{{admin_url}}" class="btn">See what changed</a></p>`,
+  },
   submission_updated: {
     subject: 'Submission updated: {{submission.title}} ({{submission.code}})',
     body: `<p>Your changes to <strong>{{submission.title}}</strong> ({{submission.code}}) were saved.</p>
 <p><a href="{{portal_url}}">View it in your portal</a></p>`,
   },
+  // {{reviewer_feedback}} renders shared reviewer comments when the organiser
+  // opts in per send (Swyx-1 bonus); unknown/absent variables render as ''.
   decision_accepted: {
     subject: 'Congratulations — {{submission.title}} was accepted for {{event.name}}',
     body: `<p>Great news, {{speaker.first_name}}!</p>
 <p><strong>{{submission.title}}</strong> ({{submission.code}}) has been <strong>accepted</strong> for {{event.name}}.</p>
+<p style="white-space:pre-line;">{{reviewer_feedback}}</p>
 <p>Your speaker portal lists everything we need from you next — including any onboarding tasks.</p>
 <p><a href="{{portal_url}}" class="btn">Open your speaker portal</a></p>`,
   },
@@ -122,6 +142,7 @@ export const DEFAULT_TEMPLATES: Record<string, DefaultTemplate> = {
     subject: 'Your {{event.name}} submission: {{submission.title}}',
     body: `<p>Hi {{speaker.first_name}},</p>
 <p>Thank you for submitting <strong>{{submission.title}}</strong> ({{submission.code}}) to {{event.name}}. After careful review we are unable to include it in this year's programme.</p>
+<p style="white-space:pre-line;">{{reviewer_feedback}}</p>
 <p>We would love to see you submit again next time.</p>`,
   },
   task_assigned: {

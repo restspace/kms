@@ -575,3 +575,34 @@ INSERT INTO message_log (id, event_id, template_key, to_email, contact_id, subje
    'joan.clarke@example.com', 'con00000-0000-4000-8000-000000000006',
    'An update on your submission', 'sent',
    'demo-provider-0008', NULL, 'seed:msg:0008', '2026-08-05T16:10:00Z', '2026-08-05T16:10:07Z');
+
+-- ---------------------------------------------------------------------------
+-- Speaker onboarding templates from the organiser clarifications
+-- (docs/Clarifications/Swyx-1.md answer 5): flight reimbursement is a
+-- co-equal must-have; the remainder are the optional templates. Bio/photos
+-- is already covered by 'Speaker Profile & Headshot' above.
+-- ---------------------------------------------------------------------------
+
+INSERT INTO portal_forms (id, event_id, name, title, type, questions, send_confirmation_email, created_at) VALUES
+  ('pf000000-0000-4000-8000-000000000002', 'evt00000-0000-4000-8000-000000000001', 'Flight Reimbursement', 'Flight Reimbursement Request', 'contacts',
+   '[{"id":"q_amount","label":"Total amount to reimburse","type":"text","required":true},
+     {"id":"q_currency","label":"Currency","type":"dropdown","required":true,"options":[{"value":"USD","label":"USD"},{"value":"EUR","label":"EUR"},{"value":"GBP","label":"GBP"},{"value":"other","label":"Other (explain in notes)"}]},
+     {"id":"q_account","label":"Payout details (IBAN / account, or PayPal email)","type":"textarea","required":true},
+     {"id":"q_notes","label":"Notes (booking reference, receipts sent to…)","type":"textarea"}]',
+   1, '2026-08-08T12:00:00Z');
+
+INSERT INTO tasks (id, event_id, title, description, target, assignment_mode, "trigger", action_type,
+                   portal_form_id, file_request_id, due_at, reminder_offsets_days, required, created_at) VALUES
+  ('task0000-0000-4000-8000-000000000005', 'evt00000-0000-4000-8000-000000000001', 'Flight Reimbursement',
+   '<p>Submit your flight details and payout information so we can reimburse your travel.</p>',
+   'contact', 'automatic', 'on_accept', 'portal_form',
+   'pf000000-0000-4000-8000-000000000002', NULL, '2026-10-05T07:00:00Z', '[7,2,0]', 1, '2026-08-08T12:00:00Z'),
+  ('task0000-0000-4000-8000-000000000006', 'evt00000-0000-4000-8000-000000000001', 'Finalize Talk Description',
+   '<p>Review and finalize your talk title and description as it will appear in the published programme.</p>',
+   'submission', 'manual', 'none', 'acknowledge', NULL, NULL, '2026-09-14T07:00:00Z', '[7,2]', 0, '2026-08-08T12:00:00Z'),
+  ('task0000-0000-4000-8000-000000000007', 'evt00000-0000-4000-8000-000000000001', 'Announce Your Participation',
+   '<p>Share that you are speaking! Announcement graphics and suggested copy are at https://ai.engineer/speaker-kit.</p>',
+   'contact', 'manual', 'none', 'external_link', NULL, NULL, '2026-09-21T07:00:00Z', '[7]', 0, '2026-08-08T12:00:00Z'),
+  ('task0000-0000-4000-8000-000000000008', 'evt00000-0000-4000-8000-000000000001', 'Invite Colleagues with Discount',
+   '<p>Your speaker discount code gives colleagues 20% off registration — share it with your network.</p>',
+   'contact', 'manual', 'none', 'acknowledge', NULL, NULL, '2026-09-28T07:00:00Z', '[7]', 0, '2026-08-08T12:00:00Z');

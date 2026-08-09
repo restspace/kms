@@ -17,11 +17,20 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run typecheck
-      - run: npm test
-      # Exercise both deployable bundles. The Worker serves the public island
-      # and the admin SPA from the same asset directory, so either half failing
-      # makes the deployment unusable.
+      # Build BEFORE test: the workers test project boots miniflare from
+      # wrangler.toml, whose [assets] binding needs apps/public/dist to exist.
+      # The build also runs the admin SPA's own tsc typecheck. Either half
+      # failing makes the deployment unusable, so both bundles are exercised.
       - run: npm run build
+      - run: npm test
+      # Validates wrangler.toml, bindings, module rules and bundling without
+      # credentials — catches deploy-shaped breakage on every PR.
+      - name: Wrangler deploy dry-run
+        run: npx wrangler deploy --dry-run --outdir dry-run-dist
+      # Advisory only: gating on audit in a large dev-dependency tree breaks
+      # CI on unrelated advisories; production deps are the signal.
+      - name: npm audit (advisory)
+        run: npm audit --omit=dev || true
 
   deploy:
     needs: build

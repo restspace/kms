@@ -164,6 +164,33 @@ const plainTextLength = (v: AnswerValue): number => {
   return v.replace(/<[^>]*>/g, '').length;
 };
 
+// Lightweight shape checks shared by the admin RecordForm, the public wizard
+// and the portal server (manual-review-1.md "basic format validation"):
+// deliberately "good enough", not RFC-complete.
+export const isValidEmailShape = (value: string): boolean => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+
+export const isValidUrlShape = (value: string): boolean => {
+  try {
+    const url = new URL(value);
+    return url.protocol === 'http:' || url.protocol === 'https:';
+  } catch {
+    return false;
+  }
+};
+
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+// Local or zoned ISO datetimes; seconds optional (matches <input type="datetime-local">).
+const DATETIME_RE = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(:\d{2})?(\.\d+)?(Z|[+-]\d{2}:?\d{2})?$/;
+
+const isValidDate = (value: string): boolean =>
+  DATE_RE.test(value) && !Number.isNaN(Date.parse(`${value}T00:00:00Z`));
+
+const isValidDateTime = (value: string): boolean =>
+  DATETIME_RE.test(value) && !Number.isNaN(Date.parse(value.replace(' ', 'T')));
+
+const optionValues = (q: QuestionDef): Set<string> =>
+  new Set((q.options ?? []).map((o) => o.value));
+
 /**
  * Validate one section's answers against its visible questions. Hidden
  * questions are never validated; their answers are the caller's to discard
@@ -186,11 +213,58 @@ export function validateAnswers(questions: QuestionDef[], answers: Answers): Val
         message: `${q.label} exceeds ${q.max_chars} characters`,
       });
     }
-    if (q.type === 'email' && typeof value === 'string' && value !== '' && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) {
-      errors.push({ question_id: q.id, code: 'invalid', message: `${q.label} must be a valid email` });
-    }
-    if (q.type === 'number' && value !== undefined && value !== null && value !== '' && Number.isNaN(Number(value))) {
-      errors.push({ question_id: q.id, code: 'invalid', message: `${q.label} must be a number` });
+    if (isEmptyValue(value)) continue; // optional and unanswered: nothing further to check
+    const invalid = (message: string) =>
+      errors.push({ question_id: q.id, code: 'invalid', message: `${q.label} ${message}` });
+    switch (q.type) {
+      case 'email':
+        if (typeof value !== 'string' || !isValidEmailShape(value)) invalid('must be a valid email');
+        break;
+      case 'number': {
+        const n = typeof value === 'number' ? value : Number(value);
+        if (typeof value === 'boolean' || Array.isArray(value) || !Number.isFinite(n)) {
+          invalid('must be a number');
+        }
+        break;
+      }
+      case 'url':
+        if (typeof value !== 'string' || !isValidUrlShape(value)) invalid('must be a valid link (http:// or https://)');
+        break;
+      case 'date':
+        if (typeof value !== 'string' || !isValidDate(value)) invalid('must be a valid date (YYYY-MM-DD)');
+        break;
+      case 'datetime':
+        if (typeof value !== 'string' || !isValidDateTime(value)) invalid('must be a valid date and time');
+        break;
+      case 'dropdown':
+      case 'radio': {
+        const allowed = optionValues(q);
+        if (allowed.size > 0 && (typeof value !== 'string' || !allowed.has(value))) {
+          invalid('must be one of the offered options');
+        }
+        break;
+      }
+      case 'multiselect': {
+        if (!Array.isArray(value)) {
+          invalid('must be a list of options');
+          break;
+        }
+        const allowed = optionValues(q);
+        if (allowed.size > 0 && value.some((v) => typeof v !== 'string' || !allowed.has(v))) {
+          invalid('contains an option that is not offered');
+        }
+        break;
+      }
+      case 'checkbox':
+        if (typeof value !== 'boolean') invalid('must be checked or unchecked');
+        break;
+      case 'file':
+        // Value is a stored asset id; ownership/scoping is the server's DB-side
+        // check — here only the shape is validated.
+        if (typeof value !== 'string' || !/^[\w-]{8,}$/.test(value)) invalid('must be an uploaded file');
+        break;
+      default:
+        break;
     }
   }
   return errors;
@@ -302,3 +376,132 @@ export function parseParticipantRoles(json: string | null | undefined): Particip
     return DEFAULT_PARTICIPANT_ROLES;
   }
 }
+
+// ---------------------------------------------------------------------------
+// Runtime config guards (sweep item P1-6): stored JSON for conditional rules,
+// routing rules and participant roles is organiser-supplied. Malformed config
+// must surface as a 4xx with a field path — never a DB constraint error.
+// ---------------------------------------------------------------------------
+
+export interface ConfigIssue {
+  path: string;
+  message: string;
+}
+
+const CONDITION_OPS: ReadonlySet<string> = new Set([
+  'equals', 'not_equals', 'contains', 'not_contains', 'is_any_of', 'is_empty', 'is_not_empty', 'gt', 'lt',
+]);
+
+const isRecord = (v: unknown): v is Record<string, unknown> =>
+  typeof v === 'object' && v !== null && !Array.isArray(v);
+
+function checkCondition(value: unknown, path: string, issues: ConfigIssue[]): void {
+  if (!isRecord(value)) {
+    issues.push({ path, message: 'condition must be an object' });
+    return;
+  }
+  if (typeof value.question_id !== 'string' || value.question_id === '') {
+    issues.push({ path: `${path}.question_id`, message: 'question_id must be a non-empty string' });
+  }
+  if (typeof value.op !== 'string' || !CONDITION_OPS.has(value.op)) {
+    issues.push({ path: `${path}.op`, message: `op must be one of ${[...CONDITION_OPS].join(', ')}` });
+  }
+}
+
+/** Validate a form_questions.visibility value. Empty array = no issues. */
+export function validateConditionalRuleConfig(value: unknown, basePath = 'visibility'): ConfigIssue[] {
+  const issues: ConfigIssue[] = [];
+  if (value === null || value === undefined) return issues;
+  if (!isRecord(value)) return [{ path: basePath, message: 'rule must be an object' }];
+  if (value.action !== 'show' && value.action !== 'hide') {
+    issues.push({ path: `${basePath}.action`, message: "action must be 'show' or 'hide'" });
+  }
+  if (value.match !== 'all' && value.match !== 'any') {
+    issues.push({ path: `${basePath}.match`, message: "match must be 'all' or 'any'" });
+  }
+  if (!Array.isArray(value.conditions)) {
+    issues.push({ path: `${basePath}.conditions`, message: 'conditions must be an array' });
+  } else {
+    value.conditions.forEach((cond, i) => checkCondition(cond, `${basePath}.conditions[${i}]`, issues));
+  }
+  return issues;
+}
+
+function checkRoutingActions(value: unknown, path: string, issues: ConfigIssue[]): void {
+  if (!isRecord(value)) {
+    issues.push({ path, message: 'actions must be an object' });
+    return;
+  }
+  for (const key of ['set_track_id', 'assign_evaluation_plan_id', 'set_status'] as const) {
+    if (value[key] !== undefined && typeof value[key] !== 'string') {
+      issues.push({ path: `${path}.${key}`, message: `${key} must be a string` });
+    }
+  }
+  for (const key of ['add_tag_ids', 'notify_contact_ids'] as const) {
+    const list = value[key];
+    if (list !== undefined && (!Array.isArray(list) || list.some((v) => typeof v !== 'string'))) {
+      issues.push({ path: `${path}.${key}`, message: `${key} must be an array of ids` });
+    }
+  }
+}
+
+/** Validate a submission_forms.routing_rules value. Empty array = no issues. */
+export function validateRoutingConfig(value: unknown, basePath = 'routing_rules'): ConfigIssue[] {
+  const issues: ConfigIssue[] = [];
+  if (value === null || value === undefined) return issues;
+  if (!isRecord(value)) return [{ path: basePath, message: 'routing config must be an object' }];
+  if (value.rules !== undefined) {
+    if (!Array.isArray(value.rules)) {
+      issues.push({ path: `${basePath}.rules`, message: 'rules must be an array' });
+    } else {
+      value.rules.forEach((rule, i) => {
+        const path = `${basePath}.rules[${i}]`;
+        if (!isRecord(rule)) {
+          issues.push({ path, message: 'rule must be an object' });
+          return;
+        }
+        if (typeof rule.id !== 'string' || rule.id === '') {
+          issues.push({ path: `${path}.id`, message: 'rule id must be a non-empty string' });
+        }
+        checkCondition(rule.when, `${path}.when`, issues);
+        if (rule.then !== undefined) checkRoutingActions(rule.then, `${path}.then`, issues);
+      });
+    }
+  }
+  if (value.fallback !== undefined) checkRoutingActions(value.fallback, `${basePath}.fallback`, issues);
+  return issues;
+}
+
+const PARTICIPANT_ROLES: ReadonlySet<string> = new Set(['speaker', 'co-speaker', 'moderator', 'panelist']);
+
+/** Validate a submission_forms.participant_roles value. Empty array = no issues. */
+export function validateParticipantRolesConfig(value: unknown, basePath = 'participant_roles'): ConfigIssue[] {
+  const issues: ConfigIssue[] = [];
+  if (value === null || value === undefined) return issues;
+  if (!Array.isArray(value)) return [{ path: basePath, message: 'participant roles must be an array' }];
+  value.forEach((entry, i) => {
+    const path = `${basePath}[${i}]`;
+    if (!isRecord(entry)) {
+      issues.push({ path, message: 'role config must be an object' });
+      return;
+    }
+    if (typeof entry.role !== 'string' || !PARTICIPANT_ROLES.has(entry.role)) {
+      issues.push({ path: `${path}.role`, message: `role must be one of ${[...PARTICIPANT_ROLES].join(', ')}` });
+    }
+    if (typeof entry.min !== 'number' || !Number.isInteger(entry.min) || entry.min < 0) {
+      issues.push({ path: `${path}.min`, message: 'min must be a non-negative integer' });
+    }
+    if (entry.max !== null && (typeof entry.max !== 'number' || !Number.isInteger(entry.max) || entry.max < 0)) {
+      issues.push({ path: `${path}.max`, message: 'max must be null or a non-negative integer' });
+    }
+    if (
+      typeof entry.min === 'number' && typeof entry.max === 'number' && entry.max < entry.min
+    ) {
+      issues.push({ path: `${path}.max`, message: 'max must be at least min' });
+    }
+  });
+  return issues;
+}
+
+/** Overall participant cap across all roles (sweep item P1-7). */
+export const MAX_PARTICIPANTS_PER_SUBMISSION = 10;

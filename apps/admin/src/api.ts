@@ -22,6 +22,8 @@ export interface Me {
 export interface ContactRow {
   id: string
   event_id: string
+  /** present when the workspace queries span events (event-as-filter model) */
+  event_name?: string | null
   email: string
   first_name: string | null
   last_name: string | null
@@ -30,6 +32,8 @@ export interface ContactRow {
   mobile_phone: string | null
   biography: string | null
   pronouns: string | null
+  /** organiser-only; never rendered in portal/public surfaces */
+  notes: string | null
   created_at: string
   updated_at: string
 }
@@ -37,6 +41,8 @@ export interface ContactRow {
 export interface SubmissionRow {
   id: string
   event_id: string
+  /** present when the workspace queries span events (event-as-filter model) */
+  event_name?: string | null
   code: string
   title: string
   description: string | null
@@ -48,6 +54,8 @@ export interface SubmissionRow {
   track_name: string | null
   submitter_contact_id: string | null
   submitter_name: string | null
+  /** organiser-only; never rendered in portal/public surfaces */
+  notes: string | null
   created_at: string
   updated_at: string
 }
@@ -97,6 +105,83 @@ export const switchEvent = (eventId: string) =>
     method: 'POST',
     body: JSON.stringify({ event_id: eventId }),
   })
+
+// ---------------------------------------------------------------------------
+// Events (FR-EVT-1/2: create; agenda publish flag rides the same PATCH)
+// ---------------------------------------------------------------------------
+
+export interface CreateEventInput {
+  name: string
+  slug: string
+  type?: string
+  website_url?: string | null
+  location?: string | null
+  timezone?: string
+  starts_at: string
+  ends_at: string
+  description?: string | null
+}
+
+export const createEvent = (data: CreateEventInput) =>
+  request<{ ok: boolean; id: string }>('/app/api/events', { method: 'POST', body: JSON.stringify(data) })
+
+export const patchEvent = (id: string, patch: { agenda_published?: boolean } & Record<string, unknown>) =>
+  request<{ ok: boolean }>(`/app/api/events/${id}`, { method: 'PATCH', body: JSON.stringify(patch) })
+
+/** Agenda go-live control (FR-AGENDA-9) — thin wrapper over the events PATCH. */
+export const setAgendaPublished = (eventId: string, published: boolean) =>
+  patchEvent(eventId, { agenda_published: published })
+
+// ---------------------------------------------------------------------------
+// Tasks CRUD (deferred-gap item: tasks were read-only in admin)
+// ---------------------------------------------------------------------------
+
+export interface TaskRow {
+  id: string
+  event_id: string
+  title: string
+  description: string | null
+  target: 'contact' | 'group' | 'submission'
+  assignment_mode: 'manual' | 'automatic'
+  trigger: 'on_accept' | 'on_schedule' | 'none'
+  action_type: 'file_upload' | 'portal_form' | 'acknowledge' | 'external_link'
+  due_at: string | null
+  required: number
+  created_at: string
+}
+
+export const createTask = (data: Record<string, unknown>) =>
+  request<TaskRow>('/app/api/tasks', { method: 'POST', body: JSON.stringify(data) })
+
+export const updateTask = (id: string, data: Record<string, unknown>) =>
+  request<TaskRow>(`/app/api/tasks/${id}`, { method: 'PUT', body: JSON.stringify(data) })
+
+export const deleteTask = (id: string) =>
+  request<{ ok: boolean }>(`/app/api/tasks/${id}`, { method: 'DELETE' })
+
+/** Internal notes (organiser-only) — narrow write path for submissions. */
+export const updateSubmissionNotes = (id: string, notes: string | null) =>
+  request<{ ok: boolean }>(`/app/api/submissions/${id}/notes`, {
+    method: 'PUT',
+    body: JSON.stringify({ notes }),
+  })
+
+// ---------------------------------------------------------------------------
+// Bulk jobs (sweep item P2-19): bulk sends return 202 { job_id }
+// ---------------------------------------------------------------------------
+
+export interface BulkJobStatus {
+  id: string
+  kind: string
+  status: 'pending' | 'running' | 'done' | 'failed'
+  total: number | null
+  enqueued: number
+  sent: number
+  failed: number
+  error: string | null
+}
+
+export const getBulkJob = (id: string) => request<BulkJobStatus>(`/app/api/bulk-jobs/${id}`)
 
 export interface MessageRow {
   id: string
