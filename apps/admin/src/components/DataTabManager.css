@@ -141,12 +141,20 @@
 .data-tab-filter-dot {
   width: 10px;
   height: 10px;
+  padding: 0;
   border-radius: 50%;
   border: 1.5px solid var(--text-faint);
   background: transparent;
   flex-shrink: 0;
   cursor: pointer;
   transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+/* It's a <button> (out of tab order; a11y item — its actions are duplicated
+   in the tab context menu for keyboard users), not a clickable span. */
+.data-tab-filter-dot:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 .data-tab-filter-dot:hover {
@@ -772,6 +780,25 @@
   padding: 0 var(--space-2);
   border-left: 1px solid var(--border);
   white-space: nowrap;
+}
+
+/* Workspace search input (deferred-gap item): debounced text filter merged
+   into the active tab's query, synced to the URL by the host. */
+.data-tab-search {
+  width: 180px;
+  max-width: 34ch;
+  padding: 4px var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 4px);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: var(--text-caption);
+}
+
+.data-tab-search:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }
 
 .data-tab-global-filter-chip {

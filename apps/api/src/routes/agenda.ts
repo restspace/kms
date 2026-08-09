@@ -175,7 +175,9 @@ function parseInstant(value: unknown): string | null | undefined {
 }
 
 // PUT /agenda/sessions/:id/schedule — the drop/resize/Move-dialog write.
-// Body: { starts_at, ends_at, room_id, notify? } — all-null time unschedules.
+// Body: { starts_at, ends_at, room_id, capacity?, notify?, notify_ack? } — an
+// all-null time unschedules. Moving a session that has a live REQUEST calendar
+// invite requires notify or notify_ack (409 invite_notify_required otherwise).
 // A conflicting drop is permitted but flagged (docs/07 §3); the fresh conflict
 // set rides back on the response so blocks render already marked.
 agendaRoutes.put('/sessions/:id/schedule', async (c) => {
@@ -212,6 +214,33 @@ agendaRoutes.put('/sessions/:id/schedule', async (c) => {
   const notify = typeof body.notify === 'string' && NOTIFY_KINDS.has(body.notify as ScheduleMailKind)
     ? (body.notify as ScheduleMailKind)
     : null;
+
+  // FR-COMM-6 / docs/07 §6: an invited session never changes silently.
+  //
+  // The admin SPA prompts before it sends, but that prompt keys off the
+  // `invited` flag in a payload that can be stale — most sharply right after a
+  // bulk send, which now only *enqueues* a job (P2-19) and answers with a
+  // payload where every session still reads invited=0 while the cron expander
+  // writes the calendar_invites rows minutes later. A client working from that
+  // payload would move an invited session without asking anyone. The guarantee
+  // therefore lives here, where the invite rows are authoritative: a real
+  // schedule change to a session with a live REQUEST invite is refused unless
+  // the caller decided about the email — either a `notify` kind, or
+  // `notify_ack: true` meaning "the operator was asked and declined the mail".
+  // A no-op write (same slot, same room) is not a change and needs neither.
+  const sameInstant = (a: string | null, b: string | null) =>
+    a === null || b === null ? a === b : Date.parse(a) === Date.parse(b);
+  const scheduleChanges =
+    !sameInstant(startsAt, current.starts_at) ||
+    !sameInstant(endsAt, current.ends_at) ||
+    roomId !== current.room_id;
+  if (scheduleChanges && notify === null && body.notify_ack !== true) {
+    const liveInvite = await db
+      .prepare("SELECT 1 FROM calendar_invites WHERE session_id = ? AND method = 'REQUEST' LIMIT 1")
+      .bind(id)
+      .first();
+    if (liveInvite) return c.json({ error: 'invite_notify_required', invited: 1 }, 409);
+  }
 
   // CANCEL needs the still-current times for the ICS, so it goes out before
   // the row is cleared (docs/08: METHOD:CANCEL carries the original slot).

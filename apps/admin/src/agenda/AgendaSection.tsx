@@ -1,11 +1,19 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { computeConflicts } from '@kms/core'
+import {
+  buildConflictIndexes,
+  computeConflicts,
+  computeConflictsForSession,
+  type AgendaSessionInput,
+  type ConflictIndexes,
+} from '@kms/core'
 import {
   addAgendaSession,
   getAgenda,
+  getBulkJob,
   removeSessionSpeaker,
   scheduleSession,
   sendScheduleConfirmations,
+  setAgendaPublished,
   setConflictIgnored,
   type AgendaConflictRow,
   type AgendaPayload,
@@ -13,6 +21,7 @@ import {
   type SchedulePatch,
 } from '../api'
 import { appConfirm } from '../components/dialogs'
+import { createMutationQueue } from './mutationQueue'
 import { ConflictsView } from './ConflictsView'
 import { AddSessionDialog, MoveDialog } from './dialogs'
 import { RoomsBoard } from './RoomsBoard'
@@ -73,6 +82,38 @@ interface Toast {
 const isAgendaView = (value: string | null | undefined): value is AgendaView =>
   value !== null && value !== undefined && VIEWS.some((v) => v.key === value)
 
+/** Only the fields the conflict engine reads — keeps the row type out of core. */
+const toEngineSession = (s: AgendaSessionRow): AgendaSessionInput => ({
+  id: s.id,
+  code: s.code,
+  title: s.title,
+  starts_at: s.starts_at,
+  ends_at: s.ends_at,
+  room_id: s.room_id,
+  track_id: s.track_id,
+  capacity: s.capacity,
+  speakers: s.speakers,
+})
+
+/**
+ * The server refused to move a session that has a live calendar invite
+ * without a notification decision (FR-COMM-6). `api.ts` folds the error code
+ * into the readable message, so match on the pair.
+ */
+const isNotifyRequired = (error: unknown): boolean =>
+  error instanceof Error &&
+  (error as { status?: number }).status === 409 &&
+  error.message.includes('invite_notify_required')
+
+/** What the operator decided about the invite email for one schedule write. */
+interface NotifyDecision {
+  notify?: SchedulePatch['notify']
+  /** True once the operator has been asked — even if they declined the mail. */
+  asked: boolean
+}
+
+type ScheduleBody = SchedulePatch & { capacity?: number | null; notify_ack?: boolean }
+
 /**
  * `initialView`/`initialDay` come from the URL (router.ts `mode`/`day`); the
  * section keeps owning its state and simply reports changes back so the address
@@ -98,15 +139,50 @@ export function AgendaSection({
   const [moveId, setMoveId] = useState<string | null>(null)
   const [showAdd, setShowAdd] = useState(false)
   const [busy, setBusy] = useState(false)
+  const [publishBusy, setPublishBusy] = useState(false)
+  const [jobNote, setJobNote] = useState<string | null>(null)
+  const [jobActive, setJobActive] = useState(false)
   const [toast, setToast] = useState<Toast | null>(null)
   const undoStack = useRef<UndoEntry[]>([])
   const toastTimer = useRef<number | null>(null)
+  const jobTimer = useRef<number | null>(null)
+
+  // Mutations are dispatched from callbacks that may have been created many
+  // payloads ago (a dialog can sit open across three server responses), so
+  // every one of them reads the board through this ref rather than through
+  // the `data` its closure captured (sweep item P2-9).
+  const dataRef = useRef<AgendaPayload | null>(null)
+  dataRef.current = data
 
   const showToast = useCallback((t: Toast) => {
     setToast(t)
     if (toastTimer.current !== null) window.clearTimeout(toastTimer.current)
     toastTimer.current = window.setTimeout(() => setToast(null), 6000)
   }, [])
+
+  /** Authoritative resync — bypasses the queue's sequence gate on purpose. */
+  const reload = useCallback(() => {
+    getAgenda().then(setData).catch(() => undefined)
+  }, [])
+
+  // One queue for the whole screen: per-session FIFO, newest-response-wins,
+  // one toast plus one authoritative refetch per error burst.
+  const queue = useMemo(
+    () =>
+      createMutationQueue({
+        onError: (error) =>
+          showToast({ message: error instanceof Error ? error.message : 'The agenda change failed' }),
+        onRefetch: reload,
+      }),
+    [reload, showToast],
+  )
+  useEffect(() => () => queue.dispose(), [queue])
+  useEffect(
+    () => () => {
+      if (jobTimer.current !== null) window.clearTimeout(jobTimer.current)
+    },
+    [],
+  )
 
   useEffect(() => {
     getAgenda()
@@ -196,51 +272,96 @@ export function AgendaSection({
     setData({ event: p.event, rooms: p.rooms, tracks: p.tracks, sessions: p.sessions, conflicts: p.conflicts })
   }, [])
 
+  /**
+   * Invited sessions never change silently (docs/07 §6 / FR-COMM-6). Ask
+   * before cancelling or re-sending; declining still applies the schedule
+   * change, but the answer is recorded so the server knows a human decided.
+   */
+  const askNotify = useCallback(
+    async (session: AgendaSessionRow, unscheduling: boolean): Promise<NotifyDecision> => {
+      const sending = unscheduling
+        ? await appConfirm(
+            `“${session.title}” has a live calendar invite.\nSend a cancellation email to its speakers?`,
+            { title: 'Unscheduling an invited session', confirmLabel: 'Send cancellation', cancelLabel: 'Skip the email' },
+          )
+        : await appConfirm(
+            `“${session.title}” has a live calendar invite.\nEmail its speakers an updated invite for the new slot?`,
+            { title: 'Moving an invited session', confirmLabel: 'Send updated invite', cancelLabel: 'Skip the email' },
+          )
+      return sending ? { notify: unscheduling ? 'cancelled' : 'changed', asked: true } : { asked: true }
+    },
+    [],
+  )
+
+  /**
+   * The write itself. A 409 `invite_notify_required` means the server holds a
+   * live invite our payload did not know about — a bulk send only *enqueues* a
+   * job now, so `invited` can flip minutes after the 202. Prompt with that
+   * authoritative knowledge and resend rather than surfacing an error.
+   */
+  const putSchedule = useCallback(
+    async (id: string, body: ScheduleBody, session: AgendaSessionRow, unscheduling: boolean) => {
+      try {
+        return await scheduleSession(id, body)
+      } catch (error) {
+        if (!isNotifyRequired(error)) throw error
+        const decision = await askNotify(session, unscheduling)
+        return await scheduleSession(id, {
+          ...body,
+          ...(decision.notify ? { notify: decision.notify } : { notify_ack: true }),
+        })
+      }
+    },
+    [askNotify],
+  )
+
+  /** Drop this session's newest undo entry — the server never took the change. */
+  const dropUndo = useCallback((id: string) => {
+    const index = undoStack.current.map((e) => e.id).lastIndexOf(id)
+    if (index >= 0) undoStack.current.splice(index, 1)
+  }, [])
+
   const commitSchedule = useCallback(
     (
       id: string,
       patch: { starts_at: string | null; ends_at: string | null; room_id: string | null },
-      opts: { pushUndo?: boolean; label?: string } = {},
+      opts: { pushUndo?: boolean; label?: string; capacity?: number | null } = {},
     ) => {
-      if (!data) return
-      const session = sessionById.get(id)
+      const current = dataRef.current
+      if (!current) return
+      const session = current.sessions.find((s) => s.id === id)
       if (!session) return
+      const capacityChanges = opts.capacity !== undefined && opts.capacity !== session.capacity
       if (
         session.starts_at === patch.starts_at &&
         session.ends_at === patch.ends_at &&
-        session.room_id === patch.room_id
+        session.room_id === patch.room_id &&
+        !capacityChanges
       ) {
         return
       }
 
-      // Invited sessions never change silently (docs/07 §6): ask before
-      // cancelling or re-sending; declining still applies the schedule change.
-      // The dialog is async, so the whole commit continues inside the IIFE.
+      // The prompt is async, so the rest of the commit continues inside the
+      // IIFE — and reads `dataRef`, never the captured render's `data`.
       void (async () => {
-        let notify: SchedulePatch['notify']
-        if (session.invited === 1) {
-          if (patch.starts_at === null) {
-            notify = (await appConfirm(
-              `“${session.title}” has a live calendar invite.\nSend a cancellation email to its speakers?`,
-              { title: 'Unscheduling an invited session', confirmLabel: 'Send cancellation', cancelLabel: 'Skip the email' },
-            ))
-              ? 'cancelled'
-              : undefined
-          } else {
-            notify = (await appConfirm(
-              `“${session.title}” has a live calendar invite.\nEmail its speakers an updated invite for the new slot?`,
-              { title: 'Moving an invited session', confirmLabel: 'Send updated invite', cancelLabel: 'Skip the email' },
-            ))
-              ? 'changed'
-              : undefined
-          }
-        }
+        const decision: NotifyDecision =
+          session.invited === 1 ? await askNotify(session, patch.starts_at === null) : { asked: false }
 
         const prev = { starts_at: session.starts_at, ends_at: session.ends_at, room_id: session.room_id }
         if (opts.pushUndo !== false) undoStack.current.push({ id, prev })
 
-        const nextSessions = data.sessions.map((s) => (s.id === id ? { ...s, ...patch } : s))
-        setData(withLocalConflicts(data, nextSessions))
+        setData((cur) =>
+          cur === null
+            ? cur
+            : withLocalConflicts(
+                cur,
+                cur.sessions.map((s) =>
+                  s.id === id
+                    ? { ...s, ...patch, ...(opts.capacity !== undefined ? { capacity: opts.capacity } : {}) }
+                    : s,
+                ),
+              ),
+        )
 
         const undo = () => {
           const entry = undoStack.current.pop()
@@ -255,16 +376,20 @@ export function AgendaSection({
           ...(opts.pushUndo !== false ? { undo } : {}),
         })
 
-        scheduleSession(id, { ...patch, ...(notify ? { notify } : {}) })
-          .then(applyPayload)
-          .catch((e: unknown) => {
-            // Server rejected: the block animates back via a fresh load.
-            getAgenda().then(setData).catch(() => undefined)
-            showToast({ message: e instanceof Error ? e.message : 'Schedule change failed' })
-          })
+        const body: ScheduleBody = {
+          ...patch,
+          ...(decision.notify ? { notify: decision.notify } : {}),
+          ...(decision.asked && !decision.notify ? { notify_ack: true } : {}),
+          ...(opts.capacity !== undefined ? { capacity: opts.capacity } : {}),
+        }
+
+        void queue.enqueue(id, () => putSchedule(id, body, session, patch.starts_at === null), {
+          apply: applyPayload,
+          onError: () => dropUndo(id),
+        })
       })()
     },
-    [data, sessionById, withLocalConflicts, applyPayload, showToast, tz],
+    [applyPayload, askNotify, dropUndo, putSchedule, queue, showToast, tz, withLocalConflicts],
   )
 
   // ⌘Z / Ctrl+Z reverts the last scheduling change (docs/07 §3).
@@ -293,21 +418,34 @@ export function AgendaSection({
     [tz],
   )
 
+  const ignoredSignatures = useMemo(
+    () => new Set((data?.conflicts ?? []).filter((c) => c.ignored).map((c) => c.signature)),
+    [data],
+  )
+
+  // Indexes over "every session except the dragged one" — built once per
+  // dragged session and thrown away whenever the board changes, so a drag
+  // costs one bucketing pass instead of a full sweep per frame (P2-17).
+  const indexCache = useMemo(() => new Map<string, ConflictIndexes>(), [data?.sessions])
+
   const previewFor = useCallback(
     (id: string, day: string, startMin: number, durationMin: number, roomId: string | null): DropPreview => {
-      if (!data) return { bad: false, titles: '' }
-      const patch = patchFrom(day, startMin, durationMin, roomId)
-      const tentative = data.sessions.map((s) => (s.id === id ? { ...s, ...patch } : s))
-      const ignoredSet = new Set(data.conflicts.filter((c) => c.ignored).map((c) => c.signature))
-      const hits = computeConflicts(tentative, data.rooms, {
-        starts_at: data.event.starts_at,
-        ends_at: data.event.ends_at,
-      }).filter(
-        (c) => c.session_ids.includes(id) && c.severity !== 'info' && !ignoredSet.has(c.signature),
-      )
+      const current = dataRef.current
+      const session = current?.sessions.find((s) => s.id === id)
+      if (!current || !session) return { bad: false, titles: '' }
+      let indexes = indexCache.get(id)
+      if (!indexes) {
+        indexes = buildConflictIndexes(current.sessions.filter((s) => s.id !== id).map(toEngineSession))
+        indexCache.set(id, indexes)
+      }
+      const tentative = { ...toEngineSession(session), ...patchFrom(day, startMin, durationMin, roomId) }
+      const hits = computeConflictsForSession(tentative, indexes, current.rooms, {
+        starts_at: current.event.starts_at,
+        ends_at: current.event.ends_at,
+      }).filter((c) => c.severity !== 'info' && !ignoredSignatures.has(c.signature))
       return { bad: hits.length > 0, titles: hits.map((c) => `${c.code}: ${c.message}`).join('\n') }
     },
-    [data, patchFrom],
+    [ignoredSignatures, indexCache, patchFrom],
   )
 
   const filteredSessions = useMemo(() => {
@@ -354,17 +492,105 @@ export function AgendaSection({
   const sessionDay = (s: AgendaSessionRow): string | null =>
     s.starts_at !== null ? utcToLocal(s.starts_at, tz).day : null
 
+  // Board-wide writes share one queue key: they each answer with a whole
+  // payload, so they must not interleave with each other either.
   const runAction = <T extends AgendaPayload>(
     action: () => Promise<T>,
     message: (p: T) => string,
   ) => {
     setBusy(true)
-    action()
+    void queue
+      .enqueue('agenda', action, {
+        apply: (p) => {
+          applyPayload(p)
+          showToast({ message: message(p) })
+        },
+      })
+      .finally(() => setBusy(false))
+  }
+
+  const published = data.event.agenda_published === 1
+
+  /** FR-AGENDA-9: the flag gates the public GET /e/:slug/agenda.json feed. */
+  const togglePublish = async () => {
+    const current = dataRef.current
+    if (!current) return
+    const next = current.event.agenda_published !== 1
+    if (!next) {
+      const confirmed = await appConfirm(
+        'Unpublish the agenda? The public agenda feed stops answering until you publish again.',
+        { title: 'Unpublish agenda', confirmLabel: 'Unpublish', danger: true },
+      )
+      if (!confirmed) return
+    }
+    setPublishBusy(true)
+    setData((cur) => (cur === null ? cur : { ...cur, event: { ...cur.event, agenda_published: next ? 1 : 0 } }))
+    try {
+      await setAgendaPublished(current.event.id, next)
+      showToast({
+        message: next ? `Agenda published at /e/${current.event.slug}/agenda.json` : 'Agenda unpublished',
+      })
+    } catch (e: unknown) {
+      showToast({ message: e instanceof Error ? e.message : 'Publishing failed' })
+      reload()
+    } finally {
+      setPublishBusy(false)
+    }
+  }
+
+  /**
+   * Bulk invites are a job now (P2-19): the 202 carries a job id and the cron
+   * expander does the sending, so progress is polled until it settles. The
+   * final tick reloads the board — that is when `invited` actually flips.
+   */
+  const pollJob = (jobId: string, total: number) => {
+    const tick = () => {
+      getBulkJob(jobId)
+        .then((job) => {
+          const target = job.total ?? total
+          if (job.status === 'done') {
+            setJobNote(`Invites sent: ${job.sent} of ${target}${job.failed > 0 ? ` (${job.failed} failed)` : ''}`)
+            setJobActive(false)
+            reload()
+            return
+          }
+          if (job.status === 'failed') {
+            setJobNote(`Invite send failed${job.error ? `: ${job.error}` : ''}`)
+            setJobActive(false)
+            return
+          }
+          setJobNote(`Queued ${job.enqueued} of ${target}…`)
+          jobTimer.current = window.setTimeout(tick, 3000)
+        })
+        .catch(() => {
+          // A polling hiccup should not strand the button; the next send retries.
+          setJobNote(null)
+          setJobActive(false)
+        })
+    }
+    tick()
+  }
+
+  const sendConfirmations = () => {
+    if (jobTimer.current !== null) window.clearTimeout(jobTimer.current)
+    setBusy(true)
+    setJobActive(true)
+    sendScheduleConfirmations()
       .then((p) => {
         applyPayload(p)
-        showToast({ message: message(p) })
+        const jobId = (p as { job_id?: string }).job_id
+        showToast({
+          message: `${p.sent_sessions} session${p.sent_sessions === 1 ? '' : 's'} queued for invites`,
+        })
+        setJobNote(`Queued 0 of ${p.sent_sessions}…`)
+        if (jobId) pollJob(jobId, p.sent_sessions)
+        else setJobActive(false) // pre-job server: nothing to poll
       })
-      .catch((e: unknown) => showToast({ message: e instanceof Error ? e.message : 'Action failed' }))
+      .catch((e: unknown) => {
+        showToast({ message: e instanceof Error ? e.message : 'Sending invites failed' })
+        setJobNote(null)
+        setJobActive(false)
+      })
       .finally(() => setBusy(false))
   }
 
@@ -372,10 +598,16 @@ export function AgendaSection({
     <div className="agenda">
       <header className="agenda-header">
         <div>
-          <h2>Agenda</h2>
+          <h2>
+            Agenda
+            <span className={`agenda-state-chip${published ? ' live' : ''}`}>{published ? 'Published' : 'Draft'}</span>
+          </h2>
           <p className="agenda-sub">
             Manage your event agenda and schedule · {data.event.name} · {tzAbbr(tz, data.event.starts_at)}
           </p>
+          {jobNote && (
+            <p className="agenda-job-note" role="status">{jobNote}</p>
+          )}
         </div>
         <div className="agenda-toolbar">
           <input
@@ -395,13 +627,22 @@ export function AgendaSection({
             </label>
           )}
           <button
-            disabled={busy || pendingConfirmations === 0}
+            disabled={busy || jobActive || pendingConfirmations === 0}
             title="Email calendar invites for every scheduled session that has none yet"
-            onClick={() =>
-              runAction(sendScheduleConfirmations, (p) => `${p.queued} invite${p.queued === 1 ? '' : 's'} queued for ${p.sent_sessions} session${p.sent_sessions === 1 ? '' : 's'}`)
-            }
+            onClick={sendConfirmations}
           >
             Send confirmations{pendingConfirmations > 0 ? ` (${pendingConfirmations})` : ''}
+          </button>
+          <button
+            disabled={publishBusy}
+            title={
+              published
+                ? 'Stop serving the public agenda feed'
+                : 'Publish the agenda to the public feed (/e/slug/agenda.json)'
+            }
+            onClick={() => void togglePublish()}
+          >
+            {published ? 'Unpublish' : 'Publish'}
           </button>
           <button className="primary" onClick={() => setShowAdd(true)}>+ Add Session</button>
         </div>
@@ -566,9 +807,9 @@ export function AgendaSection({
           days={days}
           timezone={tz}
           defaultDurationMin={defaultDuration(moveSession)}
-          onSave={({ day, startMin, durationMin, roomId }) => {
+          onSave={({ day, startMin, durationMin, roomId, capacity }) => {
             setMoveId(null)
-            commitSchedule(moveSession.id, patchFrom(day, startMin, durationMin, roomId))
+            commitSchedule(moveSession.id, patchFrom(day, startMin, durationMin, roomId), { capacity })
           }}
           onUnschedule={() => {
             setMoveId(null)
@@ -592,6 +833,7 @@ export function AgendaSection({
                   track_id: body.track_id,
                   format: body.format,
                   room_id: body.room_id,
+                  capacity: body.capacity,
                   starts_at: body.day !== null && body.startMin !== null ? localToUtc(body.day, body.startMin, tz) : null,
                   ends_at:
                     body.day !== null && body.startMin !== null

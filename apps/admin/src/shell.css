@@ -47,6 +47,34 @@
   padding: 0 var(--space-1);
 }
 
+/* "+ New event" affordance (FR-EVT-1/2) next to the event dropdown. */
+.shell-event-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.shell-event-row select {
+  flex: 1 1 auto;
+}
+
+.shell-event-add {
+  flex: 0 0 auto;
+  width: var(--control-height);
+  height: var(--control-height);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text);
+  font-size: var(--text-label);
+  line-height: 1;
+  cursor: pointer;
+}
+
+.shell-event-add:hover {
+  background: var(--surface-hover);
+}
+
 .shell-event-dates {
   margin-top: var(--space-1);
   font-size: var(--text-caption);

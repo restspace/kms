@@ -280,6 +280,23 @@
 .review-actions { display: flex; gap: var(--space-2); align-items: center; margin-top: var(--space-3); flex-wrap: wrap; }
 .review-actions .saved-note { color: var(--text-muted); font-size: var(--text-caption); }
 
+/* Internal notes (general-purpose internal notes field, manual-review item) */
+.internal-notes-field {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 6px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: var(--text-grid);
+  resize: vertical;
+}
+
+.internal-notes-actions { display: flex; gap: var(--space-2); align-items: center; margin-top: var(--space-2); margin-bottom: var(--space-4); }
+.internal-notes-error { color: var(--danger); font-size: var(--text-caption); }
+
 /* assignment status chips reused across tasks + review */
 .status-chip.status-not_started { background: var(--status-draft-bg); color: var(--status-draft-text); }
 .status-chip.status-in_progress { background: var(--status-pending-bg); color: var(--status-pending-text); }

@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { AgendaSessionRow } from '../api'
 import { getDrag, setDrag } from './dragState'
 import { durationMinutes, fmtMinutes, snapTo, utcToLocal } from './timeUtils'
@@ -48,6 +48,10 @@ interface Ghost {
   preview: DropPreview
 }
 
+const NO_PREVIEW: DropPreview = { bad: false, titles: '' }
+const slotKey = (g: { colKey: string; startMin: number; durationMin: number }) =>
+  `${g.colKey}:${g.startMin}:${g.durationMin}`
+
 export function TimeGrid({
   columns,
   sessions,
@@ -67,6 +71,42 @@ export function TimeGrid({
   const [resizing, setResizing] = useState<{ id: string; durationMin: number } | null>(null)
   const resizeStart = useRef<{ y: number; durationMin: number } | null>(null)
 
+  // dragover fires far more often than the screen repaints, and the conflict
+  // preview is the expensive part (sweep item P2-17). The ghost itself moves
+  // synchronously — it must track the cursor — while the preview is computed
+  // at most once per animation frame from the latest slot parked in a ref.
+  const pendingPreview = useRef<{ id: string; column: GridColumn; startMin: number; durationMin: number } | null>(null)
+  const previewedSlot = useRef<string | null>(null)
+  const frame = useRef<number | null>(null)
+
+  const flushPreview = () => {
+    frame.current = null
+    const p = pendingPreview.current
+    if (!p) return
+    const key = slotKey({ colKey: p.column.key, startMin: p.startMin, durationMin: p.durationMin })
+    if (previewedSlot.current === key) return
+    previewedSlot.current = key
+    const preview = previewDrop(p.id, p.column, p.startMin, p.durationMin)
+    setGhost((g) => (g !== null && slotKey(g) === key ? { ...g, preview } : g))
+  }
+
+  const queuePreview = (id: string, column: GridColumn, startMin: number, durationMin: number) => {
+    pendingPreview.current = { id, column, startMin, durationMin }
+    if (frame.current === null) frame.current = requestAnimationFrame(flushPreview)
+  }
+
+  const clearPreview = () => {
+    pendingPreview.current = null
+    previewedSlot.current = null
+  }
+
+  useEffect(
+    () => () => {
+      if (frame.current !== null) cancelAnimationFrame(frame.current)
+    },
+    [],
+  )
+
   const height = dayEndMin - dayStartMin
   const hours: number[] = []
   for (let m = Math.ceil(dayStartMin / 60) * 60; m <= dayEndMin; m += 60) hours.push(m)
@@ -81,7 +121,12 @@ export function TimeGrid({
     byColumn.set(key, list)
   }
 
-  const ghostFromEvent = (e: React.DragEvent<HTMLDivElement>, col: GridColumn): Ghost | null => {
+  /**
+   * The slot under the cursor. Read synchronously — React clears
+   * `currentTarget` once the handler returns, so the rect cannot be measured
+   * from a deferred frame.
+   */
+  const slotFromEvent = (e: React.DragEvent<HTMLDivElement>): { id: string; startMin: number; durationMin: number } | null => {
     const drag = getDrag()
     if (!drag) return null
     const rect = e.currentTarget.getBoundingClientRect()
@@ -90,12 +135,7 @@ export function TimeGrid({
       dayStartMin,
       Math.min(snapTo(raw, DROP_SNAP_MIN), dayEndMin - drag.durationMin),
     )
-    return {
-      colKey: col.key,
-      startMin,
-      durationMin: drag.durationMin,
-      preview: previewDrop(drag.id, col, startMin, drag.durationMin),
-    }
+    return { id: drag.id, startMin, durationMin: drag.durationMin }
   }
 
   const startResize = (e: React.PointerEvent<HTMLDivElement>, s: AgendaSessionRow) => {
@@ -150,23 +190,32 @@ export function TimeGrid({
             className="tg-col"
             key={col.key}
             onDragOver={(e) => {
-              if (!getDrag()) return
+              const slot = slotFromEvent(e)
+              if (!slot) return
               e.preventDefault()
               e.dataTransfer.dropEffect = 'move'
-              setGhost(ghostFromEvent(e, col))
+              const next = { colKey: col.key, startMin: slot.startMin, durationMin: slot.durationMin }
+              // Carry the last preview until the frame recomputes it, so the
+              // ghost never flickers between red and neutral.
+              setGhost((g) =>
+                g !== null && slotKey(g) === slotKey(next) ? g : { ...next, preview: g?.preview ?? NO_PREVIEW },
+              )
+              queuePreview(slot.id, col, slot.startMin, slot.durationMin)
             }}
             onDragLeave={(e) => {
               if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
+                clearPreview()
                 setGhost((g) => (g?.colKey === col.key ? null : g))
               }
             }}
             onDrop={(e) => {
               e.preventDefault()
-              const drag = getDrag()
-              const g = ghost?.colKey === col.key ? ghost : ghostFromEvent(e, col)
+              const slot = slotFromEvent(e)
+              const g = ghost?.colKey === col.key ? ghost : null
+              clearPreview()
               setGhost(null)
               setDrag(null)
-              if (drag && g) onDrop(drag.id, col, g.startMin, g.durationMin)
+              if (slot) onDrop(slot.id, col, g?.startMin ?? slot.startMin, g?.durationMin ?? slot.durationMin)
             }}
           >
             {hours.map((m) => (
@@ -190,7 +239,7 @@ export function TimeGrid({
                   draggable
                   tabIndex={0}
                   role="button"
-                  aria-label={`${s.title}, ${fmtMinutes(local.minutes)}. Press M to move.`}
+                  aria-label={`${s.title}, ${fmtMinutes(local.minutes)}. Press Enter to move.`}
                   title={conflictTitle(s.id) || `${s.code} · ${s.title}`}
                   onDragStart={(e) => {
                     setDrag({ id: s.id, durationMin: baseDur, fromTray: false })
@@ -199,10 +248,13 @@ export function TimeGrid({
                   }}
                   onDragEnd={() => {
                     setDrag(null)
+                    clearPreview()
                     setGhost(null)
                   }}
                   onKeyDown={(e) => {
-                    if (e.key === 'm' || e.key === 'M') {
+                    // Enter/Space is the expected activation for role=button;
+                    // M stays as the mnemonic (docs/07 §3 a11y alternative).
+                    if (e.key === 'm' || e.key === 'M' || e.key === 'Enter' || e.key === ' ') {
                       e.preventDefault()
                       onOpenMove(s.id)
                     }

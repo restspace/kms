@@ -82,6 +82,13 @@
   box-shadow: 0 0 0 2px var(--accent-soft-hover);
 }
 
+.record-form-field input[aria-invalid="true"],
+.record-form-field select[aria-invalid="true"],
+.record-form-field textarea[aria-invalid="true"] {
+  border-color: var(--danger) !important;
+  background: var(--danger-soft);
+}
+
 .record-form-field-checkbox label {
   display: inline-flex;
   align-items: center;

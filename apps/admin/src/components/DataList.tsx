@@ -6,23 +6,40 @@ import InfiniteLoader from 'react-window-infinite-loader';
 import useElementSize from '../hooks/useElementSize';
 import PlusIcon from '../assets/plus-icon.svg';
 import { stableSerialize } from '../utils/stableSerialize';
+import {
+  applyCellEdit,
+  applyCellMerge,
+  applyCellRollback,
+  beginPendingEdit,
+  canEditCell,
+  cellKey,
+  clearCellStatus,
+  rejectEdit,
+  resolveEdit,
+  type CellEditMap,
+  type CellEditStatus,
+} from './cellEditMachine';
 import './DataList.css';
 
 /**
  * react-window outer element that provides listbox semantics for accessibility tooling.
+ * Built per-instance (via `createDataListOuterElement`) so the aria-label can reflect
+ * the list's own `ariaLabel`/`tabName` prop rather than a hardcoded string.
  */
-const DataListOuterElement = React.forwardRef<HTMLDivElement, React.HTMLAttributes<HTMLDivElement>>(
-  function DataListOuterElement(props, ref) {
-    return (
-      <div
-        ref={ref}
-        role="listbox"
-        aria-label="Items"
-        {...props}
-      />
-    );
-  }
-);
+const createDataListOuterElement = (ariaLabel: string) =>
+  React.forwardRef<HTMLDivElement, React.HTMLAttributes<HTMLDivElement>>(
+    function DataListOuterElement(props, ref) {
+      return (
+        <div
+          ref={ref}
+          role="listbox"
+          aria-label={ariaLabel}
+          aria-multiselectable="true"
+          {...props}
+        />
+      );
+    }
+  );
 
 const ISO_TIMESTAMP_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/;
 
@@ -87,6 +104,17 @@ export interface DataListEditRendererParams<T = any> {
   index: number;
   field: string;
   onChange: (nextValue: unknown) => void;
+  /**
+   * True while a previous write to this cell is still in flight. Renderers
+   * should disable their control so the user can't stack a second edit on
+   * top of an unresolved one.
+   */
+  disabled?: boolean;
+  /**
+   * Set when the previous write to this cell failed and the value was rolled
+   * back. Cleared automatically on the next interaction with the cell.
+   */
+  status?: CellEditStatus;
 }
 
 /**
@@ -100,7 +128,24 @@ export interface DataListCellChange<T = any> {
   index: number;
 }
 
-export type DataListCellChangeHandler<T = any> = (change: DataListCellChange<T>) => T | void;
+/**
+ * A cell change handler may resolve synchronously (returning a full
+ * replacement row, a partial patch, or nothing) or asynchronously — return a
+ * Promise to let DataList mark the cell pending, disable its editor, and roll
+ * the value back if the write fails. A resolved Promise's value (if any) is
+ * merged onto the row — server-returned fields win over the optimistic local
+ * edit.
+ */
+// `Record<string, unknown>` (in addition to `T`/`Partial<T>`) covers handlers
+// like `updateSubmissionStatus` that resolve to an unrelated ack shape (e.g.
+// `{ ok: boolean }`) rather than row fields — DataList merges whatever comes
+// back, so any plain object resolves cleanly. Without it, TypeScript's
+// "weak type" rule would reject a resolved value with zero properties in
+// common with `Partial<T>` (every member of which is optional).
+export type DataListCellChangeResult<T = any> = T | Partial<T> | Record<string, unknown> | void;
+export type DataListCellChangeHandler<T = any> = (
+  change: DataListCellChange<T>
+) => DataListCellChangeResult<T> | Promise<DataListCellChangeResult<T>>;
 
 /**
  * Column definition for DataList
@@ -236,6 +281,12 @@ export interface DataListExportConfig {
     format: 'csv' | 'xlsx',
     query: { filters: Record<string, any>; sort?: { field: string; direction: 'asc' | 'desc' } }
   ) => string;
+  /**
+   * Optional title attribute for the export buttons, overriding the default
+   * "Export the current view as CSV/XLSX" tooltip. Useful for a caveat such
+   * as "cross-event export not yet available — exports the current event only".
+   */
+  title?: string;
 }
 
 export interface DataListRowDragPayload {
@@ -415,6 +466,11 @@ export interface DataListProps<T = any, TFilters extends Record<string, any> = R
    * block clicks itself, callers still enforce the actual restriction on interaction.
    */
   getEditAccess?: (item: T) => boolean | { allowed: boolean; message?: string };
+  /**
+   * Accessible label for the scrollable listbox region. Falls back to
+   * `tabName` (the tab's own title) when omitted, then to "Records".
+   */
+  ariaLabel?: string;
 }
 
 // KMS skin pass: compact 32px rows per docs/11 §4 (atelyr default was 52).
@@ -504,6 +560,7 @@ interface DataListRowData<T> {
   rowDrag?: DataListRowDragConfig<T>;
   rowDrop?: DataListRowDropConfig<T>;
   dropTargetItemId: string | null;
+  cellEditMap: CellEditMap;
   onChecklist?: (checkedIds: string[]) => void;
   checkedItemIds: Set<string>;
   getChecklistMarkerColor?: (item: T) => string | undefined;
@@ -567,7 +624,8 @@ export const DataList = <T extends Record<string, any>, TFilters extends Record<
   rowDrop,
   getEditAccess,
   fastAdd,
-  fastAddRequest
+  fastAddRequest,
+  ariaLabel
 }: DataListProps<T, TFilters>) => {
   const [items, setItems] = useState<T[]>([]);
   const [endReached, setEndReached] = useState<boolean>(false);
@@ -615,6 +673,10 @@ export const DataList = <T extends Record<string, any>, TFilters extends Record<
   const draftAnchorRef = useRef<T | null>(null);
   // Bumped whenever a draft (re)opens so the first editable control refocuses.
   const [draftGeneration, setDraftGeneration] = useState(0);
+  // Per-cell (rowId:field) pending/error status for failure-aware inline edits.
+  const [cellEditMap, setCellEditMap] = useState<CellEditMap>(() => new Map());
+  // Visually-hidden aria-live announcement for a rolled-back edit.
+  const [liveAnnouncement, setLiveAnnouncement] = useState('');
 
   // Deduplicate in-flight requests
   const inFlight = useRef<Set<string>>(new Set());
@@ -622,6 +684,12 @@ export const DataList = <T extends Record<string, any>, TFilters extends Record<
   const selectionChangeRef = useRef(onSelectionChange);
   const selectedItemRef = useRef<T | null>(selectedItem ?? null);
   const activeRowDragPayloadRef = useRef<DataListRowDragPayload | null>(null);
+  // Mirrors `items`/`cellEditMap` synchronously so handleCellChange can gate
+  // and read the latest values without waiting for a functional setState.
+  const itemsRef = useRef<T[]>(items);
+  itemsRef.current = items;
+  const cellEditMapRef = useRef<CellEditMap>(cellEditMap);
+  cellEditMapRef.current = cellEditMap;
   const [wrapperRef, size] = useElementSize<HTMLDivElement>();
   const mobileBreakpoint = mobileBreakpointWidth ?? DEFAULT_MOBILE_BREAKPOINT_WIDTH;
   const [isMobile, setIsMobile] = useState(() => isViewportMobile(mobileBreakpoint));
@@ -1323,6 +1391,12 @@ export const DataList = <T extends Record<string, any>, TFilters extends Record<
     return sizes.join(' ');
   }, [columns, onChecklist]);
 
+  const listAriaLabel = ariaLabel ?? tabName ?? 'Records';
+  const DataListOuterElement = useMemo(
+    () => createDataListOuterElement(listAriaLabel),
+    [listAriaLabel]
+  );
+
   /**
    * Get sort indicator for column
    */
@@ -1341,34 +1415,101 @@ export const DataList = <T extends Record<string, any>, TFilters extends Record<
     [columns, summaryData]
   );
 
-  const handleCellChange = useCallback((index: number, column: ColumnDefinition<T>, nextValue: unknown) => {
+  /**
+   * Applies an already-resolved cell write (sync return, or a settled
+   * Promise) to `items`. Shared by the sync and async branches of
+   * `handleCellChange` below. Pure with respect to React state — all reads
+   * come from refs/args, all writes go through the `setItems` updater.
+   */
+  const applyResolvedCellChange = useCallback((
+    index: number,
+    rowId: string,
+    resolved: DataListCellChangeResult<T>
+  ) => {
+    if (resolved === undefined) {
+      return;
+    }
     setItems((prev) => {
-      const current = prev[index];
-      if (!current) {
-        return prev;
+      const next = applyCellMerge(prev, index, rowId, resolved, getItemId);
+      const updatedItem = next[index];
+      if (updatedItem && selectedItemId !== null && getItemId(updatedItem) === selectedItemId) {
+        selectedItemRef.current = updatedItem;
       }
-
-      const fieldName = String(column.field);
-      const updated = { ...current, [fieldName]: nextValue } as T;
-      const change: DataListCellChange<T> = {
-        field: fieldName,
-        value: nextValue,
-        item: updated,
-        previousItem: current,
-        index
-      };
-      const override = column.onChange ? column.onChange(change) : undefined;
-      const resolved = override === undefined ? updated : override;
-      const nextItems = prev.slice();
-      nextItems[index] = resolved;
-
-      if (selectedItemId !== null && getItemId(current) === selectedItemId) {
-        selectedItemRef.current = resolved;
-      }
-
-      return nextItems;
+      return next;
     });
   }, [getItemId, selectedItemId]);
+
+  /**
+   * Cell edits are optimistic-local-first: the row updates immediately and
+   * `column.onChange` runs OUTSIDE the `setItems` updater (previously it ran
+   * inside the updater, a side effect in a reducer that could double-fire
+   * under StrictMode). When `onChange` returns a Promise, the cell is marked
+   * pending (further edits to that same cell are ignored until it settles),
+   * a resolved value is merged onto the row (server wins over the optimistic
+   * local edit), and a rejection rolls the field back to its previous value
+   * and announces the failure via the visually-hidden live region.
+   */
+  const handleCellChange = useCallback((index: number, column: ColumnDefinition<T>, nextValue: unknown) => {
+    const current = itemsRef.current[index];
+    if (!current) {
+      return;
+    }
+
+    const rowId = getItemId(current);
+    const fieldName = String(column.field);
+    const key = cellKey(rowId, fieldName);
+
+    if (!canEditCell(cellEditMapRef.current, key)) {
+      // A previous write to this exact cell hasn't settled yet — ignore
+      // further edits to it (other cells remain editable).
+      return;
+    }
+
+    const previousValue = current[fieldName as keyof T];
+    const updated = { ...current, [fieldName]: nextValue } as T;
+    const change: DataListCellChange<T> = {
+      field: fieldName,
+      value: nextValue,
+      item: updated,
+      previousItem: current,
+      index
+    };
+
+    setItems((prev) => applyCellEdit(prev, index, fieldName, nextValue));
+    if (selectedItemId !== null && rowId === selectedItemId) {
+      selectedItemRef.current = updated;
+    }
+    // A fresh interaction with this cell clears any stale error marker.
+    setCellEditMap((prev) => clearCellStatus(prev, key));
+
+    if (!column.onChange) {
+      return;
+    }
+
+    const result = column.onChange(change);
+    if (!(result instanceof Promise)) {
+      applyResolvedCellChange(index, rowId, result);
+      return;
+    }
+
+    setCellEditMap((prev) => beginPendingEdit(prev, key, previousValue));
+
+    result.then((resolved) => {
+      setCellEditMap((prev) => resolveEdit(prev, key));
+      applyResolvedCellChange(index, rowId, resolved);
+    }).catch(() => {
+      setCellEditMap((prev) => rejectEdit(prev, key));
+      setItems((prev) => {
+        const next = applyCellRollback(prev, index, fieldName, previousValue, rowId, getItemId);
+        const updatedItem = next[index];
+        if (updatedItem && selectedItemId !== null && getItemId(updatedItem) === selectedItemId) {
+          selectedItemRef.current = updatedItem;
+        }
+        return next;
+      });
+      setLiveAnnouncement(`${column.header} update failed — change reverted.`);
+    });
+  }, [applyResolvedCellChange, getItemId, selectedItemId]);
 
   const fastAddAccess = useMemo(() => {
     if (!fastAdd) {
@@ -1438,8 +1579,15 @@ export const DataList = <T extends Record<string, any>, TFilters extends Record<
         previousItem: prev,
         index: -1
       };
+      // Draft rows aren't part of `items` and have no cellEditMap entry, so
+      // async onChange handlers aren't awaited here — a Promise result is
+      // treated the same as no override (the draft's own onCommit is what
+      // actually persists it).
       const override = column.onChange ? column.onChange(change) : undefined;
-      return override === undefined ? updated : override;
+      if (override === undefined || override instanceof Promise) {
+        return updated;
+      }
+      return { ...updated, ...override } as T;
     });
   }, []);
 
@@ -1506,6 +1654,7 @@ export const DataList = <T extends Record<string, any>, TFilters extends Record<
     rowDrag,
     rowDrop,
     dropTargetItemId,
+    cellEditMap,
     onChecklist,
     checkedItemIds,
     getChecklistMarkerColor,
@@ -1533,6 +1682,7 @@ export const DataList = <T extends Record<string, any>, TFilters extends Record<
     rowDrag,
     rowDrop,
     dropTargetItemId,
+    cellEditMap,
     onChecklist,
     checkedItemIds,
     getChecklistMarkerColor,
@@ -1631,9 +1781,18 @@ export const DataList = <T extends Record<string, any>, TFilters extends Record<
         const isEditable = column.editable
           ? (typeof column.editable === 'function' ? column.editable(item) : column.editable)
           : false;
+        const cellStatusEntry = data.cellEditMap.get(cellKey(itemId, fieldName));
         const renderFn = column.mobileRender ?? column.render;
         const cellValue = isEditable && column.editRenderer
-          ? column.editRenderer({ value, item, index, field: fieldName, onChange: (next) => data.handleCellChange(index, column, next) })
+          ? column.editRenderer({
+              value,
+              item,
+              index,
+              field: fieldName,
+              onChange: (next) => data.handleCellChange(index, column, next),
+              disabled: cellStatusEntry?.status === 'pending',
+              status: cellStatusEntry?.status
+            })
           : renderFn ? renderFn(value, item) : value;
         const label = column.mobileHeader ?? column.header;
         return (
@@ -1727,14 +1886,27 @@ export const DataList = <T extends Record<string, any>, TFilters extends Record<
             const handleValueChange = (next: unknown) => {
               data.handleCellChange(index, column, next);
             };
+            const cellStatusEntry = data.cellEditMap.get(cellKey(itemId, fieldName));
+            const isCellPending = cellStatusEntry?.status === 'pending';
+            const hasCellError = cellStatusEntry?.status === 'error';
             const editContent = column.editRenderer
-              ? column.editRenderer({ value, item, index, field: fieldName, onChange: handleValueChange })
+              ? column.editRenderer({
+                  value,
+                  item,
+                  index,
+                  field: fieldName,
+                  onChange: handleValueChange,
+                  disabled: isCellPending,
+                  status: cellStatusEntry?.status
+                })
               : (
                 <input
                   type={typeof value === 'number' ? 'number' : 'text'}
                   className="data-list-cell-input"
                   data-column={fieldName}
                   value={normalizedValue}
+                  disabled={isCellPending}
+                  aria-invalid={hasCellError || undefined}
                   onClick={(event) => {
                     // Shift+click is the row-level global-filter gesture; let it
                     // reach the row instead of being swallowed by the editor.
@@ -1750,7 +1922,7 @@ export const DataList = <T extends Record<string, any>, TFilters extends Record<
             return (
               <div
                 key={colIndex}
-                className="data-list-cell data-list-cell-editable"
+                className={`data-list-cell data-list-cell-editable ${isCellPending ? 'data-list-cell-pending' : ''} ${hasCellError ? 'data-list-cell-error' : ''}`}
                 data-column={fieldName}
                 onClick={(event) => {
                   if (!event.shiftKey) {
@@ -1777,6 +1949,9 @@ export const DataList = <T extends Record<string, any>, TFilters extends Record<
 
   return (
     <div className={`data-list-container ${className}`}>
+      <div className="data-list-visually-hidden" role="alert" aria-live="assertive">
+        {liveAnnouncement}
+      </div>
       <div className="data-list-table">
         {FilterComponent && filterConfig && (
           <div className="data-list-filters">
@@ -1795,18 +1970,34 @@ export const DataList = <T extends Record<string, any>, TFilters extends Record<
                 {onChecklist && (
                   <div className="data-list-header-cell data-list-check-header" aria-hidden="true" />
                 )}
-                {columns.map((column, index) => (
-                  <div
-                    key={index}
-                    className={`data-list-header-cell ${column.sortable ? 'sortable' : ''}`}
-                    onClick={() => handleHeaderClick(column)}
-                  >
-                    <span>{column.header}</span>
-                    {getSortIndicator(column) && (
-                      <span className="data-list-sort-indicator">{getSortIndicator(column)}</span>
-                    )}
-                  </div>
-                ))}
+                {columns.map((column, index) => {
+                  if (!column.sortable) {
+                    return (
+                      <div key={index} className="data-list-header-cell">
+                        <span>{column.header}</span>
+                      </div>
+                    );
+                  }
+                  const field = String(column.field);
+                  const isActiveSort = sortState.field === field;
+                  const ariaSort: React.AriaAttributes['aria-sort'] = isActiveSort
+                    ? (sortState.direction === 'asc' ? 'ascending' : 'descending')
+                    : 'none';
+                  return (
+                    <div key={index} role="columnheader" aria-sort={ariaSort} className="data-list-header-cell sortable">
+                      <button
+                        type="button"
+                        className="data-list-header-button"
+                        onClick={() => handleHeaderClick(column)}
+                      >
+                        <span>{column.header}</span>
+                        {getSortIndicator(column) && (
+                          <span className="data-list-sort-indicator" aria-hidden="true">{getSortIndicator(column)}</span>
+                        )}
+                      </button>
+                    </div>
+                  );
+                })}
               </div>
             )}
             {loadError && (
@@ -1944,7 +2135,7 @@ export const DataList = <T extends Record<string, any>, TFilters extends Record<
                       key={format}
                       type="button"
                       className="data-list-export-button"
-                      title={`Export the current view as ${format.toUpperCase()} (honours active filters)`}
+                      title={exportConfig.title ?? `Export the current view as ${format.toUpperCase()} (honours active filters)`}
                       onClick={() => {
                         const sort = sortState.field && sortState.direction
                           ? { field: sortState.field, direction: sortState.direction }

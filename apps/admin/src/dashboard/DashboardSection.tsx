@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   fetchDashboard,
+  getBulkJob,
   remindTasks,
   type DashboardNudge,
   type DashboardPayload,
@@ -190,33 +191,108 @@ export function DashboardSection({ onNavigate }: { onNavigate: (target: AppNavTa
     }
   }, [])
 
+  // Polling (sweep item 16, client half): a self-rescheduling timeout rather
+  // than setInterval so each tick can (a) skip entirely while the tab is
+  // hidden — no point paying for a fetch nobody's looking at — and (b) carry
+  // its own ±15% jitter, so many admin tabs polling the same event don't all
+  // hit the Worker in lockstep. Becoming visible again triggers an immediate
+  // refetch (cheap: unchanged data is just a 304) rather than waiting out
+  // whatever's left of the current interval.
   useEffect(() => {
-    void load(true)
-    const poll = setInterval(() => void load(), POLL_MS)
-    // Re-render every few seconds so "updated Ns ago" stays honest.
-    const tick = setInterval(() => setAgoTick((t) => t + 1), 5_000)
-    return () => {
-      clearInterval(poll)
-      clearInterval(tick)
+    let cancelled = false
+    let timer: number | null = null
+
+    const jitteredDelay = () => POLL_MS * (1 + (Math.random() * 0.3 - 0.15))
+
+    const scheduleNext = () => {
+      if (cancelled) return
+      timer = window.setTimeout(tick, jitteredDelay())
     }
+
+    const tick = () => {
+      if (cancelled) return
+      if (document.visibilityState === 'hidden') {
+        scheduleNext()
+        return
+      }
+      void load().finally(scheduleNext)
+    }
+
+    void load(true)
+    scheduleNext()
+
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'visible') void load()
+    }
+    document.addEventListener('visibilitychange', onVisibilityChange)
+
+    // Re-render every few seconds so "updated Ns ago" stays honest.
+    const agoTimer = window.setInterval(() => setAgoTick((t) => t + 1), 5_000)
+
+    return () => {
+      cancelled = true
+      if (timer !== null) window.clearTimeout(timer)
+      document.removeEventListener('visibilitychange', onVisibilityChange)
+      window.clearInterval(agoTimer)
+    }
+  }, [load])
+
+  // Bulk-job progress (sweep item P2-19 follow-through): the server now
+  // always returns `sent: 0` for the pre-job clients and hands back a
+  // `job_id` to poll instead — `remindTasks`'s declared type predates that
+  // change (frozen for this lane), so the extra field is read defensively.
+  const remindPollTimerRef = useRef<number | null>(null)
+  useEffect(() => () => {
+    if (remindPollTimerRef.current !== null) window.clearTimeout(remindPollTimerRef.current)
+  }, [])
+
+  const pollRemindJob = useCallback((jobId: string) => {
+    const poll = async () => {
+      try {
+        const job = await getBulkJob(jobId)
+        if (job.status === 'done' || job.status === 'failed') {
+          remindPollTimerRef.current = null
+          setBusy(false)
+          setNote(
+            job.status === 'failed'
+              ? (job.error ?? 'Sending reminders failed.')
+              : `${job.sent} reminder${job.sent === 1 ? '' : 's'} sent${job.failed > 0 ? `, ${job.failed} failed` : ''}.`,
+          )
+          await load(true)
+          return
+        }
+        setNote(`Sending reminders… ${job.enqueued}/${job.total ?? '?'} queued.`)
+        remindPollTimerRef.current = window.setTimeout(() => void poll(), 3_000)
+      } catch (err) {
+        remindPollTimerRef.current = null
+        setBusy(false)
+        setNote(err instanceof Error ? err.message : 'Could not check reminder progress')
+      }
+    }
+    void poll()
   }, [load])
 
   const remind = useCallback(async (ids?: string[]) => {
     setBusy(true)
     try {
-      const r = await remindTasks(ids)
+      const r = await remindTasks(ids) as { ok: boolean; sent: number; skipped: number; job_id?: string }
+      if (r.job_id) {
+        setNote('Sending reminders…')
+        pollRemindJob(r.job_id)
+        return
+      }
       setNote(
         r.sent === 0 && r.skipped > 0
           ? `Already reminded today — ${r.skipped} skipped.`
           : `${r.sent} reminder${r.sent === 1 ? '' : 's'} sent${r.skipped > 0 ? `, ${r.skipped} already reminded today` : ''}.`,
       )
       await load(true)
+      setBusy(false)
     } catch (err) {
       setNote(err instanceof Error ? err.message : 'Sending failed')
-    } finally {
       setBusy(false)
     }
-  }, [load])
+  }, [load, pollRemindJob])
 
   const openNudge = useCallback((nudge: DashboardNudge) => {
     switch (nudge.key) {

@@ -92,6 +92,7 @@ const ERROR_MESSAGES: Record<string, string> = {
   email_required: 'An email address is required.',
   not_found: 'The record no longer exists.',
   conflict: 'This record changed in another session — reload to pick up the latest version before saving again.',
+  invite_notify_required: 'This session has live calendar invites — choose whether to notify speakers before moving it.',
 }
 
 function readableError(code: string): string {
@@ -444,7 +445,10 @@ export interface SchedulePatch {
   starts_at: string | null
   ends_at: string | null
   room_id: string | null
+  capacity?: number | null
   notify?: 'confirmed' | 'changed' | 'cancelled'
+  /** operator saw the invite prompt and explicitly declined to notify */
+  notify_ack?: boolean
 }
 
 export const getAgenda = () => request<AgendaPayload>('/app/api/agenda')
@@ -459,7 +463,7 @@ export const addAgendaSession = (body: Record<string, unknown>) =>
     body: JSON.stringify(body),
   })
 export const sendScheduleConfirmations = () =>
-  request<AgendaPayload & { ok: boolean; sent_sessions: number; queued: number }>('/app/api/agenda/send-confirmations', {
+  request<AgendaPayload & { ok: boolean; sent_sessions: number; queued: number; job_id?: string }>('/app/api/agenda/send-confirmations', {
     method: 'POST',
     body: JSON.stringify({}),
   })
@@ -549,7 +553,7 @@ export async function fetchDashboard(
 }
 
 export const remindTasks = (assignmentIds?: string[]) =>
-  request<{ ok: boolean; sent: number; skipped: number }>('/app/api/dashboard/remind', {
+  request<{ ok: boolean; sent: number; skipped: number; job_id?: string; total?: number }>('/app/api/dashboard/remind', {
     method: 'POST',
     body: JSON.stringify(assignmentIds ? { assignment_ids: assignmentIds } : {}),
   })

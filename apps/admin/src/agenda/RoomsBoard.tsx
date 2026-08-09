@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { AgendaRoom, AgendaSessionRow } from '../api'
 import { getDrag, setDrag } from './dragState'
 import type { DropPreview } from './TimeGrid'
@@ -35,6 +35,10 @@ interface CellGhost {
   preview: DropPreview
 }
 
+const NO_PREVIEW: DropPreview = { bad: false, titles: '' }
+const slotKey = (g: { roomId: string; day: string; startMin: number; durationMin: number }) =>
+  `${g.roomId}:${g.day}:${g.startMin}:${g.durationMin}`
+
 export function RoomsBoard({
   rooms,
   days,
@@ -52,25 +56,63 @@ export function RoomsBoard({
   const [ghost, setGhost] = useState<CellGhost | null>(null)
   const span = dayEndMin - dayStartMin
 
+  // Same rAF budget as TimeGrid (sweep item P2-17): the ghost follows the
+  // cursor on every dragover, the conflict preview is recomputed at most
+  // once per frame from the latest slot parked in a ref.
+  const pendingPreview = useRef<{ id: string; roomId: string; day: string; startMin: number; durationMin: number } | null>(null)
+  const previewedSlot = useRef<string | null>(null)
+  const frame = useRef<number | null>(null)
+
+  const flushPreview = () => {
+    frame.current = null
+    const p = pendingPreview.current
+    if (!p) return
+    const key = slotKey(p)
+    if (previewedSlot.current === key) return
+    previewedSlot.current = key
+    const preview = previewDrop(p.id, p.roomId, p.day, p.startMin, p.durationMin)
+    setGhost((g) => (g !== null && slotKey(g) === key ? { ...g, preview } : g))
+  }
+
+  const clearPreview = () => {
+    pendingPreview.current = null
+    previewedSlot.current = null
+  }
+
+  useEffect(
+    () => () => {
+      if (frame.current !== null) cancelAnimationFrame(frame.current)
+    },
+    [],
+  )
+
   const inCell = (s: AgendaSessionRow, roomId: string, day: string): boolean =>
     s.room_id === roomId && s.starts_at !== null && utcToLocal(s.starts_at, timezone).day === day
 
   const pct = (min: number) => `${((min - dayStartMin) / span) * 100}%`
   const widthPct = (dur: number) => `${(dur / span) * 100}%`
 
-  const ghostFromEvent = (e: React.DragEvent<HTMLDivElement>, roomId: string, day: string): CellGhost | null => {
+  /**
+   * The slot under the cursor, measured synchronously: React clears
+   * `currentTarget` once the handler returns, so a deferred frame could not
+   * read the cell rect.
+   */
+  const slotFromEvent = (
+    e: React.DragEvent<HTMLDivElement>,
+    roomId: string,
+    day: string,
+  ): { id: string; roomId: string; day: string; startMin: number; durationMin: number } | null => {
     const drag = getDrag()
     if (!drag) return null
     const rect = e.currentTarget.getBoundingClientRect()
     const raw = dayStartMin + ((e.clientX - rect.left) / rect.width) * span
     const startMin = Math.max(dayStartMin, Math.min(snapTo(raw, DROP_SNAP_MIN), dayEndMin - drag.durationMin))
-    return {
-      roomId,
-      day,
-      startMin,
-      durationMin: drag.durationMin,
-      preview: previewDrop(drag.id, roomId, day, startMin, drag.durationMin),
-    }
+    return { id: drag.id, roomId, day, startMin, durationMin: drag.durationMin }
+  }
+
+  const queuePreview = (slot: { id: string; roomId: string; day: string; startMin: number; durationMin: number }) => {
+    pendingPreview.current = slot
+    if (frame.current === null) frame.current = requestAnimationFrame(flushPreview)
   }
 
   return (
@@ -92,26 +134,33 @@ export function RoomsBoard({
               className="rb-cell"
               key={day}
               onDragOver={(e) => {
-                if (!getDrag()) return
+                const slot = slotFromEvent(e, room.id, day)
+                if (!slot) return
                 e.preventDefault()
                 e.dataTransfer.dropEffect = 'move'
-                setGhost(ghostFromEvent(e, room.id, day))
+                // Keep the previous verdict until the frame recomputes it, so
+                // the ghost does not flicker between red and neutral.
+                setGhost((g) =>
+                  g !== null && slotKey(g) === slotKey(slot) ? g : { ...slot, preview: g?.preview ?? NO_PREVIEW },
+                )
+                queuePreview(slot)
               }}
               onDragLeave={(e) => {
                 if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
+                  clearPreview()
                   setGhost((g) => (g && g.roomId === room.id && g.day === day ? null : g))
                 }
               }}
               onDrop={(e) => {
                 e.preventDefault()
-                const drag = getDrag()
-                const g =
-                  ghost && ghost.roomId === room.id && ghost.day === day
-                    ? ghost
-                    : ghostFromEvent(e, room.id, day)
+                const slot = slotFromEvent(e, room.id, day)
+                const g = ghost && ghost.roomId === room.id && ghost.day === day ? ghost : null
+                clearPreview()
                 setGhost(null)
                 setDrag(null)
-                if (drag && g) onDrop(drag.id, room.id, day, g.startMin, g.durationMin)
+                if (slot) {
+                  onDrop(slot.id, room.id, day, g?.startMin ?? slot.startMin, g?.durationMin ?? slot.durationMin)
+                }
               }}
             >
               {sessions.filter((s) => inCell(s, room.id, day)).map((s) => {
@@ -131,7 +180,7 @@ export function RoomsBoard({
                     draggable
                     tabIndex={0}
                     role="button"
-                    aria-label={`${s.title}, ${fmtMinutes(local.minutes)} in ${room.name}. Press M to move.`}
+                    aria-label={`${s.title}, ${fmtMinutes(local.minutes)} in ${room.name}. Press Enter to move.`}
                     title={conflictTitle(s.id) || `${s.code} · ${s.title} · ${fmtMinutes(local.minutes)}`}
                     onDragStart={(e) => {
                       setDrag({ id: s.id, durationMin: dur, fromTray: false })
@@ -140,10 +189,13 @@ export function RoomsBoard({
                     }}
                     onDragEnd={() => {
                       setDrag(null)
+                      clearPreview()
                       setGhost(null)
                     }}
                     onKeyDown={(e) => {
-                      if (e.key === 'm' || e.key === 'M') {
+                      // Enter/Space activates the role=button block; M is kept
+                      // as the mnemonic (docs/07 §3 a11y alternative).
+                      if (e.key === 'm' || e.key === 'M' || e.key === 'Enter' || e.key === ' ') {
                         e.preventDefault()
                         onOpenMove(s.id)
                       }

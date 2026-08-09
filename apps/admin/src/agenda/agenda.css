@@ -24,8 +24,28 @@
   padding: 16px 20px 10px;
   flex-wrap: wrap;
 }
-.agenda-header h2 { margin: 0; font-size: 18px; }
+.agenda-header h2 { margin: 0; font-size: 18px; display: flex; align-items: center; gap: 8px; }
 .agenda-sub { margin: 2px 0 0; color: var(--text-muted); font-size: var(--text-label); }
+
+/* Agenda go-live state (FR-AGENDA-9): the chip is the at-a-glance answer to
+   "is the public feed serving?", the header button is the control. */
+.agenda-state-chip {
+  font-size: var(--text-caption);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 1px 8px;
+  border-radius: 10px;
+  background: var(--status-draft-bg);
+  color: var(--status-draft-text);
+}
+.agenda-state-chip.live {
+  background: var(--status-accepted-bg);
+  color: var(--status-accepted-text);
+}
+
+/* Bulk invite progress (the send is a cron-expanded job, so it streams in). */
+.agenda-job-note { margin: 4px 0 0; color: var(--text-muted); font-size: var(--text-label); }
 
 .agenda-toolbar {
   display: flex;

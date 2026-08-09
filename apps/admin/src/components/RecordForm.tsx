@@ -1,4 +1,5 @@
 import React, { useCallback, useMemo, useRef, useState } from 'react';
+import { isValidEmailShape, isValidUrlShape } from '@kms/core';
 import { toReadableText } from '../utility';
 import { stableSerialize } from '../utils/stableSerialize';
 import type { SchemaFormChangeHandler, SchemaFormChangeMeta } from './DataTabManager';
@@ -129,19 +130,61 @@ export const RecordForm: React.FC<RecordFormProps> = ({
     });
   }, [changeHelpers, onDirtyChange, onSchemaFormChange, schemaFormMeta]);
 
+  /**
+   * Validates a single field's current value: required-ness first, then
+   * (for non-empty string values) the format-specific shape checks shared
+   * with the rest of the app via `@kms/core`'s `isValidEmailShape`/
+   * `isValidUrlShape`. Returns null when the value is valid.
+   */
+  const validateFieldValue = useCallback((key: string, prop: PropertySchema, rawValue: unknown): string | null => {
+    if (requiredFields.has(key) && prop.type !== 'boolean' && isEmpty(rawValue)) {
+      return 'This field is required';
+    }
+    if (!isEmpty(rawValue) && typeof rawValue === 'string') {
+      if (prop.format === 'email' && !isValidEmailShape(rawValue)) {
+        return 'Enter a valid email address';
+      }
+      if ((prop.format === 'url' || prop.format === 'uri') && !isValidUrlShape(rawValue)) {
+        return 'Enter a valid link (http:// or https://)';
+      }
+    }
+    return null;
+  }, [requiredFields]);
+
+  /** Validates on blur so format errors surface before the user reaches Save. */
+  const handleFieldBlur = useCallback((key: string, prop: PropertySchema) => {
+    const message = validateFieldValue(key, prop, valueRef.current[key]);
+    setErrors((prev) => {
+      if (!message) {
+        if (!(key in prev)) {
+          return prev;
+        }
+        const next = { ...prev };
+        delete next[key];
+        return next;
+      }
+      if (prev[key] === message) {
+        return prev;
+      }
+      return { ...prev, [key]: message };
+    });
+  }, [validateFieldValue]);
+
   const handleSubmit = useCallback(async (event: React.FormEvent) => {
     event.preventDefault();
     // A new attempt clears the previous failure, so a stale flash never sits
     // beside a fresh validation error.
     setSubmitError(null);
-    const missing: Record<string, string> = {};
+    const nextErrors: Record<string, string> = {};
     for (const [key, prop] of properties) {
-      if (requiredFields.has(key) && prop.type !== 'boolean' && isEmpty(valueRef.current[key])) {
-        missing[key] = 'This field is required';
+      const message = validateFieldValue(key, prop, valueRef.current[key]);
+      if (message) {
+        nextErrors[key] = message;
       }
     }
-    setErrors(missing);
-    if (Object.keys(missing).length > 0) {
+    setErrors(nextErrors);
+    if (Object.keys(nextErrors).length > 0) {
+      // Block save while any field is invalid.
       return;
     }
     setIsSubmitting(true);
@@ -155,16 +198,19 @@ export const RecordForm: React.FC<RecordFormProps> = ({
     } finally {
       setIsSubmitting(false);
     }
-  }, [onSubmit, properties, requiredFields]);
+  }, [onSubmit, properties, validateFieldValue]);
 
   const renderField = (key: string, prop: PropertySchema) => {
     const fieldId = `record-form-${key}`;
+    const errorId = `${fieldId}-error`;
     const label = prop.title ?? toReadableText(key);
     const raw = value[key];
     const common = {
       id: fieldId,
       disabled: isSubmitting || prop.readOnly,
-      'aria-invalid': errors[key] ? true : undefined
+      'aria-invalid': errors[key] ? true : undefined,
+      'aria-describedby': errors[key] ? errorId : undefined,
+      onBlur: () => handleFieldBlur(key, prop)
     };
 
     let control: React.ReactNode;
@@ -223,7 +269,7 @@ export const RecordForm: React.FC<RecordFormProps> = ({
         const inputType = prop.format === 'date' ? 'date'
           : prop.format === 'date-time' ? 'datetime-local'
           : prop.format === 'email' ? 'email'
-          : prop.format === 'url' ? 'url'
+          : prop.format === 'url' || prop.format === 'uri' ? 'url'
           : 'text';
         control = (
           <input
@@ -261,7 +307,7 @@ export const RecordForm: React.FC<RecordFormProps> = ({
         </label>
         {control}
         {prop.description && <p className="record-form-help">{prop.description}</p>}
-        {errors[key] && <p className="record-form-error" role="alert">{errors[key]}</p>}
+        {errors[key] && <p id={errorId} className="record-form-error" role="alert">{errors[key]}</p>}
       </div>
     );
   };

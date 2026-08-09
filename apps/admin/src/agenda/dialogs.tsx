@@ -17,11 +17,33 @@ const fromTimeValue = (value: string): number => {
   return (h as number) * 60 + (m as number)
 }
 
+/** Shortest bookable block; typing less snaps back to it on blur. */
+export const MIN_DURATION_MIN = 5
+
+/**
+ * Duration is held as text so a half-typed value stays visible, and clamped
+ * on blur so a rejected `0` visibly settles on the minimum rather than
+ * silently reverting (manual-review “duration 0 does not visibly clamp”).
+ */
+const clampDuration = (text: string): number => {
+  const n = Math.round(Number(text))
+  return Number.isFinite(n) && n >= MIN_DURATION_MIN ? n : MIN_DURATION_MIN
+}
+
+/** Optional seat count: blank clears it, anything else is at least 1. */
+const clampCapacity = (text: string): number | null => {
+  if (text.trim() === '') return null
+  const n = Math.round(Number(text))
+  return Number.isFinite(n) && n >= 1 ? n : 1
+}
+
 export interface MoveResult {
   day: string
   startMin: number
   durationMin: number
   roomId: string | null
+  /** null clears the seat count; absent is impossible — the field always reports. */
+  capacity: number | null
 }
 
 interface MoveDialogProps {
@@ -50,8 +72,9 @@ export function MoveDialog({
   const [day, setDay] = useState(local?.day ?? days[0] ?? '')
   const [time, setTime] = useState(toTimeValue(local?.minutes ?? 600))
   const [duration, setDuration] = useState(
-    scheduled ? durationMinutes(session.starts_at as string, session.ends_at as string) : defaultDurationMin,
+    String(scheduled ? durationMinutes(session.starts_at as string, session.ends_at as string) : defaultDurationMin),
   )
+  const [capacity, setCapacity] = useState(session.capacity === null ? '' : String(session.capacity))
   const [roomId, setRoomId] = useState(session.room_id ?? '')
   const dayRef = useRef<HTMLSelectElement | null>(null)
 
@@ -71,7 +94,15 @@ export function MoveDialog({
           <button
             className="primary"
             disabled={!day || !time}
-            onClick={() => onSave({ day, startMin: fromTimeValue(time), durationMin: duration, roomId: roomId || null })}
+            onClick={() =>
+              onSave({
+                day,
+                startMin: fromTimeValue(time),
+                durationMin: clampDuration(duration),
+                roomId: roomId || null,
+                capacity: clampCapacity(capacity),
+              })
+            }
           >
             Save
           </button>
@@ -96,10 +127,26 @@ export function MoveDialog({
           Duration (min)
           <input
             type="number"
-            min={5}
+            min={MIN_DURATION_MIN}
             step={5}
             value={duration}
-            onChange={(e) => setDuration(Math.max(5, Number(e.target.value) || 5))}
+            onChange={(e) => setDuration(e.target.value)}
+            onBlur={() => setDuration(String(clampDuration(duration)))}
+          />
+        </label>
+        <label>
+          Capacity
+          <input
+            type="number"
+            min={1}
+            step={1}
+            value={capacity}
+            placeholder="No limit"
+            onChange={(e) => setCapacity(e.target.value)}
+            onBlur={() => {
+              const next = clampCapacity(capacity)
+              setCapacity(next === null ? '' : String(next))
+            }}
           />
         </label>
         <label>
@@ -130,6 +177,7 @@ interface AddSessionDialogProps {
     day: string | null
     startMin: number | null
     durationMin: number
+    capacity: number | null
   }) => void
   onClose: () => void
 }
@@ -143,7 +191,8 @@ export function AddSessionDialog({ tracks, rooms, days, onSave, onClose }: AddSe
   const [roomId, setRoomId] = useState('')
   const [day, setDay] = useState('')
   const [time, setTime] = useState('10:00')
-  const [duration, setDuration] = useState(30)
+  const [duration, setDuration] = useState('30')
+  const [capacity, setCapacity] = useState('')
   const titleRef = useRef<HTMLInputElement | null>(null)
 
   return (
@@ -167,7 +216,8 @@ export function AddSessionDialog({ tracks, rooms, days, onSave, onClose }: AddSe
                 room_id: roomId || null,
                 day: day || null,
                 startMin: day ? fromTimeValue(time) : null,
-                durationMin: duration,
+                durationMin: clampDuration(duration),
+                capacity: clampCapacity(capacity),
               })
             }
           >
@@ -225,11 +275,27 @@ export function AddSessionDialog({ tracks, rooms, days, onSave, onClose }: AddSe
           Duration (min)
           <input
             type="number"
-            min={5}
+            min={MIN_DURATION_MIN}
             step={5}
             value={duration}
-            onChange={(e) => setDuration(Math.max(5, Number(e.target.value) || 5))}
+            onChange={(e) => setDuration(e.target.value)}
+            onBlur={() => setDuration(String(clampDuration(duration)))}
             disabled={!day}
+          />
+        </label>
+        <label>
+          Capacity
+          <input
+            type="number"
+            min={1}
+            step={1}
+            value={capacity}
+            placeholder="No limit"
+            onChange={(e) => setCapacity(e.target.value)}
+            onBlur={() => {
+              const next = clampCapacity(capacity)
+              setCapacity(next === null ? '' : String(next))
+            }}
           />
         </label>
       </div>

@@ -1,6 +1,6 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import type { DataListFilterProps } from '../components/DataList'
-import { getSubmissionDetail, type SubmissionDetail } from '../api'
+import { getSubmissionDetail, updateSubmissionNotes, type SubmissionDetail } from '../api'
 import './review.css'
 
 /**
@@ -27,11 +27,11 @@ export function StatusChipsFilter({ filters, setFilters }: DataListFilterProps<R
   const choose = (value: string) => setFilters((prev) => ({ ...prev, status: value }))
   return (
     <div className="chip-filter" role="group" aria-label="Status filter">
-      <button className={active === '' ? 'active' : ''} onClick={() => choose('')}>
+      <button className={active === '' ? 'active' : ''} aria-pressed={active === ''} onClick={() => choose('')}>
         All
       </button>
       {SUBMISSION_STATUSES.map((s) => (
-        <button key={s} className={active === s ? 'active' : ''} onClick={() => choose(s)}>
+        <button key={s} className={active === s ? 'active' : ''} aria-pressed={active === s} onClick={() => choose(s)}>
           {statusLabel(s)}
         </button>
       ))}
@@ -88,17 +88,57 @@ const answerText = (json: string | null): string => {
   }
 }
 
+/**
+ * One `<dt>`/`<dd>` pair. A `<dl>`'s valid children are `dt`/`dd` (optionally
+ * grouped) *or* one or more `<div>` each holding `dt`s followed by `dd`s — the
+ * previous `<span style="display:contents">` wrapper wasn't valid `<dl>`
+ * content at all. A `<div>` is, and `display: contents` keeps it out of the
+ * render tree so `dt`/`dd` still land as direct grid items under the parent
+ * `.detail-panel dl` grid (shell.css) without new layout CSS.
+ */
+function DetailPair({ term, children }: { term: string; children: ReactNode }) {
+  return (
+    <div style={{ display: 'contents' }}>
+      <dt>{term}</dt>
+      <dd>{children}</dd>
+    </div>
+  )
+}
+
 /** Submission detail tab: answers, participants with roles, review summary. */
 export function SubmissionDetailPanel({ id }: { id: string }) {
   const [detail, setDetail] = useState<SubmissionDetail | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [notes, setNotes] = useState('')
+  const [savedNotes, setSavedNotes] = useState('')
+  const [notesSaving, setNotesSaving] = useState(false)
+  const [notesError, setNotesError] = useState<string | null>(null)
 
   useEffect(() => {
     setDetail(null)
+    setNotesError(null)
     getSubmissionDetail(id)
-      .then(setDetail)
+      .then((d) => {
+        setDetail(d)
+        const initialNotes = typeof d.submission.notes === 'string' ? d.submission.notes : ''
+        setNotes(initialNotes)
+        setSavedNotes(initialNotes)
+      })
       .catch((e: unknown) => setError(e instanceof Error ? e.message : 'Failed to load'))
   }, [id])
+
+  const saveNotes = async () => {
+    setNotesSaving(true)
+    setNotesError(null)
+    try {
+      await updateSubmissionNotes(id, notes.trim() || null)
+      setSavedNotes(notes)
+    } catch (e) {
+      setNotesError(e instanceof Error ? e.message : 'Failed to save notes')
+    } finally {
+      setNotesSaving(false)
+    }
+  }
 
   if (error) return <div className="detail-panel"><p>{error}</p></div>
   if (!detail) return <div className="detail-panel"><p style={{ color: 'var(--text-muted)' }}>Loading…</p></div>
@@ -122,17 +162,34 @@ export function SubmissionDetailPanel({ id }: { id: string }) {
         {s.notified_at ? ` · Notified ${fmtDate(s.notified_at)}` : ' · Not notified'}
       </div>
       <dl>
-        {s.format ? <><dt>Format</dt><dd>{String(s.format)}</dd></> : null}
-        {s.track_name ? <><dt>Track</dt><dd>{String(s.track_name)}</dd></> : null}
-        {s.plan_name ? <><dt>Evaluation plan</dt><dd>{String(s.plan_name)}</dd></> : null}
-        {detail.tags.length > 0 && <><dt>Tags</dt><dd>{detail.tags.join(', ')}</dd></>}
+        {s.format ? <DetailPair term="Format">{String(s.format)}</DetailPair> : null}
+        {s.track_name ? <DetailPair term="Track">{String(s.track_name)}</DetailPair> : null}
+        {s.plan_name ? <DetailPair term="Evaluation plan">{String(s.plan_name)}</DetailPair> : null}
+        {detail.tags.length > 0 && <DetailPair term="Tags">{detail.tags.join(', ')}</DetailPair>}
         {detail.answers.map((a, i) => (
-          <span key={i} style={{ display: 'contents' }}>
-            <dt>{a.label}</dt>
-            <dd>{answerText(a.value_json)}</dd>
-          </span>
+          <DetailPair key={i} term={a.label}>{answerText(a.value_json)}</DetailPair>
         ))}
       </dl>
+
+      <h2 style={{ fontSize: 14 }}>Internal notes</h2>
+      <textarea
+        className="internal-notes-field"
+        rows={4}
+        value={notes}
+        onChange={(e) => setNotes((e.target as HTMLTextAreaElement).value)}
+        aria-label="Internal notes"
+        placeholder="Notes visible to organisers only — never shown in the portal."
+      />
+      <div className="internal-notes-actions">
+        <button
+          type="button"
+          disabled={notes === savedNotes || notesSaving}
+          onClick={() => void saveNotes()}
+        >
+          {notesSaving ? 'Saving…' : 'Save notes'}
+        </button>
+        {notesError && <span className="internal-notes-error" role="alert">{notesError}</span>}
+      </div>
 
       <h2 style={{ fontSize: 14 }}>Participants</h2>
       {detail.participants.map((p) => (

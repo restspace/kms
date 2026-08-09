@@ -4,7 +4,7 @@ import { DataList, ColumnDefinition, DataListQuery, DataSourceParams, DataSource
 import { appAlert, ModalDialog } from './dialogs';
 import type { DataListExportConfig, DataListFastAddConfig, DataListFilterConfig, DataListRowDragConfig, DataListRowDropConfig, DataListSummaryDataSource } from './DataList';
 import { RecordForm } from './RecordForm';
-import { ContextMenu } from './ContextMenu';
+import { ContextMenu, type ContextMenuOption } from './ContextMenu';
 import { generateRandomId, toReadableText } from '../utility';
 import { clampSplitRatioForWidth } from './splitRatio';
 import { stableSerialize } from '../utils/stableSerialize';
@@ -1000,6 +1000,19 @@ export interface DataTabManagerProps {
    * filter, with a clear button. Off by default to keep existing hosts as-is.
    */
   globalFilterIndicator?: boolean;
+  /**
+   * Workspace search (deferred-gap item): controlled value for the header
+   * search input, normally mirroring the URL's `?q=`. Omit to leave the input
+   * unrendered — search is opt-in per host.
+   */
+  searchValue?: string;
+  /**
+   * Fires ~300ms after the user stops typing in the search input (debounced
+   * here, not by the caller). The manager also merges the debounced value
+   * into the *active* list tab's dataSource `filters.q` itself — the caller
+   * only needs this to mirror the value into the URL/other UI.
+   */
+  onSearchChange?: (value: string) => void;
 }
 
 /**
@@ -1022,7 +1035,9 @@ export const DataTabManager: React.FC<DataTabManagerProps> = ({
   detailRequest,
   onSelectionChange,
   headerTrailing,
-  globalFilterIndicator = false
+  globalFilterIndicator = false,
+  searchValue,
+  onSearchChange
 }) => {
   const initialState: TabManagerState = {
     tabs: [],
@@ -1107,6 +1122,66 @@ export const DataTabManager: React.FC<DataTabManagerProps> = ({
     index: number;
     additive: boolean;
   } | null>(null);
+  /** State for the tab-label context menu (item 2: Detail / global filter / close). */
+  const [tabContextMenu, setTabContextMenu] = useState<{
+    position: { x: number; y: number };
+    tabId: string;
+  } | null>(null);
+  /**
+   * Workspace search (deferred-gap item): the input is debounced locally so
+   * every keystroke doesn't hit the network or thrash the URL; `committedSearch`
+   * is the value actually merged into the active tab's query and reported to
+   * the caller via `onSearchChange`.
+   */
+  const [searchInput, setSearchInput] = useState(searchValue ?? '');
+  const [committedSearch, setCommittedSearch] = useState(searchValue ?? '');
+  const searchDebounceRef = useRef<number | null>(null);
+  const lastSearchPropRef = useRef(searchValue);
+  useEffect(() => {
+    if (searchValue !== lastSearchPropRef.current) {
+      lastSearchPropRef.current = searchValue;
+      setSearchInput(searchValue ?? '');
+      setCommittedSearch(searchValue ?? '');
+    }
+  }, [searchValue]);
+  useEffect(() => () => {
+    if (searchDebounceRef.current !== null) window.clearTimeout(searchDebounceRef.current);
+  }, []);
+  const handleSearchInputChange = useCallback((value: string) => {
+    setSearchInput(value);
+    if (searchDebounceRef.current !== null) window.clearTimeout(searchDebounceRef.current);
+    searchDebounceRef.current = window.setTimeout(() => {
+      lastSearchPropRef.current = value;
+      setCommittedSearch(value);
+      onSearchChange?.(value);
+    }, 300);
+  }, [onSearchChange]);
+  /**
+   * Wraps a tab's dataSource so the active tab's query also carries `q`,
+   * mirroring how a `filterConfig.FilterComponent` merges local filters —
+   * except this merge happens at the dataSource-params boundary (like the
+   * host's `event_id` scoping wrapper) since the search box lives outside any
+   * single tab's own filter UI. Cached per (dataSource, q) pair so the
+   * wrapped function keeps a stable identity across renders — DataList treats
+   * a new dataSource identity as "reload from scratch".
+   */
+  const searchDataSourceCacheRef = useRef<{
+    base: (params: DataSourceParams) => Promise<DataSourceResult<unknown>>;
+    q: string;
+    wrapped: (params: DataSourceParams) => Promise<DataSourceResult<unknown>>;
+  } | null>(null);
+  const wrapDataSourceWithSearch = useCallback((
+    base: (params: DataSourceParams) => Promise<DataSourceResult<unknown>>,
+    q: string
+  ) => {
+    const cache = searchDataSourceCacheRef.current;
+    if (cache && cache.base === base && cache.q === q) {
+      return cache.wrapped;
+    }
+    const wrapped = (params: DataSourceParams) => base({ ...params, filters: { ...params.filters, q } });
+    searchDataSourceCacheRef.current = { base, q, wrapped };
+    return wrapped;
+  }, []);
   // Per-tab requests to open an item-anchored fast-add draft in the tab's DataList.
   const [fastAddRequests, setFastAddRequests] = useState<Record<string, { item: any; token: number }>>({});
   const [isReceiverActive, setIsReceiverActive] = useState<boolean>(() => Boolean(itemReceiverPanel?.isActiveByDefault));
@@ -1492,6 +1567,77 @@ export const DataTabManager: React.FC<DataTabManagerProps> = ({
     };
   }, [config, resolveItemTitle, requestChildTabReplace]);
 
+  /** Platform-detected additive-click hint for the tab context menu. */
+  const platformModifierHint = useMemo(() => {
+    const nav = typeof navigator !== 'undefined' ? navigator : undefined;
+    const uaData = (nav as { userAgentData?: { platform?: string } } | undefined)?.userAgentData;
+    const platform = uaData?.platform ?? nav?.platform ?? '';
+    return platform.includes('Mac') ? '⌘-click' : 'Ctrl-click';
+  }, []);
+
+  /**
+   * Handle right-click on a tab label (item 2: approved manual-review item).
+   * Opens a menu duplicating the filter-dot's mouse-only gestures for keyboard
+   * users, plus a "Detail" shortcut for the tab's current row selection.
+   */
+  const handleTabContextMenu = useCallback((tabId: string) => {
+    return (event: React.MouseEvent) => {
+      event.preventDefault();
+      setTabContextMenu({ position: { x: event.clientX, y: event.clientY }, tabId });
+    };
+  }, []);
+
+  const tabContextMenuOptions = useMemo(() => {
+    if (!tabContextMenu) return [];
+    const tab = state.tabs.find(t => t.id === tabContextMenu.tabId);
+    if (!tab) return [];
+    const closeMenu = () => setTabContextMenu(null);
+    const selectedItem = state.tabSelections[tab.id] ?? null;
+    const isSource = state.globalFilterSources.some(s => s.sourceTabId === tab.id);
+    const options: ContextMenuOption[] = [];
+
+    if (tab.type === 'list') {
+      options.push({
+        label: 'Detail',
+        hint: 'double-click',
+        disabled: !selectedItem,
+        onClick: () => {
+          closeMenu();
+          if (!selectedItem) return;
+          handleItemDoubleClick(tab.id, tab.configKey)(selectedItem, 0, {} as React.MouseEvent);
+        }
+      });
+      options.push({
+        label: isSource ? 'Remove global filter' : 'Make global filter',
+        hint: 'Shift-click',
+        onClick: () => {
+          closeMenu();
+          dispatch({ type: 'TOGGLE_GLOBAL_FILTER', payload: { tabId: tab.id, additive: false } });
+        }
+      });
+      options.push({
+        label: 'Add to filter',
+        hint: platformModifierHint,
+        onClick: () => {
+          closeMenu();
+          dispatch({ type: 'TOGGLE_GLOBAL_FILTER', payload: { tabId: tab.id, additive: true } });
+        }
+      });
+    }
+
+    if (tab.type === 'detail' || tab.type === 'create' || tab.type === 'edit') {
+      options.push({
+        label: 'Close tab',
+        onClick: () => {
+          closeMenu();
+          handleTabClose(tab.id, { stopPropagation: () => {} } as React.MouseEvent);
+        }
+      });
+    }
+
+    return options;
+  }, [tabContextMenu, state.tabs, state.tabSelections, state.globalFilterSources, handleItemDoubleClick, handleTabClose, platformModifierHint]);
+
   /**
    * Handle selection change in a list
    */
@@ -1559,6 +1705,36 @@ export const DataTabManager: React.FC<DataTabManagerProps> = ({
       return indices;
     }, []);
   }, [state.tabs, visibleConfigKeys]);
+
+  /** Focus targets for the roving-tabindex tab strip, one per visible tab. */
+  const tabLabelRefs = useRef<(HTMLDivElement | null)[]>([]);
+
+  /**
+   * Tab strip a11y (sweep item 10): roving tabindex over the *visible* tabs.
+   * ArrowLeft/ArrowRight move focus and selection together (wrapping); Home/End
+   * jump to the first/last visible tab. Enter/Space stay as an explicit
+   * activation. `position` is the tab's index within `visibleTabIndices`
+   * (display order), not its index in `state.tabs`.
+   */
+  const handleTabLabelKeyDown = useCallback((event: React.KeyboardEvent, position: number) => {
+    const count = visibleTabIndices.length;
+    if (count === 0) return;
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      handleTabClick(visibleTabIndices[position]);
+      return;
+    }
+    let nextPosition: number | null = null;
+    if (event.key === 'ArrowRight') nextPosition = (position + 1) % count;
+    else if (event.key === 'ArrowLeft') nextPosition = (position - 1 + count) % count;
+    else if (event.key === 'Home') nextPosition = 0;
+    else if (event.key === 'End') nextPosition = count - 1;
+    if (nextPosition !== null) {
+      event.preventDefault();
+      handleTabClick(visibleTabIndices[nextPosition]);
+      tabLabelRefs.current[nextPosition]?.focus();
+    }
+  }, [visibleTabIndices, handleTabClick]);
 
   const visibleTabIdSet = useMemo(() => {
     const ids = new Set<string>();
@@ -2177,7 +2353,11 @@ export const DataTabManager: React.FC<DataTabManagerProps> = ({
   const tabCountQueries = useQueries({
     queries: listTabs.map((tab) => {
       const tabConfig = config[tab.configKey];
-      const filters = getEffectiveTabFilters(tab.id, tab.configKey);
+      const baseFilters = getEffectiveTabFilters(tab.id, tab.configKey);
+      const isActiveList = tab.id === state.tabs[state.activeTabIndex]?.id;
+      const filters = isActiveList && committedSearch.trim()
+        ? { ...baseFilters, q: committedSearch.trim() }
+        : baseFilters;
       const filterSig = stableSerialize(filters);
       return {
         queryKey: ['tab-counts', tab.configKey, filterSig],
@@ -2230,6 +2410,16 @@ export const DataTabManager: React.FC<DataTabManagerProps> = ({
         tabConfig.dataListClassName ?? ''
       ].filter(Boolean).join(' ');
       const shouldShowAddButton = canCreate && !(itemReceiverPanel && isReceiverActive);
+      // Workspace search (deferred-gap item): merged only into the active
+      // tab's dataSource calls, not the tab's own local filters — see
+      // wrapDataSourceWithSearch above.
+      const isActiveList = tab.id === state.tabs[state.activeTabIndex]?.id;
+      const effectiveDataSource = isActiveList && committedSearch.trim()
+        ? wrapDataSourceWithSearch(
+            tabConfig.dataSource as (params: DataSourceParams) => Promise<DataSourceResult<unknown>>,
+            committedSearch.trim()
+          )
+        : tabConfig.dataSource;
       const seedSignature = stableSerialize(tabConfig.filterConfig?.initialFilters ?? {});
       const rememberedQuery = tabListQueries[tab.id];
       const restoredChecks = tabChecklistRef.current[tab.id];
@@ -2263,7 +2453,7 @@ export const DataTabManager: React.FC<DataTabManagerProps> = ({
       };
       return (
         <DataList
-          dataSource={tabConfig.dataSource}
+          dataSource={effectiveDataSource}
           columns={tabConfig.columns}
           getItemId={tabConfig.getItemId}
           onItemDoubleClick={handleItemDoubleClick(tab.id, tab.configKey)}
@@ -2507,9 +2697,13 @@ export const DataTabManager: React.FC<DataTabManagerProps> = ({
     getTotalChangeHandler,
     reloadKey,
     requestChildTabReplace,
+    state.activeTabIndex,
     state.listVersions,
+    state.tabs,
     state.tabSelections,
-    tabListQueries
+    tabListQueries,
+    committedSearch,
+    wrapDataSourceWithSearch
   ]);
 
   if (state.tabs.length === 0) {
@@ -2569,10 +2763,11 @@ export const DataTabManager: React.FC<DataTabManagerProps> = ({
     <div className="data-tab-manager">
       <div className="data-tab-header">
         <div className="data-tab-labels" role="tablist" aria-label="Data tabs">
-          {visibleTabs.map(({ tab, index }) => (
+          {visibleTabs.map(({ tab, index }, position) => (
           <div
             key={tab.id}
             id={`data-tab-${tab.id}`}
+            ref={(el) => { tabLabelRefs.current[position] = el; }}
             className={`data-tab-label ${index === state.activeTabIndex ? 'active' : ''} ${
               isGlobalFilterActive && effectiveGlobalFilterSources.some(s => s.sourceTabId === tab.id) ? 'filter-source' : ''
             }`}
@@ -2581,14 +2776,10 @@ export const DataTabManager: React.FC<DataTabManagerProps> = ({
             aria-label={getTabAriaLabel(tab)}
             aria-selected={index === state.activeTabIndex}
             aria-controls={`data-tab-panel-${tab.id}`}
-            tabIndex={0}
+            tabIndex={index === state.activeTabIndex ? 0 : -1}
             onClick={() => handleTabClick(index)}
-            onKeyDown={(event) => {
-              if (event.key === 'Enter' || event.key === ' ') {
-                event.preventDefault();
-                handleTabClick(index);
-              }
-            }}
+            onKeyDown={(event) => handleTabLabelKeyDown(event, position)}
+            onContextMenu={handleTabContextMenu(tab.id)}
           >
             <div className="data-tab-label-content">
               <span className="data-tab-label-text">{getTabTitle(tab)}</span>
@@ -2597,7 +2788,9 @@ export const DataTabManager: React.FC<DataTabManagerProps> = ({
               )}
             </div>
             {tab.type === 'list' && (
-              <span
+              <button
+                type="button"
+                tabIndex={-1}
                 className={`data-tab-filter-dot ${
                   effectiveGlobalFilterSources.some(s => s.sourceTabId === tab.id) ? 'active' : ''
                 } ${state.pendingGlobalFilterTabIds.includes(tab.id) ? 'pending' : ''}`}
@@ -2615,13 +2808,7 @@ export const DataTabManager: React.FC<DataTabManagerProps> = ({
                       ? 'Pending filter source — will filter other tabs once a row is selected here. Click to cancel.'
                       : 'Click to set as global filter, Ctrl/Cmd+click to add to the current filter'
                 }
-                aria-label={
-                  effectiveGlobalFilterSources.some(s => s.sourceTabId === tab.id)
-                    ? 'Remove global filter'
-                    : state.pendingGlobalFilterTabIds.includes(tab.id)
-                      ? 'Cancel pending global filter'
-                      : 'Set as global filter'
-                }
+                aria-label="Toggle global filter"
               />
             )}
             {(tab.type === 'detail' || tab.type === 'create' || tab.type === 'edit') && (
@@ -2671,8 +2858,18 @@ export const DataTabManager: React.FC<DataTabManagerProps> = ({
             </>
           )}
         </div>
-        {(headerTrailing || (globalFilterIndicator && globalFilterChip)) && (
+        {(headerTrailing || (globalFilterIndicator && globalFilterChip) || onSearchChange) && (
           <div className="data-tab-header-trailing">
+            {onSearchChange && (
+              <input
+                type="search"
+                aria-label="Search"
+                className="data-tab-search"
+                placeholder="Search…"
+                value={searchInput}
+                onChange={(e) => handleSearchInputChange((e.target as HTMLInputElement).value)}
+              />
+            )}
             {globalFilterIndicator && globalFilterChip}
             {headerTrailing}
           </div>
@@ -2768,6 +2965,13 @@ export const DataTabManager: React.FC<DataTabManagerProps> = ({
           position={listContextMenu.position}
           options={listContextMenuOptions}
           onClose={() => setListContextMenu(null)}
+        />
+      )}
+      {tabContextMenu && (
+        <ContextMenu
+          position={tabContextMenu.position}
+          options={tabContextMenuOptions}
+          onClose={() => setTabContextMenu(null)}
         />
       )}
       <ModalDialog

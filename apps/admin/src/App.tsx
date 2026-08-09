@@ -1,14 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { DataTabManager, TabConfig } from './components/DataTabManager'
+import { DataTabManager, TabConfig, type CreateFormProps } from './components/DataTabManager'
 import type {
-  DataListCellChange,
-  DataListCellChangeHandler,
   DataSourceParams,
   DataSourceResult,
 } from './components/DataList'
 import {
   bulkStatus,
   createContact,
+  createTask,
   deleteContact,
   getMe,
   getSubmissionDetail,
@@ -25,6 +24,8 @@ import {
 } from './api'
 import { buildExportUrl } from './api'
 import { appAlert, appConfirm } from './components/dialogs'
+import { RecordForm } from './components/RecordForm'
+import { CreateEventDialog } from './components/CreateEventDialog'
 import { FormsSection } from './forms/FormsSection'
 import { SettingsSection } from './settings/SettingsSection'
 import { EvaluationSection } from './evaluation/EvaluationSection'
@@ -105,8 +106,53 @@ const speakerSchema = {
     mobile_phone: { type: 'string', title: 'Mobile phone' },
     pronouns: { type: 'string', title: 'Pronouns' },
     biography: { type: 'string', format: 'textarea', title: 'Biography' },
+    notes: { type: 'string', format: 'textarea', title: 'Internal notes' },
   },
 }
+
+/**
+ * Task *definition* schema (deferred-gap item: tasks were read-only in
+ * admin). The Tasks tab's rows are assignments (one per assignee), a
+ * different shape from what this schema describes — see the `tasks`
+ * TabConfig below for why that means create-only via `createComponent`
+ * rather than schema-driven edit-in-grid.
+ */
+const taskSchema = {
+  type: 'object',
+  required: ['title'],
+  properties: {
+    title: { type: 'string', title: 'Title' },
+    description: { type: 'string', format: 'textarea', title: 'Description' },
+    target: { type: 'string', enum: ['contact', 'group', 'submission'], title: 'Target' },
+    assignment_mode: { type: 'string', enum: ['manual', 'automatic'], title: 'Assignment mode' },
+    trigger: { type: 'string', enum: ['none', 'on_accept', 'on_schedule'], title: 'Trigger' },
+    action_type: {
+      type: 'string',
+      enum: ['acknowledge', 'file_upload', 'portal_form', 'external_link'],
+      title: 'Action type',
+    },
+    due_at: { type: 'string', format: 'date', title: 'Due date' },
+    required: { type: 'boolean', title: 'Required' },
+  },
+}
+
+/**
+ * Create-only form for task definitions (see `taskSchema` above). A thin
+ * RecordForm wrapper so it can be wired via `TabConfig.createComponent`
+ * without also enabling `TabConfig.schema`, which DataTabManager also reads
+ * to decide whether a row double-click opens an *edit* form — wrong here,
+ * since the tab's rows are assignments, not task definitions.
+ */
+const TaskCreateForm = ({ initialValues, onSubmit, onCancel, title, onDirtyChange }: CreateFormProps) => (
+  <RecordForm
+    schema={taskSchema}
+    initialValues={initialValues}
+    onSubmit={onSubmit}
+    onCancel={onCancel}
+    title={title}
+    onDirtyChange={onDirtyChange}
+  />
+)
 
 /** Workspace tab keys addressable by dashboard deep-links. */
 type WorkspaceTabKey = 'speakers' | 'submissions' | 'tasks' | 'messages'
@@ -268,11 +314,7 @@ function buildWorkspaceConfig(
         ),
         // Return (not fire-and-forget) the write so DataList can await it and
         // roll the cell back on failure — FE-3's failure-aware inline edits.
-        // The cast drops out once FE-3 widens DataListCellChangeHandler's
-        // return type to allow a Promise; the runtime behaviour is already the
-        // one that lane expects.
-        onChange: ((change: DataListCellChange<{ id: string }>) =>
-          updateSubmissionStatus(change.item.id, String(change.value))) as unknown as DataListCellChangeHandler,
+        onChange: (change) => updateSubmissionStatus(change.item.id, String(change.value)),
       },
       {
         field: 'rating',
@@ -361,6 +403,20 @@ function buildWorkspaceConfig(
     globalFilterSets: { contact_id: 'contact_id' },
     globalFilterReceives: { contact_id: 'contact_id', submission_id: 'submission_id' },
     exportConfig: exportFor('tasks'),
+    // Create-only (deferred-gap item): this tab's rows are *assignments*, one
+    // per assignee, but a create defines a *task* — a different shape. Using
+    // `createComponent` (rather than `schema`+`onUpsert` directly on the
+    // config) opens the "+ New task" form without also flipping on
+    // double-click-to-edit for assignment rows, which would hand the wrong
+    // shape to a task-definition form. Editing/deleting task definitions
+    // in-grid isn't wired here for the same reason — see the FE-6 report.
+    createComponent: TaskCreateForm,
+    onUpsert: async (data) => {
+      const created = await createTask(data)
+      // The cast only satisfies `TabConfig<TaskAssignmentRow>`'s generic
+      // signature; the create flow above never reads the result as a row.
+      return created as unknown as TaskAssignmentRow
+    },
   }
 
   const messages: TabConfig<MessageRow> = {
@@ -438,6 +494,8 @@ export default function App() {
   const [me, setMe] = useState<Me | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [switching, setSwitching] = useState(false)
+  // Create Event dialog (FR-EVT-1/2), reachable next to the event dropdown.
+  const [createEventOpen, setCreateEventOpen] = useState(false)
 
   // Dashboard deep-link state (M5 stretch): seeded workspace filters + which
   // tab to land on. The tab itself now travels in the URL.
@@ -625,6 +683,16 @@ export default function App() {
     [],
   )
 
+  /**
+   * Workspace search (deferred-gap item): DataTabManager already debounces
+   * and merges `q` into the active tab's query itself; this only mirrors the
+   * committed value into the URL so it survives reload/back (`?q=`), which
+   * `routeSeeds` below restores into every tab's initial filters on load.
+   */
+  const handleSearchChange = useCallback((value: string) => {
+    navigate({ q: value || null }, { replace: true })
+  }, [])
+
   const handleNavigate = useCallback((target: AppNavTarget) => {
     if (target.view === 'agenda') {
       navigate({ v: 'agenda', mode: target.agendaView ?? null })
@@ -695,11 +763,35 @@ export default function App() {
           KMS <span className="shell-brand-sub">{isReviewer ? 'review' : 'admin'}</span>
         </div>
         <div className="shell-event">
-          <EventFilterSelect scope={scope} />
+          <div className="shell-event-row">
+            <EventFilterSelect scope={scope} />
+            {!isReviewer && (
+              <button
+                type="button"
+                className="shell-event-add"
+                title="Create a new event"
+                aria-label="Create a new event"
+                onClick={() => setCreateEventOpen(true)}
+              >
+                +
+              </button>
+            )}
+          </div>
           <div className="shell-event-dates">
             {fmtDate(me.event.starts_at)} – {fmtDate(me.event.ends_at)}
           </div>
         </div>
+        {!isReviewer && (
+          <CreateEventDialog
+            open={createEventOpen}
+            onClose={() => setCreateEventOpen(false)}
+            defaultTimezone={me.event.timezone}
+            onCreated={(id) => {
+              setCreateEventOpen(false)
+              void refreshMe().then(() => setFilter(id))
+            }}
+          />
+        )}
         <nav className="shell-nav" aria-label="Sections">
           {navItems.map((item) => (
             <div key={item.key} className="shell-nav-group">
@@ -763,6 +855,8 @@ export default function App() {
               onSelectionChange={handleWorkspaceSelection}
               globalFilterIndicator
               headerTrailing={<EventFilterChip scope={scope} />}
+              searchValue={route.q ?? ''}
+              onSearchChange={handleSearchChange}
             />
             {(checkedIds.length > 0 || bulkNote !== null) && (
               <BulkBar
