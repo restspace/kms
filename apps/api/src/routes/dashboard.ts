@@ -300,7 +300,10 @@ async function dashboardPayload(c: Context<ApiEnv>) {
     now,
     event,
     kpis: {
-      submissions: Object.values(status).reduce((a, b) => a + b, 0) - n('draft'),
+      // Every submission in the event: the status tiles below (accepted,
+      // pending, declined, drafts, withdrawn) are this number's breakdown
+      // (docs/09 §1), so excluding drafts here made the two disagree.
+      submissions: Object.values(status).reduce((a, b) => a + b, 0),
       accepted_speakers: speakers.length,
     },
     status_tiles: {
