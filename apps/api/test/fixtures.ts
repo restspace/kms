@@ -67,8 +67,8 @@ export async function createContact(
 
 export async function createEventUser(eventId: string, contactId: string, role: Role): Promise<void> {
   await env.DB.prepare(
-    `INSERT INTO event_users (id, event_id, contact_id, role, created_at) VALUES (?, ?, ?, ?, ?)`,
-  ).bind(`eu-${crypto.randomUUID()}`, eventId, contactId, role, ts).run();
+    `INSERT INTO event_users (event_id, contact_id, role, invited_at, accepted_at) VALUES (?, ?, ?, ?, ?)`,
+  ).bind(eventId, contactId, role, ts, ts).run();
 }
 
 /** Cookie header value for an authenticated SELF.fetch request. */

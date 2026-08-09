@@ -2,25 +2,37 @@
 // draft-autosave and submit endpoints behind it. The server is authoritative:
 // visibility is re-evaluated, hidden answers discarded, limits and the close
 // date enforced here regardless of what the client showed.
+//
+// Every write path is ONE `db.batch` (sweep item P0-1). D1 has no interactive
+// transactions, but a batch *is* an implicit transaction: either the
+// submission, its answers, participants, tags, tracks, confirmation token and
+// queued emails all land, or none of them do. Nothing is validated after the
+// first write — the complete request is normalised up front.
 
 import { Hono } from 'hono';
 import type { Context } from 'hono';
 import { renderToString } from 'preact-render-to-string';
-import { createDb } from '@kms/db';
 import {
   applyRouting,
   discardHiddenAnswers,
+  isValidEmailShape,
+  MAX_PARTICIPANTS_PER_SUBMISSION,
   parseParticipantRoles,
   sanitizeRichHtml,
   validateAnswers,
   type Answers,
   type QuestionDef,
+  type RoutingActions,
   type RoutingConfig,
+  type RoutingOutcome,
 } from '@kms/core';
 import { Page, SubmitPage, type SubmitBootstrap, type SubmitViewer } from '@kms/ui';
 import type { AppEnv } from '../env';
-import { sendTemplated } from '../mailer';
+import { attemptImmediate, prepareTemplated, type PreparedEmail } from '../mailer';
+import { bumpEventRevision } from '../revision';
+import { isSubmissionCodeCollision, nextSessionCodeSql, peekNextSessionCode } from '../sessionCode';
 import { getSession, type SessionPayload } from '../session';
+import { CONFIRM_TTL_SECONDS, mintToken } from '../tokens';
 import { loadQuestions } from './formsAdmin';
 
 export const submitRoutes = new Hono<AppEnv>();
@@ -43,6 +55,8 @@ interface FormRow {
   auto_redirect_to_portal: number;
   routing_rules: string | null;
   participant_roles: string | null;
+  notify_admins_on_create: string | null;
+  notify_admins_on_update: string | null;
   confirmation_email_enabled: number;
 }
 
@@ -61,6 +75,9 @@ interface FormContext {
   limit: number | null;
   closed: boolean;
 }
+
+/** No limit configured: bind a sentinel so the guard SQL stays one shape. */
+const NO_LIMIT = Number.MAX_SAFE_INTEGER;
 
 async function loadContext(db: D1Database, slug: string, formId: string): Promise<FormContext | null> {
   const event = await db
@@ -97,17 +114,6 @@ async function countForLimit(db: D1Database, formId: string, contactId: string):
   return row?.n ?? 0;
 }
 
-async function nextCode(db: D1Database, eventId: string): Promise<string> {
-  const row = await db
-    .prepare(
-      `SELECT COALESCE(MAX(CAST(SUBSTR(code, 6) AS INTEGER)), 0) AS n
-       FROM submissions WHERE event_id = ? AND code LIKE 'SESS-%'`,
-    )
-    .bind(eventId)
-    .first<{ n: number }>();
-  return `SESS-${(row?.n ?? 0) + 1}`;
-}
-
 /** Map system-field answers onto submission columns (docs/04 §5 after-submit). */
 function systemColumns(questions: QuestionDef[], answers: Answers): Record<string, unknown> {
   const byId = new Map(questions.map((q) => [q.id, q]));
@@ -129,10 +135,13 @@ function systemColumns(questions: QuestionDef[], answers: Answers): Record<strin
   return out;
 }
 
-function trackAnswer(questions: QuestionDef[], answers: Answers): string | null {
+/** Track names picked in the answers. A multiselect track question yields every
+ *  selected value (Swyx multi-track gap) — all of them are resolved. */
+function trackAnswers(questions: QuestionDef[], answers: Answers): string[] {
   const q = questions.find((x) => x.field_key === 'track');
   const v = q ? answers[q.id] : undefined;
-  return typeof v === 'string' && v !== '' ? v : null;
+  if (Array.isArray(v)) return v.map(String).filter((s) => s !== '');
+  return typeof v === 'string' && v !== '' ? [v] : [];
 }
 
 function tagAnswers(questions: QuestionDef[], answers: Answers): string[] {
@@ -141,7 +150,13 @@ function tagAnswers(questions: QuestionDef[], answers: Answers): string[] {
   return Array.isArray(v) ? v.map(String) : typeof v === 'string' && v !== '' ? [v] : [];
 }
 
-async function replaceAnswers(db: D1Database, submissionId: string, answers: Answers): Promise<void> {
+/**
+ * Answer rows for one submission, as statements for the caller's batch. The
+ * inserts are guarded on the parent row so a batch whose conditional create
+ * inserted nothing (quota reached) fails cleanly on `changes === 0` rather
+ * than on a foreign-key error.
+ */
+function answerStatements(db: D1Database, submissionId: string, answers: Answers): D1PreparedStatement[] {
   const statements: D1PreparedStatement[] = [
     db.prepare('DELETE FROM submission_answers WHERE submission_id = ?').bind(submissionId),
   ];
@@ -149,11 +164,14 @@ async function replaceAnswers(db: D1Database, submissionId: string, answers: Ans
     if (value === undefined) continue;
     statements.push(
       db
-        .prepare('INSERT INTO submission_answers (submission_id, question_id, value_json) VALUES (?, ?, ?)')
+        .prepare(
+          `INSERT INTO submission_answers (submission_id, question_id, value_json)
+           SELECT ?1, ?2, ?3 WHERE EXISTS (SELECT 1 FROM submissions WHERE id = ?1)`,
+        )
         .bind(submissionId, qid, JSON.stringify(value)),
     );
   }
-  await db.batch(statements);
+  return statements;
 }
 
 function parseAnswers(raw: unknown): Answers {
@@ -280,6 +298,7 @@ submitRoutes.post('/:slug/:formId/draft', async (c) => {
   const session = await requireSubmitter(c, ctx.event.id);
   if (!session) return c.json({ error: 'unauthenticated' }, 401);
 
+  const db = c.env.DB;
   const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
   const abstractQuestions = ctx.questions.filter((q) => q.section === 'abstract');
   const answers = discardHiddenAnswers(abstractQuestions, parseAnswers(body.answers));
@@ -287,9 +306,10 @@ submitRoutes.post('/:slug/:formId/draft', async (c) => {
 
   let submissionId = typeof body.submission_id === 'string' ? body.submission_id : null;
   if (submissionId) {
-    const owned = await c.env.DB.prepare(
-      `SELECT id FROM submissions WHERE id = ? AND form_id = ? AND submitter_contact_id = ? AND status = 'draft'`,
-    )
+    const owned = await db
+      .prepare(
+        `SELECT id FROM submissions WHERE id = ? AND form_id = ? AND submitter_contact_id = ? AND status = 'draft'`,
+      )
       .bind(submissionId, ctx.form.id, session.contactId)
       .first();
     if (!owned) submissionId = null;
@@ -297,10 +317,11 @@ submitRoutes.post('/:slug/:formId/draft', async (c) => {
   if (!submissionId) {
     // Without multiple-drafts, an existing open draft is reused, not duplicated.
     if (ctx.form.allow_multiple_drafts !== 1) {
-      const existing = await c.env.DB.prepare(
-        `SELECT id FROM submissions WHERE form_id = ? AND submitter_contact_id = ? AND status = 'draft'
-         ORDER BY updated_at DESC LIMIT 1`,
-      )
+      const existing = await db
+        .prepare(
+          `SELECT id FROM submissions WHERE form_id = ? AND submitter_contact_id = ? AND status = 'draft'
+           ORDER BY updated_at DESC LIMIT 1`,
+        )
         .bind(ctx.form.id, session.contactId)
         .first<{ id: string }>();
       if (existing) submissionId = existing.id;
@@ -308,57 +329,68 @@ submitRoutes.post('/:slug/:formId/draft', async (c) => {
   }
 
   const columns = systemColumns(abstractQuestions, answers);
+  const isCreate = submissionId === null;
   if (!submissionId) {
-    if (ctx.limit !== null && (await countForLimit(c.env.DB, ctx.form.id, session.contactId)) >= ctx.limit) {
+    if (ctx.limit !== null && (await countForLimit(db, ctx.form.id, session.contactId)) >= ctx.limit) {
       return c.json({ error: 'limit_reached' }, 409);
     }
     submissionId = crypto.randomUUID();
-    await c.env.DB.prepare(
-      `INSERT INTO submissions (id, event_id, form_id, code, kind, title, description, status,
-         format, level, language, capacity, ceu_credits, client_session_id,
-         submitter_contact_id, source, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?, ?, ?, ?, ?, 'form', ?, ?)`,
-    )
-      .bind(
-        submissionId,
-        ctx.event.id,
-        ctx.form.id,
-        await nextCode(c.env.DB, ctx.event.id),
-        ctx.form.collection_type === 'sessions' ? 'session' : 'abstract',
-        (columns.title as string) ?? 'Untitled draft',
-        (columns.description as string) ?? null,
-        (columns.format as string) ?? null,
-        (columns.level as string) ?? null,
-        (columns.language as string) ?? null,
-        (columns.capacity as number) ?? null,
-        (columns.ceu_credits as number) ?? null,
-        (columns.client_session_id as string) ?? null,
-        session.contactId,
-        ts,
-        ts,
-      )
-      .run();
-  } else {
-    await c.env.DB.prepare(
-      `UPDATE submissions SET title = ?, description = ?, format = ?, level = ?, language = ?,
-         capacity = ?, ceu_credits = ?, client_session_id = ?, updated_at = ?
-       WHERE id = ?`,
-    )
-      .bind(
-        (columns.title as string) ?? 'Untitled draft',
-        (columns.description as string) ?? null,
-        (columns.format as string) ?? null,
-        (columns.level as string) ?? null,
-        (columns.language as string) ?? null,
-        (columns.capacity as number) ?? null,
-        (columns.ceu_credits as number) ?? null,
-        (columns.client_session_id as string) ?? null,
-        ts,
-        submissionId,
-      )
-      .run();
   }
-  await replaceAnswers(c.env.DB, submissionId, answers);
+
+  // Same fused quota-check + code-allocation as the submit path, so a draft
+  // can never mint a duplicate SESS-n either.
+  const head = isCreate
+    ? db
+        .prepare(
+          `INSERT INTO submissions (id, event_id, form_id, code, kind, title, description, status,
+             format, level, language, capacity, ceu_credits, client_session_id,
+             submitter_contact_id, source, created_at, updated_at)
+           SELECT ?1, ?2, ?3, ${nextSessionCodeSql('?2')}, ?4, ?5, ?6, 'draft',
+                  ?7, ?8, ?9, ?10, ?11, ?12, ?13, 'form', ?14, ?14
+           WHERE (SELECT COUNT(*) FROM submissions q
+                  WHERE q.form_id = ?3 AND q.submitter_contact_id = ?13 AND q.status != 'withdrawn') < ?15`,
+        )
+        .bind(
+          submissionId,
+          ctx.event.id,
+          ctx.form.id,
+          ctx.form.collection_type === 'sessions' ? 'session' : 'abstract',
+          (columns.title as string) ?? 'Untitled draft',
+          (columns.description as string) ?? null,
+          (columns.format as string) ?? null,
+          (columns.level as string) ?? null,
+          (columns.language as string) ?? null,
+          (columns.capacity as number) ?? null,
+          (columns.ceu_credits as number) ?? null,
+          (columns.client_session_id as string) ?? null,
+          session.contactId,
+          ts,
+          ctx.limit ?? NO_LIMIT,
+        )
+    : db
+        .prepare(
+          `UPDATE submissions SET title = ?, description = ?, format = ?, level = ?, language = ?,
+             capacity = ?, ceu_credits = ?, client_session_id = ?, updated_at = ?
+           WHERE id = ?`,
+        )
+        .bind(
+          (columns.title as string) ?? 'Untitled draft',
+          (columns.description as string) ?? null,
+          (columns.format as string) ?? null,
+          (columns.level as string) ?? null,
+          (columns.language as string) ?? null,
+          (columns.capacity as number) ?? null,
+          (columns.ceu_credits as number) ?? null,
+          (columns.client_session_id as string) ?? null,
+          ts,
+          submissionId,
+        );
+
+  const results = await db.batch([head, ...answerStatements(db, submissionId, answers)]);
+  if (isCreate && results[0]?.meta.changes === 0) {
+    return c.json({ error: 'limit_reached' }, 409);
+  }
+  await bumpEventRevision(c.env, ctx.event.id);
   return c.json({ submission_id: submissionId });
 });
 
@@ -366,30 +398,197 @@ submitRoutes.post('/:slug/:formId/draft', async (c) => {
 // POST /submit/:slug/:formId/submit — the authoritative submit
 // ---------------------------------------------------------------------------
 
-interface ParticipantInput {
-  email: string;
-  first_name: string;
-  last_name: string;
-  mobile_phone: string;
-  biography: string;
-  role: string;
+/**
+ * A submission an identical retry should resolve to instead of inserting a
+ * second row. D1 has no schema slot for an idempotency key on submissions
+ * (migrations are frozen), so the identity of a retry is its *content*:
+ * same form, same submitter, same title and description, within the window.
+ */
+interface ReplayRow {
+  id: string;
+  code: string;
+  evaluation_plan_id: string | null;
 }
+
+/** A double-click is sub-second; a retried request after a dropped response is
+ *  seconds. Two minutes is generous for both and far short of "I deliberately
+ *  submitted a second proposal with the same title". */
+const REPLAY_WINDOW_MS = 2 * 60 * 1000;
+
+/** SQL predicate shared by the pre-check and the in-batch guard, so the fast
+ *  path and the race path can never disagree about what a duplicate is. */
+const DUPLICATE_PREDICATE = `form_id = ?1 AND submitter_contact_id = ?2
+     AND status NOT IN ('draft', 'withdrawn')
+     AND title = ?3 AND description IS ?4 AND created_at > ?5`;
+
+async function findRecentDuplicate(
+  db: D1Database,
+  formId: string,
+  contactId: string,
+  title: string,
+  description: string | null,
+  cutoffIso: string,
+): Promise<ReplayRow | null> {
+  return db
+    .prepare(
+      `SELECT id, code, evaluation_plan_id FROM submissions
+       WHERE ${DUPLICATE_PREDICATE}
+       ORDER BY created_at DESC LIMIT 1`,
+    )
+    .bind(formId, contactId, title, description, cutoffIso)
+    .first<ReplayRow>();
+}
+
+/** Identity columns a participant section can write onto its contact row. */
+const IDENTITY_FIELD_KEYS = ['first_name', 'last_name', 'email', 'mobile_phone', 'biography'] as const;
+type IdentityKey = (typeof IDENTITY_FIELD_KEYS)[number];
 
 const PARTICIPANT_ROLES = new Set(['speaker', 'co-speaker', 'moderator', 'panelist']);
 
-function parseParticipants(raw: unknown): ParticipantInput[] {
+interface ParticipantInput {
+  role: string;
+  is_primary_contact: boolean;
+  /** every configured participant answer, keyed by question id */
+  answers: Answers;
+  identity: Record<IdentityKey, string>;
+}
+
+const emptyIdentity = (): Record<IdentityKey, string> => ({
+  first_name: '',
+  last_name: '',
+  email: '',
+  mobile_phone: '',
+  biography: '',
+});
+
+/**
+ * Accept the frozen participant payload `{ role, is_primary_contact, answers }`
+ * (answers keyed by question id) and, until FE-5 lands, the legacy flat shape
+ * `{ email, first_name, … }` — the legacy fields are lifted onto the matching
+ * participant questions so both shapes take the same validation path.
+ */
+function normaliseParticipants(raw: unknown, participantQuestions: QuestionDef[]): ParticipantInput[] {
   if (!Array.isArray(raw)) return [];
-  return raw
-    .filter((p): p is Record<string, unknown> => Boolean(p) && typeof p === 'object')
-    .map((p) => ({
-      email: typeof p.email === 'string' ? p.email.trim().toLowerCase() : '',
-      first_name: typeof p.first_name === 'string' ? p.first_name.trim() : '',
-      last_name: typeof p.last_name === 'string' ? p.last_name.trim() : '',
-      mobile_phone: typeof p.mobile_phone === 'string' ? p.mobile_phone.trim() : '',
-      biography: typeof p.biography === 'string' ? p.biography : '',
+  const questionByFieldKey = new Map<string, QuestionDef>();
+  for (const q of participantQuestions) {
+    if (q.field_key && !questionByFieldKey.has(q.field_key)) questionByFieldKey.set(q.field_key, q);
+  }
+  const out: ParticipantInput[] = [];
+  for (const entry of raw) {
+    if (!entry || typeof entry !== 'object') continue;
+    const p = entry as Record<string, unknown>;
+    const modern = p.answers !== null && typeof p.answers === 'object';
+    const answers = modern ? parseAnswers(p.answers) : {};
+    const identity = emptyIdentity();
+    if (!modern) {
+      for (const key of IDENTITY_FIELD_KEYS) {
+        const value = typeof p[key] === 'string' ? (p[key] as string) : '';
+        if (!value) continue;
+        identity[key] = value;
+        const q = questionByFieldKey.get(key);
+        if (q) answers[q.id] = value;
+      }
+    }
+    out.push({
       role: typeof p.role === 'string' && PARTICIPANT_ROLES.has(p.role) ? p.role : 'speaker',
-    }))
-    .filter((p) => p.email !== '');
+      is_primary_contact: p.is_primary_contact === true,
+      answers,
+      identity,
+    });
+  }
+  return out;
+}
+
+/** Pull the identity columns back out of a validated participant answer map. */
+function identityFromAnswers(
+  participantQuestions: QuestionDef[],
+  answers: Answers,
+  fallback: Record<IdentityKey, string>,
+): Record<IdentityKey, string> {
+  const identity = { ...fallback };
+  for (const q of participantQuestions) {
+    const key = q.field_key as IdentityKey | undefined;
+    if (!key || !IDENTITY_FIELD_KEYS.includes(key)) continue;
+    const value = answers[q.id];
+    if (typeof value === 'string') identity[key] = value.trim();
+  }
+  identity.email = identity.email.toLowerCase();
+  return identity;
+}
+
+/** `assign_track_ids` rides on the routing action object as an optional extra
+ *  (RoutingActions is frozen); read it off the matched rules by hand. */
+type MultiTrackActions = RoutingActions & { assign_track_ids?: unknown };
+
+function routingTrackIds(config: RoutingConfig | null, routing: RoutingOutcome): string[] {
+  const out: string[] = [];
+  const collect = (actions: MultiTrackActions | undefined) => {
+    const list = actions?.assign_track_ids;
+    if (!Array.isArray(list)) return;
+    for (const value of list) {
+      if (typeof value === 'string' && value !== '' && !out.includes(value)) out.push(value);
+    }
+  };
+  for (const rule of config?.rules ?? []) {
+    if (routing.applied_rule_ids.includes(rule.id)) collect(rule.then as MultiTrackActions);
+  }
+  if (routing.used_fallback) collect(config?.fallback as MultiTrackActions | undefined);
+  return out;
+}
+
+function parseIdList(json: string | null): string[] {
+  if (!json) return [];
+  try {
+    const parsed = JSON.parse(json) as unknown;
+    return Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
+interface Recipient {
+  id: string;
+  email: string;
+  name: string;
+}
+
+/** Notification recipients must be *this event's* people (item 14): configured
+ *  admin notifies additionally need a staff role, routing notifies only need a
+ *  contact row with an address. Cross-event ids are silently dropped. */
+async function resolveRecipients(
+  db: D1Database,
+  eventId: string,
+  adminIds: string[],
+  routingIds: string[],
+): Promise<Recipient[]> {
+  const byId = new Map<string, Recipient>();
+  const nameExpr = `TRIM(COALESCE(c.first_name, '') || ' ' || COALESCE(c.last_name, ''))`;
+  if (adminIds.length > 0) {
+    const placeholders = adminIds.map(() => '?').join(', ');
+    const { results } = await db
+      .prepare(
+        `SELECT c.id, c.email, ${nameExpr} AS name FROM contacts c
+         JOIN event_users eu ON eu.contact_id = c.id AND eu.event_id = c.event_id
+         WHERE c.event_id = ? AND c.id IN (${placeholders})
+           AND eu.role IN ('owner', 'admin', 'reviewer')
+           AND c.email IS NOT NULL AND c.email != ''`,
+      )
+      .bind(eventId, ...adminIds)
+      .all<Recipient>();
+    for (const row of results) byId.set(row.id, row);
+  }
+  if (routingIds.length > 0) {
+    const placeholders = routingIds.map(() => '?').join(', ');
+    const { results } = await db
+      .prepare(
+        `SELECT c.id, c.email, ${nameExpr} AS name FROM contacts c
+         WHERE c.event_id = ? AND c.id IN (${placeholders}) AND c.email IS NOT NULL AND c.email != ''`,
+      )
+      .bind(eventId, ...routingIds)
+      .all<Recipient>();
+    for (const row of results) byId.set(row.id, row);
+  }
+  return [...byId.values()];
 }
 
 submitRoutes.post('/:slug/:formId/submit', async (c) => {
@@ -402,6 +601,12 @@ submitRoutes.post('/:slug/:formId/submit', async (c) => {
   const db = c.env.DB;
   const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
   const abstractQuestions = ctx.questions.filter((q) => q.section === 'abstract');
+  const participantQuestions = ctx.questions.filter((q) => q.section === 'participant');
+
+  // -------------------------------------------------------------------------
+  // 1. Validate and normalise the COMPLETE request. Nothing below this block
+  //    reads the database for a decision the batch depends on.
+  // -------------------------------------------------------------------------
 
   // Authoritative pass: hidden answers discarded, then required/max validated.
   const answers = discardHiddenAnswers(abstractQuestions, parseAnswers(body.answers));
@@ -410,70 +615,136 @@ submitRoutes.post('/:slug/:formId/submit', async (c) => {
     return c.json({ error: 'validation_failed', errors: validation }, 400);
   }
 
-  // Participants: the signed-in submitter is always participant 1 / primary.
-  let participants = parseParticipants(body.participants);
   const submitterContact = await db
     .prepare('SELECT email, first_name, last_name, mobile_phone, biography FROM contacts WHERE id = ?')
     .bind(session.contactId)
     .first<{ email: string; first_name: string | null; last_name: string | null; mobile_phone: string | null; biography: string | null }>();
   if (!submitterContact) return c.json({ error: 'unauthenticated' }, 401);
+
+  // Participants: the signed-in submitter is always participant 1 / primary.
+  let participants = normaliseParticipants(body.participants, participantQuestions);
   if (ctx.form.collect_participants === 1) {
-    const submitterIndex = participants.findIndex((p) => p.email === submitterContact.email);
+    if (participants.length > MAX_PARTICIPANTS_PER_SUBMISSION) {
+      return c.json(
+        { error: 'participants_invalid', detail: `at most ${MAX_PARTICIPANTS_PER_SUBMISSION} participants per submission` },
+        400,
+      );
+    }
+
+    // Per-participant conditional visibility + the shared validators, over the
+    // configured participant questions (sweep item P1-7).
+    const validated: ParticipantInput[] = [];
+    for (const [index, p] of participants.entries()) {
+      const kept = discardHiddenAnswers(participantQuestions, p.answers);
+      const errors = validateAnswers(participantQuestions, kept);
+      if (errors.length > 0) {
+        return c.json(
+          { error: 'validation_failed', errors: errors.map((e) => ({ ...e, participant_index: index })) },
+          400,
+        );
+      }
+      validated.push({ ...p, answers: kept, identity: identityFromAnswers(participantQuestions, kept, p.identity) });
+    }
+    participants = validated;
+
+    const submitterIndex = participants.findIndex((p) => p.identity.email === submitterContact.email);
     if (submitterIndex > 0) {
       participants = [participants[submitterIndex]!, ...participants.filter((_, i) => i !== submitterIndex)];
     } else if (submitterIndex === -1) {
-      participants = [
-        {
-          email: submitterContact.email,
-          first_name: submitterContact.first_name ?? '',
-          last_name: submitterContact.last_name ?? '',
-          mobile_phone: submitterContact.mobile_phone ?? '',
-          biography: submitterContact.biography ?? '',
-          role: 'speaker',
-        },
-        ...participants,
-      ];
+      const identity = emptyIdentity();
+      identity.email = submitterContact.email;
+      identity.first_name = submitterContact.first_name ?? '';
+      identity.last_name = submitterContact.last_name ?? '';
+      identity.mobile_phone = submitterContact.mobile_phone ?? '';
+      identity.biography = submitterContact.biography ?? '';
+      participants = [{ role: 'speaker', is_primary_contact: true, answers: {}, identity }, ...participants];
+      if (participants.length > MAX_PARTICIPANTS_PER_SUBMISSION) {
+        return c.json(
+          { error: 'participants_invalid', detail: `at most ${MAX_PARTICIPANTS_PER_SUBMISSION} participants per submission` },
+          400,
+        );
+      }
     }
+
     const roleConfig = parseParticipantRoles(ctx.form.participant_roles);
-    const allowedRoles = new Set(roleConfig.map((cfg) => cfg.role));
+    const allowedRoles = new Set<string>(roleConfig.map((cfg) => cfg.role));
     const seenEmails = new Set<string>();
-    for (const participant of participants) {
-      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(participant.email)) {
+    for (const p of participants) {
+      const { email, first_name, last_name, biography } = p.identity;
+      if (!isValidEmailShape(email)) {
         return c.json({ error: 'participants_invalid', detail: 'every participant needs a valid email' }, 400);
       }
-      if (seenEmails.has(participant.email)) {
-        return c.json({ error: 'participants_invalid', detail: `duplicate participant ${participant.email}` }, 400);
+      if (seenEmails.has(email)) {
+        return c.json({ error: 'participants_invalid', detail: `duplicate participant ${email}` }, 400);
       }
-      seenEmails.add(participant.email);
-      if (!participant.first_name || !participant.last_name) {
+      seenEmails.add(email);
+      if (!first_name || !last_name) {
         return c.json({ error: 'participants_invalid', detail: 'first and last name are required' }, 400);
       }
-      if (participant.first_name.length > 255 || participant.last_name.length > 255 || participant.biography.length > 5000) {
+      if (first_name.length > 255 || last_name.length > 255 || biography.length > 5000) {
         return c.json({ error: 'participants_invalid', detail: 'participant profile exceeds its character limit' }, 400);
       }
-      if (!allowedRoles.has(participant.role as typeof roleConfig[number]['role'])) {
-        return c.json({ error: 'participants_invalid', detail: `role ${participant.role} is not enabled for this form` }, 400);
+      if (!allowedRoles.has(p.role)) {
+        return c.json({ error: 'participants_invalid', detail: `role ${p.role} is not enabled for this form` }, 400);
       }
     }
     for (const cfg of roleConfig) {
       const count = participants.filter((p) => p.role === cfg.role).length;
       if (count < cfg.min) return c.json({ error: 'participants_invalid', detail: `at least ${cfg.min} ${cfg.role}` }, 400);
-      if (cfg.max !== null && count > cfg.max) return c.json({ error: 'participants_invalid', detail: `at most ${cfg.max} ${cfg.role}` }, 400);
+      if (cfg.max !== null && count > cfg.max) {
+        return c.json({ error: 'participants_invalid', detail: `at most ${cfg.max} ${cfg.role}` }, 400);
+      }
     }
   } else {
     participants = [];
   }
 
+  // System columns are needed early: they are what a content-identical retry
+  // is matched on.
+  const columns = systemColumns(abstractQuestions, answers);
+  const title = (columns.title as string) ?? 'Untitled';
+
   // Draft being promoted, if any (it does not count against the limit).
+  // A retry of the *same* promote arrives with the same submission_id but the
+  // draft is no longer a draft — that is a replay, not a second submission
+  // (sweep acceptance: "an identical retry returns the same logical result
+  // without a duplicate email").
   let submissionId = typeof body.submission_id === 'string' ? body.submission_id : null;
+  let replayOf: ReplayRow | null = null;
   if (submissionId) {
     const owned = await db
-      .prepare(`SELECT id FROM submissions WHERE id = ? AND form_id = ? AND submitter_contact_id = ? AND status = 'draft'`)
+      .prepare(
+        `SELECT id, code, status, evaluation_plan_id FROM submissions
+         WHERE id = ? AND form_id = ? AND submitter_contact_id = ?`,
+      )
       .bind(submissionId, ctx.form.id, session.contactId)
-      .first();
-    if (!owned) submissionId = null;
+      .first<ReplayRow & { status: string }>();
+    if (!owned || owned.status === 'withdrawn') submissionId = null;
+    else if (owned.status !== 'draft') {
+      replayOf = { id: owned.id, code: owned.code, evaluation_plan_id: owned.evaluation_plan_id };
+      submissionId = null;
+    }
   }
-  if (!submissionId && ctx.limit !== null) {
+  const isCreate = submissionId === null && replayOf === null;
+  // Only the submitter's own draft reaches the update path here, and promoting
+  // a draft is the submission's *first* appearance to organisers — so it
+  // notifies as a create even though the row already existed. (Edits after
+  // acceptance come through the portal's own route.)
+  const notifyAsCreate = isCreate || submissionId !== null;
+
+  // Retries that lost their submission_id (a dropped response, a double-click
+  // on a fresh form) are caught by content: same form, same submitter, same
+  // title and description, inside a short window. Different content always
+  // means a different submission.
+  const dupCutoff = new Date(Date.now() - REPLAY_WINDOW_MS).toISOString();
+  const dupDescription = (columns.description as string) ?? null;
+  if (isCreate) {
+    replayOf = await findRecentDuplicate(db, ctx.form.id, session.contactId, title, dupDescription, dupCutoff);
+  }
+
+  // Friendly pre-check; the batch re-checks the same predicate atomically so a
+  // racing request cannot squeeze past it.
+  if (isCreate && replayOf === null && ctx.limit !== null) {
     if ((await countForLimit(db, ctx.form.id, session.contactId)) >= ctx.limit) {
       return c.json({ error: 'limit_reached' }, 409);
     }
@@ -488,26 +759,62 @@ submitRoutes.post('/:slug/:formId/submit', async (c) => {
   }
   const routing = applyRouting(routingConfig, answers);
 
+  // A replay resolves to the row that already exists — same code, same portal
+  // link, no second email (the confirmation is keyed on the submission id, so
+  // even a re-render would be a duplicate in message_log).
+  const replayResponse = (row: ReplayRow) =>
+    c.json({
+      ok: true,
+      code: row.code,
+      submission_id: row.id,
+      portal_url: `/portal/${ctx.event.slug}`,
+      auto_redirect: ctx.form.auto_redirect_to_portal === 1,
+      success_message: sanitizeRichHtml(ctx.form.success_message),
+      replayed: true,
+      routing: {
+        evaluation_plan_id: row.evaluation_plan_id,
+        applied_rule_ids: routing.applied_rule_ids,
+        used_fallback: routing.used_fallback,
+      },
+    });
+  if (replayOf) return replayResponse(replayOf);
+
   // Resolve configured references inside this event. Routing JSON is editable
   // input, so foreign tenant IDs must not be allowed to cross-link records.
-  let trackId: string | null = null;
-  if (routing.set_track_id) {
-    const row = await db
-      .prepare('SELECT id FROM tracks WHERE id = ? AND event_id = ?')
-      .bind(routing.set_track_id, ctx.event.id)
-      .first<{ id: string }>();
-    trackId = row?.id ?? null;
+  const trackCandidates: string[] = [];
+  const pushCandidate = (id: string | undefined) => {
+    if (id && !trackCandidates.includes(id)) trackCandidates.push(id);
+  };
+  pushCandidate(routing.set_track_id);
+  for (const id of routingTrackIds(routingConfig, routing)) pushCandidate(id);
+
+  const resolvedTrackIds: string[] = [];
+  if (trackCandidates.length > 0) {
+    const placeholders = trackCandidates.map(() => '?').join(', ');
+    const { results } = await db
+      .prepare(`SELECT id FROM tracks WHERE event_id = ? AND id IN (${placeholders})`)
+      .bind(ctx.event.id, ...trackCandidates)
+      .all<{ id: string }>();
+    const valid = new Set(results.map((r) => r.id));
+    for (const id of trackCandidates) if (valid.has(id) && !resolvedTrackIds.includes(id)) resolvedTrackIds.push(id);
   }
-  if (!trackId) {
-    const trackName = trackAnswer(abstractQuestions, answers);
-    if (trackName) {
-      const row = await db
-        .prepare('SELECT id FROM tracks WHERE event_id = ? AND name = ?')
-        .bind(ctx.event.id, trackName)
-        .first<{ id: string }>();
-      trackId = row?.id ?? null;
+  // A multiselect track question resolves EVERY selected value, not just one.
+  const trackNames = trackAnswers(abstractQuestions, answers);
+  if (trackNames.length > 0) {
+    const placeholders = trackNames.map(() => '?').join(', ');
+    const { results } = await db
+      .prepare(`SELECT id, name FROM tracks WHERE event_id = ? AND name IN (${placeholders})`)
+      .bind(ctx.event.id, ...trackNames)
+      .all<{ id: string; name: string }>();
+    const byName = new Map(results.map((r) => [r.name, r.id]));
+    for (const name of trackNames) {
+      const id = byName.get(name);
+      if (id && !resolvedTrackIds.includes(id)) resolvedTrackIds.push(id);
     }
   }
+  const routedTrackId = routing.set_track_id && resolvedTrackIds.includes(routing.set_track_id)
+    ? routing.set_track_id
+    : null;
 
   let evaluationPlanId: string | null = null;
   if (routing.assign_evaluation_plan_id) {
@@ -539,168 +846,330 @@ submitRoutes.post('/:slug/:formId/submit', async (c) => {
   }
 
   const routableStatuses = new Set(['pending', 'accept_queue', 'decline_queue']);
-  const status = routing.set_status && routableStatuses.has(routing.set_status)
-    ? routing.set_status
-    : 'pending';
-  const columns = systemColumns(abstractQuestions, answers);
-  const ts = new Date().toISOString();
-  const title = (columns.title as string) ?? 'Untitled';
-  let code: string;
+  const status = routing.set_status && routableStatuses.has(routing.set_status) ? routing.set_status : 'pending';
 
+  // Existing row state the update path needs (primary track is sticky).
+  let existing: { code: string; track_id: string | null } | null = null;
   if (submissionId) {
-    const existing = await db
-      .prepare('SELECT code FROM submissions WHERE id = ?')
-      .bind(submissionId)
-      .first<{ code: string }>();
-    code = existing?.code ?? (await nextCode(db, ctx.event.id));
-    await db
-      .prepare(
-        `UPDATE submissions SET title = ?, description = ?, status = ?, format = ?, level = ?, language = ?,
-           capacity = ?, ceu_credits = ?, client_session_id = ?, track_id = ?, evaluation_plan_id = ?, updated_at = ?
-         WHERE id = ?`,
-      )
-      .bind(
-        title,
-        (columns.description as string) ?? null,
-        status,
-        (columns.format as string) ?? null,
-        (columns.level as string) ?? null,
-        (columns.language as string) ?? null,
-        (columns.capacity as number) ?? null,
-        (columns.ceu_credits as number) ?? null,
-        (columns.client_session_id as string) ?? null,
-        trackId,
-        evaluationPlanId,
-        ts,
-        submissionId,
-      )
-      .run();
-  } else {
-    submissionId = crypto.randomUUID();
-    code = await nextCode(db, ctx.event.id);
-    await db
-      .prepare(
-        `INSERT INTO submissions (id, event_id, form_id, code, kind, title, description, status,
-           format, level, language, capacity, ceu_credits, client_session_id, track_id,
-           evaluation_plan_id, submitter_contact_id, source, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'form', ?, ?)`,
-      )
-      .bind(
-        submissionId,
-        ctx.event.id,
-        ctx.form.id,
-        code,
-        ctx.form.collection_type === 'sessions' ? 'session' : 'abstract',
-        title,
-        (columns.description as string) ?? null,
-        status,
-        (columns.format as string) ?? null,
-        (columns.level as string) ?? null,
-        (columns.language as string) ?? null,
-        (columns.capacity as number) ?? null,
-        (columns.ceu_credits as number) ?? null,
-        (columns.client_session_id as string) ?? null,
-        trackId,
-        evaluationPlanId,
-        session.contactId,
-        ts,
-        ts,
-      )
-      .run();
+    existing = await db
+      .prepare('SELECT code, track_id FROM submissions WHERE id = ? AND event_id = ?')
+      .bind(submissionId, ctx.event.id)
+      .first<{ code: string; track_id: string | null }>();
   }
+  // Primary-track semantics: an explicit routing set_track_id always wins,
+  // otherwise the first resolved track fills a still-empty primary slot.
+  const primaryTrackId = routedTrackId ?? existing?.track_id ?? resolvedTrackIds[0] ?? null;
+  const primaryTrackName = primaryTrackId
+    ? (
+        await db
+          .prepare('SELECT name FROM tracks WHERE id = ? AND event_id = ?')
+          .bind(primaryTrackId, ctx.event.id)
+          .first<{ name: string }>()
+      )?.name ?? null
+    : null;
 
-  await replaceAnswers(db, submissionId, answers);
+  const notifyIds = parseIdList(
+    notifyAsCreate ? ctx.form.notify_admins_on_create : ctx.form.notify_admins_on_update,
+  );
+  const recipients = await resolveRecipients(db, ctx.event.id, notifyIds, routing.notify_contact_ids);
+  const submitterName =
+    `${submitterContact.first_name ?? ''} ${submitterContact.last_name ?? ''}`.trim() || submitterContact.email;
 
-  // Tags
-  const tagStatements: D1PreparedStatement[] = [
-    db.prepare('DELETE FROM submission_tags WHERE submission_id = ?').bind(submissionId),
-  ];
-  for (const tagId of tagIds) {
-    tagStatements.push(
-      db.prepare('INSERT OR IGNORE INTO submission_tags (submission_id, tag_id) VALUES (?, ?)').bind(submissionId, tagId),
-    );
-  }
-  await db.batch(tagStatements);
+  // -------------------------------------------------------------------------
+  // 2. Build the batch. Everything below is prepared, nothing is executed.
+  // -------------------------------------------------------------------------
 
-  // Participants: upsert contacts by email, then replace the participant rows.
-  const kdb = createDb(db);
-  const participantStatements: D1PreparedStatement[] = [
-    db.prepare('DELETE FROM submission_participants WHERE submission_id = ?').bind(submissionId),
-  ];
-  let position = 1;
-  for (const p of participants) {
-    const existingContact = await kdb.contacts.getByEmail(ctx.event.id, p.email);
-    const contact = existingContact ?? await kdb.contacts.upsertByEmail(ctx.event.id, p.email);
-    // A submitter may initialise a new co-speaker record, but must not
-    // overwrite another existing speaker's self-managed profile by knowing
-    // only their email address.
-    const updates: string[] = [];
-    const params: unknown[] = [];
-    for (const [column, value] of [
-      ['first_name', p.first_name],
-      ['last_name', p.last_name],
-      ['mobile_phone', p.mobile_phone],
-      ['biography', p.biography],
-    ] as const) {
-      if (value) {
-        updates.push(`${column} = ?`);
-        params.push(value);
+  const newId = submissionId ?? crypto.randomUUID();
+
+  const buildBatch = async (
+    code: string,
+  ): Promise<{ statements: D1PreparedStatement[]; emails: PreparedEmail[] }> => {
+    const ts = new Date().toISOString();
+    const statements: D1PreparedStatement[] = [];
+    const emails: PreparedEmail[] = [];
+
+    if (isCreate) {
+      // The one statement that decides whether this submission exists: the
+      // quota check, the code allocation and the insert are a single
+      // expression, so no concurrent create can interleave between them
+      // (D1 is a single writer; UNIQUE (event_id, code) is the backstop).
+      statements.push(
+        db
+          .prepare(
+            `INSERT INTO submissions (id, event_id, form_id, code, kind, title, description, status,
+               format, level, language, capacity, ceu_credits, client_session_id, track_id,
+               evaluation_plan_id, submitter_contact_id, source, created_at, updated_at)
+             SELECT ?1, ?2, ?3, ${nextSessionCodeSql('?2')}, ?4, ?5, ?6, ?7,
+                    ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, 'form', ?17, ?17
+             WHERE (SELECT COUNT(*) FROM submissions q
+                    WHERE q.form_id = ?3 AND q.submitter_contact_id = ?16 AND q.status != 'withdrawn') < ?18
+               AND ${nextSessionCodeSql('?2')} = ?19
+               AND NOT EXISTS (SELECT 1 FROM submissions d
+                               WHERE d.form_id = ?3 AND d.submitter_contact_id = ?16
+                                 AND d.status NOT IN ('draft', 'withdrawn')
+                                 AND d.title = ?5 AND d.description IS ?6 AND d.created_at > ?20)`,
+          )
+          .bind(
+            newId,
+            ctx.event.id,
+            ctx.form.id,
+            ctx.form.collection_type === 'sessions' ? 'session' : 'abstract',
+            title,
+            (columns.description as string) ?? null,
+            status,
+            (columns.format as string) ?? null,
+            (columns.level as string) ?? null,
+            (columns.language as string) ?? null,
+            (columns.capacity as number) ?? null,
+            (columns.ceu_credits as number) ?? null,
+            (columns.client_session_id as string) ?? null,
+            primaryTrackId,
+            evaluationPlanId,
+            session.contactId,
+            ts,
+            ctx.limit ?? NO_LIMIT,
+            code,
+            dupCutoff,
+          ),
+      );
+    } else {
+      statements.push(
+        db
+          .prepare(
+            `UPDATE submissions SET title = ?2, description = ?3, status = ?4, format = ?5, level = ?6,
+               language = ?7, capacity = ?8, ceu_credits = ?9, client_session_id = ?10, track_id = ?11,
+               evaluation_plan_id = ?12, updated_at = ?13
+             WHERE id = ?1 AND event_id = ?14`,
+          )
+          .bind(
+            newId,
+            title,
+            (columns.description as string) ?? null,
+            status,
+            (columns.format as string) ?? null,
+            (columns.level as string) ?? null,
+            (columns.language as string) ?? null,
+            (columns.capacity as number) ?? null,
+            (columns.ceu_credits as number) ?? null,
+            (columns.client_session_id as string) ?? null,
+            primaryTrackId,
+            evaluationPlanId,
+            ts,
+            ctx.event.id,
+          ),
+      );
+    }
+
+    statements.push(...answerStatements(db, newId, answers));
+
+    // Tags
+    statements.push(db.prepare('DELETE FROM submission_tags WHERE submission_id = ?').bind(newId));
+    for (const tagId of tagIds) {
+      statements.push(
+        db
+          .prepare(
+            `INSERT OR IGNORE INTO submission_tags (submission_id, tag_id)
+             SELECT ?1, ?2 WHERE EXISTS (SELECT 1 FROM submissions WHERE id = ?1)`,
+          )
+          .bind(newId, tagId),
+      );
+    }
+
+    // Multi-track join (authoritative set; submissions.track_id stays primary).
+    statements.push(db.prepare('DELETE FROM submission_tracks WHERE submission_id = ?').bind(newId));
+    const trackSet = primaryTrackId ? [primaryTrackId, ...resolvedTrackIds] : resolvedTrackIds;
+    for (const trackId of new Set(trackSet)) {
+      statements.push(
+        db
+          .prepare(
+            `INSERT OR IGNORE INTO submission_tracks (submission_id, track_id)
+             SELECT ?1, ?2 WHERE EXISTS (SELECT 1 FROM submissions WHERE id = ?1)`,
+          )
+          .bind(newId, trackId),
+      );
+    }
+
+    // Participants: contacts are upserted *inside* the transaction, then the
+    // participant rows resolve their contact ids from the same batch.
+    statements.push(db.prepare('DELETE FROM submission_participants WHERE submission_id = ?').bind(newId));
+    let position = 1;
+    for (const p of participants) {
+      const own = p.identity.email === submitterContact.email;
+      const orNull = (v: string) => (v === '' ? null : v);
+      // A submitter may initialise a new co-speaker record, but must not
+      // overwrite another existing speaker's self-managed profile by knowing
+      // only their email address — hence the two COALESCE orders.
+      const merge = own
+        ? `first_name = COALESCE(excluded.first_name, contacts.first_name),
+           last_name = COALESCE(excluded.last_name, contacts.last_name),
+           mobile_phone = COALESCE(excluded.mobile_phone, contacts.mobile_phone),
+           biography = COALESCE(excluded.biography, contacts.biography)`
+        : `first_name = COALESCE(contacts.first_name, excluded.first_name),
+           last_name = COALESCE(contacts.last_name, excluded.last_name),
+           mobile_phone = COALESCE(contacts.mobile_phone, excluded.mobile_phone),
+           biography = COALESCE(contacts.biography, excluded.biography)`;
+      statements.push(
+        db
+          .prepare(
+            `INSERT INTO contacts (id, event_id, email, first_name, last_name, mobile_phone, biography, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)
+             ON CONFLICT (event_id, email) DO UPDATE SET ${merge}, updated_at = ?8`,
+          )
+          .bind(
+            crypto.randomUUID(),
+            ctx.event.id,
+            p.identity.email,
+            orNull(p.identity.first_name),
+            orNull(p.identity.last_name),
+            orNull(p.identity.mobile_phone),
+            orNull(p.identity.biography),
+            ts,
+          ),
+      );
+      statements.push(
+        db
+          .prepare(
+            `INSERT INTO submission_participants
+               (id, submission_id, contact_id, role, position, is_primary_contact, confirmed_at, answers_json)
+             SELECT ?1, ?2, c.id, ?3, ?4, ?5, ?6, ?7 FROM contacts c
+             WHERE c.event_id = ?8 AND c.email = ?9
+               AND EXISTS (SELECT 1 FROM submissions s WHERE s.id = ?2)`,
+          )
+          .bind(
+            crypto.randomUUID(),
+            newId,
+            p.role,
+            position,
+            own ? 1 : 0,
+            own ? ts : null,
+            JSON.stringify(p.answers),
+            ctx.event.id,
+            p.identity.email,
+          ),
+      );
+      position += 1;
+    }
+    if (ctx.form.collect_participants !== 1) {
+      // Still record the submitter as the speaker so the anchor filter works.
+      statements.push(
+        db
+          .prepare(
+            `INSERT INTO submission_participants
+               (id, submission_id, contact_id, role, position, is_primary_contact, confirmed_at)
+             SELECT ?1, ?2, ?3, 'speaker', 1, 1, ?4
+             WHERE EXISTS (SELECT 1 FROM submissions WHERE id = ?2)`,
+          )
+          .bind(crypto.randomUUID(), newId, session.contactId, ts),
+      );
+    }
+
+    // Confirmation email (must-have, docs/04 §2.6). Its {{portal_url}} is a
+    // purpose-bound single-use magic link minted in the same transaction
+    // (sweep item P0-3), so opening it in a fresh browser authenticates.
+    // Version stays 1 so a double-submit cannot double-send.
+    if (ctx.form.confirmation_email_enabled === 1) {
+      const minted = await mintToken(db, {
+        contactId: session.contactId,
+        eventId: ctx.event.id,
+        purpose: 'submission-confirm',
+        ttlSeconds: CONFIRM_TTL_SECONDS,
+        redirectTo: `/portal/${ctx.event.slug}`,
+      });
+      const prepared = await prepareTemplated(db, {
+        templateKey: 'submission_confirmation',
+        eventId: ctx.event.id,
+        contactId: session.contactId,
+        toEmail: submitterContact.email,
+        entityId: newId,
+        version: 1,
+        context: {
+          event: { name: ctx.event.name },
+          submission: { title, code },
+          portal_url: `${c.env.APP_URL}/auth/callback?t=${minted.raw}`,
+        },
+      });
+      if (prepared) {
+        statements.push(minted.statement, ...prepared.statements);
+        emails.push(prepared);
       }
     }
-    if (updates.length > 0 && (!existingContact || contact.id === session.contactId)) {
-      await db
-        .prepare(`UPDATE contacts SET ${updates.join(', ')}, updated_at = ? WHERE id = ?`)
-        .bind(...params, ts, contact.id)
-        .run();
-    }
-    participantStatements.push(
-      db
-        .prepare(
-          `INSERT INTO submission_participants (id, submission_id, contact_id, role, position, is_primary_contact, confirmed_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        )
-        .bind(
-          crypto.randomUUID(),
-          submissionId,
-          contact.id,
-          p.role,
-          position,
-          contact.id === session.contactId ? 1 : 0,
-          contact.id === session.contactId ? ts : null,
-        ),
-    );
-    position += 1;
-  }
-  if (ctx.form.collect_participants !== 1) {
-    // Still record the submitter as the speaker so the anchor filter works.
-    participantStatements.push(
-      db
-        .prepare(
-          `INSERT INTO submission_participants (id, submission_id, contact_id, role, position, is_primary_contact, confirmed_at)
-           VALUES (?, ?, ?, 'speaker', 1, 1, ?)`,
-        )
-        .bind(crypto.randomUUID(), submissionId, session.contactId, ts),
-    );
-  }
-  await db.batch(participantStatements);
 
-  // Confirmation email (must-have, docs/04 §2.6) through the template
-  // pipeline: message_log row, outbox retry, immediate attempt — idempotent
-  // on the submission id so a double-submit cannot double-send.
-  if (ctx.form.confirmation_email_enabled === 1) {
-    await sendTemplated(c, {
-      templateKey: 'submission_confirmation',
-      eventId: ctx.event.id,
-      contactId: session.contactId,
-      toEmail: submitterContact.email,
-      entityId: submissionId,
-      context: {
-        event: { name: ctx.event.name },
-        submission: { title, code },
-        portal_url: `${c.env.APP_URL}/portal/${ctx.event.slug}`,
-      },
-    });
+    // Admin notifications (item 14). Create notifies once per submission;
+    // each edit renotifies once, keyed on the new updated_at.
+    if (recipients.length > 0) {
+      const templateKey = notifyAsCreate ? 'submission_received_admin' : 'submission_updated_admin';
+      const version = notifyAsCreate ? 1 : ts;
+      for (const recipient of recipients) {
+        const prepared = await prepareTemplated(db, {
+          templateKey,
+          eventId: ctx.event.id,
+          contactId: recipient.id,
+          toEmail: recipient.email,
+          entityId: newId,
+          version,
+          context: {
+            event: { name: ctx.event.name },
+            submission: { title, code, track_line: primaryTrackName ? ` — ${primaryTrackName}` : '' },
+            submitter: { name: submitterName, email: submitterContact.email },
+            admin_url: `${c.env.APP_URL}/app?v=workspace&tab=submissions&rec=${newId}`,
+          },
+        });
+        if (prepared) {
+          statements.push(...prepared.statements);
+          emails.push(prepared);
+        }
+      }
+    }
+
+    return { statements, emails };
+  };
+
+  // -------------------------------------------------------------------------
+  // 3. Commit. One batch per attempt, with defensive retries on the code
+  //    backstop; a rolled-back attempt leaves no token or email behind.
+  // -------------------------------------------------------------------------
+
+  let code = existing?.code ?? (await peekNextSessionCode(db, ctx.event.id));
+  let emails: PreparedEmail[] = [];
+  let committed = false;
+  // The confirmation email quotes the code, so the code has to be known before
+  // the batch is built; the batch re-asserts the allocator still agrees. A
+  // racing create invalidates that assertion rather than mis-stating the code,
+  // and we simply rebuild — a handful of attempts covers any realistic burst.
+  const MAX_ATTEMPTS = 4;
+  for (let attempt = 0; attempt < MAX_ATTEMPTS && !committed; attempt += 1) {
+    const built = await buildBatch(code);
+    let results: D1Result[] | null = null;
+    try {
+      results = await db.batch(built.statements);
+    } catch (err) {
+      if (!isCreate || !isSubmissionCodeCollision(err)) throw err;
+    }
+    if (results && (!isCreate || results[0]?.meta.changes !== 0)) {
+      emails = built.emails;
+      committed = true;
+      break;
+    }
+    // Nothing was written. Either a racing twin of this request already
+    // created the row, the quota closed underneath us, or another create took
+    // the code this batch reserved — re-read and try again.
+    if (isCreate) {
+      const dup = await findRecentDuplicate(db, ctx.form.id, session.contactId, title, dupDescription, dupCutoff);
+      if (dup) return replayResponse(dup);
+    }
+    if (isCreate && ctx.limit !== null && (await countForLimit(db, ctx.form.id, session.contactId)) >= ctx.limit) {
+      return c.json({ error: 'limit_reached' }, 409);
+    }
+    code = await peekNextSessionCode(db, ctx.event.id);
   }
+  if (!committed) {
+    return c.json({ error: 'conflict', detail: 'submission could not be allocated a code — please retry' }, 409);
+  }
+
+  submissionId = newId;
+  await bumpEventRevision(c.env, ctx.event.id);
+  // Enqueue-after-commit: the rows are durable, now try the provider once.
+  for (const prepared of emails) await attemptImmediate(c, prepared);
 
   return c.json({
     ok: true,

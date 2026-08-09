@@ -1,5 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
+  discardHiddenAnswers,
+  isValidEmailShape,
+  isValidUrlShape,
+  MAX_PARTICIPANTS_PER_SUBMISSION,
   parseParticipantRoles,
   validateAnswers,
   visibleQuestionIds,
@@ -7,6 +11,7 @@ import {
   type AnswerValue,
   type ParticipantRoleConfig,
   type QuestionDef,
+  type ValidationError,
 } from '@kms/core'
 
 /**
@@ -54,12 +59,43 @@ export interface SubmitBootstrap {
 }
 
 interface ParticipantDraft {
-  email: string
-  first_name: string
-  last_name: string
-  mobile_phone: string
-  biography: string
   role: string
+  is_primary_contact: boolean
+  answers: Answers
+}
+
+/** Questions of type 'file' have no upload control on this page (docs/04 §5
+ * — headshots/attachments are completed later in the portal); exclude them
+ * from client-side required/shape validation so the step can never be
+ * permanently blocked, matching the server's transitional treatment. */
+function filterFileErrors(questions: QuestionDef[], errors: ValidationError[]): ValidationError[] {
+  const fileIds = new Set(questions.filter((q) => q.type === 'file').map((q) => q.id))
+  return errors.filter((e) => !fileIds.has(e.question_id))
+}
+
+/** Early on-blur shape check for email/url questions (submit-time authority
+ * stays with validateAnswers — this just surfaces the same shared-shape rule
+ * sooner). Empty values are left for the required check at step-advance. */
+function liveShapeError(q: QuestionDef, value: AnswerValue): string | undefined {
+  if (q.type !== 'email' && q.type !== 'url') return undefined
+  if (typeof value !== 'string' || value.trim() === '') return undefined
+  if (q.type === 'email') return isValidEmailShape(value) ? undefined : `${q.label} must be a valid email`
+  return isValidUrlShape(value) ? undefined : `${q.label} must be a valid link (http:// or https://)`
+}
+
+/** Best-effort display name/email for a participant card title, read from
+ * whichever configured questions map onto those field keys — no special
+ * rendering, just a friendlier heading than "Participant 2". */
+function participantIdentity(questions: QuestionDef[], answers: Answers): { name: string; email: string } {
+  const byKey = (key: string): AnswerValue => {
+    const q = questions.find((qq) => qq.field_key === key)
+    return q ? answers[q.id] : undefined
+  }
+  const first = byKey('first_name')
+  const last = byKey('last_name')
+  const email = byKey('email')
+  const name = [first, last].filter((v) => typeof v === 'string' && v.trim()).join(' ')
+  return { name, email: typeof email === 'string' ? email : '' }
 }
 
 type Step = 'welcome' | 'account' | 'submission' | 'participant' | 'review'
@@ -99,17 +135,31 @@ export function SubmitPage({ data }: { data: SubmitBootstrap }) {
   const [step, setStep] = useState<Step>('welcome')
   const [answers, setAnswers] = useState<Answers>(() => viewer?.draft?.answers ?? {})
   const [submissionId, setSubmissionId] = useState<string | null>(viewer?.draft?.id ?? null)
+  const participantQuestions = useMemo(
+    () => data.questions.filter((q) => q.section === 'participant').sort((a, b) => a.position - b.position),
+    [data.questions],
+  )
+  const primaryParticipantAnswers = useMemo((): Answers => {
+    const seed: Record<string, string | null | undefined> = {
+      email: viewer?.email,
+      first_name: viewer?.first_name,
+      last_name: viewer?.last_name,
+      mobile_phone: viewer?.mobile_phone,
+      biography: viewer?.biography,
+    }
+    const answers: Answers = {}
+    for (const q of participantQuestions) {
+      const v = seed[q.field_key]
+      if (v) answers[q.id] = v
+    }
+    return answers
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [viewer])
   const [participants, setParticipants] = useState<ParticipantDraft[]>(() => [
-    {
-      email: viewer?.email ?? '',
-      first_name: viewer?.first_name ?? '',
-      last_name: viewer?.last_name ?? '',
-      mobile_phone: viewer?.mobile_phone ?? '',
-      biography: viewer?.biography ?? '',
-      role: 'speaker',
-    },
+    { role: 'speaker', is_primary_contact: true, answers: primaryParticipantAnswers },
   ])
   const [errors, setErrors] = useState<Record<string, string>>({})
+  const [participantErrors, setParticipantErrors] = useState<Record<string, string>[]>([])
   const [stepError, setStepError] = useState<string | null>(null)
   const [savedAt, setSavedAt] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
@@ -122,10 +172,6 @@ export function SubmitPage({ data }: { data: SubmitBootstrap }) {
 
   const abstractQuestions = useMemo(
     () => data.questions.filter((q) => q.section === 'abstract').sort((a, b) => a.position - b.position),
-    [data.questions],
-  )
-  const participantQuestions = useMemo(
-    () => data.questions.filter((q) => q.section === 'participant').sort((a, b) => a.position - b.position),
     [data.questions],
   )
   const roleConfigs: ParticipantRoleConfig[] = useMemo(
@@ -223,7 +269,7 @@ export function SubmitPage({ data }: { data: SubmitBootstrap }) {
   const stepIndex = steps.findIndex((s) => s.key === step)
 
   const validateSubmissionStep = useCallback((): boolean => {
-    const validation = validateAnswers(abstractQuestions, answersRef.current)
+    const validation = filterFileErrors(abstractQuestions, validateAnswers(abstractQuestions, answersRef.current))
     const next: Record<string, string> = {}
     for (const err of validation) next[err.question_id] = err.message
     setErrors(next)
@@ -231,11 +277,19 @@ export function SubmitPage({ data }: { data: SubmitBootstrap }) {
   }, [abstractQuestions])
 
   const validateParticipantStep = useCallback((): boolean => {
+    const nextErrors: Record<string, string>[] = []
+    let anyFieldErrors = false
     for (const p of participants) {
-      if (!p.email.trim() || !p.first_name.trim() || !p.last_name.trim()) {
-        setStepError('Every participant needs a first name, last name and email.')
-        return false
-      }
+      const validation = filterFileErrors(participantQuestions, validateAnswers(participantQuestions, p.answers))
+      const errs: Record<string, string> = {}
+      for (const err of validation) errs[err.question_id] = err.message
+      if (validation.length > 0) anyFieldErrors = true
+      nextErrors.push(errs)
+    }
+    setParticipantErrors(nextErrors)
+    if (anyFieldErrors) {
+      setStepError('Please fix the highlighted participant fields.')
+      return false
     }
     for (const cfg of roleConfigs) {
       const count = participants.filter((p) => p.role === cfg.role).length
@@ -250,7 +304,7 @@ export function SubmitPage({ data }: { data: SubmitBootstrap }) {
     }
     setStepError(null)
     return true
-  }, [participants, roleConfigs])
+  }, [participants, roleConfigs, participantQuestions])
 
   const goNext = useCallback(() => {
     setStepError(null)
@@ -272,13 +326,18 @@ export function SubmitPage({ data }: { data: SubmitBootstrap }) {
     setSubmitting(true)
     setStepError(null)
     try {
+      const outgoingParticipants = participants.map((p) => ({
+        role: p.role,
+        is_primary_contact: p.is_primary_contact,
+        answers: discardHiddenAnswers(participantQuestions, p.answers),
+      }))
       const res = await fetch(`${data.base_path}/submit`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
           submission_id: submissionIdRef.current,
           answers: answersRef.current,
-          participants,
+          participants: outgoingParticipants,
         }),
       })
       const body = (await res.json().catch(() => ({}))) as Record<string, unknown>
@@ -302,7 +361,7 @@ export function SubmitPage({ data }: { data: SubmitBootstrap }) {
     } finally {
       setSubmitting(false)
     }
-  }, [data.base_path, participants, submitting])
+  }, [data.base_path, participants, participantQuestions, submitting])
 
   // ------------------------------------------------------------------
   // Render
@@ -352,15 +411,19 @@ export function SubmitPage({ data }: { data: SubmitBootstrap }) {
 
       <ol className="sb-stepper">
         {steps.map((s, i) => (
-          <li
-            key={s.key}
-            className={s.key === step ? 'active' : i < stepIndex ? 'done' : ''}
-            onClick={() => {
-              // back-navigation to completed steps only (docs/04 §5 edge cases)
-              if (i < stepIndex) setStep(s.key)
-            }}
-          >
-            <span className="sb-step-n">{i + 1}</span> {s.label}
+          <li key={s.key} className={s.key === step ? 'active' : i < stepIndex ? 'done' : ''}>
+            <button
+              type="button"
+              className="sb-step-btn"
+              aria-current={s.key === step ? 'step' : undefined}
+              disabled={i > stepIndex}
+              onClick={() => {
+                // back-navigation to completed steps only (docs/04 §5 edge cases)
+                if (i < stepIndex) setStep(s.key)
+              }}
+            >
+              <span className="sb-step-n">{i + 1}</span> {s.label}
+            </button>
           </li>
         ))}
       </ol>
@@ -447,6 +510,16 @@ export function SubmitPage({ data }: { data: SubmitBootstrap }) {
                 value={answers[q.id]}
                 error={errors[q.id]}
                 onChange={(v) => setAnswer(q.id, v)}
+                onBlur={() => {
+                  if (q.type !== 'email' && q.type !== 'url') return
+                  const msg = liveShapeError(q, answers[q.id])
+                  setErrors((prev) => {
+                    if (msg) return { ...prev, [q.id]: msg }
+                    if (!(q.id in prev)) return prev
+                    const { [q.id]: _dropped, ...rest } = prev
+                    return rest
+                  })
+                }}
               />
             ) : null,
           )}
@@ -468,26 +541,53 @@ export function SubmitPage({ data }: { data: SubmitBootstrap }) {
               participant={p}
               questions={participantQuestions}
               roles={roleConfigs}
-              lockEmail={i === 0}
-              onChange={(next) =>
-                setParticipants((prev) => prev.map((old, j) => (j === i ? next : old)))
+              errors={participantErrors[i] ?? {}}
+              lockPrimaryEmail={i === 0}
+              onAnswerChange={(qid, v) =>
+                setParticipants((prev) =>
+                  prev.map((old, j) => (j === i ? { ...old, answers: { ...old.answers, [qid]: v } } : old)),
+                )
+              }
+              onAnswerBlur={(qid) => {
+                const q = participantQuestions.find((qq) => qq.id === qid)
+                if (!q) return
+                const msg = liveShapeError(q, participants[i]?.answers[qid])
+                setParticipantErrors((prev) => {
+                  const current = { ...(prev[i] ?? {}) }
+                  if (msg) current[qid] = msg
+                  else delete current[qid]
+                  const next = [...prev]
+                  next[i] = current
+                  return next
+                })
+              }}
+              onRoleChange={(role) =>
+                setParticipants((prev) => prev.map((old, j) => (j === i ? { ...old, role } : old)))
               }
               onRemove={
                 i === 0 ? undefined : () => setParticipants((prev) => prev.filter((_, j) => j !== i))
               }
             />
           ))}
-          <button
-            className="sb-button"
-            onClick={() =>
-              setParticipants((prev) => [
-                ...prev,
-                { email: '', first_name: '', last_name: '', mobile_phone: '', biography: '', role: roleConfigs[0]?.role ?? 'speaker' },
-              ])
-            }
-          >
-            + Add participant
-          </button>
+          {participants.length >= MAX_PARTICIPANTS_PER_SUBMISSION ? (
+            <p className="sb-muted">
+              Maximum of {MAX_PARTICIPANTS_PER_SUBMISSION} participants per submission.
+            </p>
+          ) : (
+            <button
+              type="button"
+              className="sb-button"
+              onClick={() =>
+                setParticipants((prev) =>
+                  prev.length >= MAX_PARTICIPANTS_PER_SUBMISSION
+                    ? prev
+                    : [...prev, { role: roleConfigs[0]?.role ?? 'speaker', is_primary_contact: false, answers: {} }],
+                )
+              }
+            >
+              + Add participant
+            </button>
+          )}
           <Nav onBack={goBack} onNext={goNext} />
         </section>
       )}
@@ -513,14 +613,15 @@ export function SubmitPage({ data }: { data: SubmitBootstrap }) {
                 Participants <button className="sb-link" onClick={() => setStep('participant')}>Edit</button>
               </h3>
               <dl className="sb-review">
-                {participants.map((p, i) => (
-                  <div key={i}>
-                    <dt>{p.role}</dt>
-                    <dd>
-                      {p.first_name} {p.last_name} · {p.email}
-                    </dd>
-                  </div>
-                ))}
+                {participants.map((p, i) => {
+                  const identity = participantIdentity(participantQuestions, p.answers)
+                  return (
+                    <div key={i}>
+                      <dt>{p.role}</dt>
+                      <dd>{[identity.name, identity.email].filter(Boolean).join(' · ') || '—'}</dd>
+                    </div>
+                  )
+                })}
               </dl>
             </>
           )}
@@ -575,21 +676,29 @@ function formatAnswer(v: AnswerValue): string {
   return String(v).replace(/<[^>]*>/g, '')
 }
 
-function QuestionInput({
+export function QuestionInput({
   question: q,
   value,
   error,
   onChange,
+  onBlur,
+  idPrefix = '',
+  disabled = false,
 }: {
   question: QuestionDef
   value: AnswerValue
   error?: string
   onChange: (v: AnswerValue) => void
+  /** Live shape-check on blur (email/url) — separate from submit-time validateAnswers. */
+  onBlur?: () => void
+  /** Distinguishes ids across repeated instances (e.g. per-participant cards). */
+  idPrefix?: string
+  disabled?: boolean
 }) {
   if (q.type === 'heading') {
     return <h3 className="sb-heading">{q.label}</h3>
   }
-  const id = `sb-q-${q.id}`
+  const id = `sb-q-${idPrefix}${q.id}`
   const counter =
     q.max_chars && (q.type === 'text' || q.type === 'textarea' || q.type === 'wysiwyg') ? (
       <span className={`sb-counter${plainLength(value) > q.max_chars ? ' over' : ''}`}>
@@ -606,7 +715,9 @@ function QuestionInput({
           id={id}
           rows={q.type === 'wysiwyg' ? 6 : 4}
           value={typeof value === 'string' ? value : ''}
+          disabled={disabled}
           onChange={(e) => onChange(e.currentTarget.value)}
+          onBlur={onBlur}
         />
       )
       break
@@ -615,6 +726,7 @@ function QuestionInput({
         <select
           id={id}
           value={typeof value === 'string' ? value : ''}
+          disabled={disabled}
           onChange={(e) => onChange(e.currentTarget.value || undefined)}
         >
           <option value="">Select…</option>
@@ -633,6 +745,7 @@ function QuestionInput({
                 type="radio"
                 name={id}
                 checked={value === o.value}
+                disabled={disabled}
                 onChange={() => onChange(o.value)}
               />
               {o.label}
@@ -652,6 +765,7 @@ function QuestionInput({
                 <input
                   type="checkbox"
                   checked={checked}
+                  disabled={disabled}
                   onChange={() =>
                     onChange(
                       checked ? selected.filter((v) => v !== o.value) : [...selected, o.value],
@@ -668,7 +782,7 @@ function QuestionInput({
     case 'checkbox':
       control = (
         <label className="sb-check">
-          <input type="checkbox" checked={Boolean(value)} onChange={(e) => onChange(e.currentTarget.checked)} />
+          <input type="checkbox" checked={Boolean(value)} disabled={disabled} onChange={(e) => onChange(e.currentTarget.checked)} />
           {q.help_text ?? 'Yes'}
         </label>
       )
@@ -679,6 +793,7 @@ function QuestionInput({
           id={id}
           type="number"
           value={value === undefined || value === null ? '' : String(value)}
+          disabled={disabled}
           onChange={(e) => onChange(e.currentTarget.value === '' ? undefined : Number(e.currentTarget.value))}
         />
       )
@@ -690,12 +805,13 @@ function QuestionInput({
           id={id}
           type={q.type === 'date' ? 'date' : 'datetime-local'}
           value={typeof value === 'string' ? value : ''}
+          disabled={disabled}
           onChange={(e) => onChange(e.currentTarget.value)}
         />
       )
       break
     case 'file':
-      control = <p className="sb-muted">File uploads are completed later in your speaker portal.</p>
+      control = <p className="sb-muted">Uploads are completed later in your speaker portal.</p>
       break
     default:
       control = (
@@ -703,7 +819,9 @@ function QuestionInput({
           id={id}
           type={q.type === 'email' ? 'email' : q.type === 'url' ? 'url' : q.type === 'phone' ? 'tel' : 'text'}
           value={typeof value === 'string' ? value : ''}
+          disabled={disabled}
           onChange={(e) => onChange(e.currentTarget.value)}
+          onBlur={q.type === 'email' || q.type === 'url' ? onBlur : undefined}
         />
       )
   }
@@ -722,69 +840,60 @@ function QuestionInput({
   )
 }
 
-/** Participant question keys that map onto contact fields (docs/04 §5 step 4). */
-const PARTICIPANT_FIELD_KEYS = new Set(['first_name', 'last_name', 'email', 'mobile_phone', 'biography'])
-
 function ParticipantCard({
   index,
   participant,
   questions,
   roles,
-  lockEmail,
-  onChange,
+  errors,
+  lockPrimaryEmail,
+  onAnswerChange,
+  onAnswerBlur,
+  onRoleChange,
   onRemove,
 }: {
   index: number
   participant: ParticipantDraft
   questions: QuestionDef[]
   roles: ParticipantRoleConfig[]
-  lockEmail: boolean
-  onChange: (p: ParticipantDraft) => void
+  errors: Record<string, string>
+  lockPrimaryEmail: boolean
+  onAnswerChange: (questionId: string, value: AnswerValue) => void
+  onAnswerBlur: (questionId: string) => void
+  onRoleChange: (role: string) => void
   onRemove?: () => void
 }) {
-  const set = (key: keyof ParticipantDraft) => (e: { currentTarget: { value: string } }) =>
-    onChange({ ...participant, [key]: e.currentTarget.value })
+  const visible = visibleQuestionIds(questions, participant.answers)
+  const identity = participantIdentity(questions, participant.answers)
+  const title = identity.name || identity.email || `Participant ${index + 1}`
 
   return (
     <div className="sb-card">
       <div className="sb-card-head">
-        <strong>Participant {index + 1}{index === 0 ? ' — primary contact' : ''}</strong>
+        <strong>{title}{index === 0 ? ' — primary contact' : ''}</strong>
         <span className="sb-card-tools">
-          <select value={participant.role} onChange={set('role')} aria-label="Role">
+          <select value={participant.role} onChange={(e) => onRoleChange(e.currentTarget.value)} aria-label={`Role for ${title}`}>
             {roles.map((r) => (
               <option key={r.role} value={r.role}>{r.role}</option>
             ))}
           </select>
-          {onRemove && <button className="sb-link" onClick={onRemove}>Remove</button>}
+          {onRemove && <button type="button" className="sb-link" onClick={onRemove}>Remove</button>}
         </span>
       </div>
       {questions
-        .filter((q) => PARTICIPANT_FIELD_KEYS.has(q.field_key))
-        .map((q) => {
-          const key = q.field_key as keyof ParticipantDraft
-          const id = `sb-p${index}-${q.field_key}`
-          const isTextarea = q.type === 'wysiwyg' || q.type === 'textarea'
-          return (
-            <div className="sb-field" key={q.id}>
-              <label htmlFor={id}>
-                {q.label}
-                {q.required && <span className="sb-req" aria-hidden="true"> *</span>}
-              </label>
-              {q.help_text && <p className="sb-help">{q.help_text}</p>}
-              {isTextarea ? (
-                <textarea id={id} rows={3} value={participant[key]} onChange={set(key)} />
-              ) : (
-                <input
-                  id={id}
-                  type={q.type === 'email' ? 'email' : q.type === 'phone' ? 'tel' : 'text'}
-                  value={participant[key]}
-                  disabled={key === 'email' && lockEmail}
-                  onChange={set(key)}
-                />
-              )}
-            </div>
-          )
-        })}
+        .filter((q) => visible.has(q.id))
+        .map((q) => (
+          <QuestionInput
+            key={q.id}
+            idPrefix={`p${index}-`}
+            question={q}
+            value={participant.answers[q.id]}
+            error={errors[q.id]}
+            disabled={lockPrimaryEmail && q.field_key === 'email'}
+            onChange={(v) => onAnswerChange(q.id, v)}
+            onBlur={() => onAnswerBlur(q.id)}
+          />
+        ))}
     </div>
   )
 }
@@ -796,8 +905,12 @@ const wizardCss = `
 .sb-stepper { display: flex; flex-wrap: wrap; gap: .25rem 1rem; list-style: none; padding: 0;
   margin: 0 0 1.5rem; font-size: .85rem; color: var(--muted); }
 .sb-stepper li { display: flex; align-items: center; gap: .4rem; }
-.sb-stepper li.done { cursor: pointer; }
-.sb-stepper li.active { color: var(--fg); font-weight: 600; }
+.sb-step-btn { display: flex; align-items: center; gap: .4rem; font: inherit; color: inherit;
+  background: none; border: 0; padding: 0; cursor: default; }
+.sb-stepper li.done .sb-step-btn { cursor: pointer; }
+.sb-stepper li.active .sb-step-btn { color: var(--fg); font-weight: 600; }
+.sb-step-btn:disabled { cursor: default; }
+.sb-step-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
 .sb-step-n { display: inline-flex; align-items: center; justify-content: center; width: 1.4rem;
   height: 1.4rem; border-radius: 50%; border: 1px solid var(--line); font-size: .75rem; }
 .sb-stepper li.active .sb-step-n { background: var(--accent); border-color: var(--accent); color: #fff; }

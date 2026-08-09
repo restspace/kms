@@ -64,9 +64,14 @@ Avatar/initials, name, email, **View more** → Profile page.
   and last-updated.
 - Detail view shows every answered question grouped by section, the participant list, and any
   attached files.
-- **Edit** is available when: the form is open (`close_at` in the future), the submission is not
-  `accepted`-and-locked, and the speaker is the submitter or primary contact. Otherwise the view
-  is read-only with an explanation ("Editing closed on 15 Sep 2026").
+- **Edit** (`/portal/:slug/submissions/:id/edit`) is available to the submitter and to every
+  participant, for as long as the submission is **not** `withdrawn` or `declined` — acceptance does
+  not lock a proposal. The form is rendered from the submission form's *abstract* questions and
+  validated with the same shared validators as the public wizard; failures re-render the page with
+  the speaker's input preserved. Withdrawn/declined submissions show a read-only explanation
+  instead ("Editing closed").
+- Saving after a decision has been made is allowed, and the organisers listed in the form's
+  `notify_admins_on_update` are emailed exactly one `submission_updated_admin` notice per save.
 - **Withdraw** action with a confirmation dialog; sets `status = withdrawn` and notifies admins.
 
 ---
@@ -103,7 +108,7 @@ Tasks are created by admins (see §8) and assigned to a contact and optionally a
 
 | Task action type | Speaker experience |
 |---|---|
-| `file_upload` | Drop zone / file picker, allowed types and max size stated, upload progress, replace-file support |
+| `file_upload` | Drop zone / file picker, allowed types and max size stated, upload progress, replace-file support. When the task is backed by a **File Request**, that request's `allowed_types` and `max_size_mb` are the effective policy (and are what the portal copy states); otherwise the generic portal limits apply. Uploads are checked for size and for magic-number/declared-type agreement — malware scanning of stored bytes is deliberately out of scope for now |
 | `portal_form` | Renders the admin-defined portal form inline; submitting marks the task complete |
 | `acknowledge` | Read the instructions, tick "I have read and agree", confirm |
 | `external_link` | Button opening the URL, then a "Mark as done" confirmation |

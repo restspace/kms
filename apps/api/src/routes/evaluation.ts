@@ -4,9 +4,9 @@
 // shared guard already ran (admins everywhere, reviewers on /review/* only).
 
 import { Hono } from 'hono';
-import type { Context } from 'hono';
 import type { Env } from '../env';
-import { sendTemplated } from '../mailer';
+import type { SendTemplatedArgs } from '../mailer';
+import { bumpEventRevision } from '../revision';
 import type { SessionPayload } from '../session';
 
 type ApiEnv = { Bindings: Env; Variables: { session: SessionPayload } };
@@ -62,17 +62,26 @@ evaluationRoutes.post('/submissions/bulk-status', async (c) => {
 /**
  * Auto-assign on-accept tasks (docs/05 §6, docs/06 §5): automatic tasks with
  * trigger on_accept and a submission target attach to the submission's
- * primary contact (falling back to the submitter). Existing assignments are
- * left alone, so re-sending decisions cannot duplicate work items.
+ * primary contact (falling back to the submitter). Set-based `INSERT OR
+ * IGNORE … SELECT` against the unique (task_id, contact_id, submission_id)
+ * index (0005) makes this safe to re-run: `RETURNING` only reports rows this
+ * call actually created, so already-assigned tasks are silently skipped and
+ * never re-emailed (sweep item P1-5). `send` is injected so the same core
+ * works from a request (sendTemplated, immediate attempt) and from the bulk
+ * job expander (queueTemplated, cron has no request Context) — the expander
+ * passes `entityPrefix` so its keys carry the job id per the bulk-job
+ * idempotency convention (see jobs/bulkJobs.ts).
  */
-async function autoAssignAcceptTasks(
-  c: Context<ApiEnv>,
+export async function autoAssignAcceptTasksCore(
+  db: D1Database,
   eventId: string,
   submission: { id: string; code: string; title: string },
   eventName: string,
   eventSlug: string,
+  appUrl: string,
+  send: (args: SendTemplatedArgs) => Promise<unknown>,
+  entityPrefix?: string,
 ): Promise<number> {
-  const db = c.env.DB;
   const { results: tasks } = await db
     .prepare(
       `SELECT id, title, due_at FROM tasks
@@ -81,6 +90,7 @@ async function autoAssignAcceptTasks(
     .bind(eventId)
     .all<{ id: string; title: string; due_at: string | null }>();
   if (tasks.length === 0) return 0;
+  const taskById = new Map(tasks.map((t) => [t.id, t]));
 
   const owner = await db
     .prepare(
@@ -94,50 +104,58 @@ async function autoAssignAcceptTasks(
     .first<{ id: string; email: string; first_name: string | null }>();
   if (!owner) return 0;
 
-  let created = 0;
-  for (const task of tasks) {
-    const existing = await db
-      .prepare('SELECT id FROM task_assignments WHERE task_id = ? AND contact_id = ? AND submission_id = ?')
-      .bind(task.id, owner.id, submission.id)
-      .first();
-    if (existing) continue;
-    const assignmentId = crypto.randomUUID();
-    await db
-      .prepare(
-        `INSERT INTO task_assignments (id, task_id, contact_id, submission_id, status)
-         VALUES (?, ?, ?, ?, 'not_started')`,
-      )
-      .bind(assignmentId, task.id, owner.id, submission.id)
-      .run();
-    created += 1;
+  const { results: inserted } = await db
+    .prepare(
+      `INSERT OR IGNORE INTO task_assignments (id, task_id, contact_id, submission_id, status)
+       SELECT lower(hex(randomblob(16))), t.id, ?, ?, 'not_started'
+       FROM tasks t
+       WHERE t.event_id = ? AND t.assignment_mode = 'automatic' AND t."trigger" = 'on_accept' AND t.target = 'submission'
+       RETURNING id, task_id`,
+    )
+    .bind(owner.id, submission.id, eventId)
+    .all<{ id: string; task_id: string }>();
+
+  for (const row of inserted) {
+    const task = taskById.get(row.task_id);
+    if (!task) continue;
     const dueLine = task.due_at
       ? `, due ${new Date(task.due_at).toLocaleDateString('en-US', { month: 'long', day: 'numeric' })}`
       : '';
-    await sendTemplated(c, {
+    await send({
       templateKey: 'task_assigned',
       eventId,
       contactId: owner.id,
       toEmail: owner.email,
-      entityId: assignmentId,
+      entityId: entityPrefix ? `${entityPrefix}:${row.id}` : row.id,
       context: {
         event: { name: eventName },
         speaker: { first_name: owner.first_name ?? 'there' },
-        task: { title: `${task.title} — ${submission.code}`, due_line: dueLine, url: `${c.env.APP_URL}/portal/${eventSlug}/tasks` },
+        task: { title: `${task.title} — ${submission.code}`, due_line: dueLine, url: `${appUrl}/portal/${eventSlug}/tasks` },
       },
     });
   }
-  return created;
+  return inserted.length;
 }
+// Note: no request-path wrapper here (unlike sendScheduleEmails/Core) —
+// auto-assign is now only ever triggered from the bulk_jobs expander
+// (jobs/bulkJobs.ts), since send-decisions moved off the request path
+// entirely (sweep item P2-19). Call autoAssignAcceptTasksCore directly with
+// `(args) => sendTemplated(c, args)` if a future request-path caller needs
+// the immediate-attempt behaviour.
 
-// POST /submissions/send-decisions — the batch notify (docs/06 §5). Flips
-// accept_queue→accepted / decline_queue→declined, stamps notified_at, sends
-// the decision template once per submission (mailer idempotency), and
-// auto-assigns on-accept tasks. Other statuses in the selection are skipped.
+// POST /submissions/send-decisions — the batch notify (docs/06 §5, sweep item
+// P2-19). No longer sends in-request: validates the selection, snapshots it
+// into a bulk_jobs row, and returns immediately. The cron expander
+// (jobs/bulkJobs.ts) does the actual flip/send/auto-assign work in bounded
+// ticks. The response keeps the legacy shape the SPA reads — accepted/
+// declined are cheap counts of the validated selection (what *will* happen),
+// tasks_assigned is always 0 here since tasks are assigned during expansion.
 evaluationRoutes.post('/submissions/send-decisions', async (c) => {
   const session = c.get('session');
   const db = c.env.DB;
   const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
   const ids = parseIds(body.ids);
+  const includeFeedback = body.include_feedback === true;
   if (ids.length === 0) return c.json({ error: 'ids_required' }, 400);
 
   const event = await db
@@ -149,14 +167,12 @@ evaluationRoutes.post('/submissions/send-decisions', async (c) => {
   const placeholders = ids.map(() => '?').join(', ');
   const { results } = await db
     .prepare(
-      `SELECT s.id, s.code, s.title, s.status, s.notified_at, s.submitter_contact_id,
-              c.email AS submitter_email, c.first_name AS submitter_first_name
+      `SELECT s.id, s.status, s.notified_at
        FROM submissions s
-       LEFT JOIN contacts c ON c.id = s.submitter_contact_id
        WHERE s.event_id = ? AND s.id IN (${placeholders})`,
     )
     .bind(session.eventId, ...ids)
-    .all<{ id: string; code: string; title: string; status: string; notified_at: string | null; submitter_contact_id: string | null; submitter_email: string | null; submitter_first_name: string | null }>();
+    .all<{ id: string; status: string; notified_at: string | null }>();
 
   // Rows outside the queues are skipped; split out those already notified so
   // the UI can say "nothing re-sent" rather than a bare zero (docs/06 §5).
@@ -164,46 +180,38 @@ evaluationRoutes.post('/submissions/send-decisions', async (c) => {
   const skippedNotified = results.filter(
     (s) => s.status !== 'accept_queue' && s.status !== 'decline_queue' && s.notified_at !== null,
   ).length;
+  const accepted = queued.filter((s) => s.status === 'accept_queue').length;
+  const declined = queued.filter((s) => s.status === 'decline_queue').length;
 
-  let accepted = 0;
-  let declined = 0;
-  let tasksAssigned = 0;
-  const ts = nowIso();
-  for (const s of queued) {
-    const isAccept = s.status === 'accept_queue';
+  let jobId: string | null = null;
+  if (queued.length > 0) {
+    jobId = crypto.randomUUID();
+    const ts = nowIso();
     await db
-      .prepare('UPDATE submissions SET status = ?, notified_at = ?, updated_at = ? WHERE id = ?')
-      .bind(isAccept ? 'accepted' : 'declined', ts, ts, s.id)
+      .prepare(
+        `INSERT INTO bulk_jobs (id, event_id, kind, status, params_json, total, enqueued, created_by, created_at, updated_at)
+         VALUES (?, ?, 'send-decisions', 'pending', ?, ?, 0, ?, ?, ?)`,
+      )
+      .bind(
+        jobId,
+        session.eventId,
+        JSON.stringify({ ids: queued.map((s) => s.id), include_feedback: includeFeedback }),
+        queued.length,
+        session.contactId,
+        ts,
+        ts,
+      )
       .run();
-    if (isAccept) accepted += 1;
-    else declined += 1;
-
-    if (s.submitter_email) {
-      await sendTemplated(c, {
-        templateKey: isAccept ? 'decision_accepted' : 'decision_declined',
-        eventId: session.eventId,
-        contactId: s.submitter_contact_id,
-        toEmail: s.submitter_email,
-        entityId: s.id, // one decision email per submission, ever (docs/06 §5)
-        context: {
-          event: { name: event.name },
-          speaker: { first_name: s.submitter_first_name ?? 'there' },
-          submission: { title: s.title, code: s.code },
-          portal_url: `${c.env.APP_URL}/portal/${event.slug}`,
-        },
-      });
-    }
-    if (isAccept) {
-      tasksAssigned += await autoAssignAcceptTasks(c, session.eventId, s, event.name, event.slug);
-    }
   }
+
   return c.json({
     ok: true,
     accepted,
     declined,
-    tasks_assigned: tasksAssigned,
+    tasks_assigned: 0,
     skipped: ids.length - queued.length,
     skipped_notified: skippedNotified,
+    job_id: jobId,
   });
 });
 
@@ -402,6 +410,21 @@ evaluationRoutes.post('/evaluation/plans/:id/assign', async (c) => {
   const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
   const reviewerIds = parseIds(body.reviewer_contact_ids);
   if (reviewerIds.length === 0) return c.json({ error: 'reviewers_required' }, 400);
+
+  // Every reviewer id must be an event_users member of this plan's event
+  // with an eligible role (sweep item P1-5 acceptance).
+  const reviewerPlaceholders = reviewerIds.map(() => '?').join(', ');
+  const { results: validReviewers } = await db
+    .prepare(
+      `SELECT DISTINCT contact_id FROM event_users
+       WHERE event_id = ? AND role IN ('reviewer', 'admin', 'owner') AND contact_id IN (${reviewerPlaceholders})`,
+    )
+    .bind(session.eventId, ...reviewerIds)
+    .all<{ contact_id: string }>();
+  if (validReviewers.length !== new Set(reviewerIds).size) {
+    return c.json({ error: 'invalid_reviewer' }, 400);
+  }
+
   const strategy = body.strategy === 'round_robin' ? 'round_robin' : 'all';
   const perSubmission = Math.max(1, Math.min(Number(body.per_submission) || 2, reviewerIds.length));
 
@@ -490,24 +513,26 @@ evaluationRoutes.get('/review/queue', async (c) => {
   return c.json({ assignments, criteria, participants });
 });
 
-/** Recompute the plan's mean weighted_total into submission.rating_cache. */
-async function refreshRatingCache(db: D1Database, submissionId: string, planId: string): Promise<void> {
-  const avg = await db
-    .prepare('SELECT ROUND(AVG(weighted_total), 2) AS v FROM reviews WHERE submission_id = ? AND plan_id = ?')
-    .bind(submissionId, planId)
-    .first<{ v: number | null }>();
-  const row = await db.prepare('SELECT rating_cache FROM submissions WHERE id = ?')
-    .bind(submissionId)
-    .first<{ rating_cache: string | null }>();
-  let cache: Record<string, number> = {};
-  try {
-    cache = row?.rating_cache ? (JSON.parse(row.rating_cache) as Record<string, number>) : {};
-  } catch { /* rebuild */ }
-  if (avg?.v === null || avg?.v === undefined) delete cache[planId];
-  else cache[planId] = avg.v;
-  await db.prepare('UPDATE submissions SET rating_cache = ? WHERE id = ?')
-    .bind(JSON.stringify(cache), submissionId)
-    .run();
+/**
+ * Recompute the plan's mean weighted_total into submission.rating_cache — one
+ * aggregate UPDATE, no read-modify-write (sweep item P1-5). rating_cache is
+ * `{ "<plan_id>": <mean> }` across every plan the submission has ever been
+ * scored under, so this only ever touches the one key for this plan_id via
+ * json_set/json_remove, leaving other plans' cached values untouched even
+ * under concurrent saves on different plans.
+ */
+function ratingCacheStatement(db: D1Database, submissionId: string, planId: string): D1PreparedStatement {
+  return db
+    .prepare(
+      `UPDATE submissions SET rating_cache = CASE
+         WHEN (SELECT AVG(weighted_total) FROM reviews WHERE submission_id = ?1 AND plan_id = ?2) IS NULL
+           THEN json_remove(COALESCE(rating_cache, '{}'), '$."' || ?2 || '"')
+         ELSE json_set(COALESCE(rating_cache, '{}'), '$."' || ?2 || '"',
+           (SELECT ROUND(AVG(weighted_total), 2) FROM reviews WHERE submission_id = ?1 AND plan_id = ?2))
+       END
+       WHERE id = ?1`,
+    )
+    .bind(submissionId, planId);
 }
 
 // POST /review/assignments/:id — save scores. Upserts the review, computes
@@ -552,31 +577,33 @@ evaluationRoutes.post('/review/assignments/:id', async (c) => {
   }
   const weightedTotal = conflict || weightTotal === 0 ? null : Math.round((weightedSum / weightTotal) * 100) / 100;
 
-  const existing = await db.prepare('SELECT id FROM reviews WHERE assignment_id = ?')
-    .bind(assignment.id)
-    .first<{ id: string }>();
   const ts = nowIso();
-  if (existing) {
-    await db
-      .prepare('UPDATE reviews SET scores = ?, weighted_total = ?, comment = ?, conflict_of_interest = ? WHERE id = ?')
-      .bind(JSON.stringify(scores), weightedTotal, comment, conflict ? 1 : 0, existing.id)
-      .run();
-  } else {
-    await db
-      .prepare(
-        `INSERT INTO reviews (id, assignment_id, submission_id, reviewer_contact_id, plan_id,
-           scores, weighted_total, comment, conflict_of_interest, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .bind(crypto.randomUUID(), assignment.id, assignment.submission_id, session.contactId,
-        assignment.plan_id, JSON.stringify(scores), weightedTotal, comment, conflict ? 1 : 0, ts)
-      .run();
-  }
-  await db
+
+  // Single INSERT … ON CONFLICT(assignment_id) DO UPDATE against the 0005
+  // partial unique index — no SELECT-then-branch, so two concurrent saves for
+  // the same assignment leave exactly one reviews row with the last writer's
+  // content (sweep item P1-5 acceptance). All three writes (review, assignment
+  // status, rating cache) commit together in one batch.
+  const reviewUpsert = db
+    .prepare(
+      `INSERT INTO reviews (id, assignment_id, submission_id, reviewer_contact_id, plan_id,
+         scores, weighted_total, comment, conflict_of_interest, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(assignment_id) WHERE assignment_id IS NOT NULL DO UPDATE SET
+         scores = excluded.scores,
+         weighted_total = excluded.weighted_total,
+         comment = excluded.comment,
+         conflict_of_interest = excluded.conflict_of_interest`,
+    )
+    .bind(crypto.randomUUID(), assignment.id, assignment.submission_id, session.contactId,
+      assignment.plan_id, JSON.stringify(scores), weightedTotal, comment, conflict ? 1 : 0, ts);
+
+  const assignmentUpdate = db
     .prepare(`UPDATE review_assignments SET status = ?, completed_at = ? WHERE id = ?`)
-    .bind(conflict ? 'skipped' : 'complete', ts, assignment.id)
-    .run();
-  await refreshRatingCache(db, assignment.submission_id, assignment.plan_id);
+    .bind(conflict ? 'skipped' : 'complete', ts, assignment.id);
+
+  await db.batch([reviewUpsert, assignmentUpdate, ratingCacheStatement(db, assignment.submission_id, assignment.plan_id)]);
+  await bumpEventRevision(c.env, session.eventId);
 
   const rating = await db
     .prepare('SELECT ROUND(AVG(weighted_total), 2) AS v FROM reviews WHERE submission_id = ? AND plan_id = ?')

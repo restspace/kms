@@ -5,6 +5,7 @@
 // reset replays the same seed the Settings button and the nightly cron use.
 
 import { Hono } from 'hono';
+import { redactInternal, redactInternalAll } from '@kms/core';
 import type { AppEnv } from '../env';
 import { esc, page } from '../html';
 
@@ -163,5 +164,123 @@ landingRoutes.post('/demo/reset', async (c) => {
 <p>The seed has been replayed — every demo record is back to its starting state.</p>
 <p><a href="/">Back to the front page</a></p>`,
     ),
+  );
+});
+
+// ---------------------------------------------------------------------------
+// GET /e/:slug/agenda.json — the published public agenda (docs/07 §8).
+//
+// This endpoint is what `events.agenda_published` *means*: until an organiser
+// flips the flag the agenda is 404, and once flipped only accepted, scheduled
+// sessions are exposed — speaker display names, never contact details, and
+// every row passes the internal-field redaction boundary.
+// ---------------------------------------------------------------------------
+
+interface PublicEventRow {
+  id: string;
+  name: string;
+  slug: string;
+  timezone: string;
+  agenda_published: number;
+}
+
+interface PublicSessionRow {
+  id: string;
+  code: string;
+  title: string;
+  description: string | null;
+  format: string | null;
+  level: string | null;
+  capacity: number | null;
+  track_id: string | null;
+  room_id: string | null;
+  starts_at: string;
+  ends_at: string;
+}
+
+/** YYYY-MM-DD in the event's own timezone, so days group the way attendees see them. */
+function dayKey(iso: string, timezone: string): string {
+  try {
+    return new Intl.DateTimeFormat('en-CA', {
+      timeZone: timezone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).format(new Date(iso));
+  } catch {
+    return iso.slice(0, 10);
+  }
+}
+
+landingRoutes.get('/e/:slug/agenda.json', async (c) => {
+  const db = c.env.DB;
+  const event = await db
+    .prepare('SELECT id, name, slug, timezone, agenda_published FROM events WHERE slug = ?')
+    .bind(c.req.param('slug'))
+    .first<PublicEventRow>();
+  if (!event || event.agenda_published !== 1) return c.json({ error: 'not_found' }, 404);
+
+  const [sessions, rooms, tracks, speakers] = await Promise.all([
+    db
+      .prepare(
+        `SELECT id, code, title, description, format, level, capacity, track_id, room_id, starts_at, ends_at
+         FROM submissions
+         WHERE event_id = ? AND status = 'accepted' AND starts_at IS NOT NULL AND ends_at IS NOT NULL
+         ORDER BY starts_at, code`,
+      )
+      .bind(event.id)
+      .all<PublicSessionRow>()
+      .then((r) => r.results),
+    db
+      .prepare('SELECT id, name, capacity FROM rooms WHERE event_id = ? ORDER BY position')
+      .bind(event.id)
+      .all<{ id: string; name: string; capacity: number | null }>()
+      .then((r) => r.results),
+    db
+      .prepare('SELECT id, name, color FROM tracks WHERE event_id = ? ORDER BY position')
+      .bind(event.id)
+      .all<{ id: string; name: string; color: string | null }>()
+      .then((r) => r.results),
+    db
+      .prepare(
+        `SELECT sp.submission_id,
+                TRIM(COALESCE(c.first_name, '') || ' ' || COALESCE(c.last_name, '')) AS name
+         FROM submission_participants sp
+         JOIN contacts c ON c.id = sp.contact_id
+         JOIN submissions s ON s.id = sp.submission_id
+         WHERE s.event_id = ? AND s.status = 'accepted'
+           AND s.starts_at IS NOT NULL AND s.ends_at IS NOT NULL
+         ORDER BY sp.position`,
+      )
+      .bind(event.id)
+      .all<{ submission_id: string; name: string | null }>()
+      .then((r) => r.results),
+  ]);
+
+  const speakersBySession = new Map<string, string[]>();
+  for (const row of speakers) {
+    const name = (row.name ?? '').trim();
+    if (!name) continue; // no email fallback: public payloads carry no PII
+    const list = speakersBySession.get(row.submission_id) ?? [];
+    list.push(name);
+    speakersBySession.set(row.submission_id, list);
+  }
+
+  const days = [...new Set(sessions.map((s) => dayKey(s.starts_at, event.timezone)))].sort();
+
+  return c.json(
+    {
+      event: redactInternal({ name: event.name, slug: event.slug, timezone: event.timezone }),
+      days,
+      rooms: redactInternalAll(rooms),
+      tracks: redactInternalAll(tracks),
+      sessions: redactInternalAll(sessions).map((s) => ({
+        ...s,
+        day: dayKey(s.starts_at, event.timezone),
+        speakers: speakersBySession.get(s.id) ?? [],
+      })),
+    },
+    200,
+    { 'cache-control': 'public, max-age=0, s-maxage=60, stale-while-revalidate=300' },
   );
 });

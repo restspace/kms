@@ -4,6 +4,14 @@
 // need. Event scope comes from the session on every statement.
 
 import { Hono } from 'hono';
+import {
+  validateConditionalRuleConfig,
+  validateParticipantRolesConfig,
+  validateRoutingConfig,
+  type ConfigIssue,
+  type RoutingActions,
+  type RoutingConfig,
+} from '@kms/core';
 import type { Env } from '../env';
 import type { SessionPayload } from '../session';
 
@@ -65,6 +73,133 @@ function jsonText(v: unknown): string | null | undefined {
     }
   }
   return undefined;
+}
+
+// ---------------------------------------------------------------------------
+// Config guards (sweep item P1-6). Organiser-supplied JSON is validated at
+// save time - shape first (shared @kms/core guards), then referential scope:
+// a routing action must never point at another event's track, plan, tag or
+// contact. Malformed config surfaces as 400 { error, issues[] }, never as a
+// runtime surprise on the public form.
+// ---------------------------------------------------------------------------
+
+/** Accept the object form the builder posts or the JSON string the DB stores. */
+function asJsonValue(raw: unknown): unknown {
+  if (typeof raw !== 'string') return raw;
+  try {
+    return JSON.parse(raw) as unknown;
+  } catch {
+    return undefined;
+  }
+}
+
+async function rejectForeignIds(
+  db: D1Database,
+  eventId: string,
+  table: 'tracks' | 'evaluation_plans' | 'tags' | 'contacts',
+  ids: string[],
+  path: string,
+  issues: ConfigIssue[],
+): Promise<void> {
+  const unique = [...new Set(ids.filter((id) => typeof id === 'string' && id !== ''))];
+  if (unique.length === 0) return;
+  const placeholders = unique.map(() => '?').join(', ');
+  const { results } = await db
+    .prepare(`SELECT id FROM ${table} WHERE event_id = ? AND id IN (${placeholders})`)
+    .bind(eventId, ...unique)
+    .all<{ id: string }>();
+  const known = new Set(results.map((r) => r.id));
+  for (const id of unique) {
+    if (!known.has(id)) issues.push({ path, message: `${id} does not belong to this event` });
+  }
+}
+
+async function checkRoutingReferences(
+  db: D1Database,
+  eventId: string,
+  config: unknown,
+  issues: ConfigIssue[],
+): Promise<void> {
+  if (!config || typeof config !== 'object') return;
+  const cfg = config as RoutingConfig;
+  const entries: Array<{ path: string; actions: RoutingActions }> = [];
+  (cfg.rules ?? []).forEach((rule, i) => {
+    if (rule && typeof rule === 'object' && rule.then) {
+      entries.push({ path: `routing_rules.rules[${i}].then`, actions: rule.then });
+    }
+  });
+  if (cfg.fallback) entries.push({ path: 'routing_rules.fallback', actions: cfg.fallback });
+
+  for (const { path, actions } of entries) {
+    // `assign_track_ids` is the optional multi-track extra the submit pipeline
+    // reads off the action object (RoutingActions itself is frozen).
+    const extra = actions as RoutingActions & { assign_track_ids?: unknown };
+    const trackIds = [
+      ...(actions.set_track_id ? [actions.set_track_id] : []),
+      ...(Array.isArray(extra.assign_track_ids)
+        ? extra.assign_track_ids.filter((v): v is string => typeof v === 'string')
+        : []),
+    ];
+    await rejectForeignIds(db, eventId, 'tracks', trackIds, `${path}.set_track_id`, issues);
+    await rejectForeignIds(
+      db,
+      eventId,
+      'evaluation_plans',
+      actions.assign_evaluation_plan_id ? [actions.assign_evaluation_plan_id] : [],
+      `${path}.assign_evaluation_plan_id`,
+      issues,
+    );
+    await rejectForeignIds(db, eventId, 'tags', actions.add_tag_ids ?? [], `${path}.add_tag_ids`, issues);
+    await rejectForeignIds(
+      db,
+      eventId,
+      'contacts',
+      actions.notify_contact_ids ?? [],
+      `${path}.notify_contact_ids`,
+      issues,
+    );
+  }
+}
+
+/** Validate every config column present on a form create/update body. */
+async function formConfigIssues(
+  db: D1Database,
+  eventId: string,
+  body: Record<string, unknown>,
+): Promise<ConfigIssue[]> {
+  const issues: ConfigIssue[] = [];
+  if ('routing_rules' in body && body.routing_rules !== null) {
+    const value = asJsonValue(body.routing_rules);
+    if (value === undefined) {
+      issues.push({ path: 'routing_rules', message: 'must be valid JSON' });
+    } else {
+      issues.push(...validateRoutingConfig(value));
+      if (issues.length === 0) await checkRoutingReferences(db, eventId, value, issues);
+    }
+  }
+  if ('participant_roles' in body && body.participant_roles !== null) {
+    const value = asJsonValue(body.participant_roles);
+    if (value === undefined) issues.push({ path: 'participant_roles', message: 'must be valid JSON' });
+    else issues.push(...validateParticipantRolesConfig(value));
+  }
+  for (const key of ['notify_admins_on_create', 'notify_admins_on_update'] as const) {
+    if (!(key in body) || body[key] === null) continue;
+    const value = asJsonValue(body[key]);
+    if (!Array.isArray(value) || value.some((v) => typeof v !== 'string')) {
+      issues.push({ path: key, message: 'must be an array of contact ids' });
+      continue;
+    }
+    await rejectForeignIds(db, eventId, 'contacts', value as string[], key, issues);
+  }
+  return issues;
+}
+
+/** Validate a question's visibility rule (create + update share this). */
+function questionConfigIssues(body: Record<string, unknown>): ConfigIssue[] {
+  if (!('visibility' in body) || body.visibility === null) return [];
+  const value = asJsonValue(body.visibility);
+  if (value === undefined) return [{ path: 'visibility', message: 'must be valid JSON' }];
+  return validateConditionalRuleConfig(value);
 }
 
 function pickFormFields(raw: unknown): Record<string, unknown> {
@@ -216,6 +351,9 @@ formsAdminRoutes.post('/', async (c) => {
     }
   }
 
+  const configIssues = await formConfigIssues(c.env.DB, session.eventId, rawBody);
+  if (configIssues.length > 0) return c.json({ error: 'invalid_config', issues: configIssues }, 400);
+
   const fields = pickFormFields(rawBody);
   const id = crypto.randomUUID();
   const ts = nowIso();
@@ -303,6 +441,9 @@ formsAdminRoutes.put('/:id', async (c) => {
       return c.json({ error: 'conflict', current_updated_at: current.updated_at }, 409);
     }
   }
+  const configIssues = await formConfigIssues(c.env.DB, session.eventId, rawBody);
+  if (configIssues.length > 0) return c.json({ error: 'invalid_config', issues: configIssues }, 400);
+
   const fields = pickFormFields(rawBody);
   const cols = Object.keys(fields);
   if (cols.length > 0) {
@@ -429,6 +570,8 @@ formsAdminRoutes.post('/:id/questions', async (c) => {
   if (!form) return c.json({ error: 'not_found' }, 404);
 
   const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+  const visibilityIssues = questionConfigIssues(body);
+  if (visibilityIssues.length > 0) return c.json({ error: 'invalid_config', issues: visibilityIssues }, 400);
   const section = body.section === 'participant' ? 'participant' : 'abstract';
 
   let fieldId = typeof body.field_id === 'string' ? body.field_id : null;
@@ -497,6 +640,8 @@ formsAdminRoutes.put('/:id/questions/:qid', async (c) => {
   if (!form) return c.json({ error: 'not_found' }, 404);
 
   const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+  const visibilityIssues = questionConfigIssues(body);
+  if (visibilityIssues.length > 0) return c.json({ error: 'invalid_config', issues: visibilityIssues }, 400);
   const updates: Record<string, unknown> = {};
   for (const [key, coerce] of Object.entries(QUESTION_FIELDS)) {
     if (!(key in body)) continue;

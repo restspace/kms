@@ -22,8 +22,12 @@ export async function sweepOutbox(db: Db, env: Env, d1: D1Database): Promise<voi
       switch (job.kind) {
         case 'email': {
           const payload = job.payload as OutboxEmailPayload | OutgoingEmail;
-          if ('log_key' in payload) {
-            await deliverEmail(d1, env, payload);
+          // `log_key` is now optional on the shared OutgoingEmail type too
+          // (sweep item P2-20, so providers can read it off either shape), so
+          // `'log_key' in payload` no longer discriminates the union — check
+          // the value instead of the key's presence.
+          if (typeof payload.log_key === 'string') {
+            await deliverEmail(d1, env, payload as OutboxEmailPayload);
           } else {
             // Pre-M2 payload shape without a message_log row; send directly.
             await selectProvider(env).send(payload);

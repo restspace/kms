@@ -1,5 +1,7 @@
-// Magic-link auth (docs/03 §5, NFR-4): 32-byte single-use token, only its SHA-256 hash
-// is stored (KV, 15-min TTL). Tokens are never logged. Session = signed HttpOnly cookie.
+// Magic-link auth (docs/03 §5, NFR-4): 32-byte single-use token, only its
+// SHA-256 hash is stored — in D1 `auth_tokens` (sweep item P0-2), so consuming
+// a link is one atomic conditional UPDATE and two concurrent callbacks cannot
+// both mint a session. Tokens are never logged. Session = signed HttpOnly cookie.
 
 import { Hono } from 'hono';
 import type { Context } from 'hono';
@@ -8,21 +10,14 @@ import type { AppEnv } from '../env';
 import { esc, page } from '../html';
 import { sendTemplated } from '../mailer';
 import { clearSessionCookie, createSessionToken, setSessionCookie } from '../session';
+import { cleanupExpiredTokensStatement, consumeToken, mintToken, sha256hex } from '../tokens';
+import type { TokenPurpose } from '../tokens';
 
 export const authRoutes = new Hono<AppEnv>();
 
-const MAGIC_TTL_SECONDS = 900; // 15 minutes, single-use
-
-function b64url(bytes: Uint8Array): string {
-  let bin = '';
-  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i] as number);
-  return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-}
-
-async function sha256hex(input: string): Promise<string> {
-  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(input));
-  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
-}
+/** Purposes a sign-in callback will honour: the portal login link, the
+ *  submission-confirmation link (P0-3) and the admin login link. */
+const CALLBACK_PURPOSES: readonly TokenPurpose[] = ['portal-login', 'submission-confirm', 'admin-login'];
 
 function wantsJson(accept: string | undefined): boolean {
   return (accept ?? '').includes('application/json');
@@ -46,6 +41,16 @@ async function readBody(c: Context<AppEnv>) {
   };
 }
 
+/**
+ * Cron sweep helper: drop long-expired token rows. `/auth` owns the token
+ * lifecycle, but the scheduled handler lives in index.ts (another lane) —
+ * it only has to call this.
+ */
+export async function cleanupExpiredAuthTokens(db: D1Database): Promise<number> {
+  const result = await cleanupExpiredTokensStatement(db).run();
+  return result.meta.changes ?? 0;
+}
+
 // POST /auth/request — accept form or JSON {email, event_slug}, mint + email a magic link.
 authRoutes.post('/request', async (c) => {
   const { email, event_slug, redirect_to } = await readBody(c);
@@ -66,20 +71,17 @@ authRoutes.post('/request', async (c) => {
 
   const contact = await db.contacts.upsertByEmail(event.id, normalisedEmail);
 
-  // 32-byte random token; only its SHA-256 hash is stored (single-use, 15-min TTL).
-  const raw = new Uint8Array(32);
-  crypto.getRandomValues(raw);
-  const token = b64url(raw);
+  // One request path serves both destinations (the role decides where the
+  // callback lands), so the link is minted as 'portal-login'; the callback
+  // accepts every sign-in purpose. Only the hash reaches D1.
+  const { raw: token, statement } = await mintToken(c.env.DB, {
+    contactId: contact.id,
+    eventId: event.id,
+    purpose: 'portal-login',
+    redirectTo: redirect_to,
+  });
+  await statement.run();
   const hash = await sha256hex(token);
-  await c.env.KV.put(
-    `magic:${hash}`,
-    JSON.stringify({
-      contactId: contact.id,
-      eventId: event.id,
-      ...(redirect_to ? { redirectTo: redirect_to } : {}),
-    }),
-    { expirationTtl: MAGIC_TTL_SECONDS },
-  );
 
   const link = `${c.env.APP_URL}/auth/callback?t=${token}`;
   // Through the template pipeline (docs/08): message_log row, outbox retry,
@@ -127,23 +129,15 @@ authRoutes.get('/callback', async (c) => {
 
   if (!token) return expired();
 
-  const hash = await sha256hex(token);
-  const key = `magic:${hash}`;
-  const stored = await c.env.KV.get(key);
-  if (!stored) return expired();
-  await c.env.KV.delete(key); // single-use (NFR-4)
-
-  let ref: { contactId: string; eventId: string; redirectTo?: string };
-  try {
-    ref = JSON.parse(stored) as { contactId: string; eventId: string; redirectTo?: string };
-  } catch {
-    return expired();
-  }
+  // Single atomic UPDATE: exactly one concurrent caller can win, and replays,
+  // expired rows and wrong-purpose tokens all come back null.
+  const consumed = await consumeToken(c.env.DB, token, CALLBACK_PURPOSES);
+  if (!consumed) return expired();
 
   const db = createDb(c.env.DB);
   const [contact, event] = await Promise.all([
-    db.contacts.getById(ref.eventId, ref.contactId),
-    db.events.getById(ref.eventId),
+    db.contacts.getById(consumed.event_id, consumed.contact_id),
+    db.events.getById(consumed.event_id),
   ]);
   if (!contact || !event) return expired();
 
@@ -161,10 +155,11 @@ authRoutes.get('/callback', async (c) => {
   setSessionCookie(c, sessionToken);
 
   // Admins and reviewers land in the app (reviewers get the review
-  // workspace); speakers land in their portal.
-  const dest =
-    safeRedirect(ref.redirectTo) ??
-    (role === 'speaker' ? `/portal/${event.slug}` : '/app');
+  // workspace); speakers land in their portal. A confirmation link always
+  // means "your submission" — default it to the event's portal.
+  const fallback =
+    consumed.purpose === 'submission-confirm' || role === 'speaker' ? `/portal/${event.slug}` : '/app';
+  const dest = safeRedirect(consumed.redirect_to) ?? fallback;
   return c.redirect(dest);
 });
 

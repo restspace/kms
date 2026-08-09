@@ -6,7 +6,16 @@
 import { Hono } from 'hono';
 import type { Context } from 'hono';
 import { createDb } from '@kms/db';
-import type { Event } from '@kms/core';
+import {
+  discardHiddenAnswers,
+  isValidUrlShape,
+  redactInternal,
+  validateAnswers,
+  type AnswerValue,
+  type Answers,
+  type Event,
+  type QuestionDef,
+} from '@kms/core';
 import type { AppEnv } from '../env';
 import { esc } from '../html';
 import {
@@ -16,7 +25,9 @@ import {
   MAX_UPLOAD_BYTES,
   saveFile,
 } from '../filestore';
-import { sendTemplated } from '../mailer';
+import { attemptImmediate, prepareTemplated, sendTemplated, type PreparedEmail } from '../mailer';
+import { bumpEventRevision } from '../revision';
+import { loadQuestions } from './formsAdmin';
 import { clearSessionCookie, getSession, type SessionPayload } from '../session';
 
 export const portalRoutes = new Hono<AppEnv>();
@@ -87,6 +98,14 @@ dl.detail dd{margin:0;overflow-wrap:anywhere}
 .counter{font-weight:400;color:#6b7280;font-size:.78rem;margin-left:.4rem}
 .headshot-preview{width:96px;height:96px;border-radius:50%;object-fit:cover;border:1px solid #e5e7eb;display:block;margin-bottom:.5rem}
 .code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.82rem;color:#6b7280}
+.errsum{background:#fee2e2;color:#b91c1c;border:1px solid #fecaca;border-radius:8px;padding:.7rem .9rem;margin-bottom:1rem}
+.errsum h2{font-size:.95rem;margin:0 0 .4rem;color:#b91c1c}
+.errsum ul{margin:0;padding-left:1.1rem}
+.errsum a{color:#b91c1c}
+.errsum:focus{outline:2px solid #b91c1c;outline-offset:2px}
+.field-err{color:#b91c1c;font-size:.82rem;margin:.25rem 0 0}
+[aria-invalid=true]{border-color:#dc2626}
+.qhelp{color:#6b7280;font-size:.82rem;margin:.15rem 0 0}
 `;
 
 type PortalSection = 'home' | 'submissions' | 'profile' | 'tasks';
@@ -186,6 +205,45 @@ const fmtDate = (iso: string | null): string => {
 };
 
 // ---------------------------------------------------------------------------
+// Validation errors (sweep item 11). A failed POST no longer throws the user's
+// typing away behind a redirect: the same page is re-rendered with every
+// posted value echoed back, a focusable role="alert" summary linking to each
+// bad control, and per-field aria-invalid/aria-describedby wiring. Success
+// keeps Post/Redirect/Get.
+// ---------------------------------------------------------------------------
+
+export interface FieldError {
+  key: string;
+  message: string;
+}
+
+const fieldId = (key: string): string => `field-${key}`;
+const errId = (key: string): string => `err-${key}`;
+
+function errorSummaryHtml(errors: FieldError[]): string {
+  if (errors.length === 0) return '';
+  const heading = errors.length === 1 ? 'There is a problem' : `There are ${errors.length} problems`;
+  return `<div class="errsum" id="error-summary" role="alert" tabindex="-1">
+<h2>${heading}</h2>
+<ul>${errors.map((e) => `<li><a href="#${esc(fieldId(e.key))}">${esc(e.message)}</a></li>`).join('')}</ul>
+</div>
+<script>document.getElementById('error-summary').focus();</script>`;
+}
+
+/** aria wiring for a control whose value failed validation. */
+function invalidAttrs(errors: FieldError[], key: string): string {
+  return errors.some((e) => e.key === key)
+    ? ` aria-invalid="true" aria-describedby="${esc(errId(key))}"`
+    : '';
+}
+
+/** The <p> that aria-describedby points at, rendered next to its control. */
+function fieldErrorHtml(errors: FieldError[], key: string): string {
+  const found = errors.find((e) => e.key === key);
+  return found ? `<p class="field-err" id="${esc(errId(key))}">${esc(found.message)}</p>` : '';
+}
+
+// ---------------------------------------------------------------------------
 // Context middleware: event + session + contact, or the login page
 // ---------------------------------------------------------------------------
 
@@ -209,9 +267,13 @@ async function loadPortalCtx(c: Context<AppEnv>): Promise<PortalCtx | Response> 
   if (!event) return c.html('<h1>Event not found</h1>', 404);
   const session = await getSession(c);
   if (!session || session.eventId !== event.id) return c.html(loginPage(event), 401);
-  const contact = await c.env.DB.prepare('SELECT * FROM contacts WHERE id = ?')
-    .bind(session.contactId)
-    .first<ContactRow>();
+  // Whole-row read: organiser-only columns are stripped at the query boundary
+  // so no portal template can leak them (manual-review-1 item 3).
+  const contact = redactInternal(
+    await c.env.DB.prepare('SELECT * FROM contacts WHERE id = ?')
+      .bind(session.contactId)
+      .first<ContactRow>(),
+  );
   if (!contact) return c.html(loginPage(event), 401);
   return { event, session, contact };
 }
@@ -368,14 +430,16 @@ portalRoutes.get('/:slug/submissions/:id', async (c) => {
   const base = `/portal/${esc(ctx.event.slug)}`;
   const id = c.req.param('id');
 
-  const submission = await c.env.DB.prepare(
-    `SELECT s.*, t.name AS track_name FROM submissions s
-     LEFT JOIN tracks t ON t.id = s.track_id
-     WHERE s.id = ? AND s.event_id = ? AND (s.submitter_contact_id = ?
-       OR EXISTS (SELECT 1 FROM submission_participants sp WHERE sp.submission_id = s.id AND sp.contact_id = ?))`,
-  )
-    .bind(id, ctx.event.id, ctx.session.contactId, ctx.session.contactId)
-    .first<Record<string, unknown>>();
+  const submission = redactInternal(
+    await c.env.DB.prepare(
+      `SELECT s.*, t.name AS track_name FROM submissions s
+       LEFT JOIN tracks t ON t.id = s.track_id
+       WHERE s.id = ? AND s.event_id = ? AND (s.submitter_contact_id = ?
+         OR EXISTS (SELECT 1 FROM submission_participants sp WHERE sp.submission_id = s.id AND sp.contact_id = ?))`,
+    )
+      .bind(id, ctx.event.id, ctx.session.contactId, ctx.session.contactId)
+      .first<Record<string, unknown>>(),
+  );
   if (!submission) return c.redirect(`${base}/submissions`);
 
   const [{ results: answers }, { results: participants }] = await Promise.all([
@@ -412,6 +476,9 @@ portalRoutes.get('/:slug/submissions/:id', async (c) => {
   const canWithdraw =
     submission.status !== 'withdrawn' && submission.status !== 'declined' &&
     submission.submitter_contact_id === ctx.session.contactId;
+  // Editing stays open for every participant until the submission is
+  // withdrawn or declined (docs/05 §4); organisers are notified afterwards.
+  const canEdit = !isEditLocked(String(submission.status));
 
   return c.html(
     portalPage(
@@ -439,7 +506,12 @@ ${
 <button class="danger" type="submit">Withdraw submission</button></form>`
     : ''
 }
-<p class="small muted" style="margin-top:.8rem">Need to change something? Contact the organisers — editing reopens with a later milestone.</p>`,
+${
+  canEdit
+    ? `<p style="margin-top:.8rem"><a class="btn secondary" href="${base}/submissions/${esc(id)}/edit">Edit submission</a></p>
+<p class="small muted">Changes are saved straight away; if a decision has already been made the organisers are notified.</p>`
+    : '<p class="small muted" style="margin-top:.8rem">This submission can no longer be edited. Contact the organisers if something needs to change.</p>'
+}`,
       flashOf(c),
     ),
   );
@@ -465,59 +537,96 @@ portalRoutes.post('/:slug/submissions/:id/withdraw', async (c) => {
 
 const PRONOUN_OPTIONS = ['', 'they/them', 'she/her', 'he/him', 'prefer not to say', 'self-describe'];
 
-portalRoutes.get('/:slug/profile', async (c) => {
-  const ctx = await loadPortalCtx(c);
-  if (ctx instanceof Response) return ctx;
+/** Link controls and the `links` json keys they map onto. */
+const LINK_FIELDS = [
+  ['link_linkedin', 'linkedin', 'LinkedIn URL'],
+  ['link_twitter', 'twitter', 'X (Twitter) URL'],
+  ['link_facebook', 'facebook', 'Facebook URL'],
+  ['link_website', 'website', 'Website'],
+] as const;
+
+type ProfileValues = Record<string, string>;
+
+function parseLinks(json: string | null): Record<string, string> {
+  try {
+    const parsed = json ? (JSON.parse(json) as unknown) : {};
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? (parsed as Record<string, string>)
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+function profileValuesFromContact(contact: ContactRow): ProfileValues {
+  const links = parseLinks(contact.links);
+  const values: ProfileValues = {
+    biography: contact.biography ?? '',
+    salutation: contact.salutation ?? '',
+    first_name: contact.first_name ?? '',
+    last_name: contact.last_name ?? '',
+    honorific: contact.honorific ?? '',
+    pronouns: contact.pronouns ?? '',
+    company: contact.company ?? '',
+    job_title: contact.job_title ?? '',
+  };
+  for (const [control, key] of LINK_FIELDS) values[control] = links[key] ?? '';
+  return values;
+}
+
+function profilePageHtml(ctx: PortalCtx, values: ProfileValues, errors: FieldError[], flash: string | null): string {
   const base = `/portal/${esc(ctx.event.slug)}`;
   const contact = ctx.contact;
-  let links: Record<string, string> = {};
-  try {
-    links = contact.links ? (JSON.parse(contact.links) as Record<string, string>) : {};
-  } catch { /* empty */ }
+  const field = (name: string, label: string, type = 'text', required = false) =>
+    `<label for="${esc(fieldId(name))}">${label}</label><input type="${type}" id="${esc(fieldId(name))}" name="${name}" value="${esc(
+      values[name] ?? '',
+    )}"${required ? ' required' : ''}${invalidAttrs(errors, name)}>${fieldErrorHtml(errors, name)}`;
 
-  const field = (name: string, label: string, value: string | null, type = 'text', required = false) =>
-    `<label for="f-${name}">${label}</label><input type="${type}" id="f-${name}" name="${name}" value="${esc(value ?? '')}"${required ? ' required' : ''}>`;
-
-  return c.html(
-    portalPage(
-      ctx,
-      'profile',
-      `<form method="post" action="${base}/profile" enctype="multipart/form-data">
+  return portalPage(
+    ctx,
+    'profile',
+    `${errorSummaryHtml(errors)}<form method="post" action="${base}/profile" enctype="multipart/form-data">
 <div class="grid2">
 <div class="card"><h2>General</h2>
-<label for="f-biography">Biography <span class="counter" id="bio-count"></span></label>
-<textarea id="f-biography" name="biography" rows="7" maxlength="5000">${esc(contact.biography ?? '')}</textarea>
-${field('salutation', 'Salutation', contact.salutation)}
-${field('first_name', 'First Name *', contact.first_name, 'text', true)}
-${field('last_name', 'Last Name *', contact.last_name, 'text', true)}
-${field('honorific', 'Honorific', contact.honorific)}
-<label for="f-pronouns">Pronouns</label>
-<select id="f-pronouns" name="pronouns">${PRONOUN_OPTIONS.map(
-        (p) => `<option value="${esc(p)}"${(contact.pronouns ?? '') === p ? ' selected' : ''}>${esc(p || '—')}</option>`,
-      ).join('')}</select>
-${field('company', 'Company', contact.company)}
-${field('job_title', 'Job title', contact.job_title)}
-<label for="f-headshot">Headshot <span class="muted small">(square works best, max 5 MB)</span></label>
+<label for="${esc(fieldId('biography'))}">Biography <span class="counter" id="bio-count"></span></label>
+<textarea id="${esc(fieldId('biography'))}" name="biography" rows="7" maxlength="5000"${invalidAttrs(
+      errors,
+      'biography',
+    )}>${esc(values.biography ?? '')}</textarea>${fieldErrorHtml(errors, 'biography')}
+${field('salutation', 'Salutation')}
+${field('first_name', 'First Name *', 'text', true)}
+${field('last_name', 'Last Name *', 'text', true)}
+${field('honorific', 'Honorific')}
+<label for="${esc(fieldId('pronouns'))}">Pronouns</label>
+<select id="${esc(fieldId('pronouns'))}" name="pronouns"${invalidAttrs(errors, 'pronouns')}>${PRONOUN_OPTIONS.map(
+      (p) => `<option value="${esc(p)}"${(values.pronouns ?? '') === p ? ' selected' : ''}>${esc(p || '\u2014')}</option>`,
+    ).join('')}</select>${fieldErrorHtml(errors, 'pronouns')}
+${field('company', 'Company')}
+${field('job_title', 'Job title')}
+<label for="${esc(fieldId('headshot'))}">Headshot <span class="muted small">(square works best, max 5 MB)</span></label>
 ${contact.headshot_asset_id ? `<img class="headshot-preview" src="/files/${esc(contact.headshot_asset_id)}" alt="Current headshot">` : ''}
-<input type="file" id="f-headshot" name="headshot" accept="image/*">
+<input type="file" id="${esc(fieldId('headshot'))}" name="headshot" accept="image/*"${invalidAttrs(errors, 'headshot')}>
+${fieldErrorHtml(errors, 'headshot')}
 </div>
 <div class="card"><h2>My Links</h2>
-${field('link_linkedin', 'LinkedIn URL', links.linkedin ?? null, 'url')}
-${field('link_twitter', 'X (Twitter) URL', links.twitter ?? null, 'url')}
-${field('link_facebook', 'Facebook URL', links.facebook ?? null, 'url')}
-${field('link_website', 'Website', links.website ?? null, 'url')}
+${LINK_FIELDS.map(([control, , label]) => field(control, label, 'url')).join('\n')}
 <p style="margin-top:1.2rem"><button type="submit">Save profile</button></p>
 </div>
 </div>
 </form>
 <script>
-const bio=document.getElementById('f-biography'),count=document.getElementById('bio-count');
+const bio=document.getElementById('field-biography'),count=document.getElementById('bio-count');
 const upd=()=>{count.textContent=bio.value.length.toLocaleString()+' / 5,000 characters'};
 bio.addEventListener('input',upd);upd();
 </script>`,
-      flashOf(c),
-    ),
+    flash,
   );
+}
+
+portalRoutes.get('/:slug/profile', async (c) => {
+  const ctx = await loadPortalCtx(c);
+  if (ctx instanceof Response) return ctx;
+  return c.html(profilePageHtml(ctx, profileValuesFromContact(ctx.contact), [], flashOf(c)));
 });
 
 portalRoutes.post('/:slug/profile', async (c) => {
@@ -526,21 +635,35 @@ portalRoutes.post('/:slug/profile', async (c) => {
   const base = `/portal/${ctx.event.slug}`;
   const body = await c.req.parseBody();
 
-  const text = (name: string): string | null => {
+  const raw = (name: string): string => {
     const v = body[name];
-    return typeof v === 'string' ? v.trim() || null : null;
+    return typeof v === 'string' ? v.trim() : '';
   };
-  const first = text('first_name');
-  const last = text('last_name');
-  if (!first || !last) {
-    return c.redirect(`${base}/profile?m=${encodeURIComponent('!First and last name are required.')}`);
-  }
-  for (const key of ['link_linkedin', 'link_twitter', 'link_facebook', 'link_website']) {
-    const v = text(key);
-    if (v && !/^https?:\/\//i.test(v)) {
-      return c.redirect(`${base}/profile?m=${encodeURIComponent('!Links must start with http:// or https://')}`);
+  const nullable = (name: string): string | null => raw(name) || null;
+
+  // Echo everything the speaker typed, whatever happens next.
+  const values: ProfileValues = {
+    biography: raw('biography'),
+    salutation: raw('salutation'),
+    first_name: raw('first_name'),
+    last_name: raw('last_name'),
+    honorific: raw('honorific'),
+    pronouns: raw('pronouns'),
+    company: raw('company'),
+    job_title: raw('job_title'),
+  };
+  for (const [control] of LINK_FIELDS) values[control] = raw(control);
+
+  const errors: FieldError[] = [];
+  if (!values.first_name) errors.push({ key: 'first_name', message: 'First name is required.' });
+  if (!values.last_name) errors.push({ key: 'last_name', message: 'Last name is required.' });
+  for (const [control, , label] of LINK_FIELDS) {
+    const value = values[control] ?? '';
+    if (value !== '' && !isValidUrlShape(value)) {
+      errors.push({ key: control, message: `${label} must be a full http:// or https:// address.` });
     }
   }
+  if (errors.length > 0) return c.html(profilePageHtml(ctx, values, errors, null), 400);
 
   let headshotId = ctx.contact.headshot_asset_id;
   const upload = body.headshot;
@@ -553,37 +676,39 @@ portalRoutes.post('/:slug/profile', async (c) => {
       allowedTypes: IMAGE_TYPES,
     });
     if ('error' in saved) {
-      return c.redirect(`${base}/profile?m=${encodeURIComponent(`!${saved.error}`)}`);
+      return c.html(profilePageHtml(ctx, values, [{ key: 'headshot', message: saved.error }], null), 400);
     }
     headshotId = saved.id;
   }
 
-  const links = JSON.stringify({
-    linkedin: text('link_linkedin') ?? '',
-    twitter: text('link_twitter') ?? '',
-    facebook: text('link_facebook') ?? '',
-    website: text('link_website') ?? '',
-  });
-  await c.env.DB.prepare(
-    `UPDATE contacts SET biography = ?, salutation = ?, first_name = ?, last_name = ?, honorific = ?,
-       pronouns = ?, company = ?, job_title = ?, headshot_asset_id = ?, links = ?, updated_at = ?
-     WHERE id = ?`,
-  )
-    .bind(
-      text('biography'),
-      text('salutation'),
-      first,
-      last,
-      text('honorific'),
-      text('pronouns'),
-      text('company'),
-      text('job_title'),
-      headshotId,
-      links,
-      new Date().toISOString(),
-      ctx.session.contactId,
-    )
-    .run();
+  // Only touch `links` when the form actually carried the controls and the
+  // result differs — a page that omits them (or leaves all four blank when
+  // they were already blank) must not overwrite what is stored.
+  const posted: Record<string, string> = {};
+  for (const [control, key] of LINK_FIELDS) posted[key] = values[control] ?? '';
+  const current = parseLinks(ctx.contact.links);
+  const linksPresent = LINK_FIELDS.some(([control]) => control in body);
+  const linksUnchanged = LINK_FIELDS.every(([, key]) => (current[key] ?? '') === posted[key]);
+  const writeLinks = linksPresent && !linksUnchanged;
+
+  const now = new Date().toISOString();
+  const sql = `UPDATE contacts SET biography = ?, salutation = ?, first_name = ?, last_name = ?, honorific = ?,
+       pronouns = ?, company = ?, job_title = ?, headshot_asset_id = ?${writeLinks ? ', links = ?' : ''}, updated_at = ?
+     WHERE id = ?`;
+  const binds: unknown[] = [
+    nullable('biography'),
+    nullable('salutation'),
+    values.first_name,
+    values.last_name,
+    nullable('honorific'),
+    nullable('pronouns'),
+    nullable('company'),
+    nullable('job_title'),
+    headshotId,
+  ];
+  if (writeLinks) binds.push(JSON.stringify(posted));
+  binds.push(now, ctx.session.contactId);
+  await c.env.DB.prepare(sql).bind(...binds).run();
   return c.redirect(`${base}/profile?m=${encodeURIComponent('Profile saved.')}`);
 });
 
@@ -609,15 +734,99 @@ function parsePortalFormQuestions(json: string | null): PortalFormQuestion[] {
   }
 }
 
-function taskActionHtml(base: string, t: TaskAssignmentRow, portalForm: { title: string | null; questions: PortalFormQuestion[] } | null): string {
+// ---------------------------------------------------------------------------
+// Upload policy (FR-PORTAL-8): a task backed by a file request uses that
+// request's allowed_types / max_size_mb; anything else falls back to the
+// generic portal limits. Malware scanning of stored bytes stays deliberately
+// out of scope this pass (see the note in routes/files.ts).
+// ---------------------------------------------------------------------------
+
+interface FileRequestPolicyRow {
+  id: string;
+  title: string;
+  allowed_types: string | null;
+  max_size_mb: number | null;
+}
+
+interface UploadPolicy {
+  allowedTypes: Set<string>;
+  maxBytes: number;
+}
+
+const TYPE_LABELS: Record<string, string> = {
+  'application/pdf': 'PDF',
+  'application/vnd.ms-powerpoint': 'PowerPoint',
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation': 'PowerPoint',
+  'application/msword': 'Word',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'Word',
+  'application/zip': 'ZIP',
+  'image/jpeg': 'JPEG',
+  'image/png': 'PNG',
+  'image/webp': 'WebP',
+};
+
+function uploadPolicyFor(request: FileRequestPolicyRow | null | undefined): UploadPolicy {
+  let allowedTypes = DOCUMENT_TYPES;
+  if (request?.allowed_types) {
+    try {
+      const parsed = JSON.parse(request.allowed_types) as unknown;
+      if (Array.isArray(parsed)) {
+        const types = parsed.filter((t): t is string => typeof t === 'string' && t.trim() !== '');
+        if (types.length > 0) allowedTypes = new Set(types);
+      }
+    } catch {
+      // Malformed config must not lock the speaker out: generic list applies.
+    }
+  }
+  const maxBytes =
+    request && typeof request.max_size_mb === 'number' && request.max_size_mb > 0
+      ? request.max_size_mb * 1024 * 1024
+      : MAX_UPLOAD_BYTES;
+  return { allowedTypes, maxBytes };
+}
+
+/** Human copy for the effective policy — never a hardcoded "max 20 MB". */
+function describeUploadPolicy(policy: UploadPolicy): string {
+  const labels = [...new Set([...policy.allowedTypes].map((t) => TYPE_LABELS[t] ?? t))];
+  const mb = Math.max(1, Math.round(policy.maxBytes / 1024 / 1024));
+  return `${labels.join(', ')} \u2014 max ${mb} MB`;
+}
+
+async function loadFileRequest(
+  c: Context<AppEnv>,
+  eventId: string,
+  id: string,
+): Promise<FileRequestPolicyRow | null> {
+  return c.env.DB.prepare(
+    'SELECT id, title, allowed_types, max_size_mb FROM file_requests WHERE id = ? AND event_id = ?',
+  )
+    .bind(id, eventId)
+    .first<FileRequestPolicyRow>();
+}
+
+interface TaskRenderOpts {
+  portalForm: { title: string | null; questions: PortalFormQuestion[] } | null;
+  policy: UploadPolicy;
+  /** validation errors for *this* assignment only */
+  errors: FieldError[];
+  /** posted values for *this* assignment only, keyed by control name */
+  posted: Record<string, string>;
+}
+
+function taskActionHtml(base: string, t: TaskAssignmentRow, opts: TaskRenderOpts): string {
   if (t.status === 'complete') {
     return `<p class="small muted">Completed ${esc(fmtDate(t.completed_at))}.</p>`;
   }
+  const { portalForm, policy, errors, posted } = opts;
   const action = `${base}/tasks/${esc(t.assignment_id)}/complete`;
   switch (t.action_type) {
     case 'acknowledge':
       return `<form method="post" action="${action}">
-<label class="small" style="font-weight:400"><input type="checkbox" name="agree" value="1" required> I have read and agree</label>
+<label class="small" style="font-weight:400"><input type="checkbox" id="${esc(fieldId('agree'))}" name="agree" value="1" required${invalidAttrs(
+        errors,
+        'agree',
+      )}> I have read and agree</label>
+${fieldErrorHtml(errors, 'agree')}
 <p><button type="submit">Confirm</button></p></form>`;
     case 'external_link': {
       const url = t.description?.match(/https?:\/\/\S+/)?.[0];
@@ -627,8 +836,12 @@ ${url ? `<p><a class="btn secondary" href="${esc(url)}" target="_blank" rel="noo
     }
     case 'file_upload':
       return `<form method="post" action="${action}" enctype="multipart/form-data">
-<label>File <span class="muted small">(PDF, slides, docs or images — max 20 MB)</span></label>
-<input type="file" name="upload" required>
+<label for="${esc(fieldId('upload'))}">File <span class="muted small">(${esc(describeUploadPolicy(policy))})</span></label>
+<input type="file" id="${esc(fieldId('upload'))}" name="upload" required accept="${esc([...policy.allowedTypes].join(','))}"${invalidAttrs(
+        errors,
+        'upload',
+      )}>
+${fieldErrorHtml(errors, 'upload')}
 <p><button type="submit">Upload &amp; complete</button></p></form>`;
     case 'portal_form': {
       if (!portalForm || portalForm.questions.length === 0) {
@@ -636,22 +849,32 @@ ${url ? `<p><a class="btn secondary" href="${esc(url)}" target="_blank" rel="noo
       }
       const fields = portalForm.questions
         .map((q) => {
-          const id = `pf-${esc(q.id)}`;
+          const key = `q_${q.id}`;
+          const id = esc(fieldId(key));
           const req = q.required ? ' required' : '';
           const star = q.required ? ' *' : '';
+          const aria = invalidAttrs(errors, key);
+          const err = fieldErrorHtml(errors, key);
+          const value = posted[key] ?? '';
           if (q.type === 'dropdown' && q.options) {
             return `<label for="${id}">${esc(q.label)}${star}</label>
-<select id="${id}" name="q_${esc(q.id)}"${req}><option value="">Select…</option>${q.options
-              .map((o) => `<option value="${esc(o.value)}">${esc(o.label)}</option>`)
-              .join('')}</select>`;
+<select id="${id}" name="${esc(key)}"${req}${aria}><option value="">Select\u2026</option>${q.options
+              .map((o) => `<option value="${esc(o.value)}"${o.value === value ? ' selected' : ''}>${esc(o.label)}</option>`)
+              .join('')}</select>${err}`;
           }
           if (q.type === 'checkbox') {
-            return `<label class="small" style="font-weight:400"><input type="checkbox" name="q_${esc(q.id)}" value="yes"${req}> ${esc(q.label)}${star}</label>`;
+            return `<label class="small" style="font-weight:400"><input type="checkbox" id="${id}" name="${esc(
+              key,
+            )}" value="yes"${value !== '' ? ' checked' : ''}${req}${aria}> ${esc(q.label)}${star}</label>${err}`;
           }
           if (q.type === 'textarea') {
-            return `<label for="${id}">${esc(q.label)}${star}</label><textarea id="${id}" name="q_${esc(q.id)}" rows="3"${req}></textarea>`;
+            return `<label for="${id}">${esc(q.label)}${star}</label><textarea id="${id}" name="${esc(
+              key,
+            )}" rows="3"${req}${aria}>${esc(value)}</textarea>${err}`;
           }
-          return `<label for="${id}">${esc(q.label)}${star}</label><input type="${q.type === 'date' ? 'date' : 'text'}" id="${id}" name="q_${esc(q.id)}"${req}>`;
+          return `<label for="${id}">${esc(q.label)}${star}</label><input type="${
+            q.type === 'date' ? 'date' : 'text'
+          }" id="${id}" name="${esc(key)}" value="${esc(value)}"${req}${aria}>${err}`;
         })
         .join('');
       return `<form method="post" action="${action}">${fields}<p><button type="submit">Submit &amp; complete</button></p></form>`;
@@ -659,11 +882,19 @@ ${url ? `<p><a class="btn secondary" href="${esc(url)}" target="_blank" rel="noo
   }
 }
 
-portalRoutes.get('/:slug/tasks', async (c) => {
-  const ctx = await loadPortalCtx(c);
-  if (ctx instanceof Response) return ctx;
+interface TasksPageOpts {
+  flash?: string | null;
+  /** assignment whose form failed validation — errors/posted apply to it only */
+  assignmentId?: string;
+  errors?: FieldError[];
+  posted?: Record<string, string>;
+}
+
+async function tasksPageHtml(c: Context<AppEnv>, ctx: PortalCtx, opts: TasksPageOpts = {}): Promise<string> {
   const base = `/portal/${esc(ctx.event.slug)}`;
   const assignments = await loadAssignments(c, ctx.session.contactId);
+  const errors = opts.errors ?? [];
+  const posted = opts.posted ?? {};
 
   // portal_form definitions for any form-backed tasks on the page
   const formIds = [...new Set(assignments.map((t) => t.portal_form_id).filter((v): v is string => v !== null))];
@@ -675,7 +906,17 @@ portalRoutes.get('/:slug/tasks', async (c) => {
     if (row) forms.set(formId, { title: row.title, questions: parsePortalFormQuestions(row.questions) });
   }
 
-  const renderTask = (t: TaskAssignmentRow): string => `<div class="task" id="a-${esc(t.assignment_id)}">
+  // file-request policies for any upload tasks on the page (FR-PORTAL-8)
+  const requestIds = [...new Set(assignments.map((t) => t.file_request_id).filter((v): v is string => v !== null))];
+  const requests = new Map<string, FileRequestPolicyRow>();
+  for (const requestId of requestIds) {
+    const row = await loadFileRequest(c, ctx.event.id, requestId);
+    if (row) requests.set(requestId, row);
+  }
+
+  const renderTask = (t: TaskAssignmentRow): string => {
+    const isTarget = t.assignment_id === opts.assignmentId;
+    return `<div class="task" id="a-${esc(t.assignment_id)}">
 <div class="t-head">
 <span class="t-title">${esc(t.title)}${t.required === 1 ? ' <span class="muted small">(required)</span>' : ''}</span>
 ${t.due_at ? `<span class="due${isOverdue(t) ? ' overdue' : ''}">Due ${esc(fmtDate(t.due_at))}</span>` : ''}
@@ -684,25 +925,35 @@ ${isOverdue(t) ? '<span class="badge-overdue">Overdue</span>' : ''}
 </div>
 ${t.description ? `<div class="small muted" style="margin-top:.3rem">${esc(t.description.replace(/<[^>]*>/g, ''))}</div>` : ''}
 ${t.submission_code ? `<div class="small muted">For <span class="code">${esc(t.submission_code)}</span> ${esc(t.submission_title ?? '')}</div>` : ''}
-<div class="t-body">${taskActionHtml(base, t, t.portal_form_id ? forms.get(t.portal_form_id) ?? null : null)}</div>
+<div class="t-body">${taskActionHtml(base, t, {
+      portalForm: t.portal_form_id ? forms.get(t.portal_form_id) ?? null : null,
+      policy: uploadPolicyFor(t.file_request_id ? requests.get(t.file_request_id) ?? null : null),
+      errors: isTarget ? errors : [],
+      posted: isTarget ? posted : {},
+    })}</div>
 </div>`;
+  };
 
   const submissionTasks = assignments.filter((t) => t.submission_id !== null);
   const myTasks = assignments.filter((t) => t.submission_id === null);
 
-  return c.html(
-    portalPage(
-      ctx,
-      'tasks',
-      `<div class="card"><h2>Submission Tasks <span class="count">${submissionTasks.length}</span></h2>
+  return portalPage(
+    ctx,
+    'tasks',
+    `${errorSummaryHtml(errors)}<div class="card"><h2>Submission Tasks <span class="count">${submissionTasks.length}</span></h2>
 ${submissionTasks.length === 0 ? '<p class="muted">No submission tasks found.</p>' : submissionTasks.map(renderTask).join('')}
 </div>
 <div class="card"><h2>My Tasks <span class="count">${myTasks.length}</span></h2>
 ${myTasks.length === 0 ? '<p class="muted">No tasks found.</p>' : myTasks.map(renderTask).join('')}
 </div>`,
-      flashOf(c),
-    ),
+    opts.flash ?? null,
   );
+}
+
+portalRoutes.get('/:slug/tasks', async (c) => {
+  const ctx = await loadPortalCtx(c);
+  if (ctx instanceof Response) return ctx;
+  return c.html(await tasksPageHtml(c, ctx, { flash: flashOf(c) }));
 });
 
 portalRoutes.post('/:slug/tasks/:assignmentId/complete', async (c) => {
@@ -711,6 +962,9 @@ portalRoutes.post('/:slug/tasks/:assignmentId/complete', async (c) => {
   const base = `/portal/${ctx.event.slug}`;
   const assignmentId = c.req.param('assignmentId');
   const back = (msg: string) => c.redirect(`${base}/tasks?m=${encodeURIComponent(msg)}#a-${assignmentId}`);
+  /** Field-level failure: re-render the tasks page with the input preserved. */
+  const invalid = async (errors: FieldError[], posted: Record<string, string> = {}) =>
+    c.html(await tasksPageHtml(c, ctx, { assignmentId, errors, posted }), 400);
 
   const row = await c.env.DB.prepare(
     `SELECT ta.id AS assignment_id, ta.status, ta.completed_at, ta.submission_id,
@@ -731,15 +985,20 @@ portalRoutes.post('/:slug/tasks/:assignmentId/complete', async (c) => {
   if (row.action_type === 'file_upload') {
     const body = await c.req.parseBody();
     const upload = body.upload;
-    if (!(upload instanceof File) || upload.size === 0) return back('!Choose a file to upload.');
+    if (!(upload instanceof File) || upload.size === 0) {
+      return invalid([{ key: 'upload', message: 'Choose a file to upload.' }]);
+    }
+    // The file request, when there is one, sets the accepted types and size.
+    const request = row.file_request_id ? await loadFileRequest(c, ctx.event.id, row.file_request_id) : null;
+    const policy = uploadPolicyFor(request);
     const saved = await saveFile(c.env, {
       eventId: ctx.event.id,
       uploadedByContactId: ctx.session.contactId,
       file: upload,
-      maxBytes: MAX_UPLOAD_BYTES,
-      allowedTypes: DOCUMENT_TYPES,
+      maxBytes: policy.maxBytes,
+      allowedTypes: policy.allowedTypes,
     });
-    if ('error' in saved) return back(`!${saved.error}`);
+    if ('error' in saved) return invalid([{ key: 'upload', message: saved.error }]);
     responseId = saved.id;
     if (row.file_request_id) {
       await c.env.DB.prepare(
@@ -751,22 +1010,33 @@ portalRoutes.post('/:slug/tasks/:assignmentId/complete', async (c) => {
     }
   } else if (row.action_type === 'acknowledge') {
     const body = await c.req.parseBody();
-    if (body.agree !== '1') return back('!Please tick the confirmation first.');
+    if (body.agree !== '1') {
+      return invalid([{ key: 'agree', message: 'Please tick the confirmation first.' }]);
+    }
   } else if (row.action_type === 'portal_form') {
     if (!row.portal_form_id) return back('!This form is not available.');
-    const form = await c.env.DB.prepare('SELECT * FROM portal_forms WHERE id = ?')
-      .bind(row.portal_form_id)
-      .first<{ id: string; name: string; questions: string | null; send_confirmation_email: number }>();
+    const form = redactInternal(
+      await c.env.DB.prepare('SELECT * FROM portal_forms WHERE id = ?')
+        .bind(row.portal_form_id)
+        .first<{ id: string; name: string; questions: string | null; send_confirmation_email: number }>(),
+    );
     if (!form) return back('!This form is not available.');
     const questions = parsePortalFormQuestions(form.questions);
     const body = await c.req.parseBody();
     const answers: Record<string, string> = {};
+    const posted: Record<string, string> = {};
+    const errors: FieldError[] = [];
     for (const q of questions) {
       const v = body[`q_${q.id}`];
       const value = typeof v === 'string' ? v.trim() : '';
-      if (q.required && value === '') return back(`!${q.label} is required.`);
+      posted[`q_${q.id}`] = value;
+      if (q.required && value === '') {
+        errors.push({ key: `q_${q.id}`, message: `${q.label} is required.` });
+        continue;
+      }
       if (value !== '') answers[q.id] = value;
     }
+    if (errors.length > 0) return invalid(errors, posted);
     responseId = crypto.randomUUID();
     await c.env.DB.prepare(
       `INSERT INTO portal_form_responses (id, portal_form_id, contact_id, submission_id, answers, submitted_at)
@@ -789,14 +1059,426 @@ portalRoutes.post('/:slug/tasks/:assignmentId/complete', async (c) => {
       });
     }
   }
-  // external_link needs no payload — the button press is the confirmation.
+  // external_link needs no payload \u2014 the button press is the confirmation.
 
   await c.env.DB.prepare(
     `UPDATE task_assignments SET status = 'complete', completed_at = ?, response_id = ? WHERE id = ?`,
   )
     .bind(ts, responseId, assignmentId)
     .run();
-  return back('Task completed — thank you!');
+  return back('Task completed \u2014 thank you!');
+});
+
+// ---------------------------------------------------------------------------
+// Editing a submission (docs/Clarifications/Swyx-2 gap 2). Acceptance does not
+// lock a proposal: any participant may keep it accurate until it is withdrawn
+// or declined. Post-decision edits notify the organisers configured on the
+// form (notify_admins_on_update), once per save.
+// ---------------------------------------------------------------------------
+
+const EDIT_LOCKED_STATUSES: ReadonlySet<string> = new Set(['withdrawn', 'declined']);
+
+function isEditLocked(status: string): boolean {
+  return EDIT_LOCKED_STATUSES.has(status);
+}
+
+interface EditableSubmissionRow {
+  id: string;
+  event_id: string;
+  form_id: string | null;
+  code: string;
+  title: string;
+  description: string | null;
+  status: string;
+  format: string | null;
+  level: string | null;
+  language: string | null;
+  track_id: string | null;
+  submitter_contact_id: string | null;
+  updated_at: string;
+}
+
+/** The submission, but only when this speaker submitted it or participates. */
+async function loadOwnSubmission(
+  c: Context<AppEnv>,
+  ctx: PortalCtx,
+  id: string,
+): Promise<EditableSubmissionRow | null> {
+  return redactInternal(
+    await c.env.DB.prepare(
+      `SELECT s.* FROM submissions s
+       WHERE s.id = ? AND s.event_id = ? AND (s.submitter_contact_id = ?
+         OR EXISTS (SELECT 1 FROM submission_participants sp WHERE sp.submission_id = s.id AND sp.contact_id = ?))`,
+    )
+      .bind(id, ctx.event.id, ctx.session.contactId, ctx.session.contactId)
+      .first<EditableSubmissionRow>(),
+  );
+}
+
+async function loadAbstractQuestions(c: Context<AppEnv>, formId: string | null): Promise<QuestionDef[]> {
+  if (!formId) return [];
+  const all = (await loadQuestions(c.env.DB, formId)) as unknown as QuestionDef[];
+  return all.filter((q) => q.section === 'abstract');
+}
+
+async function loadSubmissionAnswers(c: Context<AppEnv>, submissionId: string): Promise<Answers> {
+  const { results } = await c.env.DB.prepare(
+    'SELECT question_id, value_json FROM submission_answers WHERE submission_id = ?',
+  )
+    .bind(submissionId)
+    .all<{ question_id: string; value_json: string | null }>();
+  const out: Answers = {};
+  for (const row of results) {
+    if (row.value_json === null) continue;
+    try {
+      out[row.question_id] = JSON.parse(row.value_json) as AnswerValue;
+    } catch {
+      out[row.question_id] = row.value_json;
+    }
+  }
+  return out;
+}
+
+const answerText = (v: AnswerValue): string =>
+  v === null || v === undefined || typeof v === 'boolean' || Array.isArray(v) ? '' : String(v);
+
+const answerList = (v: AnswerValue): string[] =>
+  Array.isArray(v) ? v.map(String) : v === null || v === undefined || v === '' ? [] : [String(v)];
+
+function editControlHtml(q: QuestionDef, value: AnswerValue, errors: FieldError[]): string {
+  const id = esc(fieldId(q.id));
+  const name = esc(`q_${q.id}`);
+  const aria = invalidAttrs(errors, q.id);
+  const err = fieldErrorHtml(errors, q.id);
+  const star = q.required ? ' *' : '';
+  const help = q.help_text ? `<p class="qhelp">${esc(q.help_text)}</p>` : '';
+  const label = `<label for="${id}">${esc(q.label)}${star}</label>`;
+  const maxlen = q.max_chars ? ` maxlength="${q.max_chars}"` : '';
+
+  switch (q.type) {
+    case 'heading':
+      return `<h3 style="margin:1.2rem 0 .2rem;font-size:.95rem">${esc(q.label)}</h3>${help}`;
+    case 'textarea':
+    case 'wysiwyg':
+      return `${label}<textarea id="${id}" name="${name}" rows="6"${maxlen}${aria}>${esc(answerText(value))}</textarea>${help}${err}`;
+    case 'dropdown':
+      return `${label}<select id="${id}" name="${name}"${aria}><option value="">Select\u2026</option>${(q.options ?? [])
+        .map(
+          (o) =>
+            `<option value="${esc(o.value)}"${o.value === answerText(value) ? ' selected' : ''}>${esc(o.label)}</option>`,
+        )
+        .join('')}</select>${help}${err}`;
+    case 'radio': {
+      const chosen = answerText(value);
+      const items = (q.options ?? [])
+        .map(
+          (o, idx) =>
+            `<label class="small" style="font-weight:400"><input type="radio"${idx === 0 ? ` id="${id}"` : ''} name="${name}" value="${esc(
+              o.value,
+            )}"${o.value === chosen ? ' checked' : ''}${aria}> ${esc(o.label)}</label>`,
+        )
+        .join('');
+      return `${label}${items}${help}${err}`;
+    }
+    case 'multiselect': {
+      const chosen = new Set(answerList(value));
+      const items = (q.options ?? [])
+        .map(
+          (o, idx) =>
+            `<label class="small" style="font-weight:400"><input type="checkbox"${idx === 0 ? ` id="${id}"` : ''} name="${name}" value="${esc(
+              o.value,
+            )}"${chosen.has(o.value) ? ' checked' : ''}${aria}> ${esc(o.label)}</label>`,
+        )
+        .join('');
+      return `${label}${items}${help}${err}`;
+    }
+    case 'checkbox':
+      return `<label class="small" style="font-weight:400"><input type="checkbox" id="${id}" name="${name}" value="yes"${
+        value === true || value === 'yes' ? ' checked' : ''
+      }${aria}> ${esc(q.label)}${star}</label>${help}${err}`;
+    case 'file':
+      return `${label}<p class="small muted">Uploaded files are managed from your Tasks page; the current attachment is left as it is.</p>${help}`;
+    default: {
+      const type =
+        q.type === 'number'
+          ? 'number'
+          : q.type === 'email'
+            ? 'email'
+            : q.type === 'url'
+              ? 'url'
+              : q.type === 'phone'
+                ? 'tel'
+                : q.type === 'date'
+                  ? 'date'
+                  : q.type === 'datetime'
+                    ? 'datetime-local'
+                    : 'text';
+      return `${label}<input type="${type}" id="${id}" name="${name}" value="${esc(answerText(value))}"${maxlen}${aria}>${help}${err}`;
+    }
+  }
+}
+
+function editPageHtml(
+  ctx: PortalCtx,
+  submission: EditableSubmissionRow,
+  questions: QuestionDef[],
+  answers: Answers,
+  errors: FieldError[],
+  flash: string | null,
+): string {
+  const base = `/portal/${esc(ctx.event.slug)}`;
+  const detail = `${base}/submissions/${esc(submission.id)}`;
+  const decided = submission.status === 'accepted' || submission.status === 'accept_queue' || submission.status === 'decline_queue';
+  return portalPage(
+    ctx,
+    'submissions',
+    `${errorSummaryHtml(errors)}<div class="card">
+<h2><span class="code">${esc(submission.code)}</span> Edit submission ${statusChipHtml(submission.status)}</h2>
+${decided ? '<p class="small muted">This submission already has a decision \u2014 the organisers are notified of any change you save.</p>' : ''}
+<form method="post" action="${detail}/edit">
+${questions.map((q) => editControlHtml(q, answers[q.id], errors)).join('\n')}
+<p style="margin-top:1.2rem"><button type="submit">Save changes</button>
+<a class="btn secondary" style="margin-left:.5rem" href="${detail}">Cancel</a></p>
+</form>
+</div>`,
+    flash,
+  );
+}
+
+/** Read one posted edit form back into Answers, typed per question. */
+function readEditAnswers(
+  questions: QuestionDef[],
+  body: Record<string, string | File | (string | File)[]>,
+  existing: Answers,
+): Answers {
+  const out: Answers = {};
+  for (const q of questions) {
+    if (q.type === 'heading') continue;
+    if (q.type === 'file') {
+      // Not editable here: keep whatever the submission already carries.
+      if (existing[q.id] !== undefined) out[q.id] = existing[q.id];
+      continue;
+    }
+    const raw = body[`q_${q.id}`];
+    if (q.type === 'multiselect') {
+      const list = Array.isArray(raw) ? raw : raw === undefined ? [] : [raw];
+      out[q.id] = list.filter((v): v is string => typeof v === 'string' && v !== '');
+      continue;
+    }
+    const first = Array.isArray(raw) ? raw[0] : raw;
+    const value = typeof first === 'string' ? first.trim() : '';
+    if (q.type === 'checkbox') {
+      out[q.id] = value !== '';
+      continue;
+    }
+    if (q.type === 'number') {
+      const n = Number(value);
+      out[q.id] = value === '' ? null : Number.isNaN(n) ? value : n;
+      continue;
+    }
+    out[q.id] = value;
+  }
+  return out;
+}
+
+/** System fields mirrored onto submission columns (docs/04 §5). */
+function editSystemColumns(questions: QuestionDef[], answers: Answers): Record<string, string | null> {
+  const out: Record<string, string | null> = {};
+  for (const q of questions) {
+    const value = answers[q.id];
+    if (value === undefined) continue;
+    const text = answerText(value).trim();
+    switch (q.field_key) {
+      case 'title':
+        if (text !== '') out.title = text.slice(0, 255);
+        break;
+      case 'description':
+      case 'format':
+      case 'level':
+      case 'language':
+        out[q.field_key] = text === '' ? null : text;
+        break;
+      default:
+        break;
+    }
+  }
+  return out;
+}
+
+async function prepareAdminUpdateEmails(
+  c: Context<AppEnv>,
+  ctx: PortalCtx,
+  submission: EditableSubmissionRow,
+  title: string,
+  version: string,
+): Promise<PreparedEmail[]> {
+  if (!submission.form_id) return [];
+  const form = await c.env.DB.prepare(
+    'SELECT notify_admins_on_update FROM submission_forms WHERE id = ? AND event_id = ?',
+  )
+    .bind(submission.form_id, ctx.event.id)
+    .first<{ notify_admins_on_update: string | null }>();
+  let ids: string[] = [];
+  try {
+    const parsed = form?.notify_admins_on_update ? (JSON.parse(form.notify_admins_on_update) as unknown) : [];
+    if (Array.isArray(parsed)) ids = [...new Set(parsed.filter((v): v is string => typeof v === 'string' && v !== ''))];
+  } catch {
+    ids = [];
+  }
+  if (ids.length === 0) return [];
+
+  // Recipients must be contacts of this event — configuration can go stale.
+  const placeholders = ids.map(() => '?').join(', ');
+  const { results } = await c.env.DB.prepare(
+    `SELECT id, email FROM contacts WHERE event_id = ? AND id IN (${placeholders})`,
+  )
+    .bind(ctx.event.id, ...ids)
+    .all<{ id: string; email: string }>();
+
+  const prepared: PreparedEmail[] = [];
+  for (const recipient of results) {
+    // version = the new updated_at, so one save produces exactly one message.
+    const email = await prepareTemplated(c.env.DB, {
+      templateKey: 'submission_updated_admin',
+      eventId: ctx.event.id,
+      contactId: recipient.id,
+      toEmail: recipient.email,
+      entityId: submission.id,
+      version,
+      context: {
+        event: { name: ctx.event.name },
+        submission: { title, code: submission.code },
+        submitter: { name: displayName(ctx.contact), email: ctx.contact.email },
+        admin_url: `${c.env.APP_URL}/app`,
+      },
+    });
+    if (email) prepared.push(email);
+  }
+  return prepared;
+}
+
+/** Shared guard for both edit routes: 404 when it is not theirs, 403 when locked. */
+async function resolveEditTarget(
+  c: Context<AppEnv>,
+  ctx: PortalCtx,
+  id: string,
+): Promise<{ submission: EditableSubmissionRow; questions: QuestionDef[] } | Response> {
+  const submission = await loadOwnSubmission(c, ctx, id);
+  if (!submission) {
+    return c.html(
+      portalPage(
+        ctx,
+        'submissions',
+        '<div class="card"><h2>Submission not found</h2><p class="muted">We could not find that submission on your account.</p></div>',
+      ),
+      404,
+    );
+  }
+  if (isEditLocked(submission.status)) {
+    return c.html(
+      portalPage(
+        ctx,
+        'submissions',
+        `<div class="card"><h2>Editing closed</h2><p class="muted">This submission is ${esc(
+          submission.status,
+        )} and can no longer be edited. Contact the organisers if something needs to change.</p></div>`,
+      ),
+      403,
+    );
+  }
+  const questions = await loadAbstractQuestions(c, submission.form_id);
+  if (questions.length === 0) {
+    return c.html(
+      portalPage(
+        ctx,
+        'submissions',
+        '<div class="card"><h2>Editing unavailable</h2><p class="muted">This submission has no editable form. Contact the organisers to make a change.</p></div>',
+      ),
+      403,
+    );
+  }
+  return { submission, questions };
+}
+
+portalRoutes.get('/:slug/submissions/:id/edit', async (c) => {
+  const ctx = await loadPortalCtx(c);
+  if (ctx instanceof Response) return ctx;
+  const target = await resolveEditTarget(c, ctx, c.req.param('id'));
+  if (target instanceof Response) return target;
+  const answers = await loadSubmissionAnswers(c, target.submission.id);
+  return c.html(editPageHtml(ctx, target.submission, target.questions, answers, [], flashOf(c)));
+});
+
+portalRoutes.post('/:slug/submissions/:id/edit', async (c) => {
+  const ctx = await loadPortalCtx(c);
+  if (ctx instanceof Response) return ctx;
+  const base = `/portal/${ctx.event.slug}`;
+  const id = c.req.param('id');
+  const target = await resolveEditTarget(c, ctx, id);
+  if (target instanceof Response) return target;
+  const { submission, questions } = target;
+
+  const body = await c.req.parseBody({ all: true });
+  const existing = await loadSubmissionAnswers(c, submission.id);
+  const answers = readEditAnswers(questions, body, existing);
+  const errors: FieldError[] = validateAnswers(questions, answers).map((e) => ({
+    key: e.question_id,
+    message: e.message,
+  }));
+  if (errors.length > 0) return c.html(editPageHtml(ctx, submission, questions, answers, errors, null), 400);
+
+  const kept = discardHiddenAnswers(questions, answers);
+  const sys = editSystemColumns(questions, kept);
+  const title = sys.title ?? submission.title;
+
+  // Track comes from its system question when the form has one, otherwise the
+  // stored value stands. Validate it belongs to this event either way.
+  const trackQuestion = questions.find((q) => q.field_key === 'track');
+  let trackId = trackQuestion ? answerText(kept[trackQuestion.id]) || null : submission.track_id;
+  if (trackId) {
+    const track = await c.env.DB.prepare('SELECT id FROM tracks WHERE id = ? AND event_id = ?')
+      .bind(trackId, ctx.event.id)
+      .first<{ id: string }>();
+    if (!track) trackId = null;
+  }
+
+  const updatedAt = new Date().toISOString();
+  const statements: D1PreparedStatement[] = [
+    c.env.DB.prepare(
+      `UPDATE submissions SET title = ?, description = ?, format = ?, level = ?, language = ?,
+         track_id = ?, updated_at = ?
+       WHERE id = ? AND event_id = ? AND status NOT IN ('withdrawn', 'declined')`,
+    ).bind(
+      title,
+      'description' in sys ? sys.description : submission.description,
+      'format' in sys ? sys.format : submission.format,
+      'level' in sys ? sys.level : submission.level,
+      'language' in sys ? sys.language : submission.language,
+      trackId,
+      updatedAt,
+      submission.id,
+      ctx.event.id,
+    ),
+    c.env.DB.prepare('DELETE FROM submission_answers WHERE submission_id = ?').bind(submission.id),
+  ];
+  for (const [questionId, value] of Object.entries(kept)) {
+    if (value === undefined) continue;
+    statements.push(
+      c.env.DB.prepare(
+        'INSERT INTO submission_answers (submission_id, question_id, value_json) VALUES (?, ?, ?)',
+      ).bind(submission.id, questionId, JSON.stringify(value)),
+    );
+  }
+
+  // Notification rows commit with the edit: no update without its notice.
+  const emails = await prepareAdminUpdateEmails(c, ctx, submission, title, updatedAt);
+  for (const email of emails) statements.push(...email.statements);
+  await c.env.DB.batch(statements);
+
+  await bumpEventRevision(c.env, ctx.event.id);
+  for (const email of emails) await attemptImmediate(c, email);
+
+  return c.redirect(`${base}/submissions/${id}?m=${encodeURIComponent('Submission updated.')}`);
 });
 
 // ---------------------------------------------------------------------------

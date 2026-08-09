@@ -20,6 +20,15 @@ export interface OutgoingEmail {
   html: string;
   /** when present the message is a calendar invite (docs/08 §5) */
   ics?: IcsPayload;
+  /**
+   * message_log idempotency key (sweep item P2-20). Declared here — not only
+   * on mailer.ts's OutboxEmailPayload — so providers can read it off the
+   * `OutgoingEmail` they're handed without a cast; `OutboxEmailPayload`
+   * narrows it to required. Passed to providers that support server-side
+   * idempotency so a crash after acceptance but before the local
+   * message_log/outbox update is recorded can't cause a double-send.
+   */
+  log_key?: string;
 }
 
 export interface EmailProvider {
@@ -55,7 +64,13 @@ export function createResendProvider(apiKey: string, from: string): EmailProvide
       }
       const res = await fetch('https://api.resend.com/emails', {
         method: 'POST',
-        headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+          // Resend dedupes retried sends within a rolling window when the
+          // same key is replayed (sweep item P2-20).
+          ...(mail.log_key ? { 'Idempotency-Key': mail.log_key } : {}),
+        },
         body: JSON.stringify(body),
       });
       if (!res.ok) throw new Error(`resend ${res.status}: ${await res.text()}`);
@@ -99,6 +114,15 @@ export function createSendGridProvider(apiKey: string, from: string): EmailProvi
             disposition: 'attachment',
           },
         ];
+      }
+      if (mail.log_key) {
+        // SendGrid's v3 mail/send has no true idempotency header (unlike
+        // Resend) — custom_args only tags the send for later lookup via the
+        // Activity API/webhooks. Residual risk (sweep item P2-20): a crash
+        // after SendGrid accepts the request but before this call returns
+        // can still cause a retry-driven duplicate send; there's no
+        // provider-side guard against that on this path.
+        body.custom_args = { idempotency_key: mail.log_key };
       }
       const res = await fetch('https://api.sendgrid.com/v3/mail/send', {
         method: 'POST',

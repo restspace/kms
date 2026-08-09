@@ -7,8 +7,8 @@
 
 import type { Context } from 'hono';
 import { buildIcs, calendarLinks } from '@kms/email';
-import type { AppEnv } from './env';
-import { sendTemplated } from './mailer';
+import type { AppEnv, Env } from './env';
+import { sendTemplated, type SendOutcome, type SendTemplatedArgs } from './mailer';
 
 export type ScheduleMailKind = 'confirmed' | 'changed' | 'cancelled';
 
@@ -67,13 +67,26 @@ function fmtLocal(isoUtc: string, timeZone: string): string {
  * Send the appropriate invite email to every speaker on a session. Safe to
  * call repeatedly: each (speaker, session, sequence) sends at most once.
  * Returns the number of invites queued.
+ *
+ * Refactored (sweep item P2-19) into a (env, db)-style core plus a thin
+ * Context-based wrapper: the bulk-job cron expander only has `env`, not a
+ * request `Context`, so it calls `sendScheduleEmailsCore` directly with
+ * `queueTemplated` as the `send` callback (delivery happens on the next
+ * outbox sweep tick, same as every other cron-originated email). Request
+ * callers keep using `sendScheduleEmails`, which attempts immediate delivery
+ * via `sendTemplated`/waitUntil as before. `entityPrefix`, when given,
+ * prefixes the message_log entity id with `<jobId>:` per the bulk-job
+ * idempotency-key convention (jobs/bulkJobs.ts) so job progress is countable
+ * by `idempotency_key LIKE '%:'||jobId||':%'`.
  */
-export async function sendScheduleEmails<E extends AppEnv>(
-  c: Context<E>,
+export async function sendScheduleEmailsCore(
+  env: Env,
+  db: D1Database,
   submissionId: string,
   kind: ScheduleMailKind,
+  send: (args: SendTemplatedArgs) => Promise<SendOutcome>,
+  entityPrefix?: string,
 ): Promise<number> {
-  const db = c.env.DB;
   const session = await db
     .prepare(
       `SELECT s.id, s.event_id, s.code, s.title, s.description, s.starts_at, s.ends_at,
@@ -101,17 +114,17 @@ export async function sendScheduleEmails<E extends AppEnv>(
 
   const domain = (() => {
     try {
-      return new URL(c.env.APP_URL).hostname;
+      return new URL(env.APP_URL).hostname;
     } catch {
       return 'kms.local';
     }
   })();
   const method = kind === 'cancelled' ? 'CANCEL' : 'REQUEST';
-  const organizerEmail = (c.env.EMAIL_FROM ?? 'no-reply@example.com').replace(/^.*<|>$/g, '');
+  const organizerEmail = (env.EMAIL_FROM ?? 'no-reply@example.com').replace(/^.*<|>$/g, '');
   const location = [session.room_name, session.event_location].filter(Boolean).join(', ') || session.event_name;
   const plainDescription =
     (session.description ?? '').replace(/<[^>]*>/g, '').slice(0, 500) +
-    `\n\nSpeaker portal: ${c.env.APP_URL}/portal/${session.event_slug}`;
+    `\n\nSpeaker portal: ${env.APP_URL}/portal/${session.event_slug}`;
   const links = calendarLinks({
     title: `${session.title} — ${session.event_name}`,
     startsAtUtc: session.starts_at,
@@ -164,12 +177,12 @@ export async function sendScheduleEmails<E extends AppEnv>(
       attendees: [{ name: speakerName, email: speaker.email }],
     });
 
-    const outcome = await sendTemplated(c, {
+    const outcome = await send({
       templateKey: `schedule_${kind}`,
       eventId: session.event_id,
       contactId: speaker.contact_id,
       toEmail: speaker.email,
-      entityId: session.id,
+      entityId: entityPrefix ? `${entityPrefix}:${session.id}` : session.id,
       version: sequence, // each schedule change is a distinct send
       context: {
         event: { name: session.event_name, location: session.event_location ?? '' },
@@ -181,11 +194,20 @@ export async function sendScheduleEmails<E extends AppEnv>(
           room: session.room_name ?? 'TBC',
         },
         calendar: links,
-        portal_url: `${c.env.APP_URL}/portal/${session.event_slug}`,
+        portal_url: `${env.APP_URL}/portal/${session.event_slug}`,
       },
       ics: { content: ics, method },
     });
     if (outcome === 'queued') queued += 1;
   }
   return queued;
+}
+
+/** Request-path wrapper: attempts immediate delivery via sendTemplated/waitUntil. */
+export async function sendScheduleEmails<E extends AppEnv>(
+  c: Context<E>,
+  submissionId: string,
+  kind: ScheduleMailKind,
+): Promise<number> {
+  return sendScheduleEmailsCore(c.env, c.env.DB, submissionId, kind, (args) => sendTemplated(c, args));
 }

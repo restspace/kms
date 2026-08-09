@@ -11,7 +11,9 @@ import type { Context } from 'hono';
 import { computeConflicts } from '@kms/core';
 import type { AgendaRoomInput, AgendaSessionInput, Conflict } from '@kms/core';
 import type { Env } from '../env';
+import { bumpEventRevision } from '../revision';
 import { sendScheduleEmails, type ScheduleMailKind } from '../scheduleMail';
+import { nextSessionCodeSql } from '../sessionCode';
 import type { SessionPayload } from '../session';
 
 type ApiEnv = { Bindings: Env; Variables: { session: SessionPayload } };
@@ -156,6 +158,14 @@ agendaRoutes.get('/', async (c) => {
 
 const NOTIFY_KINDS = new Set<ScheduleMailKind>(['confirmed', 'changed', 'cancelled']);
 
+/** Optional non-negative integer seat count; `undefined` = not supplied/invalid. */
+function parseCapacity(value: unknown): number | null | undefined {
+  if (value === undefined) return undefined;
+  if (value === null || value === '') return null;
+  const n = Number(value);
+  return Number.isInteger(n) && n >= 0 ? n : undefined;
+}
+
 function parseInstant(value: unknown): string | null | undefined {
   if (value === null) return null;
   if (typeof value !== 'string') return undefined;
@@ -208,10 +218,20 @@ agendaRoutes.put('/sessions/:id/schedule', async (c) => {
   let notified = 0;
   if (notify === 'cancelled') notified = await sendScheduleEmails(c, id, 'cancelled');
 
+  // `capacity` is optional here (the Move dialog can set it inline); absent
+  // means "leave as is", explicit null clears it.
+  const capacity = parseCapacity(body.capacity);
+  if (capacity === undefined && 'capacity' in body) return c.json({ error: 'invalid_capacity' }, 400);
+
   await db
-    .prepare('UPDATE submissions SET starts_at = ?, ends_at = ?, room_id = ?, updated_at = ? WHERE id = ?')
-    .bind(startsAt, endsAt, roomId, nowIso(), id)
+    .prepare(
+      `UPDATE submissions SET starts_at = ?1, ends_at = ?2, room_id = ?3,
+         capacity = CASE WHEN ?5 = 1 THEN ?6 ELSE capacity END, updated_at = ?4
+       WHERE id = ?7`,
+    )
+    .bind(startsAt, endsAt, roomId, nowIso(), capacity === undefined ? 0 : 1, capacity ?? null, id)
     .run();
+  await bumpEventRevision(c.env, session.eventId);
 
   if (notify === 'confirmed' || notify === 'changed') notified = await sendScheduleEmails(c, id, notify);
 
@@ -220,7 +240,8 @@ agendaRoutes.put('/sessions/:id/schedule', async (c) => {
 });
 
 // POST /agenda/sessions — "+ Add Session" (docs/07 §5): stored as a manual,
-// already-accepted submission so there is one pipeline.
+// already-accepted submission so there is one pipeline. Room, track and times
+// are validated against *this* event before anything is written.
 agendaRoutes.post('/sessions', async (c) => {
   const session = c.get('session');
   const db = c.env.DB;
@@ -231,51 +252,67 @@ agendaRoutes.post('/sessions', async (c) => {
   const startsAt = parseInstant(body.starts_at) ?? null;
   const endsAt = parseInstant(body.ends_at) ?? null;
   if ((startsAt === null) !== (endsAt === null)) return c.json({ error: 'invalid_time' }, 400);
+  if (startsAt !== null && endsAt !== null && Date.parse(endsAt) <= Date.parse(startsAt)) {
+    return c.json({ error: 'invalid_time' }, 400);
+  }
+
   const roomId = typeof body.room_id === 'string' && body.room_id !== '' ? body.room_id : null;
   const trackId = typeof body.track_id === 'string' && body.track_id !== '' ? body.track_id : null;
   const format = typeof body.format === 'string' && body.format !== '' ? body.format : null;
+  const capacity = parseCapacity(body.capacity);
+  if (capacity === undefined && 'capacity' in body) return c.json({ error: 'invalid_capacity' }, 400);
 
-  // Next SESS-n from the highest existing numeric suffix.
-  const { results: codes } = await db
-    .prepare("SELECT code FROM submissions WHERE event_id = ?")
-    .bind(session.eventId)
-    .all<{ code: string }>();
-  let max = 0;
-  for (const { code } of codes) {
-    const n = Number(/^SESS-(\d+)$/.exec(code)?.[1] ?? 0);
-    if (n > max) max = n;
+  // Tenant isolation: a foreign room/track id must never be linked in.
+  if (roomId) {
+    const room = await db
+      .prepare('SELECT id FROM rooms WHERE id = ? AND event_id = ?')
+      .bind(roomId, session.eventId)
+      .first();
+    if (!room) return c.json({ error: 'invalid_room' }, 400);
+  }
+  if (trackId) {
+    const track = await db
+      .prepare('SELECT id FROM tracks WHERE id = ? AND event_id = ?')
+      .bind(trackId, session.eventId)
+      .first();
+    if (!track) return c.json({ error: 'invalid_track' }, 400);
   }
 
+  // Same in-statement allocator the CFP pipeline uses, so manual and submitted
+  // sessions share one SESS-n sequence with no read-then-write race.
   const id = crypto.randomUUID();
   const ts = nowIso();
   await db
     .prepare(
       `INSERT INTO submissions (id, event_id, code, kind, title, description, status, track_id, format,
-                                room_id, starts_at, ends_at, source, created_at, updated_at)
-       VALUES (?, ?, ?, 'session', ?, ?, 'accepted', ?, ?, ?, ?, ?, 'manual', ?, ?)`,
+                                capacity, room_id, starts_at, ends_at, source, created_at, updated_at)
+       SELECT ?1, ?2, ${nextSessionCodeSql('?2')}, 'session', ?3, ?4, 'accepted', ?5, ?6,
+              ?7, ?8, ?9, ?10, 'manual', ?11, ?11`,
     )
     .bind(
       id,
       session.eventId,
-      `SESS-${max + 1}`,
       title,
       typeof body.description === 'string' ? body.description : null,
       trackId,
       format,
+      capacity ?? null,
       roomId,
       startsAt,
       endsAt,
       ts,
-      ts,
     )
     .run();
+  await bumpEventRevision(c.env, session.eventId);
 
   const payload = await agendaPayload(c);
   return c.json({ ok: true, id, ...payload }, 201);
 });
 
 // POST /agenda/send-confirmations — bulk invite for every scheduled session
-// that has no live invite yet (docs/07 §6).
+// that has no live invite yet (docs/07 §6). Sending is a *job* (sweep item
+// P2-19): the request snapshots the target sessions and returns 202; the cron
+// expander does the delivery, so a large agenda cannot time out the request.
 agendaRoutes.post('/send-confirmations', async (c) => {
   const session = c.get('session');
   const { results } = await c.env.DB
@@ -288,12 +325,30 @@ agendaRoutes.post('/send-confirmations', async (c) => {
     )
     .bind(session.eventId)
     .all<{ id: string }>();
-  let queued = 0;
-  for (const { id } of results) {
-    queued += await sendScheduleEmails(c, id, 'confirmed');
-  }
+
+  const jobId = crypto.randomUUID();
+  const ts = nowIso();
+  await c.env.DB
+    .prepare(
+      `INSERT INTO bulk_jobs (id, event_id, kind, status, params_json, total, enqueued, created_by, created_at, updated_at)
+       VALUES (?, ?, 'send-confirmations', 'pending', ?, ?, 0, ?, ?, ?)`,
+    )
+    .bind(
+      jobId,
+      session.eventId,
+      JSON.stringify({ session_ids: results.map((r) => r.id) }),
+      results.length,
+      session.contactId,
+      ts,
+      ts,
+    )
+    .run();
+  await bumpEventRevision(c.env, session.eventId);
+
+  // Response keys the admin client already reads are kept; the counters are
+  // now "how much the job will do", not "how much was sent inline".
   const payload = await agendaPayload(c);
-  return c.json({ ok: true, sent_sessions: results.length, queued, ...payload });
+  return c.json({ ok: true, job_id: jobId, sent_sessions: results.length, queued: 0, ...payload }, 202);
 });
 
 // POST /agenda/conflicts/ignore — toggle a signature (docs/07 §4).
@@ -325,6 +380,7 @@ agendaRoutes.delete('/sessions/:id/speakers/:contactId', async (c) => {
     .bind(c.req.param('id'), c.req.param('contactId'), session.eventId)
     .run();
   if (result.meta.changes === 0) return c.json({ error: 'not_found' }, 404);
+  await bumpEventRevision(c.env, session.eventId);
   const payload = await agendaPayload(c);
   return c.json({ ok: true, ...payload });
 });

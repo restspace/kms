@@ -11,11 +11,17 @@ export const SESSION_COOKIE = 'kms_session';
 export const SESSION_TTL_SECONDS = 7 * 24 * 60 * 60; // 7 days
 
 export interface SessionPayload {
+  /** 2 = minted after the workspace redesign. Absent on cookies issued before
+   * it; every v2 field is optional so old cookies still verify (docs/12). */
+  v?: 2;
   contactId: string;
   eventId: string;
   eventSlug: string;
   email: string;
   role: Role;
+  /** organisation of `eventId` at mint time — a hint, never an authority: the
+   * accessible-event set is always re-resolved from the database per request. */
+  orgId?: string;
   /** set when an admin is impersonating a speaker via "View Portal" */
   impersonatedBy?: string;
   /** unix seconds */

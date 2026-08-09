@@ -10,12 +10,15 @@ import { Hono } from 'hono';
 import type { Context } from 'hono';
 import { computeConflicts } from '@kms/core';
 import type { AgendaRoomInput } from '@kms/core';
-import type { Env } from '../env';
-import { sendTemplated } from '../mailer';
-import type { SessionPayload } from '../session';
+import type { AccessEnv } from '../access';
+import { getEventRevision } from '../revision';
 import { loadIgnored, loadSessions, toEngineInput } from './agenda';
 
-type ApiEnv = { Bindings: Env; Variables: { session: SessionPayload } };
+type ApiEnv = AccessEnv;
+
+/** Payload cache lifetime; the revision key makes staleness impossible, this
+ * is only the backstop for a bump that never landed (KV write failure). */
+const DASHBOARD_CACHE_TTL_SECONDS = 600;
 
 export const dashboardRoutes = new Hono<ApiEnv>();
 
@@ -89,30 +92,38 @@ async function dashboardPayload(c: Context<ApiEnv>) {
     db.prepare('SELECT id, name, slug, timezone, starts_at, ends_at FROM events WHERE id = ?').bind(eventId).first<EventRow>(),
     db.prepare('SELECT status, COUNT(*) AS n FROM submissions WHERE event_id = ? GROUP BY status').bind(eventId).all<{ status: string; n: number }>(),
     // One pass over accepted speakers powers the stat, the confirmation mix,
-    // top-by-outstanding and asset completeness.
+    // top-by-outstanding and asset completeness. The task counters come from
+    // one grouped aggregate joined in, not three correlated subqueries per
+    // contact (sweep item P2-16).
     db.prepare(
       `SELECT c.id AS contact_id,
               NULLIF(TRIM(COALESCE(c.first_name,'') || ' ' || COALESCE(c.last_name,'')), '') AS name,
               c.email,
               CASE WHEN c.biography IS NULL OR c.biography = '' THEN 1 ELSE 0 END AS missing_bio,
               CASE WHEN c.headshot_asset_id IS NULL THEN 1 ELSE 0 END AS missing_headshot,
-              (SELECT COUNT(*) FROM task_assignments ta JOIN tasks t ON t.id = ta.task_id
-                WHERE ta.contact_id = c.id AND t.event_id = ?1 AND ta.status != 'complete'
-                  AND t.action_type = 'file_upload') AS missing_slides,
-              (SELECT COUNT(*) FROM task_assignments ta JOIN tasks t ON t.id = ta.task_id
-                WHERE ta.contact_id = c.id AND t.event_id = ?1 AND ta.status != 'complete') AS outstanding,
-              (SELECT COUNT(*) FROM task_assignments ta JOIN tasks t ON t.id = ta.task_id
-                WHERE ta.contact_id = c.id AND t.event_id = ?1 AND ta.status != 'complete'
-                  AND t.due_at IS NOT NULL AND t.due_at < ?2) AS overdue,
-              EXISTS (SELECT 1 FROM submission_participants sp2
-                      JOIN submissions s2 ON s2.id = sp2.submission_id
-                      WHERE sp2.contact_id = c.id AND s2.status = 'accepted'
-                        AND sp2.confirmed_at IS NOT NULL) AS confirmed
+              COALESCE(tg.missing_slides, 0) AS missing_slides,
+              COALESCE(tg.outstanding, 0) AS outstanding,
+              COALESCE(tg.overdue, 0) AS overdue,
+              CASE WHEN cf.contact_id IS NULL THEN 0 ELSE 1 END AS confirmed
        FROM contacts c
+       JOIN (SELECT DISTINCT sp.contact_id
+             FROM submission_participants sp
+             JOIN submissions s ON s.id = sp.submission_id
+             WHERE s.event_id = ?1 AND s.status = 'accepted') acc ON acc.contact_id = c.id
+       LEFT JOIN (SELECT ta.contact_id,
+                         SUM(CASE WHEN ta.status != 'complete' AND t.action_type = 'file_upload' THEN 1 ELSE 0 END) AS missing_slides,
+                         SUM(CASE WHEN ta.status != 'complete' THEN 1 ELSE 0 END) AS outstanding,
+                         SUM(CASE WHEN ta.status != 'complete' AND t.due_at IS NOT NULL AND t.due_at < ?2 THEN 1 ELSE 0 END) AS overdue
+                  FROM task_assignments ta
+                  JOIN tasks t ON t.id = ta.task_id
+                  WHERE t.event_id = ?1
+                  GROUP BY ta.contact_id) tg ON tg.contact_id = c.id
+       LEFT JOIN (SELECT DISTINCT sp2.contact_id
+                  FROM submission_participants sp2
+                  JOIN submissions s2 ON s2.id = sp2.submission_id
+                  WHERE s2.event_id = ?1 AND s2.status = 'accepted'
+                    AND sp2.confirmed_at IS NOT NULL) cf ON cf.contact_id = c.id
        WHERE c.event_id = ?1
-         AND EXISTS (SELECT 1 FROM submission_participants sp
-                     JOIN submissions s ON s.id = sp.submission_id
-                     WHERE sp.contact_id = c.id AND s.status = 'accepted')
        ORDER BY outstanding DESC, overdue DESC, name`,
     ).bind(eventId, now).all<SpeakerAggRow>(),
     db.prepare(
@@ -374,71 +385,79 @@ async function dashboardPayload(c: Context<ApiEnv>) {
   };
 }
 
-// GET /app/api/dashboard — the whole board, with an ETag so the 15 s poll is a
-// 304 unless something actually changed (docs/09 §7).
+// GET /app/api/dashboard — the whole board. The ETag is the event revision
+// (sweep item P2-16), computed *before* any query: an idle 15 s poll costs one
+// KV read and zero D1 queries. A revision miss still tries the KV payload
+// cache keyed on the same revision, so only a genuine change pays for the
+// aggregate block (docs/09 §7).
 dashboardRoutes.get('/', async (c) => {
-  const payload = await dashboardPayload(c);
-  if (!payload) return c.json({ error: 'not_found' }, 404);
-
-  // `now` changes every read; hash everything else so idle polls hit the 304.
-  const { now, ...stable } = payload;
-  const digest = await crypto.subtle.digest('SHA-1', new TextEncoder().encode(JSON.stringify(stable)));
-  const etag = `"${[...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('')}"`;
-
+  const eventId = c.get('session').eventId;
+  const revision = await getEventRevision(c.env, eventId);
+  const etag = `"r${revision}"`;
   c.header('ETag', etag);
   c.header('Cache-Control', 'no-cache');
   if (c.req.header('if-none-match') === etag) return c.body(null, 304);
+
+  const cacheKey = `dash:${eventId}:${revision}`;
+  const cached = await c.env.KV.get<Record<string, unknown>>(cacheKey, 'json').catch(() => null);
+  // `now` is the only field that must not come out of a cache — everything
+  // else is a snapshot of the revision this key names.
+  if (cached) return c.json({ ...cached, now: new Date().toISOString() });
+
+  const payload = await dashboardPayload(c);
+  if (!payload) return c.json({ error: 'not_found' }, 404);
+  await c.env.KV.put(cacheKey, JSON.stringify(payload), { expirationTtl: DASHBOARD_CACHE_TTL_SECONDS })
+    .catch(() => {});
   return c.json(payload);
 });
 
-// POST /app/api/dashboard/remind { assignment_ids?: string[] } — send task
+// POST /app/api/dashboard/remind { assignment_ids?: string[] } — queue task
 // reminders for overdue assignments; empty/omitted ids means "remind all".
-// Idempotent per assignment per day (docs/09 §10 test 5): a second click
-// counts as skipped, never a duplicate email.
+// The request no longer sends inline (a big event exceeded the request budget,
+// sweep item P2-19): it snapshots a bulk_jobs row and the cron expander sends
+// in chunks with `bulk:<jobId>:<contactId>` keys, which keeps the per-assignment
+// idempotency guarantee (docs/09 §10 test 5). `sent`/`skipped` stay in the body
+// as zeros for the pre-job clients; poll GET /app/api/bulk-jobs/:id for progress.
 dashboardRoutes.post('/remind', async (c) => {
   const session = c.get('session');
   const db = c.env.DB;
   const now = new Date().toISOString();
   const body = (await c.req.json().catch(() => ({}))) as { assignment_ids?: unknown };
   const requested = Array.isArray(body.assignment_ids)
-    ? new Set(body.assignment_ids.filter((v): v is string => typeof v === 'string'))
+    ? body.assignment_ids.filter((v): v is string => typeof v === 'string')
     : null;
 
-  const [event, overdue] = await Promise.all([
-    db.prepare('SELECT id, name, slug FROM events WHERE id = ?').bind(session.eventId).first<{ id: string; name: string; slug: string }>(),
-    db.prepare(
-      `SELECT ta.id AS assignment_id, ta.contact_id, c.email, c.first_name, t.title AS task_title
-       FROM task_assignments ta
-       JOIN tasks t ON t.id = ta.task_id
-       JOIN contacts c ON c.id = ta.contact_id
-       WHERE t.event_id = ? AND ta.status != 'complete' AND t.due_at IS NOT NULL AND t.due_at < ?`,
-    ).bind(session.eventId, now).all<{ assignment_id: string; contact_id: string; email: string; first_name: string | null; task_title: string }>(),
-  ]);
+  const event = await db.prepare('SELECT id FROM events WHERE id = ?')
+    .bind(session.eventId)
+    .first<{ id: string }>();
   if (!event) return c.json({ error: 'not_found' }, 404);
 
-  const targets = overdue.results.filter((row) => requested === null || requested.has(row.assignment_id));
-  let sent = 0;
-  let skipped = 0;
-  for (const row of targets) {
-    const outcome = await sendTemplated(c, {
-      templateKey: 'task_reminder',
-      eventId: event.id,
-      contactId: row.contact_id,
-      toEmail: row.email,
-      entityId: row.assignment_id,
-      version: `manual-${now.slice(0, 10)}`,
-      context: {
-        event: { name: event.name },
-        speaker: { first_name: row.first_name ?? 'there' },
-        task: {
-          title: row.task_title,
-          due_line: ' — now overdue',
-          url: `${c.env.APP_URL}/portal/${event.slug}/tasks`,
-        },
-      },
-    });
-    if (outcome === 'queued') sent += 1;
-    else skipped += 1;
-  }
-  return c.json({ ok: true, sent, skipped });
+  const requestedSet = requested === null ? null : new Set(requested);
+  const overdue = await db.prepare(
+    `SELECT ta.id AS assignment_id
+     FROM task_assignments ta
+     JOIN tasks t ON t.id = ta.task_id
+     WHERE t.event_id = ? AND ta.status != 'complete' AND t.due_at IS NOT NULL AND t.due_at < ?`,
+  ).bind(session.eventId, now).all<{ assignment_id: string }>();
+  const targets = overdue.results
+    .map((row) => row.assignment_id)
+    .filter((id) => requestedSet === null || requestedSet.has(id));
+
+  const jobId = crypto.randomUUID();
+  await db.prepare(
+    `INSERT INTO bulk_jobs (id, event_id, kind, status, params_json, total, enqueued, created_by, created_at, updated_at)
+     VALUES (?, ?, 'remind-tasks', 'pending', ?, ?, 0, ?, ?, ?)`,
+  )
+    .bind(
+      jobId,
+      session.eventId,
+      JSON.stringify({ assignment_ids: targets, requested_at: now }),
+      targets.length,
+      session.contactId,
+      now,
+      now,
+    )
+    .run();
+
+  return c.json({ ok: true, job_id: jobId, total: targets.length, sent: 0, skipped: 0 }, 202);
 });

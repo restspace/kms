@@ -10,21 +10,26 @@ import { cors } from 'hono/cors';
 import type { Context } from 'hono';
 import type { Env } from '../env';
 import { getRevalidatedPrivilegedSession } from '../session';
-import { RESOURCES, queryResource } from './adminApi';
+import { RESOURCES, queryResource, type ResourceDef } from './adminApi';
 import { toCsv, toXlsx } from '../export';
 import { sha256Hex } from '../hashing';
+import { decodeCursor, encodeCursor, keysetWhere, type CursorPayload } from '../cursor';
+import { bumpEventRevision } from '../revision';
+import { isValidEmailShape } from '@kms/core';
 
 interface RestAuth {
   via: 'token' | 'session';
   /** organisation the bearer token can reach (token auth only) */
   orgId?: string;
+  /** the api_tokens row id (token auth only) — the idempotency key namespace */
+  tokenId?: string;
   /** the one event a first-party session can reach (session auth only) */
   eventId?: string;
 }
 
 type RestEnv = {
   Bindings: Env;
-  Variables: { auth: RestAuth; event: EventRow };
+  Variables: { auth: RestAuth; event: EventRow; idemBody?: unknown };
 };
 
 interface EventRow {
@@ -50,8 +55,29 @@ export const restApiRoutes = new Hono<RestEnv>();
 // so a permissive CORS policy is safe here.
 restApiRoutes.use('*', cors({ origin: '*', allowHeaders: ['Authorization', 'Content-Type'] }));
 
-const apiError = (c: Context<RestEnv>, status: 400 | 401 | 403 | 404 | 422, code: string, message: string) =>
+const apiError = (c: Context<RestEnv>, status: 400 | 401 | 403 | 404 | 409 | 422, code: string, message: string) =>
   c.json({ error: { code, message } }, status);
+
+interface FieldError {
+  field: string;
+  message: string;
+}
+
+/** Uniform 400 for whitelist-field validation failures (work item 2). */
+const validationError = (c: Context<RestEnv>, errors: FieldError[]) =>
+  c.json(
+    { error: { code: 'validation', message: errors[0]?.message ?? 'Validation failed.', details: errors } },
+    400,
+  );
+
+/** Read the parsed JSON body. When the idempotency middleware already
+ * consumed the request stream (Idempotency-Key present), read its stash
+ * instead of re-reading — the underlying body can only be read once. */
+async function readBody(c: Context<RestEnv>): Promise<Record<string, unknown>> {
+  const stashed = c.get('idemBody');
+  if (stashed !== undefined) return stashed as Record<string, unknown>;
+  return (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+}
 
 // ---------------------------------------------------------------------------
 // Auth: Bearer token (server-to-server) or the admin session cookie (first-party)
@@ -68,7 +94,7 @@ restApiRoutes.use('*', async (c, next) => {
       .bind(hash)
       .first<{ id: string; org_id: string }>();
     if (!token) return apiError(c, 401, 'invalid_token', 'Unknown or revoked API token.');
-    c.set('auth', { via: 'token', orgId: token.org_id });
+    c.set('auth', { via: 'token', orgId: token.org_id, tokenId: token.id });
     c.executionCtx.waitUntil(
       c.env.DB.prepare('UPDATE api_tokens SET last_used_at = ? WHERE id = ?')
         .bind(new Date().toISOString(), token.id)
@@ -89,6 +115,75 @@ restApiRoutes.use('*', async (c, next) => {
     'unauthenticated',
     'Pass an API token as `Authorization: Bearer kms_…` (create one under Settings → API tokens).',
   );
+});
+
+// ---------------------------------------------------------------------------
+// Idempotency-Key (work item 3): every POST in this file may carry one. A
+// replay (same actor + key) returns the stored response verbatim; the same
+// key with a different body is a client bug, surfaced as 422 rather than
+// silently executing twice or silently replaying the wrong thing.
+// ---------------------------------------------------------------------------
+
+interface IdempotencyRecord {
+  status: number;
+  body: unknown;
+  bodyHash: string;
+}
+
+restApiRoutes.use('*', async (c, next) => {
+  if (c.req.method !== 'POST') return next();
+  const idemKey = c.req.header('Idempotency-Key');
+  if (!idemKey) return next();
+
+  const auth = c.get('auth');
+  const actor = auth.via === 'token' ? `token:${auth.tokenId ?? ''}` : `session:${auth.eventId ?? ''}`;
+  const kvKey = `apiidem:${await sha256Hex(`${actor}:${idemKey}`)}`;
+
+  // The request body can only be read once; stash the parsed JSON for
+  // handlers (readBody) and hash the raw text for the mismatch check.
+  const bodyText = await c.req.text();
+  const bodyHash = await sha256Hex(bodyText);
+  let parsedBody: unknown = {};
+  try {
+    parsedBody = bodyText ? JSON.parse(bodyText) : {};
+  } catch {
+    parsedBody = {};
+  }
+  c.set('idemBody', parsedBody);
+
+  const stored = await c.env.KV.get(kvKey);
+  if (stored) {
+    let record: IdempotencyRecord;
+    try {
+      record = JSON.parse(stored) as IdempotencyRecord;
+    } catch {
+      record = { status: 500, body: {}, bodyHash: '' };
+    }
+    if (record.bodyHash !== bodyHash) {
+      return apiError(
+        c,
+        422,
+        'idempotency_mismatch',
+        'This Idempotency-Key was already used with a different request body.',
+      );
+    }
+    const replay = c.json(record.body as object, record.status as 200);
+    replay.headers.set('Idempotency-Replayed', 'true');
+    return replay;
+  }
+
+  await next();
+
+  const res = c.res;
+  if (res && res.status >= 200 && res.status < 500) {
+    try {
+      const body: unknown = await res.clone().json();
+      const record: IdempotencyRecord = { status: res.status, body, bodyHash };
+      c.executionCtx.waitUntil(c.env.KV.put(kvKey, JSON.stringify(record), { expirationTtl: 86400 }));
+    } catch {
+      // Non-JSON response (shouldn't happen for POSTs in this file) — skip caching.
+    }
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -271,7 +366,7 @@ const SUBMISSION_STATUSES = new Set([
 ]);
 
 restApiRoutes.post('/events/:event_id/submissions/:id/status', async (c) => {
-  const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+  const body = await readBody(c);
   const status = typeof body.status === 'string' ? body.status : '';
   if (!SUBMISSION_STATUSES.has(status)) {
     return apiError(c, 422, 'invalid_status', `status must be one of: ${[...SUBMISSION_STATUSES].join(', ')}.`);
@@ -282,16 +377,576 @@ restApiRoutes.post('/events/:event_id/submissions/:id/status', async (c) => {
     .bind(status, new Date().toISOString(), c.req.param('id'), c.get('event').id)
     .run();
   if (result.meta.changes === 0) return apiError(c, 404, 'not_found', 'No submission with this id in this event.');
+  await bumpEventRevision(c.env, c.get('event').id);
   return c.json({ ok: true, status });
 });
+
+// ---------------------------------------------------------------------------
+// Contacts CRUD (work item 2). Field whitelist kept local — do not import
+// adminApi.ts's CONTACT_FIELDS, which is under concurrent edit elsewhere.
+// ---------------------------------------------------------------------------
+
+const CONTACT_FIELDS = [
+  'email', 'first_name', 'last_name', 'company', 'job_title',
+  'mobile_phone', 'biography', 'pronouns',
+] as const;
+
+function pickContactFields(raw: unknown): { fields: Record<string, string | null>; errors: FieldError[] } {
+  const body = (raw ?? {}) as Record<string, unknown>;
+  const fields: Record<string, string | null> = {};
+  const errors: FieldError[] = [];
+  for (const field of CONTACT_FIELDS) {
+    if (!(field in body)) continue;
+    const value = body[field];
+    if (value === null || value === '') fields[field] = null;
+    else if (typeof value === 'string') fields[field] = value.trim();
+    else errors.push({ field, message: `${field} must be a string.` });
+  }
+  if (typeof fields.email === 'string') {
+    fields.email = fields.email.toLowerCase();
+    if (!isValidEmailShape(fields.email)) errors.push({ field: 'email', message: 'email is not a valid address.' });
+  }
+  return { fields, errors };
+}
+
+// POST /events/:event_id/contacts
+restApiRoutes.post('/events/:event_id/contacts', async (c) => {
+  const eventId = c.get('event').id;
+  const { fields, errors } = pickContactFields(await readBody(c));
+  if (!fields.email) errors.unshift({ field: 'email', message: 'email is required.' });
+  if (errors.length > 0) return validationError(c, errors);
+
+  const id = crypto.randomUUID();
+  const ts = new Date().toISOString();
+  const cols = Object.keys(fields);
+  try {
+    await c.env.DB.prepare(
+      `INSERT INTO contacts (id, event_id, created_at, updated_at, ${cols.join(', ')})
+       VALUES (?, ?, ?, ?${', ?'.repeat(cols.length)})`,
+    )
+      .bind(id, eventId, ts, ts, ...cols.map((k) => fields[k]))
+      .run();
+  } catch (err) {
+    const message = err instanceof Error ? err.message : '';
+    if (message.includes('UNIQUE')) return apiError(c, 409, 'email_exists', 'A contact with this email already exists in this event.');
+    throw err;
+  }
+  await bumpEventRevision(c.env, eventId);
+  const row = await c.env.DB.prepare('SELECT * FROM contacts WHERE id = ?').bind(id).first();
+  return c.json(row, 201);
+});
+
+// PUT /events/:event_id/contacts/:cid
+restApiRoutes.put('/events/:event_id/contacts/:cid', async (c) => {
+  const eventId = c.get('event').id;
+  const id = c.req.param('cid');
+  const { fields, errors } = pickContactFields(await readBody(c));
+  if ('email' in fields && !fields.email) errors.push({ field: 'email', message: 'email cannot be cleared.' });
+  if (errors.length > 0) return validationError(c, errors);
+
+  const cols = Object.keys(fields);
+  if (cols.length > 0) {
+    try {
+      const result = await c.env.DB.prepare(
+        `UPDATE contacts SET ${cols.map((k) => `${k} = ?`).join(', ')}, updated_at = ?
+         WHERE id = ? AND event_id = ?`,
+      )
+        .bind(...cols.map((k) => fields[k]), new Date().toISOString(), id, eventId)
+        .run();
+      if (result.meta.changes === 0) return apiError(c, 404, 'not_found', 'No contact with this id in this event.');
+    } catch (err) {
+      const message = err instanceof Error ? err.message : '';
+      if (message.includes('UNIQUE')) return apiError(c, 409, 'email_exists', 'A contact with this email already exists in this event.');
+      throw err;
+    }
+  }
+  await bumpEventRevision(c.env, eventId);
+  const row = await c.env.DB.prepare('SELECT * FROM contacts WHERE id = ? AND event_id = ?').bind(id, eventId).first();
+  if (!row) return apiError(c, 404, 'not_found', 'No contact with this id in this event.');
+  return c.json(row);
+});
+
+// DELETE /events/:event_id/contacts/:cid — contacts.headshot_asset_id and
+// file_assets.uploaded_by_contact_id are mutually referential; null the
+// headshot ref first in the same batch (same fix as the admin speaker-delete
+// bug), then delete. A remaining FK violation (e.g. a reviewer assignment
+// with no ON DELETE clause) surfaces as 409, not a 500.
+restApiRoutes.delete('/events/:event_id/contacts/:cid', async (c) => {
+  const eventId = c.get('event').id;
+  const id = c.req.param('cid');
+  const exists = await c.env.DB.prepare('SELECT id FROM contacts WHERE id = ? AND event_id = ?').bind(id, eventId).first();
+  if (!exists) return apiError(c, 404, 'not_found', 'No contact with this id in this event.');
+  try {
+    await c.env.DB.batch([
+      c.env.DB.prepare('UPDATE contacts SET headshot_asset_id = NULL WHERE id = ?').bind(id),
+      c.env.DB.prepare('DELETE FROM contacts WHERE id = ? AND event_id = ?').bind(id, eventId),
+    ]);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : '';
+    return apiError(c, 409, 'constraint', message || 'This contact cannot be deleted while other records reference it.');
+  }
+  await bumpEventRevision(c.env, eventId);
+  return c.json({ ok: true });
+});
+
+// ---------------------------------------------------------------------------
+// Submissions CRUD (work item 2)
+// ---------------------------------------------------------------------------
+
+const SUBMISSION_WRITE_FIELDS = ['description', 'format', 'level', 'language'] as const;
+
+interface SubmissionWriteResult {
+  fields: Record<string, string | null>;
+  errors: FieldError[];
+  trackId: string | null | undefined; // undefined = not provided
+  status: string | undefined;
+}
+
+async function pickSubmissionFields(
+  c: Context<RestEnv>,
+  raw: unknown,
+  { allowStatus }: { allowStatus: boolean },
+): Promise<SubmissionWriteResult> {
+  const body = (raw ?? {}) as Record<string, unknown>;
+  const fields: Record<string, string | null> = {};
+  const errors: FieldError[] = [];
+
+  if ('title' in body) {
+    const v = body.title;
+    if (typeof v === 'string' && v.trim()) fields.title = v.trim();
+    else errors.push({ field: 'title', message: 'title must be a non-empty string.' });
+  }
+  for (const field of SUBMISSION_WRITE_FIELDS) {
+    if (!(field in body)) continue;
+    const v = body[field];
+    if (v === null || v === '') fields[field] = null;
+    else if (typeof v === 'string') fields[field] = v;
+    else errors.push({ field, message: `${field} must be a string.` });
+  }
+
+  let trackId: string | null | undefined;
+  if ('track_id' in body) {
+    const v = body.track_id;
+    if (v === null || v === '') trackId = null;
+    else if (typeof v === 'string') {
+      const track = await c.env.DB.prepare('SELECT id FROM tracks WHERE id = ? AND event_id = ?')
+        .bind(v, c.get('event').id)
+        .first();
+      if (!track) errors.push({ field: 'track_id', message: 'track_id does not belong to this event.' });
+      else trackId = v;
+    } else {
+      errors.push({ field: 'track_id', message: 'track_id must be a string.' });
+    }
+  }
+
+  let status: string | undefined;
+  if (allowStatus && 'status' in body) {
+    const v = body.status;
+    if (typeof v === 'string' && SUBMISSION_STATUSES.has(v)) status = v;
+    else errors.push({ field: 'status', message: `status must be one of: ${[...SUBMISSION_STATUSES].join(', ')}.` });
+  }
+
+  return { fields, errors, trackId, status };
+}
+
+// POST /events/:event_id/submissions — manual create (source='manual').
+restApiRoutes.post('/events/:event_id/submissions', async (c) => {
+  const eventId = c.get('event').id;
+  const body = await readBody(c);
+  const { fields, errors, trackId } = await pickSubmissionFields(c, body, { allowStatus: false });
+  const title = typeof body.title === 'string' ? body.title.trim() : '';
+  if (!title) errors.unshift({ field: 'title', message: 'title is required.' });
+  if (errors.length > 0) return validationError(c, errors);
+
+  const id = crypto.randomUUID();
+  const ts = new Date().toISOString();
+  const result = await c.env.DB.prepare(
+    `INSERT INTO submissions
+       (id, event_id, code, kind, title, description, status, format, level, language, track_id, source, created_at, updated_at)
+     SELECT ?, ?,
+       'SESS-' || (COALESCE((SELECT MAX(CAST(SUBSTR(code,6) AS INTEGER)) FROM submissions WHERE event_id=? AND code LIKE 'SESS-%'),0)+1),
+       'abstract', ?, ?, 'pending', ?, ?, ?, ?, 'manual', ?, ?`,
+  )
+    .bind(
+      id, eventId, eventId,
+      title, fields.description ?? null,
+      fields.format ?? null, fields.level ?? null, fields.language ?? null,
+      trackId ?? null,
+      ts, ts,
+    )
+    .run();
+  if (result.meta.changes === 0) return apiError(c, 422, 'create_failed', 'Could not create the submission.');
+  await bumpEventRevision(c.env, eventId);
+  const row = await c.env.DB.prepare('SELECT * FROM submissions WHERE id = ?').bind(id).first();
+  return c.json(row, 201);
+});
+
+// PUT /events/:event_id/submissions/:sid
+restApiRoutes.put('/events/:event_id/submissions/:sid', async (c) => {
+  const eventId = c.get('event').id;
+  const id = c.req.param('sid');
+  const { fields, errors, trackId, status } = await pickSubmissionFields(c, await readBody(c), { allowStatus: true });
+  if (errors.length > 0) return validationError(c, errors);
+
+  const sets: string[] = [];
+  const params: unknown[] = [];
+  for (const [key, value] of Object.entries(fields)) {
+    sets.push(`${key} = ?`);
+    params.push(value);
+  }
+  if (trackId !== undefined) {
+    sets.push('track_id = ?');
+    params.push(trackId);
+  }
+  if (status !== undefined) {
+    sets.push('status = ?');
+    params.push(status);
+  }
+  sets.push('updated_at = ?');
+  params.push(new Date().toISOString());
+
+  const result = await c.env.DB.prepare(
+    `UPDATE submissions SET ${sets.join(', ')} WHERE id = ? AND event_id = ?`,
+  )
+    .bind(...params, id, eventId)
+    .run();
+  if (result.meta.changes === 0) return apiError(c, 404, 'not_found', 'No submission with this id in this event.');
+  await bumpEventRevision(c.env, eventId);
+  const row = await c.env.DB.prepare('SELECT * FROM submissions WHERE id = ? AND event_id = ?').bind(id, eventId).first();
+  return c.json(row);
+});
+
+// DELETE /events/:event_id/submissions/:sid — every child row cascades
+// (answers, participants, tags, review data, task assignments), so a plain
+// delete is safe; no batch/FK workaround needed here.
+restApiRoutes.delete('/events/:event_id/submissions/:sid', async (c) => {
+  const eventId = c.get('event').id;
+  const result = await c.env.DB.prepare('DELETE FROM submissions WHERE id = ? AND event_id = ?')
+    .bind(c.req.param('sid'), eventId)
+    .run();
+  if (result.meta.changes === 0) return apiError(c, 404, 'not_found', 'No submission with this id in this event.');
+  await bumpEventRevision(c.env, eventId);
+  return c.json({ ok: true });
+});
+
+// ---------------------------------------------------------------------------
+// Tasks CRUD (work item 2)
+// ---------------------------------------------------------------------------
+
+const TASK_TARGETS = new Set(['contact', 'group', 'submission']);
+const TASK_ASSIGNMENT_MODES = new Set(['manual', 'automatic']);
+const TASK_TRIGGERS = new Set(['on_accept', 'on_schedule', 'none']);
+const TASK_ACTION_TYPES = new Set(['file_upload', 'portal_form', 'acknowledge', 'external_link']);
+
+interface TaskWriteResult {
+  cols: Record<string, unknown>;
+  errors: FieldError[];
+}
+
+async function pickTaskFields(c: Context<RestEnv>, raw: unknown, { requireTitle }: { requireTitle: boolean }): Promise<TaskWriteResult> {
+  const body = (raw ?? {}) as Record<string, unknown>;
+  const cols: Record<string, unknown> = {};
+  const errors: FieldError[] = [];
+  const eventId = c.get('event').id;
+
+  if ('title' in body || requireTitle) {
+    const v = body.title;
+    if (typeof v === 'string' && v.trim()) cols.title = v.trim();
+    else if (requireTitle) errors.push({ field: 'title', message: 'title is required.' });
+  }
+  if ('description' in body) {
+    const v = body.description;
+    cols.description = v === null || v === '' ? null : typeof v === 'string' ? v : undefined;
+    if (cols.description === undefined) errors.push({ field: 'description', message: 'description must be a string.' });
+  }
+  if ('target' in body) {
+    const v = body.target;
+    if (typeof v === 'string' && TASK_TARGETS.has(v)) cols.target = v;
+    else errors.push({ field: 'target', message: `target must be one of: ${[...TASK_TARGETS].join(', ')}.` });
+  }
+  if ('assignment_mode' in body) {
+    const v = body.assignment_mode;
+    if (typeof v === 'string' && TASK_ASSIGNMENT_MODES.has(v)) cols.assignment_mode = v;
+    else errors.push({ field: 'assignment_mode', message: `assignment_mode must be one of: ${[...TASK_ASSIGNMENT_MODES].join(', ')}.` });
+  }
+  if ('trigger' in body) {
+    const v = body.trigger;
+    if (typeof v === 'string' && TASK_TRIGGERS.has(v)) cols.trigger = v;
+    else errors.push({ field: 'trigger', message: `trigger must be one of: ${[...TASK_TRIGGERS].join(', ')}.` });
+  }
+  if ('action_type' in body) {
+    const v = body.action_type;
+    if (typeof v === 'string' && TASK_ACTION_TYPES.has(v)) cols.action_type = v;
+    else errors.push({ field: 'action_type', message: `action_type must be one of: ${[...TASK_ACTION_TYPES].join(', ')}.` });
+  }
+  if ('portal_form_id' in body) {
+    const v = body.portal_form_id;
+    if (v === null || v === '') cols.portal_form_id = null;
+    else if (typeof v === 'string') {
+      const row = await c.env.DB.prepare('SELECT id FROM portal_forms WHERE id = ? AND event_id = ?').bind(v, eventId).first();
+      if (!row) errors.push({ field: 'portal_form_id', message: 'portal_form_id does not belong to this event.' });
+      else cols.portal_form_id = v;
+    } else {
+      errors.push({ field: 'portal_form_id', message: 'portal_form_id must be a string.' });
+    }
+  }
+  if ('file_request_id' in body) {
+    const v = body.file_request_id;
+    if (v === null || v === '') cols.file_request_id = null;
+    else if (typeof v === 'string') {
+      const row = await c.env.DB.prepare('SELECT id FROM file_requests WHERE id = ? AND event_id = ?').bind(v, eventId).first();
+      if (!row) errors.push({ field: 'file_request_id', message: 'file_request_id does not belong to this event.' });
+      else cols.file_request_id = v;
+    } else {
+      errors.push({ field: 'file_request_id', message: 'file_request_id must be a string.' });
+    }
+  }
+  if ('due_at' in body) {
+    const v = body.due_at;
+    if (v === null || v === '') cols.due_at = null;
+    else if (typeof v === 'string' && !Number.isNaN(Date.parse(v))) cols.due_at = v;
+    else errors.push({ field: 'due_at', message: 'due_at must be an ISO 8601 timestamp.' });
+  }
+  if ('reminder_offsets_days' in body) {
+    const v = body.reminder_offsets_days;
+    if (v === null) cols.reminder_offsets_days = null;
+    else if (Array.isArray(v) && v.every((n) => Number.isInteger(n))) cols.reminder_offsets_days = JSON.stringify(v);
+    else errors.push({ field: 'reminder_offsets_days', message: 'reminder_offsets_days must be an array of integers.' });
+  }
+  if ('required' in body) {
+    const v = body.required;
+    if (typeof v === 'boolean') cols.required = v ? 1 : 0;
+    else errors.push({ field: 'required', message: 'required must be a boolean.' });
+  }
+
+  return { cols, errors };
+}
+
+// POST /events/:event_id/tasks
+restApiRoutes.post('/events/:event_id/tasks', async (c) => {
+  const eventId = c.get('event').id;
+  const { cols, errors } = await pickTaskFields(c, await readBody(c), { requireTitle: true });
+  if (errors.length > 0) return validationError(c, errors);
+
+  const id = crypto.randomUUID();
+  const ts = new Date().toISOString();
+  const keys = Object.keys(cols);
+  const quoted = keys.map((k) => (k === 'trigger' ? '"trigger"' : k));
+  await c.env.DB.prepare(
+    `INSERT INTO tasks (id, event_id, created_at, ${quoted.join(', ')})
+     VALUES (?, ?, ?${', ?'.repeat(keys.length)})`,
+  )
+    .bind(id, eventId, ts, ...keys.map((k) => cols[k]))
+    .run();
+  await bumpEventRevision(c.env, eventId);
+  const row = await c.env.DB.prepare('SELECT * FROM tasks WHERE id = ?').bind(id).first();
+  return c.json(row, 201);
+});
+
+// PUT /events/:event_id/tasks/:tid
+restApiRoutes.put('/events/:event_id/tasks/:tid', async (c) => {
+  const eventId = c.get('event').id;
+  const id = c.req.param('tid');
+  const { cols, errors } = await pickTaskFields(c, await readBody(c), { requireTitle: false });
+  if (errors.length > 0) return validationError(c, errors);
+
+  const keys = Object.keys(cols);
+  if (keys.length > 0) {
+    const quoted = keys.map((k) => (k === 'trigger' ? '"trigger"' : k));
+    const result = await c.env.DB.prepare(
+      `UPDATE tasks SET ${quoted.map((k) => `${k} = ?`).join(', ')} WHERE id = ? AND event_id = ?`,
+    )
+      .bind(...keys.map((k) => cols[k]), id, eventId)
+      .run();
+    if (result.meta.changes === 0) return apiError(c, 404, 'not_found', 'No task with this id in this event.');
+  }
+  await bumpEventRevision(c.env, eventId);
+  const row = await c.env.DB.prepare('SELECT * FROM tasks WHERE id = ? AND event_id = ?').bind(id, eventId).first();
+  if (!row) return apiError(c, 404, 'not_found', 'No task with this id in this event.');
+  return c.json(row);
+});
+
+// DELETE /events/:event_id/tasks/:tid — assignments cascade via task_id.
+restApiRoutes.delete('/events/:event_id/tasks/:tid', async (c) => {
+  const eventId = c.get('event').id;
+  const result = await c.env.DB.prepare('DELETE FROM tasks WHERE id = ? AND event_id = ?')
+    .bind(c.req.param('tid'), eventId)
+    .run();
+  if (result.meta.changes === 0) return apiError(c, 404, 'not_found', 'No task with this id in this event.');
+  await bumpEventRevision(c.env, eventId);
+  return c.json({ ok: true });
+});
+
+// ---------------------------------------------------------------------------
+// Forms (work item 2): read-only for v1 preview. Creation/editing stays
+// admin-UI only (formsAdmin.ts) — see docs/10 §2.
+// ---------------------------------------------------------------------------
+
+// GET /events/:event_id/forms
+restApiRoutes.get('/events/:event_id/forms', async (c) => {
+  const { results } = await c.env.DB.prepare(
+    `SELECT f.id, f.internal_name, f.external_title, f.collection_type, f.status, f.close_at,
+            f.created_at, f.updated_at,
+            (SELECT COUNT(*) FROM form_questions q WHERE q.form_id = f.id) AS question_count,
+            (SELECT COUNT(*) FROM submissions s WHERE s.form_id = f.id) AS submission_count
+     FROM submission_forms f WHERE f.event_id = ? ORDER BY f.created_at DESC`,
+  )
+    .bind(c.get('event').id)
+    .all();
+  return c.json({ data: results });
+});
+
+// GET /events/:event_id/forms/:fid — form + its questions.
+restApiRoutes.get('/events/:event_id/forms/:fid', async (c) => {
+  const eventId = c.get('event').id;
+  const id = c.req.param('fid');
+  const form = await c.env.DB.prepare('SELECT * FROM submission_forms WHERE id = ? AND event_id = ?')
+    .bind(id, eventId)
+    .first();
+  if (!form) return apiError(c, 404, 'not_found', 'No form with this id in this event.');
+  const { results } = await c.env.DB.prepare(
+    'SELECT * FROM form_questions WHERE form_id = ? ORDER BY section, position',
+  )
+    .bind(id)
+    .all();
+  return c.json({ ...form, questions: results });
+});
+
+// ---------------------------------------------------------------------------
+// Cursor pagination (work item 1). Keyset mode is opt-in via ?cursor= — the
+// registry's fromSql/selectSql/filters are reused as-is (RESOURCES is
+// call-only here), and only the id-tiebreaker aliases + numeric-vs-text
+// sentinel are declared locally so this doesn't depend on BE-3's concurrent
+// edits to adminApi.ts. Offset mode (no ?cursor=) is unchanged for back-compat.
+// ---------------------------------------------------------------------------
+
+/** Primary-key column alias per resource's fromSql — the keyset tiebreaker. */
+const CURSOR_ID_EXPR: Record<string, string> = {
+  contacts: 'c.id',
+  submissions: 's.id',
+  tasks: 'ta.id',
+  messages: 'm.id',
+};
+
+// The only sort field whose JSON value is a number, not a string — everything
+// else (titles, statuses, ISO timestamps) sorts correctly as text.
+const NUMERIC_SORT_FIELDS = new Set(['rating']);
+const NULL_TEXT_SENTINEL = '';
+const NULL_NUMBER_SENTINEL = -1e15;
+
+/** Resolve the SQL sort expression + JSON row key for cursor mode. Falls back
+ * to ordering by id when no (valid) ?sort= is given — a total, stable order. */
+function cursorSort(
+  resource: string,
+  def: ResourceDef,
+  field: string | null,
+): { orderExpr: string; idExpr: string; rowKey: string; numeric: boolean } {
+  const idExpr = CURSOR_ID_EXPR[resource] ?? 'id';
+  if (field && def.sortable[field]) {
+    const numeric = NUMERIC_SORT_FIELDS.has(field);
+    const wrapped = numeric
+      ? `COALESCE(${def.sortable[field]}, ${NULL_NUMBER_SENTINEL})`
+      : `COALESCE(${def.sortable[field]}, '${NULL_TEXT_SENTINEL}')`;
+    return { orderExpr: wrapped, idExpr, rowKey: field, numeric };
+  }
+  return { orderExpr: idExpr, idExpr, rowKey: 'id', numeric: false };
+}
+
+async function handleCursorList(c: Context<RestEnv>, resource: string, def: ResourceDef, cursorRaw: string) {
+  const eventId = c.get('event').id;
+  const cursor: CursorPayload | null = cursorRaw === '' ? null : decodeCursor(cursorRaw);
+  if (cursorRaw !== '' && !cursor) return apiError(c, 400, 'invalid_cursor', 'The cursor parameter is not valid.');
+
+  const limitRaw = Number(c.req.query('limit'));
+  const limit = Number.isInteger(limitRaw) ? Math.min(Math.max(limitRaw, 1), 100) : 25;
+
+  let sortField: string | null = null;
+  let direction: 'asc' | 'desc' = 'asc';
+  const sortRaw = c.req.query('sort');
+  if (sortRaw) {
+    const desc = sortRaw.startsWith('-');
+    const field = desc ? sortRaw.slice(1) : sortRaw;
+    if (def.sortable[field]) {
+      sortField = field;
+      direction = desc ? 'desc' : 'asc';
+    }
+  }
+  const { orderExpr, idExpr, rowKey, numeric } = cursorSort(resource, def, sortField);
+
+  const filterClauses: { sql: string; params: unknown[] }[] = [];
+  for (const name of Object.keys(def.filters)) {
+    const value = c.req.query(name);
+    if (value === undefined || value === '') continue;
+    const built = def.filters[name]?.(value);
+    if (built) filterClauses.push(built);
+  }
+
+  const whereForCount = filterClauses.length > 0 ? ` AND ${filterClauses.map((f) => f.sql).join(' AND ')}` : '';
+  const countParams = [eventId, ...filterClauses.flatMap((f) => f.params)];
+  const totalRow = await c.env.DB.prepare(`SELECT COUNT(*) AS n ${def.fromSql}${whereForCount}`)
+    .bind(...countParams)
+    .first<{ n: number }>();
+
+  const clauses = [...filterClauses];
+  const listParams: unknown[] = [eventId];
+  if (cursor) {
+    const kw = keysetWhere(orderExpr, idExpr, direction, cursor);
+    clauses.push({ sql: kw.sql, params: kw.binds });
+  }
+  const whereSql = clauses.length > 0 ? ` AND ${clauses.map((cl) => cl.sql).join(' AND ')}` : '';
+  for (const cl of clauses) listParams.push(...cl.params);
+
+  const dir = direction === 'desc' ? 'DESC' : 'ASC';
+  const listSql = `${def.selectSql} ${def.fromSql}${whereSql} ORDER BY ${orderExpr} ${dir}, ${idExpr} ${dir} LIMIT ?`;
+  const { results } = await c.env.DB.prepare(listSql).bind(...listParams, limit + 1).all();
+  const rows = results as Record<string, unknown>[];
+  const hasMore = rows.length > limit;
+  const page = hasMore ? rows.slice(0, limit) : rows;
+
+  let nextCursor: string | null = null;
+  if (hasMore) {
+    const last = page[page.length - 1]!;
+    const id = String(last.id);
+    let v: string | number;
+    if (rowKey === 'id') v = id;
+    else {
+      const raw = last[rowKey];
+      v = raw === null || raw === undefined ? (numeric ? NULL_NUMBER_SENTINEL : NULL_TEXT_SENTINEL) : (raw as string | number);
+    }
+    nextCursor = encodeCursor({ v, id });
+  }
+
+  return c.json({
+    data: page,
+    total: totalRow?.n ?? 0,
+    limit,
+    offset: null,
+    has_more: hasMore,
+    next_cursor: nextCursor,
+  });
+}
 
 // ---------------------------------------------------------------------------
 // Generic list endpoint (must register after the specific routes above)
 // ---------------------------------------------------------------------------
 
 // GET /events/:event_id/:resource → { data, total, limit, offset, has_more }
+// (?cursor= switches to keyset pagination, adding next_cursor.)
 restApiRoutes.get('/events/:event_id/:resource', async (c) => {
   const resource = c.req.param('resource');
+  const def = RESOURCES[resource];
+  if (!def) {
+    return apiError(
+      c,
+      404,
+      'unknown_resource',
+      `No resource named "${resource}". Available: ${Object.keys(RESOURCES).join(', ')}.`,
+    );
+  }
+
+  const cursorRaw = c.req.query('cursor');
+  if (cursorRaw !== undefined) return handleCursorList(c, resource, def, cursorRaw);
+
   const parsed = queryFromParams(c, resource, { maxSize: 200, defaultSize: 25 });
   if (!parsed) {
     return apiError(
@@ -308,5 +963,6 @@ restApiRoutes.get('/events/:event_id/:resource', async (c) => {
     limit: parsed.body.size,
     offset: parsed.body.from,
     has_more: parsed.body.from + items.length < total,
+    next_cursor: null,
   });
 });
