@@ -1,7 +1,7 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import { useQueries, useQueryClient } from '@tanstack/react-query';
 import { DataList, ColumnDefinition, DataListQuery, DataSourceParams, DataSourceResult } from './DataList';
-import { appAlert } from './dialogs';
+import { appAlert, ModalDialog } from './dialogs';
 import type { DataListExportConfig, DataListFastAddConfig, DataListFilterConfig, DataListRowDragConfig, DataListRowDropConfig, DataListSummaryDataSource } from './DataList';
 import { RecordForm } from './RecordForm';
 import { ContextMenu } from './ContextMenu';
@@ -981,6 +981,25 @@ export interface DataTabManagerProps {
    * deep-link landing on Tasks). Re-fires whenever `token` changes.
    */
   activeTabRequest?: { configKey: string; token: number };
+  /**
+   * External request to open a detail tab for an already-loaded record (URL
+   * deep-link restore: the caller resolves `?rec=` to a row and hands it over).
+   * Re-fires whenever `token` changes; ignored when the tab or config is gone.
+   */
+  detailRequest?: { configKey: string; item: any; token: number };
+  /**
+   * Fires whenever any list tab's selected row changes. Used to mirror the
+   * selection into the URL; the per-tab `TabConfig.onSelectionChange` keeps
+   * working alongside it.
+   */
+  onSelectionChange?: (selection: { tabId: string; configKey: string; id: string | null; item: any | null } | null) => void;
+  /** Right-aligned slot in the tab header row (the app's event-filter chip). */
+  headerTrailing?: React.ReactNode;
+  /**
+   * Render a built-in chip naming the tab/row currently anchoring the global
+   * filter, with a clear button. Off by default to keep existing hosts as-is.
+   */
+  globalFilterIndicator?: boolean;
 }
 
 /**
@@ -999,7 +1018,11 @@ export const DataTabManager: React.FC<DataTabManagerProps> = ({
   onListQueryChange,
   itemReceiverPanel,
   reloadKey,
-  activeTabRequest
+  activeTabRequest,
+  detailRequest,
+  onSelectionChange,
+  headerTrailing,
+  globalFilterIndicator = false
 }) => {
   const initialState: TabManagerState = {
     tabs: [],
@@ -1178,6 +1201,38 @@ export const DataTabManager: React.FC<DataTabManagerProps> = ({
     handledTabRequestToken.current = activeTabRequest.token;
     dispatch({ type: 'SET_ACTIVE_TAB', payload: { index } });
   }, [activeTabRequest, state.tabs]);
+
+  /**
+   * Honour external open-detail requests (URL `?rec=` restore). The caller has
+   * already resolved the record, so this only has to find the parent list tab.
+   */
+  const handledDetailRequestToken = useRef<number | null>(null);
+  useEffect(() => {
+    if (!detailRequest || handledDetailRequestToken.current === detailRequest.token) {
+      return;
+    }
+    const parent = state.tabs.find(
+      t => t.type === 'list' && t.configKey === detailRequest.configKey
+    );
+    if (!parent) {
+      return; // tabs not initialized yet; retry when state.tabs changes
+    }
+    handledDetailRequestToken.current = detailRequest.token;
+    const tabConfig = config[detailRequest.configKey];
+    if (!tabConfig?.detailComponent || !detailRequest.item) {
+      return; // nothing to show — deep link degrades to just opening the tab
+    }
+    dispatch({
+      type: 'OPEN_DETAIL_TAB',
+      payload: {
+        item: detailRequest.item,
+        configKey: detailRequest.configKey,
+        parentTabId: parent.id,
+        replace: true,
+        title: `Detail: ${resolveItemTitle(detailRequest.item, tabConfig)}`
+      }
+    });
+  }, [config, detailRequest, resolveItemTitle, state.tabs]);
 
   /**
    * Notify consumers when the active tab changes.
@@ -1445,6 +1500,16 @@ export const DataTabManager: React.FC<DataTabManagerProps> = ({
       const tabConfig = config[configKey];
       const currentItem = state.tabSelections[tabId] ?? null;
       const getItemId = tabConfig?.getItemId;
+      // Manager-level mirror of the selection (App reflects it into the URL).
+      const reportSelection = () => {
+        if (!onSelectionChange) return;
+        onSelectionChange({
+          tabId,
+          configKey,
+          item,
+          id: item && getItemId ? getItemId(item) : null
+        });
+      };
       const notifyOnReselect = Boolean(tabConfig?.notifyOnReselect);
       if (getItemId) {
         const currentId = currentItem ? getItemId(currentItem) : null;
@@ -1459,6 +1524,7 @@ export const DataTabManager: React.FC<DataTabManagerProps> = ({
           }
           if (didRefreshSelectedItem || notifyOnReselect) {
             tabConfig?.onSelectionChange?.(item);
+            reportSelection();
           }
           return;
         }
@@ -1468,8 +1534,9 @@ export const DataTabManager: React.FC<DataTabManagerProps> = ({
         payload: { tabId, item }
       });
       tabConfig?.onSelectionChange?.(item);
+      reportSelection();
     };
-  }, [config, state.tabSelections]);
+  }, [config, onSelectionChange, state.tabSelections]);
 
   const visibleConfigKeys = useMemo(() => {
     if (!itemReceiverPanel) {
@@ -2459,6 +2526,43 @@ export const DataTabManager: React.FC<DataTabManagerProps> = ({
   const activeTabTitle = state.tabs[state.activeTabIndex]?.title ?? '';
   const isGlobalFilterActive = effectiveGlobalFilterSources.length > 0;
   const isReceiverPanelShown = Boolean(itemReceiverPanel && isReceiverActive && !isMobileSplit);
+  /**
+   * "Filtered by: <tab> — <row>" read-out for the anchor(s) currently driving
+   * the global filter. The row label comes from the source tab's configured
+   * title resolver, falling back to the record id.
+   */
+  const globalFilterChip = isGlobalFilterActive ? (
+    <span className="data-tab-global-filter-chip" role="status">
+      <span className="data-tab-global-filter-chip-label">Filtered by:</span>
+      {globalFilterChangeEvent.sources.map((source) => {
+        const tabConfig = source.sourceConfigKey ? config[source.sourceConfigKey] : undefined;
+        const fallbackId = tabConfig?.getItemId && source.item
+          ? tabConfig.getItemId(source.item)
+          : '';
+        return (
+          <span key={source.sourceTabId} className="data-tab-global-filter-chip-source">
+            {source.sourceTabTitle} — {source.valueLabel || fallbackId || 'selected row'}
+          </span>
+        );
+      })}
+      <button
+        type="button"
+        className="data-tab-global-filter-chip-clear"
+        title="Clear the global filter"
+        aria-label="Clear the global filter"
+        onClick={() => {
+          for (const source of effectiveGlobalFilterSources) {
+            dispatch({
+              type: 'TOGGLE_GLOBAL_FILTER',
+              payload: { tabId: source.sourceTabId, additive: false }
+            });
+          }
+        }}
+      >
+        ✕
+      </button>
+    </span>
+  ) : null;
 
   return (
     <RelatedRecordsContext.Provider value={relatedRecordsContextValue}>
@@ -2567,6 +2671,12 @@ export const DataTabManager: React.FC<DataTabManagerProps> = ({
             </>
           )}
         </div>
+        {(headerTrailing || (globalFilterIndicator && globalFilterChip)) && (
+          <div className="data-tab-header-trailing">
+            {globalFilterIndicator && globalFilterChip}
+            {headerTrailing}
+          </div>
+        )}
         {itemReceiverPanel && !isMobileSplit && (
           <div className="data-tab-header-actions">
             {isReceiverPanelShown && state.globalFilterSources.length > effectiveGlobalFilterSources.length && (
@@ -2660,30 +2770,32 @@ export const DataTabManager: React.FC<DataTabManagerProps> = ({
           onClose={() => setListContextMenu(null)}
         />
       )}
-      {pendingCloseTabId && (
-        <div className="data-tab-confirm-overlay" role="dialog" aria-modal="true" aria-labelledby="unsaved-changes-title">
-          <div className="data-tab-confirm-dialog">
-            <h3 id="unsaved-changes-title">Unsaved Changes</h3>
-            <p>You have unsaved changes. Are you sure you want to close this tab?</p>
-            <div className="data-tab-confirm-actions">
-              <button
-                type="button"
-                className="data-tab-confirm-cancel"
-                onClick={handleCancelClose}
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                className="data-tab-confirm-discard"
-                onClick={handleConfirmClose}
-              >
-                Discard Changes
-              </button>
-            </div>
+      <ModalDialog
+        open={pendingCloseTabId !== null}
+        title="Unsaved Changes"
+        onClose={handleCancelClose}
+        danger
+        footer={
+          <div className="data-tab-confirm-actions">
+            <button
+              type="button"
+              className="data-tab-confirm-cancel"
+              onClick={handleCancelClose}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="data-tab-confirm-discard"
+              onClick={handleConfirmClose}
+            >
+              Discard Changes
+            </button>
           </div>
-        </div>
-      )}
+        }
+      >
+        <p className="app-dialog-message">You have unsaved changes. Are you sure you want to close this tab?</p>
+      </ModalDialog>
     </div>
     </RelatedRecordsContext.Provider>
   );

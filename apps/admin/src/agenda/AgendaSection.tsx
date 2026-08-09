@@ -70,10 +70,28 @@ interface Toast {
   undo?: () => void
 }
 
-export function AgendaSection({ initialView }: { initialView?: AgendaView } = {}) {
+const isAgendaView = (value: string | null | undefined): value is AgendaView =>
+  value !== null && value !== undefined && VIEWS.some((v) => v.key === value)
+
+/**
+ * `initialView`/`initialDay` come from the URL (router.ts `mode`/`day`); the
+ * section keeps owning its state and simply reports changes back so the address
+ * bar follows along. Invalid values fall back to the defaults.
+ */
+export function AgendaSection({
+  initialView,
+  initialDay,
+  onViewChange,
+  onDayChange,
+}: {
+  initialView?: string | null
+  initialDay?: string | null
+  onViewChange?: (view: AgendaView) => void
+  onDayChange?: (day: string) => void
+} = {}) {
   const [data, setData] = useState<AgendaPayload | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [view, setView] = useState<AgendaView>(initialView ?? 'day')
+  const [view, setView] = useState<AgendaView>(isAgendaView(initialView) ? initialView : 'day')
   const [groupBy, setGroupBy] = useState<'room' | 'track'>('room')
   const [curDay, setCurDay] = useState('')
   const [search, setSearch] = useState('')
@@ -94,10 +112,26 @@ export function AgendaSection({ initialView }: { initialView?: AgendaView } = {}
     getAgenda()
       .then((p) => {
         setData(p)
-        setCurDay((d) => d || eventDays(p.event.starts_at, p.event.ends_at, p.event.timezone)[0] || '')
+        setCurDay((d) => {
+          if (d) return d
+          const evDays = eventDays(p.event.starts_at, p.event.ends_at, p.event.timezone)
+          // Honour a `?day=` deep link when it names a day of this event.
+          if (initialDay && evDays.includes(initialDay)) return initialDay
+          return evDays[0] || ''
+        })
       })
       .catch((e: unknown) => setError(e instanceof Error ? e.message : 'Failed to load the agenda'))
   }, [])
+
+  // Report view/day back to the router (replaceState — these refine the screen
+  // rather than navigate). Reporting from an effect keeps every internal
+  // setView/setCurDay call site untouched.
+  useEffect(() => {
+    onViewChange?.(view)
+  }, [onViewChange, view])
+  useEffect(() => {
+    if (curDay) onDayChange?.(curDay)
+  }, [curDay, onDayChange])
 
   const tz = data?.event.timezone ?? 'UTC'
   const days = useMemo(

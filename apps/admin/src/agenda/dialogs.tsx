@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react'
+import { useRef, useState } from 'react'
 import type { AgendaRoom, AgendaSessionRow, AgendaTrack } from '../api'
 import { durationMinutes, fmtDay, utcToLocal } from './timeUtils'
+import { ModalDialog } from '../components/dialogs'
 
 /**
  * The keyboard "Move session" dialog (docs/07 §3 a11y alternative — everything
@@ -52,61 +53,15 @@ export function MoveDialog({
     scheduled ? durationMinutes(session.starts_at as string, session.ends_at as string) : defaultDurationMin,
   )
   const [roomId, setRoomId] = useState(session.room_id ?? '')
-
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose()
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [onClose])
+  const dayRef = useRef<HTMLSelectElement | null>(null)
 
   return (
-    <div className="agenda-dialog-scrim" onClick={onClose}>
-      <div
-        className="agenda-dialog"
-        role="dialog"
-        aria-modal="true"
-        aria-label={`Move ${session.title}`}
-        onClick={(e) => e.stopPropagation()}
-      >
-        <h3>Move session</h3>
-        <p className="agenda-dialog-sub">{session.code} · {session.title}</p>
-        <div className="agenda-dialog-grid">
-          <label>
-            Date
-            <select value={day} onChange={(e) => setDay(e.target.value)} autoFocus>
-              {days.map((d) => (
-                <option key={d} value={d}>{fmtDay(d)}</option>
-              ))}
-            </select>
-          </label>
-          <label>
-            Start
-            <input type="time" step={300} value={time} onChange={(e) => setTime(e.target.value)} />
-          </label>
-          <label>
-            Duration (min)
-            <input
-              type="number"
-              min={5}
-              step={5}
-              value={duration}
-              onChange={(e) => setDuration(Math.max(5, Number(e.target.value) || 5))}
-            />
-          </label>
-          <label>
-            Room
-            <select value={roomId} onChange={(e) => setRoomId(e.target.value)}>
-              <option value="">No room</option>
-              {rooms.map((r) => (
-                <option key={r.id} value={r.id}>
-                  {r.name}{r.capacity !== null ? ` (${r.capacity})` : ''}
-                </option>
-              ))}
-            </select>
-          </label>
-        </div>
+    <ModalDialog
+      open
+      title="Move session"
+      onClose={onClose}
+      initialFocusRef={dayRef}
+      footer={
         <div className="agenda-dialog-actions">
           {scheduled && (
             <button className="danger" onClick={onUnschedule}>Unschedule</button>
@@ -121,8 +76,45 @@ export function MoveDialog({
             Save
           </button>
         </div>
+      }
+    >
+      <p className="agenda-dialog-sub">{session.code} · {session.title}</p>
+      <div className="agenda-dialog-grid">
+        <label>
+          Date
+          <select ref={dayRef} value={day} onChange={(e) => setDay(e.target.value)}>
+            {days.map((d) => (
+              <option key={d} value={d}>{fmtDay(d)}</option>
+            ))}
+          </select>
+        </label>
+        <label>
+          Start
+          <input type="time" step={300} value={time} onChange={(e) => setTime(e.target.value)} />
+        </label>
+        <label>
+          Duration (min)
+          <input
+            type="number"
+            min={5}
+            step={5}
+            value={duration}
+            onChange={(e) => setDuration(Math.max(5, Number(e.target.value) || 5))}
+          />
+        </label>
+        <label>
+          Room
+          <select value={roomId} onChange={(e) => setRoomId(e.target.value)}>
+            <option value="">No room</option>
+            {rooms.map((r) => (
+              <option key={r.id} value={r.id}>
+                {r.name}{r.capacity !== null ? ` (${r.capacity})` : ''}
+              </option>
+            ))}
+          </select>
+        </label>
       </div>
-    </div>
+    </ModalDialog>
   )
 }
 
@@ -152,76 +144,15 @@ export function AddSessionDialog({ tracks, rooms, days, onSave, onClose }: AddSe
   const [day, setDay] = useState('')
   const [time, setTime] = useState('10:00')
   const [duration, setDuration] = useState(30)
-
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose()
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [onClose])
+  const titleRef = useRef<HTMLInputElement | null>(null)
 
   return (
-    <div className="agenda-dialog-scrim" onClick={onClose}>
-      <div className="agenda-dialog" role="dialog" aria-modal="true" aria-label="Add session" onClick={(e) => e.stopPropagation()}>
-        <h3>Add session</h3>
-        <p className="agenda-dialog-sub">Created as a manual, already-accepted session — one pipeline.</p>
-        <label className="agenda-dialog-full">
-          Title
-          <input value={title} onChange={(e) => setTitle(e.target.value)} autoFocus placeholder="Session title" />
-        </label>
-        <div className="agenda-dialog-grid">
-          <label>
-            Track
-            <select value={trackId} onChange={(e) => setTrackId(e.target.value)}>
-              <option value="">No track</option>
-              {tracks.map((t) => (
-                <option key={t.id} value={t.id}>{t.name}</option>
-              ))}
-            </select>
-          </label>
-          <label>
-            Format
-            <select value={format} onChange={(e) => setFormat(e.target.value)}>
-              {FORMATS.map((f) => (
-                <option key={f} value={f}>{f}</option>
-              ))}
-            </select>
-          </label>
-          <label>
-            Room
-            <select value={roomId} onChange={(e) => setRoomId(e.target.value)}>
-              <option value="">No room</option>
-              {rooms.map((r) => (
-                <option key={r.id} value={r.id}>{r.name}</option>
-              ))}
-            </select>
-          </label>
-          <label>
-            Date
-            <select value={day} onChange={(e) => setDay(e.target.value)}>
-              <option value="">Unscheduled</option>
-              {days.map((d) => (
-                <option key={d} value={d}>{fmtDay(d)}</option>
-              ))}
-            </select>
-          </label>
-          <label>
-            Start
-            <input type="time" step={300} value={time} onChange={(e) => setTime(e.target.value)} disabled={!day} />
-          </label>
-          <label>
-            Duration (min)
-            <input
-              type="number"
-              min={5}
-              step={5}
-              value={duration}
-              onChange={(e) => setDuration(Math.max(5, Number(e.target.value) || 5))}
-              disabled={!day}
-            />
-          </label>
-        </div>
+    <ModalDialog
+      open
+      title="Add session"
+      onClose={onClose}
+      initialFocusRef={titleRef}
+      footer={
         <div className="agenda-dialog-actions">
           <span className="spacer" />
           <button onClick={onClose}>Cancel</button>
@@ -243,7 +174,65 @@ export function AddSessionDialog({ tracks, rooms, days, onSave, onClose }: AddSe
             Add session
           </button>
         </div>
+      }
+    >
+      <p className="agenda-dialog-sub">Created as a manual, already-accepted session — one pipeline.</p>
+      <label className="agenda-dialog-full">
+        Title
+        <input ref={titleRef} value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Session title" />
+      </label>
+      <div className="agenda-dialog-grid">
+        <label>
+          Track
+          <select value={trackId} onChange={(e) => setTrackId(e.target.value)}>
+            <option value="">No track</option>
+            {tracks.map((t) => (
+              <option key={t.id} value={t.id}>{t.name}</option>
+            ))}
+          </select>
+        </label>
+        <label>
+          Format
+          <select value={format} onChange={(e) => setFormat(e.target.value)}>
+            {FORMATS.map((f) => (
+              <option key={f} value={f}>{f}</option>
+            ))}
+          </select>
+        </label>
+        <label>
+          Room
+          <select value={roomId} onChange={(e) => setRoomId(e.target.value)}>
+            <option value="">No room</option>
+            {rooms.map((r) => (
+              <option key={r.id} value={r.id}>{r.name}</option>
+            ))}
+          </select>
+        </label>
+        <label>
+          Date
+          <select value={day} onChange={(e) => setDay(e.target.value)}>
+            <option value="">Unscheduled</option>
+            {days.map((d) => (
+              <option key={d} value={d}>{fmtDay(d)}</option>
+            ))}
+          </select>
+        </label>
+        <label>
+          Start
+          <input type="time" step={300} value={time} onChange={(e) => setTime(e.target.value)} disabled={!day} />
+        </label>
+        <label>
+          Duration (min)
+          <input
+            type="number"
+            min={5}
+            step={5}
+            value={duration}
+            onChange={(e) => setDuration(Math.max(5, Number(e.target.value) || 5))}
+            disabled={!day}
+          />
+        </label>
       </div>
-    </div>
+    </ModalDialog>
   )
 }

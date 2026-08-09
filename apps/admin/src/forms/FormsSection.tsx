@@ -17,10 +17,36 @@ import './forms.css'
  * opening into the 6-step builder wizard.
  */
 
-export function FormsSection({ eventSlug, timezone }: { eventSlug: string; timezone: string }) {
+/**
+ * `routeFormId`/`routeStep` come from the URL (router.ts `form`/`fstep`): the
+ * open form is addressable, and opening/closing one reports back through
+ * `onOpenForm` so Back closes the builder.
+ */
+export function FormsSection({
+  eventSlug,
+  timezone,
+  routeFormId,
+  routeStep,
+  onOpenForm,
+  onStepChange,
+}: {
+  eventSlug: string
+  timezone: string
+  routeFormId?: string | null
+  routeStep?: string | null
+  onOpenForm?: (formId: string | null) => void
+  onStepChange?: (step: string) => void
+}) {
   const [forms, setForms] = useState<FormRow[] | null>(null)
-  const [openFormId, setOpenFormId] = useState<string | null>(null)
+  const [localFormId, setLocalFormId] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  // The route wins when the host wires it up; otherwise fall back to local
+  // state so the section still works standalone (tests, storybook-style use).
+  const openFormId = onOpenForm ? (routeFormId ?? null) : localFormId
+  const setOpenFormId = (id: string | null) => {
+    setLocalFormId(id)
+    onOpenForm?.(id)
+  }
 
   const reload = useCallback(() => {
     listForms()
@@ -33,9 +59,12 @@ export function FormsSection({ eventSlug, timezone }: { eventSlug: string; timez
   if (openFormId) {
     return (
       <FormBuilder
+        key={openFormId}
         formId={openFormId}
         eventSlug={eventSlug}
         timezone={timezone}
+        initialStep={routeStep}
+        onStepChange={onStepChange}
         onClose={() => {
           setOpenFormId(null)
           reload()

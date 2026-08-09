@@ -252,3 +252,82 @@
 .ws-preset-bar button:hover {
   color: var(--text);
 }
+
+/* --- Workspace redesign: nav children, event scope chrome ---------------- */
+
+.shell-nav-group {
+  display: block;
+}
+
+.shell-nav .shell-nav-children {
+  display: flex;
+  flex-direction: column;
+  padding-bottom: var(--space-1);
+}
+
+.shell-nav button.shell-nav-child {
+  height: calc(var(--row-height) - 6px);
+  padding-left: calc(var(--space-3) * 2);
+  font-size: var(--text-label);
+  color: var(--text-muted);
+}
+
+.shell-nav button.shell-nav-child.active {
+  background: none;
+  color: var(--accent);
+  font-weight: 600;
+  border-left-color: var(--accent);
+}
+
+/* Per-event surfaces: a subtitle line so it stays unambiguous which event the
+   screen shows while the workspace filter says "All events". */
+.section-with-event {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.section-event-note {
+  flex: 0 0 auto;
+  padding: var(--space-1) var(--space-3);
+  border-bottom: 1px solid var(--border);
+  background: var(--chrome);
+  color: var(--text-muted);
+  font-size: var(--text-caption);
+}
+
+.section-event-note strong {
+  color: var(--text);
+}
+
+.section-event-note-hint {
+  margin-left: var(--space-1);
+  color: var(--text-faint);
+}
+
+/* Event-filter read-out in the workspace tab-header trailing slot. */
+.event-filter-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  max-width: 26ch;
+  overflow: hidden;
+  white-space: nowrap;
+  padding: 3px var(--space-2);
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: var(--text-caption);
+  font-weight: 600;
+}
+
+.event-filter-chip.all {
+  color: var(--text-secondary);
+}
+
+.event-filter-chip .event-filter-chip-label {
+  color: var(--text-muted);
+  font-weight: 500;
+}

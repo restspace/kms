@@ -1,10 +1,17 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { DataTabManager, TabConfig } from './components/DataTabManager'
+import type {
+  DataListCellChange,
+  DataListCellChangeHandler,
+  DataSourceParams,
+  DataSourceResult,
+} from './components/DataList'
 import {
   bulkStatus,
   createContact,
   deleteContact,
   getMe,
+  getSubmissionDetail,
   queryResource,
   sendDecisions,
   switchEvent,
@@ -17,7 +24,7 @@ import {
   type TaskAssignmentRow,
 } from './api'
 import { buildExportUrl } from './api'
-import { appConfirm } from './components/dialogs'
+import { appAlert, appConfirm } from './components/dialogs'
 import { FormsSection } from './forms/FormsSection'
 import { SettingsSection } from './settings/SettingsSection'
 import { EvaluationSection } from './evaluation/EvaluationSection'
@@ -31,15 +38,32 @@ import {
   SUBMISSION_STATUSES,
   statusLabel,
 } from './workspace/extras'
+import {
+  EventFilterChip,
+  EventFilterSelect,
+  EventScopeNote,
+  EventScopeProvider,
+  type EventFilter,
+  type EventScopeValue,
+} from './eventScope'
+import { currentRoute, navigate, useRoute, type ViewKey } from './router'
 import './shell.css'
 
 /**
- * Admin SPA shell (docs/12 M0.5→M3): slim sidebar + event switcher around the
- * tab workspace, Forms, Evaluation and the reviewer workspace. Reviewers see
- * only Review; everything else needs the admin role (enforced server-side too).
+ * Admin SPA shell (docs/12 M0.5→M3, workspace redesign): slim sidebar + event
+ * scope control around the tab workspace, Forms, Evaluation and the reviewer
+ * workspace. Reviewers see only Review; everything else needs the admin role
+ * (enforced server-side too).
+ *
+ * Two things changed with the redesign:
+ *  - the event is a *filter dimension* for the workspace (`'all'` spans every
+ *    accessible event) while the per-event surfaces stay bound to the session's
+ *    current event — see eventScope.tsx for the two-concept model;
+ *  - every addressable piece of state lives in the URL via router.ts, so the
+ *    shell derives its view from the route and reports changes back into it.
  */
 
-const NAV_ITEMS = [
+const NAV_ITEMS: ReadonlyArray<{ key: ViewKey; label: string; soon: string | null }> = [
   { key: 'dashboard', label: 'Dashboard', soon: null },
   { key: 'workspace', label: 'Workspace', soon: null },
   { key: 'forms', label: 'Forms', soon: null },
@@ -47,9 +71,7 @@ const NAV_ITEMS = [
   { key: 'review', label: 'Review', soon: null },
   { key: 'agenda', label: 'Agenda', soon: null },
   { key: 'settings', label: 'Settings', soon: null },
-] as const
-
-type ViewKey = (typeof NAV_ITEMS)[number]['key']
+]
 
 const fmtDate = (iso: string | null | undefined): string => {
   if (!iso) return ''
@@ -89,27 +111,79 @@ const speakerSchema = {
 /** Workspace tab keys addressable by dashboard deep-links. */
 type WorkspaceTabKey = 'speakers' | 'submissions' | 'tasks' | 'messages'
 
+const WORKSPACE_TAB_KEYS: readonly WorkspaceTabKey[] = ['speakers', 'submissions', 'tasks', 'messages']
+
+const isWorkspaceTabKey = (value: string | null): value is WorkspaceTabKey =>
+  value !== null && (WORKSPACE_TAB_KEYS as readonly string[]).includes(value)
+
+/**
+ * Tabs whose selected record can be resolved back from an id alone, and so can
+ * survive a reload as `?rec=`. Tasks and Messages have no by-id read on the
+ * query endpoint yet (see the FE-2 notes) — their selection is not URL-backed.
+ */
+const REC_RESTORABLE: ReadonlyArray<WorkspaceTabKey> = ['speakers', 'submissions']
+
 type WorkspaceSeeds = Partial<Record<WorkspaceTabKey, Record<string, unknown>>>
 
 /** Filter UI for tabs whose only filters come from dashboard deep-link seeds. */
 const NullFilter = () => null
+
+/**
+ * Resolve a workspace record from its id so a `?rec=` deep link can re-open the
+ * detail tab. Returns null when the record is gone (the caller drops `rec`).
+ */
+async function loadWorkspaceRecord(
+  tab: WorkspaceTabKey,
+  id: string,
+  eventFilterId: string | null,
+): Promise<unknown | null> {
+  if (tab === 'speakers') {
+    const result = await queryResource<ContactRow>('contacts')({
+      from: 0,
+      size: 1,
+      filters: { contact_id: id, ...(eventFilterId ? { event_id: eventFilterId } : {}) },
+    })
+    return result.items[0] ?? null
+  }
+  if (tab === 'submissions') {
+    const detail = await getSubmissionDetail(id)
+    return (detail.submission as unknown as SubmissionRow | undefined) ?? null
+  }
+  return null
+}
 
 /** Workspace tab configs against the Worker's generic query endpoints. */
 function buildWorkspaceConfig(
   onChecklist: (ids: string[]) => void,
   checklistResetKey: number,
   seeds: WorkspaceSeeds,
-  eventId: string,
+  currentEventId: string,
+  eventFilterId: string | null,
 ): Record<string, TabConfig> {
+  // Event as a filter dimension: with no `event_id` the Worker returns every
+  // event this staff email can reach, so the tabs span the organisation.
+  const scoped = <T,>(resource: 'contacts' | 'submissions' | 'messages' | 'tasks') => {
+    const base = queryResource<T>(resource)
+    if (!eventFilterId) return base
+    return (params: DataSourceParams): Promise<DataSourceResult<T>> =>
+      base({ ...params, filters: { ...params.filters, event_id: eventFilterId } })
+  }
   // Export buttons (M6): each tab downloads its current view — active filters
   // and anchor included — through the public REST API's export endpoint.
+  // KNOWN LIMITATION: the export endpoint is single-event, so with the filter
+  // on "All events" the download covers the *current* event only.
   const exportFor = (resource: 'contacts' | 'submissions' | 'tasks' | 'messages') => ({
-    buildUrl: (format: 'csv' | 'xlsx', query: { filters: Record<string, unknown>; sort?: { field: string; direction: 'asc' | 'desc' } }) =>
-      buildExportUrl(eventId, resource, format, query.filters, query.sort),
+    buildUrl: (format: 'csv' | 'xlsx', query: { filters: Record<string, unknown>; sort?: { field: string; direction: 'asc' | 'desc' } }) => {
+      const { event_id: scopedEvent, ...rest } = query.filters as Record<string, unknown>
+      const eventId = typeof scopedEvent === 'string' && scopedEvent ? scopedEvent : currentEventId
+      return buildExportUrl(eventId, resource, format, rest, query.sort)
+    },
   })
+  /** Cross-event provenance column; hidden on mobile where width is scarce. */
+  const eventColumn = { field: 'event_name', header: 'Event', width: '140px', sortable: false, mobileHidden: true }
   const speakers: TabConfig<ContactRow> = {
     displayTitle: 'Speakers',
-    dataSource: queryResource<ContactRow>('contacts'),
+    dataSource: scoped<ContactRow>('contacts'),
     getItemId: (item) => item.id,
     getItemTitle: contactName,
     columns: [
@@ -118,6 +192,7 @@ function buildWorkspaceConfig(
       { field: 'email', header: 'Email', width: '1.5fr', sortable: true, mobileRow: 2 },
       { field: 'company', header: 'Company', sortable: true },
       { field: 'job_title', header: 'Job title', mobileHidden: true },
+      eventColumn,
     ],
     detailComponent: ({ item, onEdit }) => (
       <div className="detail-panel">
@@ -127,6 +202,7 @@ function buildWorkspaceConfig(
           <dt>Email</dt><dd>{item.email}</dd>
           {item.mobile_phone && <><dt>Mobile</dt><dd>{item.mobile_phone}</dd></>}
           {item.pronouns && <><dt>Pronouns</dt><dd>{item.pronouns}</dd></>}
+          {item.event_name && <><dt>Event</dt><dd>{item.event_name}</dd></>}
           <dt>Created</dt><dd>{fmtDate(item.created_at)}</dd>
         </dl>
         {item.biography && <div className="detail-body">{stripHtml(item.biography)}</div>}
@@ -145,7 +221,8 @@ function buildWorkspaceConfig(
       existing ? updateContact(existing.id, data) : createContact(data),
     onDelete: async (item) => {
       const confirmed = await appConfirm(
-        `Delete ${contactName(item)}? Their submissions remain, unattributed.`,
+        `Delete ${contactName(item)}? Their submissions remain, unattributed; ` +
+          'their participant links, reviews and task assignments are removed.',
         { title: 'Delete contact', confirmLabel: 'Delete', danger: true },
       )
       if (!confirmed) return false
@@ -156,7 +233,7 @@ function buildWorkspaceConfig(
 
   const submissions: TabConfig<SubmissionRow & { rating: number | null; notified_at: string | null; review_count: number }> = {
     displayTitle: 'Submissions',
-    dataSource: queryResource('submissions'),
+    dataSource: scoped('submissions'),
     getItemId: (item) => item.id,
     titleField: 'title',
     initialSort: { field: 'created_at', direction: 'desc' },
@@ -189,9 +266,13 @@ function buildWorkspaceConfig(
             ))}
           </select>
         ),
-        onChange: (change) => {
-          void updateSubmissionStatus((change.item as { id: string }).id, String(change.value))
-        },
+        // Return (not fire-and-forget) the write so DataList can await it and
+        // roll the cell back on failure — FE-3's failure-aware inline edits.
+        // The cast drops out once FE-3 widens DataListCellChangeHandler's
+        // return type to allow a Promise; the runtime behaviour is already the
+        // one that lane expects.
+        onChange: ((change: DataListCellChange<{ id: string }>) =>
+          updateSubmissionStatus(change.item.id, String(change.value))) as unknown as DataListCellChangeHandler,
       },
       {
         field: 'rating',
@@ -216,6 +297,7 @@ function buildWorkspaceConfig(
       { field: 'format', header: 'Format', width: '100px', sortable: true, mobileHidden: true },
       { field: 'track_name', header: 'Track', sortable: true, mobileRow: 2 },
       { field: 'submitter_name', header: 'Submitter', sortable: true, mobileRow: 2 },
+      eventColumn,
     ],
     detailComponent: ({ item }) => <SubmissionDetailPanel id={item.id} />,
     globalFilterSets: { id: 'submission_id' },
@@ -225,7 +307,7 @@ function buildWorkspaceConfig(
 
   const tasks: TabConfig<TaskAssignmentRow> = {
     displayTitle: 'Tasks',
-    dataSource: queryResource<TaskAssignmentRow>('tasks'),
+    dataSource: scoped<TaskAssignmentRow>('tasks'),
     getItemId: (item) => item.id,
     getItemTitle: (item) => item.task_title,
     columns: [
@@ -258,6 +340,7 @@ function buildWorkspaceConfig(
         mobileHidden: true,
         render: (value: string | null) => fmtDate(value),
       },
+      eventColumn,
     ],
     detailComponent: ({ item }) => (
       <div className="detail-panel">
@@ -282,7 +365,7 @@ function buildWorkspaceConfig(
 
   const messages: TabConfig<MessageRow> = {
     displayTitle: 'Messages',
-    dataSource: queryResource<MessageRow>('messages'),
+    dataSource: scoped<MessageRow>('messages'),
     getItemId: (item) => item.id,
     getItemTitle: (item) => item.subject ?? item.template_key ?? item.id,
     initialSort: { field: 'created_at', direction: 'desc' },
@@ -309,6 +392,7 @@ function buildWorkspaceConfig(
         sortable: true,
         render: (value: string) => <span className={`status-chip status-${value}`}>{value}</span>,
       },
+      eventColumn,
     ],
     detailComponent: ({ item }) => (
       <div className="detail-panel">
@@ -328,8 +412,9 @@ function buildWorkspaceConfig(
     exportConfig: exportFor('messages'),
   }
 
-  // Dashboard deep-link seeds (M5 stretch): tabs without their own filter UI
-  // still honour seeded local filters; the preset bar in App clears them.
+  // Dashboard deep-link seeds (M5 stretch) and URL-restored q/flt: tabs without
+  // their own filter UI still honour seeded local filters; the preset bar in App
+  // clears them.
   if (seeds.speakers) {
     speakers.filterConfig = { initialFilters: seeds.speakers, defaultFilters: {}, FilterComponent: NullFilter }
   }
@@ -349,16 +434,16 @@ function buildWorkspaceConfig(
 }
 
 export default function App() {
+  const route = useRoute()
   const [me, setMe] = useState<Me | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
-  const [view, setView] = useState<ViewKey>('dashboard')
   const [switching, setSwitching] = useState(false)
 
   // Dashboard deep-link state (M5 stretch): seeded workspace filters + which
-  // tab to land on, and the agenda view to open with.
+  // tab to land on. The tab itself now travels in the URL.
   const [wsPreset, setWsPreset] = useState<{ seeds: WorkspaceSeeds; label: string | null } | null>(null)
   const [wsTabRequest, setWsTabRequest] = useState<{ configKey: string; token: number } | undefined>(undefined)
-  const [agendaStart, setAgendaStart] = useState<{ view?: 'conflicts'; key: number }>({ key: 0 })
+  const [detailRequest, setDetailRequest] = useState<{ configKey: string; item: unknown; token: number } | undefined>(undefined)
 
   // Bulk-action state (docs/06 §5): checks come up from the Submissions tab.
   const [checkedIds, setCheckedIds] = useState<string[]>([])
@@ -366,14 +451,75 @@ export default function App() {
   const [bulkBusy, setBulkBusy] = useState(false)
   const [bulkNote, setBulkNote] = useState<string | null>(null)
 
+  const refreshMe = useCallback(async () => {
+    const m = await getMe()
+    setMe(m)
+  }, [])
+
+  /**
+   * Bind the session cookie to a different event. The per-event surfaces are
+   * remounted by key afterwards — no page reload, so unsaved workspace state
+   * and the URL both survive. The optimistic local update keeps the UI honest
+   * while /app/api/me re-reads the authoritative record (timezone included).
+   */
+  const applyEventCookie = useCallback(async (eventId: string) => {
+    setSwitching(true)
+    try {
+      await switchEvent(eventId)
+      setMe((prev) => {
+        if (!prev) return prev
+        const next = prev.events.find((e) => e.id === eventId)
+        return next ? { ...prev, event: { ...prev.event, ...next } } : prev
+      })
+      await refreshMe()
+    } catch (err) {
+      await appAlert(err instanceof Error ? err.message : 'Could not switch event', 'Event switch failed')
+    } finally {
+      setSwitching(false)
+    }
+  }, [refreshMe])
+
+  // First load: read the session, force reviewers onto Review, and honour an
+  // `?ev=` deep link that names an event other than the session's current one.
+  const bootstrapped = useRef(false)
   useEffect(() => {
     getMe()
       .then((m) => {
         setMe(m)
-        if (m.role === 'reviewer') setView('review')
+        if (m.role === 'reviewer') {
+          navigate({ v: 'review' }, { replace: true })
+          return
+        }
+        if (bootstrapped.current) return
+        bootstrapped.current = true
+        const wanted = route.ev
+        if (wanted !== 'all' && wanted !== m.event.id && m.events.some((e) => e.id === wanted)) {
+          void applyEventCookie(wanted)
+        }
       })
       .catch((err: unknown) => setLoadError(err instanceof Error ? err.message : 'Failed to load'))
+    // Intentionally once on mount: the route is read through a ref-like guard.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  const isReviewer = me?.role === 'reviewer'
+  const view: ViewKey = isReviewer ? 'review' : route.v
+
+  /** Validated workspace filter: an unknown id in the URL degrades to "all". */
+  const filter: EventFilter = useMemo(() => {
+    if (!me || route.ev === 'all') return 'all'
+    const known = route.ev === me.event.id || me.events.some((e) => e.id === route.ev)
+    return known ? route.ev : 'all'
+  }, [me, route.ev])
+  const eventFilterId = filter === 'all' ? null : filter
+
+  const setFilter = useCallback(
+    (next: EventFilter) => {
+      navigate({ ev: next, rec: null }, { replace: true })
+      if (next !== 'all' && me && next !== me.event.id) void applyEventCookie(next)
+    },
+    [applyEventCookie, me],
+  )
 
   const handleChecklist = useCallback((ids: string[]) => {
     setCheckedIds(ids)
@@ -384,27 +530,112 @@ export default function App() {
     if (ids.length > 0) setBulkNote(null)
   }, [])
 
+  // URL-restored search / extra filters ride in as tab seeds alongside the
+  // dashboard's.
+  const routeSeeds = useMemo<Record<string, unknown> | null>(() => {
+    const merged = { ...(route.flt ?? {}), ...(route.q ? { q: route.q } : {}) }
+    return Object.keys(merged).length > 0 ? merged : null
+  }, [route.flt, route.q])
+
+  const mergedSeeds = useMemo<WorkspaceSeeds>(() => {
+    const base = wsPreset?.seeds ?? {}
+    if (!routeSeeds) return base
+    const out: WorkspaceSeeds = {}
+    for (const key of WORKSPACE_TAB_KEYS) {
+      out[key] = { ...(base[key] ?? {}), ...routeSeeds }
+    }
+    return out
+  }, [routeSeeds, wsPreset])
+
   // Rebuilding on checklistResetKey both clears checks and refetches lists —
   // exactly what a bulk action needs.
   const workspaceConfig = useMemo(
-    () => buildWorkspaceConfig(handleChecklist, checklistResetKey, wsPreset?.seeds ?? {}, me?.event.id ?? ''),
-    [handleChecklist, checklistResetKey, wsPreset, me?.event.id],
+    () => buildWorkspaceConfig(handleChecklist, checklistResetKey, mergedSeeds, me?.event.id ?? '', eventFilterId),
+    [handleChecklist, checklistResetKey, mergedSeeds, me?.event.id, eventFilterId],
+  )
+
+  const workspaceTabs = useMemo(
+    () => Object.entries(workspaceConfig).map(([key, cfg]) => ({ key, label: cfg.displayTitle ?? key })),
+    [workspaceConfig],
+  )
+
+  // Route → tab: re-fire the DataTabManager activate request whenever the URL
+  // names a different tab (including a fresh deep link on load).
+  useEffect(() => {
+    if (!route.tab) return
+    setWsTabRequest((prev) =>
+      prev?.configKey === route.tab ? prev : { configKey: route.tab as string, token: (prev?.token ?? 0) + 1 },
+    )
+  }, [route.tab])
+
+  /**
+   * Route → open detail tab. `handledRec` also absorbs selections reported *by*
+   * the workspace, so mirroring a click into the URL never bounces back as a
+   * re-open. A record that 404s just drops out of the URL.
+   */
+  const handledRec = useRef<string | null>(null)
+  useEffect(() => {
+    const { rec, tab } = route
+    if (view !== 'workspace' || !rec || !isWorkspaceTabKey(tab)) return
+    const key = `${tab}:${rec}`
+    if (handledRec.current === key) return
+    handledRec.current = key
+    if (!REC_RESTORABLE.includes(tab)) return
+    let cancelled = false
+    void loadWorkspaceRecord(tab, rec, eventFilterId)
+      .then((item) => {
+        if (cancelled) return
+        if (!item) {
+          navigate({ rec: null }, { replace: true })
+          return
+        }
+        setDetailRequest((prev) => ({ configKey: tab, item, token: (prev?.token ?? 0) + 1 }))
+      })
+      .catch(() => {
+        if (!cancelled) navigate({ rec: null }, { replace: true })
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [route, view, eventFilterId])
+
+  /**
+   * Workspace → route: active list tab. Detail tabs keep the parent's key. The
+   * manager's very first report (landing on the default tab) replaces rather
+   * than pushes, so Back doesn't bounce between `?v=workspace` and
+   * `?v=workspace&tab=speakers`.
+   */
+  const handleActiveTabChange = useCallback((tab: { type: string; configKey: string } | null) => {
+    if (!tab || tab.type !== 'list') return
+    navigate({ tab: tab.configKey }, { replace: currentRoute().tab === null })
+  }, [])
+
+  /**
+   * Workspace → route: selected record. Replaces rather than pushes — arrowing
+   * down a list must not bury the Back button under one entry per row.
+   */
+  const handleWorkspaceSelection = useCallback(
+    (selection: { configKey: string; id: string | null } | null) => {
+      const configKey = selection?.configKey ?? null
+      if (!isWorkspaceTabKey(configKey) || !REC_RESTORABLE.includes(configKey)) return
+      const id = selection?.id ?? null
+      handledRec.current = id ? `${configKey}:${id}` : null
+      navigate({ rec: id }, { replace: true })
+    },
+    [],
   )
 
   const handleNavigate = useCallback((target: AppNavTarget) => {
     if (target.view === 'agenda') {
-      // Keyed remount so a repeat deep-link re-applies the initial view.
-      setAgendaStart((prev) => ({ view: target.agendaView, key: prev.key + 1 }))
-      setView('agenda')
+      navigate({ v: 'agenda', mode: target.agendaView ?? null })
       return
     }
     if (target.view === 'forms') {
-      setView('forms')
+      navigate({ v: 'forms', form: null, fstep: null })
       return
     }
     setWsPreset(target.seedFilters || target.label ? { seeds: target.seedFilters ?? {}, label: target.label ?? null } : null)
-    setWsTabRequest((prev) => ({ configKey: target.tab, token: (prev?.token ?? 0) + 1 }))
-    setView('workspace')
+    navigate({ v: 'workspace', tab: target.tab, rec: null })
   }, [])
 
   const runBulk = useCallback(
@@ -444,48 +675,62 @@ export default function App() {
     return <div className="shell"><div className="shell-loading">Loading…</div></div>
   }
 
-  const isReviewer = me.role === 'reviewer'
   const navItems = isReviewer ? NAV_ITEMS.filter((i) => i.key === 'review') : NAV_ITEMS
+  const scope: EventScopeValue = {
+    me,
+    filter,
+    currentEventId: me.event.id,
+    currentEvent: me.event,
+    events: me.events.length > 0 ? me.events : [me.event],
+    setFilter,
+    refreshMe,
+    switching,
+  }
 
   return (
+    <EventScopeProvider value={scope}>
     <div className="shell">
       <aside className="shell-sidebar">
         <div className="shell-brand">
           KMS <span className="shell-brand-sub">{isReviewer ? 'review' : 'admin'}</span>
         </div>
         <div className="shell-event">
-          <select
-            aria-label="Event"
-            value={me.event.id}
-            disabled={switching || me.events.length < 2}
-            onChange={(e) => {
-              if (!me || e.target.value === me.event.id) return
-              setSwitching(true)
-              switchEvent(e.target.value)
-                .then(() => window.location.reload())
-                .catch(() => setSwitching(false))
-            }}
-          >
-            {(me.events.length > 0 ? me.events : [me.event]).map((e) => (
-              <option key={e.id} value={e.id}>{e.name}</option>
-            ))}
-          </select>
+          <EventFilterSelect scope={scope} />
           <div className="shell-event-dates">
             {fmtDate(me.event.starts_at)} – {fmtDate(me.event.ends_at)}
           </div>
         </div>
         <nav className="shell-nav" aria-label="Sections">
           {navItems.map((item) => (
-            <button
-              key={item.key}
-              className={view === item.key ? 'active' : ''}
-              disabled={item.soon !== null}
-              title={item.soon ? `Arrives with ${item.soon}` : undefined}
-              onClick={() => setView(item.key)}
-            >
-              {item.label}
-              {item.soon && <span className="shell-nav-soon">{item.soon}</span>}
-            </button>
+            <div key={item.key} className="shell-nav-group">
+              <button
+                className={view === item.key ? 'active' : ''}
+                disabled={item.soon !== null}
+                title={item.soon ? `Arrives with ${item.soon}` : undefined}
+                aria-current={view === item.key && !(item.key === 'workspace' && route.tab) ? 'page' : undefined}
+                onClick={() => navigate({ v: item.key })}
+              >
+                {item.label}
+                {item.soon && <span className="shell-nav-soon">{item.soon}</span>}
+              </button>
+              {item.key === 'workspace' && !isReviewer && (
+                <div className="shell-nav-children">
+                  {workspaceTabs.map((tab) => {
+                    const active = view === 'workspace' && route.tab === tab.key
+                    return (
+                      <button
+                        key={tab.key}
+                        className={`shell-nav-child ${active ? 'active' : ''}`}
+                        aria-current={active ? 'page' : undefined}
+                        onClick={() => navigate({ v: 'workspace', tab: tab.key })}
+                      >
+                        {tab.label}
+                      </button>
+                    )
+                  })}
+                </div>
+              )}
+            </div>
           ))}
         </nav>
         <div className="shell-footer">
@@ -513,6 +758,11 @@ export default function App() {
               config={workspaceConfig}
               defaultTabs={['speakers', 'submissions', 'tasks', 'messages']}
               activeTabRequest={wsTabRequest}
+              detailRequest={detailRequest}
+              onActiveTabChange={handleActiveTabChange}
+              onSelectionChange={handleWorkspaceSelection}
+              globalFilterIndicator
+              headerTrailing={<EventFilterChip scope={scope} />}
             />
             {(checkedIds.length > 0 || bulkNote !== null) && (
               <BulkBar
@@ -529,15 +779,37 @@ export default function App() {
             )}
           </>
         ) : view === 'forms' && !isReviewer ? (
-          <FormsSection eventSlug={me.event.slug} timezone={me.event.timezone} />
+          <div className="section-with-event" key={me.event.id}>
+            <EventScopeNote scope={scope} />
+            <FormsSection
+              eventSlug={me.event.slug}
+              timezone={me.event.timezone}
+              routeFormId={route.form}
+              routeStep={route.fstep}
+              onOpenForm={(id) => navigate({ form: id, fstep: id ? route.fstep : null })}
+              onStepChange={(step) => navigate({ fstep: step }, { replace: true })}
+            />
+          </div>
         ) : view === 'evaluation' && !isReviewer ? (
-          <EvaluationSection />
+          <div className="section-with-event" key={me.event.id}>
+            <EventScopeNote scope={scope} />
+            <EvaluationSection />
+          </div>
         ) : view === 'agenda' && !isReviewer ? (
-          <AgendaSection key={agendaStart.key} initialView={agendaStart.view} />
+          <AgendaSection
+            key={me.event.id}
+            initialView={route.mode as never}
+            initialDay={route.day}
+            onViewChange={(mode) => navigate({ mode }, { replace: true })}
+            onDayChange={(day) => navigate({ day }, { replace: true })}
+          />
         ) : view === 'dashboard' && !isReviewer ? (
-          <DashboardSection onNavigate={handleNavigate} />
+          <DashboardSection key={me.event.id} onNavigate={handleNavigate} />
         ) : view === 'settings' && !isReviewer ? (
-          <SettingsSection me={me} />
+          <div className="section-with-event" key={me.event.id}>
+            <EventScopeNote scope={scope} />
+            <SettingsSection me={me} />
+          </div>
         ) : view === 'review' ? (
           <ReviewerWorkspace />
         ) : (
@@ -548,5 +820,6 @@ export default function App() {
         )}
       </main>
     </div>
+    </EventScopeProvider>
   )
 }

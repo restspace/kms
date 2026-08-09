@@ -761,3 +761,62 @@
     min-height: 200px;
   }
 }
+
+/* Tab-header trailing slot: the app's event-filter chip plus the built-in
+   global-filter read-out (workspace redesign). */
+.data-tab-header-trailing {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 0 var(--space-2);
+  border-left: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.data-tab-global-filter-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  max-width: 34ch;
+  overflow: hidden;
+  padding: 3px var(--space-1) 3px var(--space-2);
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: var(--text-caption);
+  font-weight: 600;
+}
+
+.data-tab-global-filter-chip-label {
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.data-tab-global-filter-chip-source {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.data-tab-global-filter-chip-clear {
+  border: 0;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  line-height: 1;
+  padding: 0 2px;
+  opacity: 0.75;
+}
+
+.data-tab-global-filter-chip-clear:hover {
+  opacity: 1;
+}
+
+@media (max-width: 720px) {
+  .data-tab-header-trailing {
+    display: none;
+  }
+}

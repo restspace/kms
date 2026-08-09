@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { appConfirm } from '../components/dialogs'
+import { appConfirm, ModalDialog } from '../components/dialogs'
 import {
   addQuestion,
   deleteQuestion,
@@ -77,21 +77,32 @@ function editablePatch(form: FormRow): Record<string, unknown> {
   }
 }
 
+const isStepKey = (value: string | null | undefined): value is StepKey =>
+  value !== null && value !== undefined && STEPS.some((s) => s.key === value)
+
+/**
+ * `initialStep` comes from the URL (router.ts `fstep`) and `onStepChange`
+ * reports moves back; an unknown step falls back to the first one.
+ */
 export function FormBuilder({
   formId,
   eventSlug,
   timezone,
+  initialStep,
+  onStepChange,
   onClose,
 }: {
   formId: string
   eventSlug: string
   timezone: string
+  initialStep?: string | null
+  onStepChange?: (step: string) => void
   onClose: () => void
 }) {
   const [form, setForm] = useState<FormRow | null>(null)
   const [questions, setQuestions] = useState<FormQuestion[]>([])
   const [meta, setMeta] = useState<BuilderMeta | null>(null)
-  const [step, setStep] = useState<StepKey>('setup')
+  const [step, setStep] = useState<StepKey>(isStepKey(initialStep) ? initialStep : 'setup')
   const [saving, setSaving] = useState(false)
   const [savedAt, setSavedAt] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -154,6 +165,7 @@ export function FormBuilder({
     async (next: StepKey) => {
       if (dirtyRef.current && !(await save())) return
       setStep(next)
+      onStepChange?.(next)
     },
     [save],
   )
@@ -471,26 +483,6 @@ function QuestionList({
   )
 }
 
-function Modal({ title, children, footer, onClose }: {
-  title: string
-  children: React.ReactNode
-  footer?: React.ReactNode
-  onClose: () => void
-}) {
-  return (
-    <div className="fmodal-scrim" onClick={(e) => { if (e.target === e.currentTarget) onClose() }}>
-      <div className="fmodal" role="dialog" aria-label={title}>
-        <div className="fmodal-head">
-          {title}
-          <button className="fbtn-link" onClick={onClose}>✕</button>
-        </div>
-        <div className="fmodal-body">{children}</div>
-        {footer && <div className="fmodal-foot">{footer}</div>}
-      </div>
-    </div>
-  )
-}
-
 const CREATABLE_TYPES = ['text', 'textarea', 'wysiwyg', 'number', 'email', 'phone', 'url', 'date', 'dropdown', 'multiselect', 'checkbox', 'radio', 'heading']
 
 function AddFieldModal({ meta, section, usedFieldIds, onAdd, onClose }: {
@@ -518,7 +510,8 @@ function AddFieldModal({ meta, section, usedFieldIds, onAdd, onClose }: {
   if (creating) {
     const needsOptions = ['dropdown', 'multiselect', 'radio'].includes(type)
     return (
-      <Modal
+      <ModalDialog
+        open
         title="Create Field"
         onClose={onClose}
         footer={
@@ -567,12 +560,12 @@ function AddFieldModal({ meta, section, usedFieldIds, onAdd, onClose }: {
             <input type="number" value={maxChars} onChange={(e) => setMaxChars(e.target.value)} />
           </div>
         )}
-      </Modal>
+      </ModalDialog>
     )
   }
 
   return (
-    <Modal title="Add Field" onClose={onClose}>
+    <ModalDialog open title="Add Field" onClose={onClose}>
       <button className="field-pick" onClick={() => setCreating(true)}>
         <strong>Create Field ›</strong>
       </button>
@@ -586,7 +579,7 @@ function AddFieldModal({ meta, section, usedFieldIds, onAdd, onClose }: {
         </button>
       ))}
       {candidates.length === 0 && <p className="bhelp">No unused library fields match.</p>}
-    </Modal>
+    </ModalDialog>
   )
 }
 
@@ -604,7 +597,8 @@ function QuestionEditModal({ question, onSave, onClose }: {
   )
 
   return (
-    <Modal
+    <ModalDialog
+      open
       title={`Edit — ${question.label}`}
       onClose={onClose}
       footer={
@@ -650,7 +644,7 @@ function QuestionEditModal({ question, onSave, onClose }: {
           {question.locked && <p className="bhelp">System field — options edits apply to this form only.</p>}
         </div>
       )}
-    </Modal>
+    </ModalDialog>
   )
 }
 
@@ -694,7 +688,8 @@ function LogicModal({ question, earlier, onSave, onClose }: {
     setConditions((prev) => prev.map((c, j) => (j === i ? { ...c, ...next } : c)))
 
   return (
-    <Modal
+    <ModalDialog
+      open
       title={`Conditional logic — ${question.label}`}
       onClose={onClose}
       footer={
@@ -803,7 +798,7 @@ function LogicModal({ question, earlier, onSave, onClose }: {
           )}
         </>
       )}
-    </Modal>
+    </ModalDialog>
   )
 }
 

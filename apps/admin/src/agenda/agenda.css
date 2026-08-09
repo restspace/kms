@@ -549,6 +549,7 @@
   gap: 10px 12px;
 }
 .agenda-dialog label,
+.agenda-dialog-grid label,
 .agenda-dialog-full {
   display: flex;
   flex-direction: column;
@@ -558,7 +559,10 @@
 }
 .agenda-dialog-full { margin-bottom: 10px; }
 .agenda-dialog input,
-.agenda-dialog select {
+.agenda-dialog select,
+.agenda-dialog-grid input,
+.agenda-dialog-grid select,
+.agenda-dialog-full input {
   padding: 6px 8px;
   border: 1px solid var(--border);
   border-radius: 6px;
