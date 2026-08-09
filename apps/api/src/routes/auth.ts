@@ -8,6 +8,7 @@ import type { Context } from 'hono';
 import { createDb } from '@kms/db';
 import type { AppEnv } from '../env';
 import { esc, page } from '../html';
+import { demoLogins } from './landing';
 import { sendTemplated } from '../mailer';
 import { clearSessionCookie, createSessionToken, setSessionCookie } from '../session';
 import { cleanupExpiredTokensStatement, consumeToken, mintToken, sha256hex } from '../tokens';
@@ -84,24 +85,41 @@ authRoutes.post('/request', async (c) => {
   const hash = await sha256hex(token);
 
   const link = `${c.env.APP_URL}/auth/callback?t=${token}`;
-  // Through the template pipeline (docs/08): message_log row, outbox retry,
-  // immediate attempt. The token hash keys idempotency — one send per link.
-  // The rendered body carries the link; mailer never logs message content.
-  await sendTemplated(c, {
-    templateKey: 'magic_link',
-    eventId: event.id,
-    contactId: contact.id,
-    toEmail: contact.email,
-    entityId: hash,
-    context: { event: { name: event.name }, magic_link: link },
-  });
 
   const dev = c.env.DEV_MODE === 'on';
-  if (json) {
-    return c.json(dev ? { ok: true, dev_link: link } : { ok: true });
+  // Demo carve-out (docs/12 §2): the landing page's one-click logins use seeded
+  // contacts whose @example.com addresses can't receive mail, so on the public
+  // demo instance (DEMO_RESET=on) the link is shown inline and the email is
+  // skipped — a send to those addresses could only bounce. Only the two seeded
+  // demo addresses qualify; everyone else gets the mail path, and DEV_MODE
+  // stays off in production.
+  let demoInline = false;
+  if (!dev && c.env.DEMO_RESET === 'on') {
+    const demo = await demoLogins(c.env.DB);
+    demoInline =
+      normalisedEmail === demo?.adminEmail?.toLowerCase() ||
+      normalisedEmail === demo?.speakerEmail?.toLowerCase();
   }
-  const devBlock = dev
-    ? `<div class="devlink"><strong>DEV_MODE</strong> — your sign-in link:<br><a href="${esc(link)}">${esc(link)}</a></div>`
+  const showLink = dev || demoInline;
+
+  if (!demoInline) {
+    // Through the template pipeline (docs/08): message_log row, outbox retry,
+    // immediate attempt. The token hash keys idempotency — one send per link.
+    // The rendered body carries the link; mailer never logs message content.
+    await sendTemplated(c, {
+      templateKey: 'magic_link',
+      eventId: event.id,
+      contactId: contact.id,
+      toEmail: contact.email,
+      entityId: hash,
+      context: { event: { name: event.name }, magic_link: link },
+    });
+  }
+  if (json) {
+    return c.json(showLink ? { ok: true, dev_link: link } : { ok: true });
+  }
+  const devBlock = showLink
+    ? `<div class="devlink"><strong>${dev ? 'DEV_MODE' : 'Demo login'}</strong> — your sign-in link:<br><a href="${esc(link)}">${esc(link)}</a></div>`
     : '';
   return c.html(
     page(

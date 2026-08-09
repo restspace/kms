@@ -20,7 +20,7 @@ interface DemoLogins {
 }
 
 /** Read the demo credentials out of the seeded data rather than hard-coding them. */
-async function demoLogins(db: D1Database): Promise<DemoLogins | null> {
+export async function demoLogins(db: D1Database): Promise<DemoLogins | null> {
   const event = await db
     .prepare('SELECT id, name, slug FROM events ORDER BY created_at LIMIT 1')
     .first<{ id: string; name: string; slug: string }>();
