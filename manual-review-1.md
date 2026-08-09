@@ -140,3 +140,138 @@ So the keystroke tip is accurate to real behaviour; the correction is only that 
 **Open question raised by user:** since the additive modifier is platform-dependent (Ctrl vs Cmd), should the keystroke tip shown in the context menu detect the OS and display the correct key per platform, rather than a single hardcoded label? Not yet decided — flagging for a decision before implementation.
 
 **Status:** Recorded as a proposed UI change. No fix applied yet — deferred per user request.
+
+## Add a general-purpose internal Notes field (submissions + contacts)
+
+**Finding:** No general-purpose notes field exists on any user-facing entity. The only precedent is `rooms.notes` (`packages/db/migrations/0001_init.sql:122`), which is seeded but unreachable — there is no rooms admin UI. Every other free-text column is purpose-built and either speaker-authored/published (`contacts.biography`, `submissions.description`) or structured and role-scoped (`reviews.comment` is bound to one reviewer *and* one evaluation plan, and feeds the rating aggregation — the wrong place for "AV rider outstanding").
+
+**Already spec'd:** `docs/07-agenda-and-scheduling.md:102` says session editing shows "…Status, Client Session ID, **and internal notes**." That field was specified and never built, so this closes a documented gap rather than adding scope.
+
+**Decision:** implement as a **plain TEXT column** on each table, not a polymorphic `notes(entity_type, entity_id, …)` table. A column rides the existing RESOURCES registry for free (the registry's `SELECT c.*` / `SELECT s.*` propagates it to the admin grid, the `/api/v1` list endpoints and the CSV/XLSX exports with no extra wiring; OpenAPI response bodies are untyped `{ type: 'object' }` so no doc change is needed). Revisit a notes *table* only if attribution ("who wrote this, when") or multiple threaded notes per record are actually wanted.
+
+**Naming:** column named `notes`, labelled **"Internal notes"** in all admin UI. Never rendered in portal, public or embed templates — see the redaction helper below.
+
+### 1. `submissions.notes`
+
+Highest value: the submission row is what the whole workspace turns around (accept/decline queues, evaluation, scheduling, conflict resolution), and sessions are the same row (`submissions.kind`), so one column serves both the Submissions tab and the agenda.
+
+- New migration `packages/db/migrations/0004_notes.sql`: `ALTER TABLE submissions ADD COLUMN notes TEXT;`
+- Add `notes: string | null` to `SubmissionRow` in `apps/admin/src/api.ts`.
+- **New write path needed** — submissions have no edit form today (the Submissions tab supplies no `schema`/`onUpsert`, and `SubmissionDetailPanel` at `apps/admin/src/workspace/extras.tsx:92` is entirely read-only). Add a narrow `PUT /app/api/submissions/:id/notes` alongside the existing status routes in `apps/api/src/routes/evaluation.ts`, accepting only `notes`.
+- Add an inline "Internal notes" textarea to `SubmissionDetailPanel`.
+- Optionally add the field to `MoveDialog` / `AddSessionDialog` (`apps/admin/src/agenda/dialogs.tsx`) to honour `docs/07` §5 literally.
+
+### 2. `contacts.notes`
+
+Cheapest change and close behind on value — the Speakers tab already has the full schema-driven form and generic CRUD endpoints, so this is five small edits:
+
+- Same migration: `ALTER TABLE contacts ADD COLUMN notes TEXT;`
+- Add `notes` to `CONTACT_FIELDS` (`apps/api/src/routes/adminApi.ts`, ~line 446) — `pickContactFields()` and the `POST`/`PUT /contacts` handlers are already generic over that whitelist.
+- Add `notes: { type: 'string', format: 'textarea', title: 'Internal notes' }` to `speakerSchema` (`apps/admin/src/App.tsx:74`). `RecordForm` already renders `format: 'textarea'` as a `<textarea rows={4}>`.
+- Add `notes: string | null` to `ContactRow` in `apps/admin/src/api.ts`.
+- Render it in the speakers `detailComponent`.
+
+Use cases: "prefers to travel Tuesday", "declined last year", "press contact — route through comms".
+
+### 3. Portal redaction helper (required, not optional)
+
+The same `SELECT *` convenience that makes the column free in the admin makes it a live exposure risk in the portal. Three sites select whole rows for speaker-facing pages:
+
+- `apps/api/src/routes/portal.ts:212` — `SELECT * FROM contacts WHERE id = ?` (speaker's own profile)
+- `apps/api/src/routes/portal.ts:372` — `SELECT s.*, t.name AS track_name FROM submissions s …` (speaker's own submission)
+- `apps/api/src/routes/portal.ts:757` — `SELECT * FROM portal_forms WHERE id = ?`
+
+Nothing leaks *today* because those templates render explicitly named fields — but the column would sit one careless `${...}` or one future `JSON.stringify(row)` away from the speaker.
+
+**Add a redaction function that every portal row read passes through**, e.g. `redactInternal<T>(row: T | null): T | null` in `packages/core/src/redact.ts` (exported from `packages/core/src/index.ts`), plus a `redactInternalAll()` for arrays. It strips a known set of internal-only keys — starting with `notes`, extensible as more are added — returning a new object rather than mutating.
+
+Requirements:
+- Null/undefined-safe (portal lookups can miss), and a no-op on rows that don't carry the key.
+- Applied at **every** portal row fetch, immediately at the query boundary, so the redacted object is the only thing the templates ever see. Same treatment for any future public/embed route that reads submission or contact rows.
+- Covered by a unit test asserting `notes` is absent from the returned object, so the guarantee survives refactors.
+
+**Status:** Approved for implementation (1, 2 and 3). Not yet applied.
+
+---
+
+# Deferred from the E2E run (docs/14, tests/secondary-flow-e2e.md, tests/unhappy-paths-e2e.md)
+
+The items below were found by the unattended test-and-fix run and deliberately NOT fixed by it:
+each is unbuilt feature work rather than a broken code path, so building it unattended was out of
+scope. Citations re-verified against the working tree at the time of writing.
+
+## Agenda publish/unpublish is specified but not built (FR-AGENDA-9)
+
+**Finding:** `agenda_published` exists end-to-end as *state* and is written by nothing.
+- Column: `packages/db/migrations/0001_init.sql:38` (`INTEGER NOT NULL DEFAULT 0`), seeded at `packages/db/seed/seed.sql:18`.
+- Typed: `packages/core/src/types.ts:42`, `apps/api/src/routes/agenda.ts:31`, `apps/admin/src/api.ts:350`.
+- Read into the agenda payload: `apps/api/src/routes/agenda.ts:125`.
+- No `UPDATE … agenda_published` anywhere, and no publish / unpublish / go-live control exists under `apps/admin/src/agenda`. Confirmed twice from the browser: the Agenda header offers only Search sessions, Group by, Send confirmations and + Add Session.
+
+**Fix:** add an event PATCH endpoint that sets `agenda_published`, a go-live control on the Agenda header, and a published-state affordance so the current state is visible. Decide first what "published" gates — a public agenda route is the obvious consumer, and none exists yet.
+
+**Status:** Confirmed gap, spec vs implementation. No fix applied — deferred as feature work.
+
+## Session capacity cannot be set, so ROOM_CAPACITY_EXCEEDED can never fire (FR-AGENDA-6)
+
+**Finding:** The conflict engine implements the check and nothing can trigger it.
+- Guard: `packages/core/src/agenda.ts:133-137`, severity `warning` at `:62`, code declared at `:14`.
+- It needs a *session* capacity: `submissions.capacity` exists (`packages/db/migrations/0001_init.sql:210`) and is read into the agenda payload (`apps/api/src/routes/agenda.ts:62,114`) — but no route ever writes it (no `UPDATE` touches `capacity` in `apps/api/src/routes/`).
+- In the SPA, `capacity` appears only as a **room** attribute: `apps/admin/src/agenda/dialogs.tsx:104`, `RoomsBoard.tsx:88`, `AgendaSection.tsx:310`. The Move dialog offers Date / Start / Duration / Room only; the Add Session dialog and the submission detail panel offer no capacity field either.
+
+**Fix:** add a capacity input to the Add Session and Move dialogs (or to the submission detail panel) and a write path for `submissions.capacity`. The engine then needs no change. Until then FR-AGENDA-6's "capacity is editable" is unmet and the warning is dead code.
+
+**Status:** Confirmed gap. No fix applied — deferred as feature work.
+
+## File-request upload policy is stored but never enforced (FR-PORTAL-8)
+
+**Finding:** `file_requests.allowed_types` and `max_size_mb` are declared and seeded but read by no code.
+- Declared: `packages/db/migrations/0001_init.sql:398-399` (`allowed_types TEXT -- json string[]`, `max_size_mb INTEGER`).
+- Seeded: `packages/db/seed/seed.sql:326`.
+- No reader anywhere in `apps/` or `packages/`. Portal task uploads validate against the generic document allow-list instead, so a per-request restriction ("PDF only, max 5 MB") is silently ignored.
+
+Verified from the browser: a `.txt` upload IS rejected — but by the generic list, not by the request's own policy, so a request that permits `.txt` would still reject it, and one that forbids PDF would still accept it.
+
+**Fix:** read both columns in the portal upload handler and validate against them, falling back to the generic list when they are null. Worth a unit test per branch, since the failure mode is silent acceptance.
+
+**Status:** Confirmed gap. No fix applied — deferred as feature work.
+
+## Workspace has no free-text search, though the API implements one
+
+**Finding:** `/app/api/meta` advertises a `q` filter and the backend fully implements it — free-text match over first/last name, email and company for contacts (`apps/api/src/routes/adminApi.ts:153,191`), over title and code for submissions (`:227,274`), and over task title and assignee for tasks (`:308,332`). The Submissions tab exposes only status chips; no search input exists on any workspace tab.
+
+**Fix:** add a search input to the workspace tab header, bound to the existing `q` parameter. Server-side work is already done, so this is a UI-only change.
+
+**Status:** Confirmed gap, first observed in the primary-plan run and re-confirmed in the secondary run. No fix applied — deferred.
+
+## Tasks are read-only in admin; portal forms and file requests have no admin surface at all
+
+**Finding:** Nuance matters here.
+- **Tasks** DO have an admin read surface — a workspace tab with filtering and CSV/XLSX export (`apps/admin/src/App.tsx:226-280`, `:336-346`) — but `apps/api/src/routes/adminApi.ts` exposes no POST/PUT/PATCH/DELETE for tasks. They can be viewed and exported, never created or edited. The only writer is `autoAssignAcceptTasks` on acceptance.
+- **Portal forms and file requests** have no admin surface whatsoever: `file_requests` and `portal_forms` appear only in `apps/api/src/routes/portal.ts` (the speaker-facing side). They exist solely as seed data.
+
+**Fix:** for tasks, add the write endpoints and reuse the existing schema-driven form (the same five-edit pattern as `contacts.notes` above). For portal forms and file requests, an admin CRUD surface is a larger piece — scope it deliberately rather than growing it from the seed.
+
+**Status:** Confirmed gap. No fix applied — deferred as feature work.
+
+## UNRESOLVED — invited session may move silently via the Move dialog (FR-COMM-6)
+
+This one is **not** a deferred feature; it is a contradiction between two competent observations, and it needs a human.
+
+**What the runner saw (phase U, M4.9):** moving an already-invited session through the **Move dialog** produced no "notify speakers?" prompt — the block moved and persisted silently. Reproduced twice, the second time after a full reload of `/app` against a fresh agenda payload, with `/app/api/agenda` reporting SESS-1 `invited=1`. Screenshot: `tests/screenshots/u-01/m4.9.png`.
+
+**What the fixer saw:** on a clean seed `calendar_invites` is empty, so nothing is invited — the runner's `invited=1` came from that run's own invite send. It recreated the state by inserting a `method='REQUEST'` invite, confirmed `invited=1`, then drove the dialog twice (M-key from the Day grid changing room; List-view row double-click changing start time). **Both raised the prompt.** `MoveDialog.onSave` already calls `commitSchedule` (`apps/admin/src/agenda/AgendaSection.tsx:537`) — the same guard as the drag path — so there is nothing to reroute. It changed no code rather than fix a symptom it could not observe, which was the right call.
+
+**Why this is still open:** the two observations differ in *how* `invited` was established — a real send during the run versus a synthetic invite row — so the trigger is not understood. `docs/07-agenda-and-scheduling.md` §6 says invited sessions never change silently; if the runner's path is reachable in production, that guarantee is broken.
+
+**Suggested next step:** reproduce the runner's exact sequence — bulk-send confirmations first, so `calendar_invites` is populated the way the app populates it, then move via the dialog — and compare the `session.invited` value the component actually sees against the one the API returns. A shape mismatch after a real send (`invited` arriving as a string, or the payload not refetched after the send) would explain both observations at once.
+
+**Status:** Unresolved. Needs investigation before the agenda is trusted to notify.
+
+## Minor, accepted as safe — duration 0 does not visibly clamp
+
+**Finding:** Typing `0` into Duration in the Move dialog is rejected via `min="5"` and the save is refused, but the field settles back to the existing value (e.g. 30) rather than visibly clamping to 5. No zero-length session is ever created, so the data stays correct; only the feedback is unclear.
+
+**Fix (optional):** clamp the displayed value to the minimum on blur so the rejection is legible.
+
+**Status:** Recorded and accepted as safe. No fix applied.
