@@ -1,5 +1,6 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import { useQueries, useQueryClient } from '@tanstack/react-query';
+import { breakpoints } from '@kms/theme';
 import { DataList, ColumnDefinition, DataListQuery, DataSourceParams, DataSourceResult } from './DataList';
 import { appAlert, ModalDialog } from './dialogs';
 import type { DataListExportConfig, DataListFastAddConfig, DataListFilterConfig, DataListRowDragConfig, DataListRowDropConfig, DataListSummaryDataSource, DataListToolbarAction } from './DataList';
@@ -9,6 +10,9 @@ import { generateRandomId, toReadableText } from '../utility';
 import { clampSplitRatioForWidth } from './splitRatio';
 import { stableSerialize } from '../utils/stableSerialize';
 import './DataTabManager.css';
+
+/** Matches the medium-width block in DataTabManager.css (tab strip -> dropdown). */
+const MEDIUM_MEDIA_QUERY = `(max-width: ${breakpoints.medium}px)`;
 
 /**
  * Tab configuration for a single tab type
@@ -1210,7 +1214,7 @@ export const DataTabManager: React.FC<DataTabManagerProps> = ({
   const splitContainerRef = useRef<HTMLDivElement | null>(null);
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const [isMobileSplit, setIsMobileSplit] = useState(() =>
-    typeof window !== 'undefined' ? window.matchMedia('(max-width: 768px)').matches : false
+    typeof window !== 'undefined' ? window.matchMedia(MEDIUM_MEDIA_QUERY).matches : false
   );
   const isMobileSplitRef = useRef(isMobileSplit);
   const queryClient = useQueryClient();
@@ -1225,7 +1229,7 @@ export const DataTabManager: React.FC<DataTabManagerProps> = ({
   }, [isMobileSplit]);
 
   useEffect(() => {
-    const mq = window.matchMedia('(max-width: 768px)');
+    const mq = window.matchMedia(MEDIUM_MEDIA_QUERY);
     const handler = (e: MediaQueryListEvent) => setIsMobileSplit(e.matches);
     mq.addEventListener('change', handler);
     return () => mq.removeEventListener('change', handler);

@@ -656,6 +656,10 @@
     display: none;
   }
 
+  .data-tab-header-trailing {
+    display: none;
+  }
+
   .data-tab-header {
     position: relative;
     width: 100%;
@@ -841,12 +845,6 @@
 
 .data-tab-global-filter-chip-clear:hover {
   opacity: 1;
-}
-
-@media (max-width: 720px) {
-  .data-tab-header-trailing {
-    display: none;
-  }
 }
 
 /* Export status feedback (CNT-14: bulk ZIP export feedback) */
