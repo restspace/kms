@@ -336,6 +336,38 @@
   background: var(--surface-hover);
 }
 
+/* CNT-10: the headshot upload control sits under the name/company block in
+   detail-panel-head, styled small and unobtrusive since it's a secondary
+   action next to the identity it edits, not a primary form control. */
+.headshot-upload {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: var(--space-1);
+}
+
+.headshot-upload-button {
+  height: 26px;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text-muted);
+  font: inherit;
+  font-size: var(--text-label);
+  cursor: pointer;
+}
+
+.headshot-upload-button:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.headshot-upload-button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
 /* Dashboard deep-link preset chip (M5 stretch) */
 
 .ws-preset-bar {

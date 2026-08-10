@@ -62,6 +62,7 @@ import {
   type BulkJobPollHandle,
 } from './workspace/messaging'
 import { openImportWizard } from './workspace/ImportWizard'
+import { HeadshotUploadControl } from './workspace/headshotUpload'
 import { resolveTargetEventId } from './utils/importTarget'
 import {
   EventFilterChip,
@@ -545,7 +546,7 @@ function buildWorkspaceConfig(
       },
       eventColumn,
     ],
-    detailComponent: ({ item, onEdit }) => {
+    detailComponent: ({ item, onEdit, onItemSaved }) => {
       const customValues = parseContactFieldValues(item.custom_fields_json)
       return (
         <div className="detail-panel">
@@ -554,6 +555,16 @@ function buildWorkspaceConfig(
             <div>
               <h2>{contactName(item)}</h2>
               <div className="detail-sub">{item.job_title ? `${item.job_title} · ` : ''}{item.company ?? ''}</div>
+              {/*
+                * CNT-10: the speaker edit form (speakerSchema below) is a
+                * generic RecordForm schema with no room for a file control,
+                * so this lives here instead — same reasoning as
+                * PortalInviteButton living outside the form further down.
+                */}
+              <HeadshotUploadControl
+                item={item}
+                onUpdated={(headshot_asset_id) => onItemSaved?.({ ...item, headshot_asset_id })}
+              />
             </div>
           </div>
           <dl>

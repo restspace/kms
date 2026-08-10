@@ -47,6 +47,8 @@ interface PlacedSession {
   session: PublicSession
   startMin: number
   endMin: number
+  /** True session end for labels — endMin may be padded for layout (MIN_VISUAL_MIN). */
+  displayEndMin: number
   /** Sub-column index within its room column, for overlapping sessions. */
   lane: number
   /** How many sub-columns the overlap cluster needs. */
@@ -109,7 +111,7 @@ function buildDayLayout(feed: AgendaFeed, day: string): DayLayout {
     // MIN_VISUAL_MIN) — clamped to the day boundary so a session ending at
     // 23:55 doesn't get padded past midnight.
     const endMin = Math.min(Math.max(rawEndMin, start.minutes + MIN_VISUAL_MIN), 24 * 60)
-    return { session: s, startMin: start.minutes, endMin, lane: 0, lanes: 1 }
+    return { session: s, startMin: start.minutes, endMin, displayEndMin: rawEndMin, lane: 0, lanes: 1 }
   })
 
   const usedRoomIds = new Set<string>()
@@ -378,11 +380,11 @@ export function AgendaWidget({ eventSlug, filter }: AgendaWidgetProps) {
                       ...(track?.color ? { ['--ag-track' as string]: track.color } : {}),
                     }}
                     onClick={() => setSelectedId(s.id)}
-                    aria-label={`${s.title}, ${fmtMinutes(p.startMin)} to ${fmtMinutes(p.endMin)}, ${col.label}`}
-                    title={`${s.title} — ${fmtMinutes(p.startMin)} – ${fmtMinutes(p.endMin)}`}
+                    aria-label={`${s.title}, ${fmtMinutes(p.startMin)} to ${fmtMinutes(p.displayEndMin)}, ${col.label}`}
+                    title={`${s.title} — ${fmtMinutes(p.startMin)} – ${fmtMinutes(p.displayEndMin)}`}
                   >
                     <span className="ag-block-time">
-                      {fmtMinutes(p.startMin)} – {fmtMinutes(p.endMin)}
+                      {fmtMinutes(p.startMin)} – {fmtMinutes(p.displayEndMin)}
                     </span>
                     <span className="ag-block-title">{s.title}</span>
                     {durationMin >= 40 && s.speakers.length > 0 && (

@@ -269,6 +269,66 @@ describe('sweepBulkJobs / compose', () => {
     ).toBe(3);
   });
 
+  // CNT-08 (compose half): live-demo eval composing to "Speakers (2)" produced
+  // two message_log rows stuck at status 'queued' — the progress dialog hung
+  // at "Sending messages… 0/2 queued" with Close disabled, then the settled
+  // banner reported "No messages were sent" even though two rows existed.
+  // Root cause was the same as the already-fixed remind-tasks path: the cron
+  // sweep order in index.ts is sweepReminders -> sweepOutbox -> sweepBulkJobs,
+  // so an outbox row *this* expander enqueues is invisible to *this* tick's
+  // sweepOutbox and would only flip to 'sent' on the *next* tick — but
+  // bulk_jobs.status already flips to 'done' in *this* tick, so the polling
+  // dialog stops and reports message_log's state right then (0 sent). The fix
+  // (expandCompose now calls the same deliverNow() helper expandRemindTasks
+  // uses) delivers inline, so message_log must already read 'sent' by the
+  // time a single sweepBulkJobs tick reports the job done — with no separate
+  // sweepOutbox call at all.
+  it('delivers compose messages inline so message_log is already sent by the time the job reports done (CNT-08)', async () => {
+    await clearPendingJobs();
+    const eventId = await createEvent({ name: 'InlineConf' });
+    const admin = await staffSession(eventId);
+    const speaker1 = await createContact(eventId, { email: 'inline-compose-1@example.com' });
+    const speaker2 = await createContact(eventId, { email: 'inline-compose-2@example.com' });
+
+    const res = await SELF.fetch(
+      'https://example.com/app/api/messaging/compose',
+      post(admin.cookie, {
+        subject: 'Reminder',
+        body: 'Hi {{first_name}}',
+        audience: 'selected',
+        contact_ids: [speaker1, speaker2],
+      }),
+    );
+    const { job_id: jobId } = (await res.json()) as { job_id: string };
+
+    await sweepBulkJobs(env, 50); // no sweepOutbox call — delivery must happen inline
+
+    const job = await env.DB.prepare('SELECT status, enqueued, total FROM bulk_jobs WHERE id = ?')
+      .bind(jobId)
+      .first<{ status: string; enqueued: number; total: number }>();
+    expect(job).toEqual({ status: 'done', enqueued: 2, total: 2 });
+
+    const sent = await env.DB.prepare(
+      `SELECT COUNT(*) AS n FROM message_log
+       WHERE template_key = 'compose' AND status = 'sent' AND idempotency_key LIKE '%:' || ? || ':%'`,
+    ).bind(jobId).first<{ n: number }>();
+    expect(sent?.n).toBe(2);
+
+    const queuedStill = await env.DB.prepare(
+      `SELECT COUNT(*) AS n FROM message_log
+       WHERE template_key = 'compose' AND status = 'queued' AND idempotency_key LIKE '%:' || ? || ':%'`,
+    ).bind(jobId).first<{ n: number }>();
+    expect(queuedStill?.n).toBe(0);
+
+    // GET /app/api/bulk-jobs/:id (what the compose dialog polls) must report
+    // the true sent count, not the planned/enqueued count.
+    const pollRes = await SELF.fetch(`https://example.com/app/api/bulk-jobs/${jobId}`, { headers: { cookie: admin.cookie } });
+    const polled = (await pollRes.json()) as { status: string; sent: number; failed: number };
+    expect(polled.status).toBe('done');
+    expect(polled.sent).toBe(2);
+    expect(polled.failed).toBe(0);
+  });
+
   it('escapes the organiser\'s text rather than letting it become markup', () => {
     const html = composeBodyToHtml('A <script>alert(1)</script> line\nwith a break\n\nSecond paragraph');
     expect(html).not.toContain('<script>');

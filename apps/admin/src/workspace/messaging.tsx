@@ -260,14 +260,29 @@ export function ComposeForm({ onSubmit, onCancel, title }: CreateFormProps) {
               Every recipient has a row in the Messages tab with its own delivery status.
             </p>
           )}
+          {phase.kind === 'sending' && (
+            <p className="record-form-help">
+              You can close this now — the send continues in the background and the Messages tab will show
+              each recipient's delivery status as it lands.
+            </p>
+          )}
         </div>
         <div className="record-form-actions">
           <span className="record-form-actions-spacer" />
           <button
             type="button"
             className="record-form-submit"
-            disabled={phase.kind === 'sending'}
-            onClick={() => void onSubmit({})}
+            onClick={() => {
+              // Closing mid-send never needs to block: the compose job already
+              // exists server-side and keeps draining on the cron sweep
+              // regardless of whether this dialog is still polling it. Cancel
+              // the poll so it doesn't keep ticking against an unmounted
+              // caller's state, then close immediately — previously Close was
+              // disabled for the whole 'sending' phase, which could pin the
+              // dialog open for up to a full cron tick (~60s) with no way out.
+              pollRef.current?.cancel()
+              void onSubmit({})
+            }}
           >
             Close
           </button>

@@ -427,8 +427,18 @@ landingRoutes.get('/e/:slug/speakers.json', async (c) => {
         title: row.job_title,
         company: row.company,
         bio: row.biography,
+        // Lane N1 (EMB-04): seed.sql has no R2/KV object to back a real
+        // file_assets row (see contacts UPDATE comment below the speakers
+        // insert), so demo headshots can't flow through the asset route.
+        // A `headshot_asset_id` that already looks like a path (starts with
+        // `/`) is a seeded static asset under the worker's own ASSETS
+        // binding (apps/public/public/avatars/*.svg -> /static/avatars/*.svg)
+        // and is passed straight through; a real uploaded asset id (a UUID,
+        // never starting with `/`) still resolves via the gated route below.
         headshot_url: row.headshot_asset_id
-          ? `/e/${encodeURIComponent(event.slug)}/speakers/${encodeURIComponent(row.contact_id)}/headshot`
+          ? row.headshot_asset_id.startsWith('/')
+            ? row.headshot_asset_id
+            : `/e/${encodeURIComponent(event.slug)}/speakers/${encodeURIComponent(row.contact_id)}/headshot`
           : null,
         sessions: [],
       };

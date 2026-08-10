@@ -7,6 +7,13 @@ import userEvent from '@testing-library/user-event';
 import { SessionsWidget } from './SessionsWidget';
 import type { AgendaFeed } from '../publicData';
 
+// EMB-01: the judge reported no in-place "Show more" anywhere — the widget's
+// truncation logic (isLong = description.length > 180) was correct all
+// along, the seeded descriptions just never crossed the threshold. This
+// description intentionally does.
+const longDescription =
+  'Patterns for keeping tool-calling agents on the rails: typed tool schemas, permission scopes, replayable traces and failure budgets. We will walk through production incidents where each guardrail earned its keep.';
+
 const feed: AgendaFeed = {
   event: { name: 'DevFlow Conf', slug: 'devflow', timezone: 'America/Los_Angeles' },
   days: ['2027-05-12'],
@@ -17,7 +24,7 @@ const feed: AgendaFeed = {
       id: 's1',
       code: 'SESS-1',
       title: 'Building Reliable Multi-Agent Pipelines',
-      description: null,
+      description: longDescription,
       format: 'Talk',
       level: null,
       capacity: null,
@@ -70,6 +77,23 @@ describe('SessionsWidget', () => {
     await user.type(search, 'Nobody Here');
 
     expect(screen.getByText('No sessions match your search or filters.')).toBeTruthy();
+  });
+
+  it('truncates a long description with a Show more/Show less toggle', async () => {
+    const user = userEvent.setup();
+    render(<SessionsWidget eventSlug="devflow" />);
+    await waitFor(() => expect(screen.getByText(/Building Reliable Multi-Agent Pipelines/)).toBeTruthy());
+
+    expect(screen.getByText(/…$/)).toBeTruthy();
+    const toggle = screen.getByRole('button', { name: 'Show more' });
+    expect(toggle).toHaveProperty('ariaExpanded', 'false');
+
+    await user.click(toggle);
+    expect(screen.getByRole('button', { name: 'Show less' })).toBeTruthy();
+    expect(screen.getByText(new RegExp(longDescription.slice(0, 40)))).toBeTruthy();
+
+    await user.click(screen.getByRole('button', { name: 'Show less' }));
+    expect(screen.getByRole('button', { name: 'Show more' })).toBeTruthy();
   });
 
   it('opens a session detail modal (full description + speaker) when the title is clicked', async () => {

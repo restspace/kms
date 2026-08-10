@@ -339,6 +339,24 @@ export const updateContact = (id: string, data: Record<string, unknown>) =>
 export const deleteContact = (id: string) =>
   request<{ ok: boolean }>(`/app/api/contacts/${id}`, { method: 'DELETE' })
 
+/**
+ * CNT-10: the organiser speaker edit form had no photo control — the only
+ * way to set a headshot was the speaker's own portal profile page, which is
+ * useless for a speaker who hasn't logged in. Mirrors `importPreviewFile`'s
+ * FormData shape (a File body must keep its browser-generated multipart
+ * boundary, never JSON-stringified) and lands on the same admin-only
+ * endpoint adminApi.ts adds alongside the existing headshot-clear-on-delete
+ * logic, which itself reuses portal.ts's `saveFile` storage seam.
+ */
+export const uploadContactHeadshot = (id: string, file: File) => {
+  const form = new FormData()
+  form.set('headshot', file)
+  return request<{ ok: boolean; headshot_asset_id: string }>(`/app/api/contacts/${id}/headshot`, {
+    method: 'POST',
+    body: form,
+  })
+}
+
 // ---------------------------------------------------------------------------
 // Form builder (docs/04)
 // ---------------------------------------------------------------------------

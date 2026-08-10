@@ -420,7 +420,7 @@ async function expandCompose(env: Env, job: BulkJobRow, limit: number): Promise<
         company: contact.company ?? '',
         job_title: contact.job_title ?? '',
       };
-      await queueTemplated(db, {
+      const { outcome, payload } = await queueTemplated(db, {
         templateKey: 'compose',
         eventId: job.event_id,
         contactId: contact.id,
@@ -437,6 +437,15 @@ async function expandCompose(env: Env, job: BulkJobRow, limit: number): Promise<
           portal_url: `${env.APP_URL}/portal/${event.slug}`,
         },
       });
+      // Deliver inline rather than waiting for the next cron tick's
+      // sweepOutbox (CNT-08, same disease as expandRemindTasks — see
+      // deliverNow's doc comment): the sweep order in index.ts is
+      // sweepReminders -> sweepOutbox -> sweepBulkJobs, so an outbox row this
+      // expander enqueues is invisible to *this* tick's sweepOutbox and would
+      // otherwise sit 'queued' until the next tick, while bulk_jobs.status
+      // already flips to 'done' this tick and the compose dialog's poll loop
+      // stops polling and reports a stale zero sent-count.
+      if (outcome === 'queued' && payload) await deliverNow(db, env, payload.log_key, payload);
     }
   }
 

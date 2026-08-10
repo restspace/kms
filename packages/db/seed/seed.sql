@@ -230,11 +230,18 @@ INSERT INTO event_users (event_id, contact_id, role, invited_at, accepted_at) VA
 -- and the speakers.json feed (apps/api/src/routes/landing.tsx) were already
 -- wired correctly end to end; there was just no data flowing through them.
 -- Additive UPDATEs rather than reshaping the INSERT above, per this lane's
--- scope. No headshot_asset_id is seeded — there is no actual R2 object for
--- seed.sql to reference, so speakers correctly fall back to the initials
--- tile (SpeakerAvatar); the headshot render path itself is covered by a
--- widget test with a synthetic headshot_url instead.
+-- scope.
 -- ---------------------------------------------------------------------------
+
+-- Lane N1 (EMB-04): every seeded speaker previously fell back to the
+-- initials tile because headshot_asset_id was never set — there was no real
+-- R2/KV object for seed.sql (pure D1 SQL) to reference. Rather than fake a
+-- file_assets row that would always 404 (no bytes behind it), most speakers
+-- now point at a small set of static SVG avatars shipped as worker assets
+-- (apps/public/public/avatars/*.svg, served at /static/avatars/*.svg — see
+-- landing.tsx's speakers.json headshot_url mapping for the `/`-prefix
+-- passthrough this relies on). Two speakers (Claude, Barbara) are left
+-- without one so the initials fallback still has coverage in the demo.
 
 UPDATE contacts SET biography = '<p>Ada is a principal engineer building tool-use guardrails for multi-agent systems, with a decade in developer platforms before that. She speaks regularly on reliability engineering for LLM-backed products.</p>'
   WHERE id = 'con00000-0000-4000-8000-000000000002';
@@ -250,6 +257,24 @@ UPDATE contacts SET biography = '<p>Claude is CTO of Bitstream, where he oversee
   WHERE id = 'con00000-0000-4000-8000-000000000007';
 UPDATE contacts SET biography = '<p>Barbara is a distinguished engineer at Substrate working on prompt compression and serving efficiency for large language models. She previously led infrastructure teams at two cloud providers.</p>'
   WHERE id = 'con00000-0000-4000-8000-000000000008';
+
+-- headshot_asset_id is a real FK (D1 enforces it), so each static path needs
+-- a backing file_assets row even though nothing ever reads its `key`/KV
+-- bytes for these — landing.tsx's `/`-prefix check returns the id (the path
+-- itself) straight from speakers.json before the gated /headshot route (and
+-- thus loadFile/KV) is ever reached.
+INSERT INTO file_assets (id, event_id, key, filename, content_type, size_bytes, uploaded_by_contact_id, created_at) VALUES
+  ('/static/avatars/speaker-1.svg', 'evt00000-0000-4000-8000-000000000001', 'static:avatars/speaker-1.svg', 'speaker-1.svg', 'image/svg+xml', 420, NULL, '2026-08-08T12:00:00Z'),
+  ('/static/avatars/speaker-2.svg', 'evt00000-0000-4000-8000-000000000001', 'static:avatars/speaker-2.svg', 'speaker-2.svg', 'image/svg+xml', 420, NULL, '2026-08-08T12:00:00Z'),
+  ('/static/avatars/speaker-3.svg', 'evt00000-0000-4000-8000-000000000001', 'static:avatars/speaker-3.svg', 'speaker-3.svg', 'image/svg+xml', 420, NULL, '2026-08-08T12:00:00Z'),
+  ('/static/avatars/speaker-4.svg', 'evt00000-0000-4000-8000-000000000001', 'static:avatars/speaker-4.svg', 'speaker-4.svg', 'image/svg+xml', 420, NULL, '2026-08-08T12:00:00Z');
+
+UPDATE contacts SET headshot_asset_id = '/static/avatars/speaker-1.svg' WHERE id = 'con00000-0000-4000-8000-000000000002'; -- Ada
+UPDATE contacts SET headshot_asset_id = '/static/avatars/speaker-2.svg' WHERE id = 'con00000-0000-4000-8000-000000000003'; -- Grace
+UPDATE contacts SET headshot_asset_id = '/static/avatars/speaker-3.svg' WHERE id = 'con00000-0000-4000-8000-000000000004'; -- Alan
+UPDATE contacts SET headshot_asset_id = '/static/avatars/speaker-4.svg' WHERE id = 'con00000-0000-4000-8000-000000000005'; -- Margaret
+UPDATE contacts SET headshot_asset_id = '/static/avatars/speaker-1.svg' WHERE id = 'con00000-0000-4000-8000-000000000006'; -- Joan
+-- Claude (007) and Barbara (008) intentionally left without a headshot.
 
 -- ---------------------------------------------------------------------------
 -- Contact custom fields (SPK-15): 0009_contact_custom_fields.sql added the
@@ -276,7 +301,9 @@ INSERT INTO submissions (
 ) VALUES
   ('sub00000-0000-4000-8000-000000000001', 'evt00000-0000-4000-8000-000000000001', 'form0000-0000-4000-8000-000000000001',
    'SESS-1', 'abstract', 'Building Reliable Multi-Agent Pipelines with Tool-Use Guardrails',
-   '<p>Patterns for keeping tool-calling agents on the rails: typed tool schemas, permission scopes, replayable traces and failure budgets.</p>',
+   -- Lane N1 (EMB-01): extended past the 160/180-char truncation threshold
+   -- so the itinerary/session-list "Show more" toggle has something to do.
+   '<p>Patterns for keeping tool-calling agents on the rails: typed tool schemas, permission scopes, replayable traces and failure budgets. We will walk through production incidents where each guardrail earned its keep, and the failure modes that slipped through anyway.</p>',
    'accepted', 'trk00000-0000-4000-8000-000000000001', 'Talk', 'Intermediate', 'English',
    'con00000-0000-4000-8000-000000000002', '2026-08-05T17:00:00Z', 'form',
    '2026-08-01T09:00:00Z', '2026-08-05T17:00:00Z'),
@@ -505,11 +532,13 @@ UPDATE submissions SET rating_cache = '{"plan0000-0000-4000-8000-000000000001":1
 UPDATE submissions SET rating_cache = '{"plan0000-0000-4000-8000-000000000002":4.34}' WHERE id = 'sub00000-0000-4000-8000-000000000003';
 
 -- ---------------------------------------------------------------------------
--- M4: agenda (docs/12 §2) — four more accepted sessions; five scheduled on
+-- M4: agenda (docs/12 §2) — four more accepted sessions; four scheduled on
 -- Oct 12 across Main Stage and Hall A, with one deliberate speaker
 -- double-booking (Grace: SESS-2 on Main Stage 10:00–10:30 PDT overlaps
 -- SESS-11 in Hall A 10:15–10:45) so the Conflicts view is non-empty on
--- arrival. SESS-14 stays unscheduled so the tray and the dashboard nudge
+-- arrival. SESS-13 (lane N1, EMB-07) sits on Oct 13 instead — every session
+-- used to land on day 1, so the day tabs for Oct 13/14 always read "nothing
+-- scheduled". SESS-14 stays unscheduled so the tray and the dashboard nudge
 -- have material. All times UTC; the event runs in America/Los_Angeles (PDT,
 -- UTC-7 in October).
 -- ---------------------------------------------------------------------------
@@ -527,20 +556,27 @@ INSERT INTO submissions (
    'room0000-0000-4000-8000-000000000002', '2026-10-12T17:15:00Z', '2026-10-12T17:45:00Z', 'form',
    '2026-08-02T10:30:00Z', '2026-08-07T09:00:00Z'),
 
+  -- Lane N1 (EMB-01): description extended past the widgets' truncation
+  -- threshold (160/180 chars) so "Show more" actually has something to
+  -- expand — the original one-sentence copy never crossed it.
   ('sub00000-0000-4000-8000-000000000012', 'evt00000-0000-4000-8000-000000000001', 'form0000-0000-4000-8000-000000000001',
    'SESS-12', 'abstract', 'Guardrail Benchmarks in CI: Catching Regressions Before Users Do',
-   '<p>How we turned red-team findings into a CI benchmark suite that gates every model and prompt change.</p>',
+   '<p>How we turned red-team findings into a CI benchmark suite that gates every model and prompt change. The talk covers scoring rubrics, flaky-test triage and the dashboard our on-call actually watches during a rollout.</p>',
    'accepted', 'trk00000-0000-4000-8000-000000000002', 'Talk', 'Intermediate', 'English',
    'con00000-0000-4000-8000-000000000006', '2026-08-06T15:31:00Z',
    'room0000-0000-4000-8000-000000000002', '2026-10-12T18:00:00Z', '2026-10-12T18:45:00Z', 'form',
    '2026-08-02T11:00:00Z', '2026-08-07T09:05:00Z'),
 
+  -- Lane N1 (EMB-07/EMB-01): moved from Oct 12 to Oct 13 (same room, same
+  -- 90-minute length) so the day tabs for Oct 13/14 aren't uniformly empty —
+  -- every seeded session used to land on day 1. Description also extended
+  -- past the truncation threshold, same reasoning as SESS-12 above.
   ('sub00000-0000-4000-8000-000000000013', 'evt00000-0000-4000-8000-000000000001', 'form0000-0000-4000-8000-000000000001',
    'SESS-13', 'abstract', 'Building a Retrieval Evaluation Harness from Scratch',
-   '<p>A hands-on workshop: golden sets, graded relevance judgments and a live leaderboard for your own corpus.</p>',
+   '<p>A hands-on workshop: golden sets, graded relevance judgments and a live leaderboard for your own corpus. We build the harness end-to-end, from labeling guidelines to a query-level dashboard you can keep extending long after the session ends.</p>',
    'accepted', 'trk00000-0000-4000-8000-000000000003', 'Workshop', 'Advanced', 'English',
    'con00000-0000-4000-8000-000000000007', '2026-08-06T15:32:00Z',
-   'room0000-0000-4000-8000-000000000001', '2026-10-12T20:00:00Z', '2026-10-12T21:30:00Z', 'form',
+   'room0000-0000-4000-8000-000000000001', '2026-10-13T16:00:00Z', '2026-10-13T17:30:00Z', 'form',
    '2026-08-03T09:00:00Z', '2026-08-07T09:10:00Z'),
 
   ('sub00000-0000-4000-8000-000000000014', 'evt00000-0000-4000-8000-000000000001', 'form0000-0000-4000-8000-000000000001',

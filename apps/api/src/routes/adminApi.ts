@@ -14,6 +14,7 @@ import { accessibleEventIds, accessibleEvents, isWriter, requireEventAccess, typ
 import { decodeCursor, encodeCursor, keysetWhere } from '../cursor';
 import { bumpEventRevision, getEventRevision } from '../revision';
 import { createSessionToken, getRevalidatedPrivilegedSession, setSessionCookie, type SessionPayload } from '../session';
+import { IMAGE_TYPES, MAX_HEADSHOT_BYTES, saveFile } from '../filestore';
 import { formsAdminRoutes } from './formsAdmin';
 import { evaluationRoutes } from './evaluation';
 import { agendaRoutes } from './agenda';
@@ -844,6 +845,47 @@ adminApiRoutes.delete('/contacts/:id', async (c) => {
   if ((results[3]?.meta.changes ?? 0) === 0) return c.json({ error: 'not_found' }, 404);
   await bumpEventRevision(c.env, session.eventId);
   return c.json({ ok: true });
+});
+
+// POST /contacts/:id/headshot { headshot: File } → { ok, headshot_asset_id }
+//
+// CNT-10: the organiser speaker edit form had no photo control at all — the
+// only way to set a headshot was the speaker's own portal profile page
+// (portal.ts's POST /:slug/profile), which is unreachable for a speaker who
+// never logs in. Reuses the exact same storage seam (filestore.ts's
+// saveFile, same MAX_HEADSHOT_BYTES/IMAGE_TYPES limits and magic-byte check,
+// same KV-backed file_assets row) so a headshot set from either surface is
+// indistinguishable in storage and both read back through GET /files/:id.
+adminApiRoutes.post('/contacts/:id/headshot', async (c) => {
+  const session = c.get('session');
+  const id = c.req.param('id');
+  const db = c.env.DB;
+
+  const exists = await db
+    .prepare('SELECT id FROM contacts WHERE id = ? AND event_id = ?')
+    .bind(id, session.eventId)
+    .first<{ id: string }>();
+  if (!exists) return c.json({ error: 'not_found' }, 404);
+
+  const body = await c.req.parseBody();
+  const upload = body.headshot;
+  if (!(upload instanceof File) || upload.size === 0) return c.json({ error: 'file_required' }, 400);
+
+  const saved = await saveFile(c.env, {
+    eventId: session.eventId,
+    uploadedByContactId: session.contactId,
+    file: upload,
+    maxBytes: MAX_HEADSHOT_BYTES,
+    allowedTypes: IMAGE_TYPES,
+  });
+  if ('error' in saved) return c.json({ error: saved.error }, 400);
+
+  await db
+    .prepare('UPDATE contacts SET headshot_asset_id = ?, updated_at = ? WHERE id = ? AND event_id = ?')
+    .bind(saved.id, new Date().toISOString(), id, session.eventId)
+    .run();
+  await bumpEventRevision(c.env, session.eventId);
+  return c.json({ ok: true, headshot_asset_id: saved.id });
 });
 
 // ---------------------------------------------------------------------------
