@@ -111,9 +111,9 @@ export function roomAndTrackNames(
 
 const sessionModalCss = `
 .session-modal-backdrop { position: fixed; inset: 0; background: color-mix(in srgb, black 55%, transparent); display: flex; align-items: center; justify-content: center; padding: 1.5rem; z-index: 100; }
-.session-modal { position: relative; background: var(--bg); color: var(--fg); border-radius: 12px; padding: 1.5rem; max-width: 560px; width: 100%; max-height: 85vh; overflow-y: auto; box-shadow: 0 12px 40px rgba(0,0,0,.3); }
-.session-modal-close { position: absolute; top: .6rem; right: .6rem; width: 2rem; height: 2rem; border-radius: 999px; border: none; background: color-mix(in srgb, var(--fg) 8%, transparent); color: var(--fg); font-size: 1.2rem; line-height: 1; cursor: pointer; }
-.session-modal-close:hover { background: color-mix(in srgb, var(--fg) 14%, transparent); }
+.session-modal { position: relative; background: var(--surface); color: var(--text); border-radius: var(--radius); padding: 1.5rem; max-width: 560px; width: 100%; max-height: 85vh; overflow-y: auto; box-shadow: var(--shadow-overlay); }
+.session-modal-close { position: absolute; top: .6rem; right: .6rem; width: 2rem; height: 2rem; border-radius: 999px; border: none; background: color-mix(in srgb, var(--text) 8%, transparent); color: var(--text); font-size: 1.2rem; line-height: 1; cursor: pointer; }
+.session-modal-close:hover { background: color-mix(in srgb, var(--text) 14%, transparent); }
 .session-modal-title { margin: 0 .5rem .3rem 0; font-size: 1.3rem; }
 .session-modal-meta { margin: 0 0 .25rem; font-size: .9rem; }
 .session-modal-tags { margin: 0 0 .75rem; font-size: .85rem; }

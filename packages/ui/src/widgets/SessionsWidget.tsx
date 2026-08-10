@@ -257,18 +257,18 @@ export function SessionsWidget({ eventSlug, filter }: SessionsWidgetProps) {
 
 const sessionsWidgetCss = `
 .sessions-controls { display: flex; flex-wrap: wrap; gap: .6rem; align-items: center; margin-bottom: .75rem; }
-.sessions-search { flex: 1 1 240px; padding: .5rem .75rem; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--fg); font-size: .95rem; }
+.sessions-search { flex: 1 1 240px; padding: .5rem .75rem; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); color: var(--text); font-size: .95rem; }
 .sessions-facets { display: flex; flex-wrap: wrap; gap: .5rem; }
-.sessions-facets select { padding: .4rem .6rem; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--fg); font-size: .88rem; }
+.sessions-facets select { padding: .4rem .6rem; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); color: var(--text); font-size: .88rem; }
 .sessions-count { margin: 0 0 .75rem; font-size: .85rem; }
 .sessions-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: .75rem; }
-.sessions-card { border: 1px solid var(--line); border-radius: 10px; padding: .9rem 1rem; }
+.sessions-card { border: 1px solid var(--border); border-radius: var(--radius); padding: .9rem 1rem; }
 .sessions-card-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: flex-start; gap: .5rem; }
 .sessions-card-title { margin: 0; font-size: 1.02rem; }
-.sessions-card-title-link { display: inline; background: none; border: none; padding: 0; margin: 0; font: inherit; font-weight: 600; text-align: left; color: var(--fg); cursor: pointer; text-decoration: none; }
+.sessions-card-title-link { display: inline; background: none; border: none; padding: 0; margin: 0; font: inherit; font-weight: 600; text-align: left; color: var(--text); cursor: pointer; text-decoration: none; }
 .sessions-card-title-link:hover, .sessions-card-title-link:focus-visible { color: var(--accent); text-decoration: underline; }
 .sessions-card-tags { display: flex; flex-wrap: wrap; gap: .35rem; flex-shrink: 0; }
-.sessions-tag { font-size: .72rem; padding: .15rem .5rem; border-radius: 999px; background: color-mix(in srgb, var(--fg) 8%, transparent); color: var(--muted); white-space: nowrap; }
+.sessions-tag { font-size: .72rem; padding: .15rem .5rem; border-radius: 999px; background: color-mix(in srgb, var(--text) 8%, transparent); color: var(--text-muted); white-space: nowrap; }
 .sessions-tag-track { background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent); }
 .sessions-card-meta { margin-top: .3rem; font-size: .85rem; }
 .sessions-card-desc { margin: .55rem 0 0; line-height: 1.5; }

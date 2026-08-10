@@ -1,6 +1,6 @@
 .context-menu {
     position: fixed; /* portal + viewport coords */
-    background-color: var(--surface);
+    background-color: var(--surface-raised);
     border: 1px solid var(--border-strong);
     border-radius: var(--radius);
     padding: var(--space-1);

@@ -9,9 +9,11 @@
     "packages/*"
   ],
   "scripts": {
+    "build:theme": "node packages/theme/build.mjs",
     "build:public": "vite build --config apps/public/vite.config.ts",
+    "build:headers": "node scripts/copy-asset-headers.mjs",
     "build:admin": "npm run build -w apps/admin",
-    "build": "npm run build:public && npm run build:admin",
+    "build": "npm run build:theme && npm run build:public && npm run build:admin && npm run build:headers",
     "test": "vitest run",
     "test:unit": "vitest run --project unit --project ui",
     "test:workers": "vitest run --project workers",

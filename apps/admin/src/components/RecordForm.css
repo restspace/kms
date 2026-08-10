@@ -10,7 +10,7 @@
   color: var(--text);
 }
 
-.record-form-header h2 {
+.record-form-header h2 { font-family: var(--font-display);
   margin: 0 0 var(--space-3);
   font-size: 1.1em;
   font-weight: 600;
@@ -60,7 +60,8 @@
   font-weight: 600;
   color: var(--text-secondary);
   text-transform: uppercase;
-  letter-spacing: 0.04em;
+  font-family: var(--font-display);
+  letter-spacing: var(--tracking-label);
 }
 
 .record-form-field input[type="text"],

@@ -1,13 +1,13 @@
 /* Embeds (EMB-15): snippet generator for the five public widgets. */
 
 .embeds {
-  padding: var(--space-5, 20px);
+  padding: var(--space-5);
   overflow-y: auto;
   height: 100%;
   box-sizing: border-box;
 }
 
-.embeds-head h2 {
+.embeds-head h2 { font-family: var(--font-display);
   font-size: 18px;
   margin: 0 0 6px;
 }
@@ -21,9 +21,10 @@
 }
 
 .embeds-warn {
-  background: color-mix(in srgb, var(--warning, #f59e0b) 12%, transparent);
-  border: 1px solid color-mix(in srgb, var(--warning, #f59e0b) 40%, transparent);
-  border-radius: 8px;
+  background: var(--notice-soft);
+  border: 1px solid var(--notice-border);
+  color: var(--notice-text);
+  border-radius: var(--radius);
   padding: 8px 12px;
   font-size: 13px;
   margin: 0 0 14px;
@@ -46,7 +47,7 @@
 .embeds-field {
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: var(--radius);
   padding: 12px 14px 14px;
   margin: 0 0 14px;
 }
@@ -54,7 +55,8 @@
 .embeds-field legend {
   font-size: 12px;
   font-weight: 600;
-  letter-spacing: 0.04em;
+  font-family: var(--font-display);
+  letter-spacing: var(--tracking-label);
   text-transform: uppercase;
   color: var(--text-muted);
   padding: 0 4px;
@@ -77,7 +79,7 @@
   text-align: left;
   background: transparent;
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius);
   padding: 8px 10px;
   cursor: pointer;
   font: inherit;
@@ -85,15 +87,15 @@
 }
 
 .embeds-card:hover {
-  border-color: var(--accent, #4f46e5);
+  border-color: var(--accent);
 }
 
 .embeds-card.is-active {
-  border-color: var(--accent, #4f46e5);
-  background: color-mix(in srgb, var(--accent, #4f46e5) 10%, transparent);
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
 }
 
-.embeds-card-title {
+.embeds-card-title { font-family: var(--font-display);
   font-size: 13px;
   font-weight: 600;
 }
@@ -175,8 +177,8 @@
   box-sizing: border-box;
   padding: 6px 8px;
   border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--bg, transparent);
+  border-radius: var(--radius);
+  background: var(--bg);
   color: inherit;
   font: inherit;
   font-size: 13px;
@@ -193,7 +195,7 @@
 .embeds-preview {
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: var(--radius);
   padding: 12px 14px;
   min-width: 0;
 }
@@ -206,7 +208,7 @@
   margin-bottom: 8px;
 }
 
-.embeds-snippet-head h3 {
+.embeds-snippet-head h3 { font-family: var(--font-display);
   font-size: 13px;
   margin: 0;
 }
@@ -214,19 +216,19 @@
 .embeds-snippet textarea {
   width: 100%;
   box-sizing: border-box;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
   line-height: 1.5;
   padding: 10px;
   border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--bg, transparent);
+  border-radius: var(--radius);
+  background: var(--bg);
   color: inherit;
   resize: vertical;
 }
 
 .embeds-url {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
   word-break: break-all;
   margin: 0;
@@ -235,7 +237,7 @@
 .embeds-preview-frame {
   width: 100%;
   border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--bg, #fff);
+  border-radius: var(--radius);
+  background: var(--bg);
   display: block;
 }

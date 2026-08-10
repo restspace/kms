@@ -91,9 +91,18 @@ export function EmbedsSection({ me }: { me: Me }) {
   const slug = me.event.slug
   const origin = typeof window === 'undefined' ? '' : window.location.origin
 
+/**
+ * Prefill for the accent override picker. `<input type="color">` needs a
+ * literal hex so this cannot read --accent, but it must stay in step with it:
+ * an embed that does not override the accent inherits this exact value from
+ * the token layer, so the picker should open showing what is already applied.
+ */
+const DEFAULT_EMBED_ACCENT = '#2c4a73'
+
+
   const [widget, setWidget] = useState<WidgetKey>('agenda')
   const [format, setFormat] = useState<FormatKey>('script')
-  const [accent, setAccent] = useState('#4f46e5')
+  const [accent, setAccent] = useState(DEFAULT_EMBED_ACCENT)
   const [useAccent, setUseAccent] = useState(false)
   const [showHeader, setShowHeader] = useState(false)
   const [track, setTrack] = useState(ALL)

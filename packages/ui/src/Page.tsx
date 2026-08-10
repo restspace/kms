@@ -1,4 +1,5 @@
 import type { ReactNode } from 'react'
+import { baseCss as sharedBaseCss, tokensCss } from '@kms/theme'
 
 interface PageProps {
   title: string
@@ -42,23 +43,24 @@ function safeJson(value: unknown): string {
   return JSON.stringify(value).replace(/</g, '\\u003c')
 }
 
+/**
+ * Public pages share the app-wide token layer (@kms/theme) rather than
+ * carrying their own palette. Only the page-level layout and element defaults
+ * specific to these documents live here.
+ */
 const baseCss = `
-:root { color-scheme: light dark; --fg:#111827; --muted:#6b7280; --bg:#ffffff; --line:#e5e7eb; --accent:#4f46e5; }
-@media (prefers-color-scheme: dark) {
-  :root { --fg:#f3f4f6; --muted:#9ca3af; --bg:#0b0f19; --line:#1f2937; --accent:#818cf8; }
-}
-* { box-sizing: border-box; }
-body { margin:0; background:var(--bg); color:var(--fg);
-  font: 16px/1.6 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+${tokensCss}
+${sharedBaseCss}
+:root { color-scheme: light dark; }
+body { font-size: 16px; line-height: 1.6; }
 main { max-width: 42rem; margin: 0 auto; padding: 4rem 1.5rem; }
-h1 { font-size: 2rem; line-height: 1.2; margin: 0 0 .5rem; letter-spacing: -.02em; }
+h1 { font-family: var(--font-display); font-size: 2.25rem; font-weight: 600; line-height: 1.15; margin: 0 0 .5rem; letter-spacing: -.01em; }
 p { margin: 0 0 1rem; }
-.muted { color: var(--muted); }
-.card { border:1px solid var(--line); border-radius:12px; padding:1.25rem; margin:1.5rem 0; }
+.card { border:1px solid var(--border); border-radius:var(--radius); padding:1.25rem; margin:1.5rem 0; }
 .row { display:flex; gap:.75rem; align-items:center; }
-button { font:inherit; padding:.4rem .9rem; border-radius:8px; border:1px solid var(--line);
-  background:transparent; color:var(--fg); cursor:pointer; }
+button { font:inherit; padding:.4rem .9rem; border-radius:var(--radius); border:1px solid var(--border);
+  background:transparent; color:var(--text); cursor:pointer; }
 button:hover { border-color: var(--accent); color: var(--accent); }
-code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size:.9em;
-  background:color-mix(in srgb, var(--fg) 8%, transparent); padding:.1em .35em; border-radius:4px; }
+code { font-family: var(--font-mono); font-size:.9em;
+  background:color-mix(in srgb, var(--text) 8%, transparent); padding:.1em .35em; border-radius:var(--radius); }
 `

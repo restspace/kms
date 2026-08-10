@@ -97,8 +97,8 @@ export function SpeakerDetailWidget({ eventSlug, speakerId }: SpeakerDetailWidge
 }
 
 export const speakerDetailCss = `
-.speaker-detail-back { display: inline-block; margin-bottom: 1rem; color: var(--muted); text-decoration: none; font-size: .9rem; }
-.speaker-detail-back:hover { color: var(--fg); }
+.speaker-detail-back { display: inline-block; margin-bottom: 1rem; color: var(--text-muted); text-decoration: none; font-size: .9rem; }
+.speaker-detail-back:hover { color: var(--text); }
 .speaker-detail-head { display: flex; align-items: center; gap: 1.1rem; margin-bottom: 1rem; }
 .speaker-detail-name { margin: 0 0 .2rem; }
 .speaker-detail-bio { line-height: 1.6; margin: 1rem 0; }

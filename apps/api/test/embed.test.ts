@@ -10,6 +10,10 @@ import { SELF, env } from 'cloudflare:test';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { createContact, createEvent, createEventUser, sessionCookieFor } from './fixtures';
 import { addParticipant, createSubmission } from './fixtures-portal';
+import { tokensCss } from '@kms/theme';
+
+/** The light-theme accent, read from the token layer so it cannot go stale. */
+const THEME_ACCENT = /:root\{[^}]*?--accent:(#[0-9a-f]{6})/.exec(tokensCss)![1];
 
 const ORIGIN = 'https://kms.test';
 
@@ -214,6 +218,17 @@ describe('public page query parameters', () => {
     expect(html).toContain(':root{--accent:#ff0055;}');
     // The class name also occurs in the shell stylesheet — assert on the element.
     expect(html).not.toContain('aria-label="Event sections"');
+  });
+
+  it('falls back to the theme accent when the host supplies none', async () => {
+    // Widgets render on customers' own sites and must keep taking the host's
+    // colour (asserted above). With no data-accent, the frame inherits the
+    // app's own accent from the shared token layer rather than a second
+    // hardcoded default that could drift from it.
+    const res = await SELF.fetch(`${ORIGIN}/e/${slug}/agenda?embed=1`);
+    const html = await res.text();
+    expect(html).not.toContain(':root{--accent:');
+    expect(html).toContain(`--accent:${THEME_ACCENT}`);
   });
 
   it('drops an accent that is not a plain hex colour, so nothing escapes the CSS rule', async () => {

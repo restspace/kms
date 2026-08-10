@@ -10,6 +10,14 @@ import './RoomsTracksFields.css'
  * feature rather than two independently-invented forms.
  */
 
+/**
+ * Placeholder shown by the track colour swatch before an organiser picks one.
+ * `<input type="color">` only accepts a literal hex, so this cannot be a theme
+ * token — it is a warm neutral chosen to sit quietly on the paper ground
+ * rather than to read as a real track colour.
+ */
+const DEFAULT_TRACK_COLOR = '#a39a8c'
+
 export interface RoomDraftRow {
   /** Client-side key for React lists / diffing — not necessarily a server id. */
   key: string
@@ -126,7 +134,7 @@ export function TrackRowEditor({
         type="color"
         className="rt-row-color"
         aria-label="Track color"
-        value={row.color || '#94a3b8'}
+        value={row.color || DEFAULT_TRACK_COLOR}
         onChange={(e) => onColorChange((e.target as HTMLInputElement).value)}
         onBlur={onColorBlur}
         disabled={disabled}

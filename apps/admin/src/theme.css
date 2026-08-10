@@ -1,183 +1,14 @@
 /**
- * KMS admin design tokens — the single source for colour, type and density.
- * Direction per docs/11 §4: one system font family, 14px base / 13px in grids,
- * compact 32px rows on an 8px spacing scale, neutral grey chrome with one blue
- * accent, status colours reserved for status (always paired with a label),
- * flat 1px borders (shadows only on overlays), motion ≤150ms, both themes
- * defined explicitly.
+ * Admin SPA theme entry. The tokens themselves now live in @kms/theme, shared
+ * with the Worker-rendered auth pages, the speaker portal and the public event
+ * pages, so a palette change reaches every surface at once. Only the SPA's own
+ * ground rules and markup conventions stay here.
  *
- * Theme resolution has three states: bare :root is the complete light palette;
- * the prefers-color-scheme block (guarded with :not([data-theme="light"]))
- * covers OS-dark with no explicit choice; [data-theme="dark"] covers an
- * explicit dark choice. Components must only ever use the tokens.
+ * Components must only ever use the tokens — see packages/theme/tokens.css for
+ * the full set and the three-state theme resolution.
  */
 
-:root {
-  /* Type */
-  --font-ui: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  --text-base: 14px;
-  --text-grid: 13px;
-  --text-label: 12px;
-  --text-caption: 11px;
-
-  /* Density */
-  --space-1: 4px;
-  --space-2: 8px;
-  --space-3: 12px;
-  --space-4: 16px;
-  --space-5: 24px;
-  --row-height: 32px;
-  --tab-height: 44px;
-  --control-height: 28px;
-  --radius-sm: 3px;
-  --radius: 5px;
-
-  /* Ground and surfaces */
-  --bg: #f5f6f8;
-  --surface: #ffffff;
-  --surface-hover: #f9fafb;
-  --chrome: #f3f4f6;
-  --border: #e5e7eb;
-  --border-strong: #d1d5db;
-
-  /* Text */
-  --text: #1f2937;
-  --text-secondary: #4b5563;
-  --text-muted: #6b7280;
-  --text-faint: #9ca3af;
-
-  /* Accent (primary actions, selection, focus) */
-  --accent: #2563eb;
-  --accent-strong: #1d4ed8;
-  --accent-contrast: #ffffff;
-  --accent-soft: #eff6ff;
-  --accent-soft-hover: #dbeafe;
-  --accent-border: #93c5fd;
-
-  /* Danger */
-  --danger: #dc2626;
-  --danger-strong: #b91c1c;
-  --danger-soft: #fef2f2;
-  --danger-border: #fecaca;
-
-  /* Notice (paused filters, warnings) */
-  --notice-soft: #fef3c7;
-  --notice-border: #fde68a;
-  --notice-text: #92400e;
-
-  /* Status — used ONLY for record status, always with a visible label */
-  --status-accepted-bg: #dcfce7;
-  --status-accepted-text: #15803d;
-  --status-pending-bg: #fef9c3;
-  --status-pending-text: #854d0e;
-  --status-queue-bg: #fef3c7;
-  --status-queue-text: #92400e;
-  --status-declined-bg: #fee2e2;
-  --status-declined-text: #b91c1c;
-  --status-withdrawn-bg: #e2e8f0;
-  --status-withdrawn-text: #475569;
-  --status-draft-bg: #f3f4f6;
-  --status-draft-text: #4b5563;
-
-  /* Overlays are the one permitted elevation */
-  --shadow-overlay: 0 4px 20px rgba(15, 23, 42, 0.18);
-  --scrim: rgba(15, 23, 42, 0.45);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) {
-    --bg: #12151a;
-    --surface: #191d24;
-    --surface-hover: #1f242c;
-    --chrome: #1d222a;
-    --border: #2b323c;
-    --border-strong: #3b4450;
-
-    --text: #e5e7eb;
-    --text-secondary: #b9c1cb;
-    --text-muted: #8d97a3;
-    --text-faint: #6b7480;
-
-    --accent: #60a5fa;
-    --accent-strong: #93c5fd;
-    --accent-contrast: #0f172a;
-    --accent-soft: #1c2940;
-    --accent-soft-hover: #24344f;
-    --accent-border: #3b5b8f;
-
-    --danger: #f87171;
-    --danger-strong: #fca5a5;
-    --danger-soft: #2c1a1c;
-    --danger-border: #5b2b2e;
-
-    --notice-soft: #2e2712;
-    --notice-border: #57491f;
-    --notice-text: #fbbf24;
-
-    --status-accepted-bg: #14301f;
-    --status-accepted-text: #4ade80;
-    --status-pending-bg: #2e2a10;
-    --status-pending-text: #facc15;
-    --status-queue-bg: #2e2412;
-    --status-queue-text: #fbbf24;
-    --status-declined-bg: #331a1c;
-    --status-declined-text: #f87171;
-    --status-withdrawn-bg: #262d38;
-    --status-withdrawn-text: #94a3b8;
-    --status-draft-bg: #222831;
-    --status-draft-text: #9aa4b0;
-
-    --shadow-overlay: 0 4px 20px rgba(0, 0, 0, 0.55);
-    --scrim: rgba(0, 0, 0, 0.6);
-  }
-}
-
-:root[data-theme="dark"] {
-  --bg: #12151a;
-  --surface: #191d24;
-  --surface-hover: #1f242c;
-  --chrome: #1d222a;
-  --border: #2b323c;
-  --border-strong: #3b4450;
-
-  --text: #e5e7eb;
-  --text-secondary: #b9c1cb;
-  --text-muted: #8d97a3;
-  --text-faint: #6b7480;
-
-  --accent: #60a5fa;
-  --accent-strong: #93c5fd;
-  --accent-contrast: #0f172a;
-  --accent-soft: #1c2940;
-  --accent-soft-hover: #24344f;
-  --accent-border: #3b5b8f;
-
-  --danger: #f87171;
-  --danger-strong: #fca5a5;
-  --danger-soft: #2c1a1c;
-  --danger-border: #5b2b2e;
-
-  --notice-soft: #2e2712;
-  --notice-border: #57491f;
-  --notice-text: #fbbf24;
-
-  --status-accepted-bg: #14301f;
-  --status-accepted-text: #4ade80;
-  --status-pending-bg: #2e2a10;
-  --status-pending-text: #facc15;
-  --status-queue-bg: #2e2412;
-  --status-queue-text: #fbbf24;
-  --status-declined-bg: #331a1c;
-  --status-declined-text: #f87171;
-  --status-withdrawn-bg: #262d38;
-  --status-withdrawn-text: #94a3b8;
-  --status-draft-bg: #222831;
-  --status-draft-text: #9aa4b0;
-
-  --shadow-overlay: 0 4px 20px rgba(0, 0, 0, 0.55);
-  --scrim: rgba(0, 0, 0, 0.6);
-}
+@import '@kms/theme/tokens.css';
 
 /* App ground */
 html,
@@ -195,7 +26,11 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
-/* Status chips: colour never travels without its label */
+/**
+ * Status chips: colour never travels without its label. The Worker-rendered
+ * surfaces use a `.chip.st-…` convention instead (packages/theme statusChipCss)
+ * but read the same --status-* tokens, so the two cannot drift on colour.
+ */
 .status-chip {
   display: inline-flex;
   align-items: center;

@@ -6,6 +6,7 @@
     "@kms/core": "*",
     "@kms/db": "*",
     "@kms/email": "*",
+    "@kms/theme": "*",
     "hono": "^4.5.0"
   }
 }

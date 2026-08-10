@@ -77,18 +77,18 @@ export function EventShell({ eventName, eventSlug, active, subnav, hideHeader, c
 
 /** Appended to Page's baseCss for event pages only (kept separate so the CFP wizard bundle doesn't ship it). */
 export const eventShellCss = `
-.event-shell-header { border-bottom: 1px solid var(--line); padding-bottom: 1rem; margin-bottom: 1.5rem; }
-.event-shell-eyebrow { margin: 0 0 .15rem; text-transform: uppercase; letter-spacing: .06em; font-size: .75rem; }
+.event-shell-header { border-bottom: 1px solid var(--border); padding-bottom: 1rem; margin-bottom: 1.5rem; }
+.event-shell-eyebrow { margin: 0 0 .15rem; font-family: var(--font-display); text-transform: uppercase; letter-spacing: var(--tracking-label); font-size: .75rem; }
 .event-shell-header h1 { margin-bottom: .75rem; }
 .event-shell-nav { display: flex; flex-wrap: wrap; gap: .25rem; }
-.event-shell-nav a { padding: .4rem .8rem; border-radius: 8px; color: var(--muted); text-decoration: none; font-size: .92rem; }
-.event-shell-nav a:hover { color: var(--fg); background: color-mix(in srgb, var(--fg) 6%, transparent); }
+.event-shell-nav a { font-family: var(--font-display); padding: .4rem .8rem; border-radius: var(--radius); color: var(--text-muted); text-decoration: none; font-size: .92rem; }
+.event-shell-nav a:hover { color: var(--text); background: color-mix(in srgb, var(--text) 6%, transparent); }
 .event-shell-nav a.event-shell-nav-active { color: var(--accent); font-weight: 600; background: color-mix(in srgb, var(--accent) 12%, transparent); }
 .event-shell-subnav { margin-top: .75rem; }
 .event-shell-bare .event-shell-subnav { margin-top: 0; margin-bottom: .75rem; }
 .event-shell-main { min-height: 40vh; }
 .event-widget-list { list-style: none; margin: 0; padding: 0; }
-.event-widget-list li { padding: .85rem 0; border-bottom: 1px solid var(--line); }
+.event-widget-list li { padding: .85rem 0; border-bottom: 1px solid var(--border); }
 .event-widget-list li:last-child { border-bottom: none; }
-.event-widget-empty { color: var(--muted); }
+.event-widget-empty { color: var(--text-muted); }
 `

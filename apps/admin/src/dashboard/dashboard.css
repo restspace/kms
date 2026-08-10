@@ -27,18 +27,23 @@
 
 .db-kicker {
   font-size: var(--text-caption);
-  letter-spacing: 0.08em;
+  font-family: var(--font-display);
+  letter-spacing: var(--tracking-label);
   color: var(--text-muted);
 }
 
 .db-header h1 {
   margin: 0.15rem 0 0;
-  font-size: 1.25rem;
-  font-weight: 650;
+  font-family: var(--font-display);
+  font-size: var(--text-display);
+  font-weight: 600;
+  line-height: 1.15;
 }
 
 .db-freshness {
-  font-size: var(--text-caption);
+  font-family: var(--font-display);
+  font-style: italic;
+  font-size: var(--text-label);
   color: var(--text-faint);
   white-space: nowrap;
 }
@@ -135,8 +140,9 @@
 .db-kpi-status:hover { background: var(--surface-hover); }
 
 .db-kpi-value {
-  font-size: 1.45rem;
-  font-weight: 700;
+  font-family: var(--font-display);
+  font-size: 1.6rem;
+  font-weight: 600;
   line-height: 1.2;
 }
 
@@ -159,7 +165,8 @@
 .db-nudges-title {
   font-size: var(--text-caption);
   font-weight: 650;
-  letter-spacing: 0.05em;
+  font-family: var(--font-display);
+  letter-spacing: var(--tracking-label);
   text-transform: uppercase;
   color: var(--text-muted);
   margin-right: 0.25rem;
@@ -172,7 +179,7 @@
   border: 1px solid var(--notice-border);
   background: var(--notice-soft);
   color: var(--notice-text);
-  border-radius: 999px;
+  border-radius: var(--radius);
   padding: 0.3rem 0.7rem 0.3rem 0.35rem;
   font: inherit;
   font-size: var(--text-label);
@@ -184,7 +191,7 @@
 
 .db-nudge-count {
   background: var(--surface);
-  border-radius: 999px;
+  border-radius: var(--radius);
   min-width: 1.4rem;
   height: 1.4rem;
   display: inline-flex;
@@ -208,7 +215,10 @@
   border: none;
   background: none;
   font: inherit;
-  font-size: var(--text-label);
+  font-family: var(--font-display);
+  font-size: var(--text-caption);
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-label);
   color: var(--text-secondary);
   padding: 0.4rem 0.7rem;
   cursor: pointer;
@@ -217,7 +227,7 @@
 }
 
 .db-tabs button.active {
-  color: var(--text);
+  color: var(--accent-strong);
   font-weight: 600;
   border-bottom-color: var(--accent);
 }
@@ -251,7 +261,8 @@
   font-size: var(--text-label);
   font-weight: 650;
   text-transform: uppercase;
-  letter-spacing: 0.05em;
+  font-family: var(--font-display);
+  letter-spacing: var(--tracking-label);
   color: var(--text-muted);
 }
 
@@ -303,7 +314,7 @@
 
 .db-bar-track {
   background: var(--bg);
-  border-radius: 999px;
+  border-radius: var(--radius);
   height: 10px;
   overflow: hidden;
 }
@@ -311,7 +322,7 @@
 .db-bar-fill {
   display: block;
   height: 100%;
-  border-radius: 999px;
+  border-radius: var(--radius);
   min-width: 2px;
 }
 
@@ -388,7 +399,8 @@
   text-align: left;
   font-size: var(--text-caption);
   text-transform: uppercase;
-  letter-spacing: 0.04em;
+  font-family: var(--font-display);
+  letter-spacing: var(--tracking-label);
   color: var(--text-muted);
   font-weight: 600;
   padding: 0.3rem 0.5rem;
@@ -447,7 +459,7 @@
 .db-form-row:last-child { border-bottom: none; }
 .db-form-row > div:first-child { flex: 1; min-width: 0; }
 .db-form-name { font-weight: 600; }
-.db-form-sub { color: var(--text-faint); font-size: var(--text-caption); }
+.db-form-sub { font-family: var(--font-display); font-style: italic; color: var(--text-faint); font-size: var(--text-label); }
 .db-form-counts { white-space: nowrap; color: var(--text-secondary); }
 
 .db-asset-row {
@@ -475,7 +487,7 @@
   background: var(--danger-soft);
   border: 1px solid var(--danger-border);
   color: var(--danger);
-  border-radius: 999px;
+  border-radius: var(--radius);
   font-size: var(--text-caption);
   padding: 0.05rem 0.45rem;
 }

@@ -46,7 +46,8 @@
   font-weight: 600;
   font-size: var(--text-label);
   text-transform: uppercase;
-  letter-spacing: 0.04em;
+  font-family: var(--font-display);
+  letter-spacing: var(--tracking-label);
   color: var(--text-secondary);
   background: var(--chrome);
   border-bottom: 1px solid var(--border);
@@ -158,10 +159,10 @@
   border: 0;
   background: none;
   font: inherit;
-  color: var(--accent, #2563eb);
+  color: var(--accent);
   text-align: left;
   text-decoration: underline;
-  text-decoration-color: color-mix(in srgb, var(--accent, #2563eb) 40%, transparent);
+  text-decoration-color: color-mix(in srgb, var(--accent) 40%, transparent);
   text-underline-offset: 2px;
   cursor: pointer;
   overflow: hidden;
@@ -175,9 +176,9 @@
 }
 
 .data-list-cell-link:focus-visible {
-  outline: 2px solid var(--accent, #2563eb);
+  outline: 2px solid var(--accent);
   outline-offset: 1px;
-  border-radius: 2px;
+  border-radius: var(--radius-sm);
 }
 
 .data-list-row-draggable {
@@ -360,8 +361,8 @@
   width: 14px;
   height: 14px;
   border: 1px solid var(--text);
-  border-radius: 2px;
-  background-color: var(--surface);
+  border-radius: var(--radius-sm);
+  background-color: var(--surface-raised);
   display: inline-block;
 }
 
@@ -489,7 +490,8 @@
   font-weight: 600;
   color: var(--text-muted);
   text-transform: uppercase;
-  letter-spacing: 0.04em;
+  font-family: var(--font-display);
+  letter-spacing: var(--tracking-label);
   white-space: nowrap;
 }
 
@@ -556,7 +558,8 @@
   font-weight: 600;
   color: var(--text-muted);
   text-transform: uppercase;
-  letter-spacing: 0.04em;
+  font-family: var(--font-display);
+  letter-spacing: var(--tracking-label);
   white-space: nowrap;
 }
 
@@ -709,8 +712,8 @@
 
 .data-list-export-button {
   border: 1px solid var(--border);
-  border-radius: 6px;
-  background-color: var(--surface);
+  border-radius: var(--radius);
+  background-color: var(--surface-raised);
   color: var(--text-muted);
   font-size: 11px;
   font-weight: 600;

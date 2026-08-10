@@ -1,14 +1,14 @@
 /* Settings (M6): token management, docs pointers, demo reset. */
 
 .settings-shell {
-  padding: var(--space-5, 20px);
+  padding: var(--space-5);
   max-width: 760px;
   overflow-y: auto;
   height: 100%;
   box-sizing: border-box;
 }
 
-.settings-shell h1 {
+.settings-shell h1 { font-family: var(--font-display);
   font-size: 18px;
   margin: 0 0 16px;
 }
@@ -16,12 +16,12 @@
 .settings-card {
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: var(--radius);
   padding: 16px 18px;
   margin-bottom: 16px;
 }
 
-.settings-card h2 {
+.settings-card h2 { font-family: var(--font-display);
   font-size: 14px;
   margin: 0 0 6px;
 }
@@ -44,7 +44,7 @@
   gap: 24px;
 }
 
-.settings-rt-columns h3 {
+.settings-rt-columns h3 { font-family: var(--font-display);
   font-size: 13px;
   margin: 0 0 8px;
   color: var(--text-muted);
@@ -57,7 +57,7 @@
 }
 
 .settings-empty {
-  color: var(--text-faint, var(--text-muted));
+  color: var(--text-faint);
   font-size: 13px;
   padding: 8px 0;
 }
@@ -72,7 +72,7 @@
   flex: 1;
   max-width: 320px;
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--radius);
   padding: 6px 10px;
   font-size: 13px;
   background: var(--surface);
@@ -83,8 +83,8 @@
 .settings-fresh-actions button {
   border: 1px solid var(--accent);
   background: var(--accent);
-  color: var(--accent-contrast, #fff);
-  border-radius: 6px;
+  color: var(--accent-contrast);
+  border-radius: var(--radius);
   font-size: 13px;
   font-weight: 600;
   padding: 6px 12px;
@@ -95,7 +95,7 @@
   background: transparent !important;
   border: 1px solid var(--border) !important;
   color: var(--text-muted) !important;
-  border-radius: 6px;
+  border-radius: var(--radius);
   font-size: 12px;
   padding: 3px 10px;
   cursor: pointer;
@@ -108,8 +108,8 @@
 
 .settings-fresh-token {
   border: 1px solid var(--accent);
-  background: var(--accent-soft, color-mix(in srgb, var(--accent) 8%, var(--surface)));
-  border-radius: 8px;
+  background: var(--accent-soft);
+  border-radius: var(--radius);
   padding: 12px 14px;
   margin-bottom: 12px;
   font-size: 13px;
@@ -122,7 +122,7 @@
   word-break: break-all;
   background: var(--surface);
   border: 1px dashed var(--border);
-  border-radius: 6px;
+  border-radius: var(--radius);
   padding: 6px 8px;
   user-select: all;
 }
@@ -153,7 +153,7 @@
 }
 
 .settings-table tr.revoked td {
-  color: var(--text-faint, var(--text-muted));
+  color: var(--text-faint);
   text-decoration: line-through;
 }
 
@@ -163,13 +163,13 @@
 
 .settings-revoked-chip {
   font-size: 11px;
-  color: var(--text-faint, var(--text-muted));
+  color: var(--text-faint);
 }
 
 .settings-curl {
-  background: var(--surface-sunken, color-mix(in srgb, var(--text) 4%, var(--surface)));
+  background: var(--chrome);
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius);
   padding: 10px 12px;
   font-size: 12px;
   overflow-x: auto;
@@ -180,7 +180,7 @@
   border: 1px solid var(--danger);
   background: transparent;
   color: var(--danger);
-  border-radius: 6px;
+  border-radius: var(--radius);
   font-size: 13px;
   font-weight: 600;
   padding: 6px 14px;
@@ -189,7 +189,7 @@
 
 .settings-danger:hover:not(:disabled) {
   background: var(--danger);
-  color: #fff;
+  color: var(--danger-contrast);
 }
 
 .settings-reset-row {
@@ -210,7 +210,7 @@
 .settings-template-editor label {
   font-size: 12px;
   font-weight: 600;
-  color: var(--text-faint, #6b7280);
+  color: var(--text-faint);
 }
 .settings-template-editor input,
 .settings-template-editor textarea {
@@ -219,7 +219,7 @@
   padding: 6px 8px;
 }
 .settings-template-editor textarea {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
   resize: vertical;
 }

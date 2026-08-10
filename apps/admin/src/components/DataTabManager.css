@@ -279,7 +279,7 @@
   background: var(--surface);
 }
 
-.data-tab-receiver-pane-title {
+.data-tab-receiver-pane-title { font-family: var(--font-display);
   height: var(--tab-height);
   display: flex;
   align-items: center;
@@ -314,7 +314,7 @@
   background: var(--accent);
   color: var(--accent-contrast);
   padding: var(--space-2) var(--space-4);
-  border-radius: 16px;
+  border-radius: 999px;
   font-size: var(--text-label);
   box-shadow: var(--shadow-overlay);
   pointer-events: none;
@@ -370,7 +370,8 @@
       font-weight: 600;
       color: var(--text-secondary);
       text-transform: uppercase;
-      letter-spacing: 0.04em;
+      font-family: var(--font-display);
+      letter-spacing: var(--tracking-label);
       padding: 0;
       max-width: none;
     }
@@ -570,7 +571,7 @@
 }
 
 .data-tab-confirm-dialog {
-  background: var(--surface);
+  background: var(--surface-raised);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   box-shadow: var(--shadow-overlay);
@@ -591,7 +592,7 @@
   }
 }
 
-.data-tab-confirm-dialog h3 {
+.data-tab-confirm-dialog h3 { font-family: var(--font-display);
   margin: 0 0 var(--space-3) 0;
   font-size: 1.05em;
   font-weight: 600;
@@ -710,7 +711,7 @@
     left: 0;
     right: 0;
     z-index: 100;
-    background: var(--surface);
+    background: var(--surface-raised);
     border: 1px solid var(--border);
     border-radius: 0 0 var(--radius) var(--radius);
     box-shadow: var(--shadow-overlay);
@@ -789,7 +790,7 @@
   max-width: 34ch;
   padding: 4px var(--space-2);
   border: 1px solid var(--border);
-  border-radius: var(--radius-sm, 4px);
+  border-radius: var(--radius-sm);
   background: var(--surface);
   color: var(--text);
   font: inherit;
@@ -809,7 +810,7 @@
   overflow: hidden;
   padding: 3px var(--space-1) 3px var(--space-2);
   border: 1px solid var(--accent);
-  border-radius: 999px;
+  border-radius: var(--radius);
   background: var(--accent-soft);
   color: var(--accent);
   font-size: var(--text-caption);
@@ -853,7 +854,7 @@
   position: relative;
   padding: var(--space-2) var(--space-3);
   border-bottom: 1px solid var(--border);
-  background: var(--surface-soft);
+  background: var(--chrome);
   color: var(--text);
   font-size: var(--text-caption);
   line-height: 1.4;
@@ -861,15 +862,15 @@
 }
 
 .data-tab-export-status-info {
-  background: var(--info-soft, #e3f2fd);
-  color: var(--info, #1976d2);
-  border-left: 3px solid var(--info, #1976d2);
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  border-left: 3px solid var(--accent);
 }
 
 .data-tab-export-status-error {
-  background: var(--danger-soft, #ffebee);
-  color: var(--danger, #d32f2f);
-  border-left: 3px solid var(--danger, #d32f2f);
+  background: var(--danger-soft);
+  color: var(--danger);
+  border-left: 3px solid var(--danger);
 }
 
 @keyframes slideDown {

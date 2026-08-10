@@ -403,31 +403,31 @@ export function ScheduleWidget({ eventSlug, filter }: ScheduleWidgetProps) {
 const scheduleWidgetCss = `
 .schedule-toolbar { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: .75rem; margin-bottom: 1rem; }
 .schedule-tabs { display: flex; flex-wrap: wrap; gap: .3rem; }
-.schedule-tab { padding: .4rem .8rem; border-radius: 999px; border: 1px solid var(--line); background: var(--bg); color: var(--muted); font-size: .88rem; cursor: pointer; }
-.schedule-tab:hover { color: var(--fg); }
+.schedule-tab { padding: .4rem .8rem; border-radius: 999px; border: 1px solid var(--border); background: var(--surface); color: var(--text-muted); font-size: .88rem; cursor: pointer; }
+.schedule-tab:hover { color: var(--text); }
 .schedule-tab-active { color: var(--accent); border-color: var(--accent); font-weight: 600; background: color-mix(in srgb, var(--accent) 12%, transparent); }
 .schedule-export { display: flex; flex-wrap: wrap; align-items: center; gap: .6rem; }
 .schedule-export-link { font-size: .88rem; color: var(--accent); text-decoration: none; }
 .schedule-export-link:hover { text-decoration: underline; }
-.schedule-export-button { padding: .4rem .8rem; border-radius: 8px; border: 1px solid var(--line); background: var(--bg); color: var(--fg); font-size: .85rem; cursor: pointer; }
+.schedule-export-button { padding: .4rem .8rem; border-radius: var(--radius); border: 1px solid var(--border); background: var(--surface); color: var(--text); font-size: .85rem; cursor: pointer; }
 .schedule-export-button:disabled { opacity: .5; cursor: not-allowed; }
 .schedule-export-button:not(:disabled):hover { border-color: var(--accent); color: var(--accent); }
 .schedule-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: .75rem; }
-.schedule-card { display: flex; gap: .75rem; border: 1px solid var(--line); border-radius: 10px; padding: .9rem 1rem; }
-.schedule-star { flex-shrink: 0; align-self: flex-start; border: none; background: none; padding: 0; font-size: 1.4rem; line-height: 1; cursor: pointer; color: var(--muted); }
+.schedule-card { display: flex; gap: .75rem; border: 1px solid var(--border); border-radius: var(--radius); padding: .9rem 1rem; }
+.schedule-star { flex-shrink: 0; align-self: flex-start; border: none; background: none; padding: 0; font-size: 1.4rem; line-height: 1; cursor: pointer; color: var(--text-muted); }
 .schedule-star:hover { color: var(--accent); }
 .schedule-star-active { color: var(--accent); }
 .schedule-card-body { flex: 1; min-width: 0; }
 .schedule-card-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: flex-start; gap: .5rem; }
 .schedule-card-title { margin: 0; font-size: 1.02rem; }
-.schedule-card-title-link { display: inline; background: none; border: none; padding: 0; margin: 0; font: inherit; font-weight: 600; text-align: left; color: var(--fg); cursor: pointer; text-decoration: none; }
+.schedule-card-title-link { display: inline; background: none; border: none; padding: 0; margin: 0; font: inherit; font-weight: 600; text-align: left; color: var(--text); cursor: pointer; text-decoration: none; }
 .schedule-card-title-link:hover, .schedule-card-title-link:focus-visible { color: var(--accent); text-decoration: underline; }
 .schedule-showmore { margin-left: .35rem; background: none; border: none; padding: 0; color: var(--accent); cursor: pointer; font-size: inherit; text-decoration: underline; }
 .schedule-card-tags { display: flex; flex-wrap: wrap; gap: .35rem; flex-shrink: 0; }
-.schedule-tag { font-size: .72rem; padding: .15rem .5rem; border-radius: 999px; background: color-mix(in srgb, var(--fg) 8%, transparent); color: var(--muted); white-space: nowrap; }
+.schedule-tag { font-size: .72rem; padding: .15rem .5rem; border-radius: 999px; background: color-mix(in srgb, var(--text) 8%, transparent); color: var(--text-muted); white-space: nowrap; }
 .schedule-tag-track { background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent); }
 .schedule-card-meta { margin-top: .3rem; font-size: .85rem; }
-.schedule-card-desc { margin: .55rem 0 0; line-height: 1.5; color: var(--muted); font-size: .9rem; }
+.schedule-card-desc { margin: .55rem 0 0; line-height: 1.5; color: var(--text-muted); font-size: .9rem; }
 .schedule-card-speakers { margin-top: .45rem; font-size: .88rem; }
-.schedule-toast { margin: 0 0 .75rem; padding: .5rem .8rem; border-radius: 8px; background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent); font-size: .85rem; }
+.schedule-toast { margin: 0 0 .75rem; padding: .5rem .8rem; border-radius: var(--radius); background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent); font-size: .85rem; }
 `

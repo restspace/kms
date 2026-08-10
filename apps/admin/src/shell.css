@@ -11,7 +11,7 @@
   flex: 0 0 184px;
   display: flex;
   flex-direction: column;
-  background: var(--chrome);
+  background: var(--bg);
   border-right: 1px solid var(--border);
   min-height: 0;
 }
@@ -21,6 +21,7 @@
   align-items: baseline;
   gap: var(--space-2);
   padding: var(--space-3) var(--space-3) var(--space-2);
+  font-family: var(--font-display);
   font-weight: 700;
   letter-spacing: 0.02em;
 }
@@ -91,6 +92,7 @@
   display: flex;
   align-items: center;
   width: 100%;
+  font-family: var(--font-display);
   gap: var(--space-2);
   padding: 0 var(--space-3);
   height: var(--row-height);
@@ -165,7 +167,7 @@
   color: var(--text-muted);
 }
 
-.shell-placeholder h2 {
+.shell-placeholder h2 { font-family: var(--font-display);
   color: var(--text-secondary);
   font-size: var(--text-base);
   margin: 0 0 var(--space-2);
@@ -193,14 +195,14 @@
   padding: var(--space-5);
 }
 
-.admin-error-boundary h2 {
+.admin-error-boundary h2 { font-family: var(--font-display);
   color: var(--danger);
   font-size: var(--text-base);
   margin: 0 0 var(--space-2);
 }
 
 .admin-error-boundary-message {
-  font-family: var(--font-mono, monospace);
+  font-family: var(--font-mono);
   font-size: var(--text-caption);
   word-break: break-word;
   margin: 0 0 var(--space-3);
@@ -227,7 +229,7 @@
   max-width: 720px;
 }
 
-.detail-panel h2 {
+.detail-panel h2 { font-family: var(--font-display);
   margin: 0 0 var(--space-1);
   font-size: 16px;
 }
@@ -245,7 +247,7 @@
   border-radius: 50%;
   object-fit: cover;
   flex: none;
-  background: var(--surface-2, #eee);
+  background: var(--chrome);
 }
 
 .contact-headshot-fallback {
@@ -255,7 +257,7 @@
   font-size: 20px;
   font-weight: 600;
   color: var(--text-muted);
-  border: 1px solid var(--border, #ddd);
+  border: 1px solid var(--border);
 }
 
 .detail-panel .detail-sub {
@@ -466,7 +468,7 @@
   white-space: nowrap;
   padding: 3px var(--space-2);
   border: 1px solid var(--border-strong);
-  border-radius: 999px;
+  border-radius: var(--radius);
   background: var(--surface);
   color: var(--text);
   font-size: var(--text-caption);

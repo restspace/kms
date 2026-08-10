@@ -31,9 +31,9 @@ export type AppNavTarget =
 const POLL_MS = 15_000
 
 const BOARDS = [
-  { key: 'today', label: 'Today', dot: '#2563eb' },
-  { key: 'tracking', label: 'Speaker Tracking', dot: '#d97706' },
-  { key: 'pipeline', label: 'Submissions Pipeline', dot: '#059669' },
+  { key: 'today', label: 'Today', dot: 'var(--accent)' },
+  { key: 'tracking', label: 'Speaker Tracking', dot: 'var(--chart-2)' },
+  { key: 'pipeline', label: 'Submissions Pipeline', dot: 'var(--chart-4)' },
 ] as const
 
 type BoardKey = (typeof BOARDS)[number]['key']
@@ -148,9 +148,9 @@ function PacingChart({ pacing }: { pacing: DashboardPayload['forms']['pacing'] }
     <div className="db-pacing">
       <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" role="img"
         aria-label={`Cumulative submissions, ${maxY} total`}>
-        <polyline points={`${x(0)},${y(0)} ${points}`} fill="none" stroke="#2563eb" strokeWidth="2" />
+        <polyline points={`${x(0)},${y(0)} ${points}`} fill="none" stroke="var(--accent)" strokeWidth="2" />
         {pacing.map((p, i) => (
-          <circle key={p.day} cx={x(i)} cy={y(p.cumulative)} r="3" fill="#2563eb">
+          <circle key={p.day} cx={x(i)} cy={y(p.cumulative)} r="3" fill="var(--accent)">
             <title>{`${fmtDay(p.day)}: +${p.count} (${p.cumulative} total)`}</title>
           </circle>
         ))}
@@ -537,7 +537,7 @@ function TodayBoard({ data, tab, onTab, onNudge, onNavigate }: {
           <section className="db-card db-span2">
             <h3>Participants by role</h3>
             <BarList
-              color="#2563eb"
+              color="var(--chart-1)"
               rows={data.participants.by_role.map((r) => ({ key: r.role, label: r.role, value: r.n }))}
             />
           </section>
@@ -546,10 +546,10 @@ function TodayBoard({ data, tab, onTab, onNudge, onNavigate }: {
             <Donut
               centre={String(data.participants.status_mix.reduce((a, r) => a + r.n, 0))}
               segments={[
-                { label: 'Accepted sessions', color: '#059669', value: data.participants.status_mix.filter((r) => r.status === 'accepted' && r.kind === 'session').reduce((a, r) => a + r.n, 0) },
-                { label: 'Accepted abstracts', color: '#34d399', value: data.participants.status_mix.filter((r) => r.status === 'accepted' && r.kind === 'abstract').reduce((a, r) => a + r.n, 0) },
-                { label: 'Pending sessions', color: '#d97706', value: data.participants.status_mix.filter((r) => r.status === 'pending' && r.kind === 'session').reduce((a, r) => a + r.n, 0) },
-                { label: 'Pending abstracts', color: '#fbbf24', value: data.participants.status_mix.filter((r) => r.status === 'pending' && r.kind === 'abstract').reduce((a, r) => a + r.n, 0) },
+                { label: 'Accepted sessions', color: 'var(--chart-good)', value: data.participants.status_mix.filter((r) => r.status === 'accepted' && r.kind === 'session').reduce((a, r) => a + r.n, 0) },
+                { label: 'Accepted abstracts', color: 'var(--chart-good-soft)', value: data.participants.status_mix.filter((r) => r.status === 'accepted' && r.kind === 'abstract').reduce((a, r) => a + r.n, 0) },
+                { label: 'Pending sessions', color: 'var(--chart-warn)', value: data.participants.status_mix.filter((r) => r.status === 'pending' && r.kind === 'session').reduce((a, r) => a + r.n, 0) },
+                { label: 'Pending abstracts', color: 'var(--chart-warn-soft)', value: data.participants.status_mix.filter((r) => r.status === 'pending' && r.kind === 'abstract').reduce((a, r) => a + r.n, 0) },
               ]}
             />
           </section>
@@ -572,7 +572,7 @@ function TodayBoard({ data, tab, onTab, onNudge, onNavigate }: {
           <section className="db-card db-span2">
             <h3>Completed vs assigned, per reviewer</h3>
             <BarList
-              color="#7c3aed"
+              color="var(--chart-3)"
               rows={data.evaluations.reviewers.map((r) => ({
                 key: r.email,
                 label: r.name ?? r.email,
@@ -608,14 +608,14 @@ function TodayBoard({ data, tab, onTab, onNudge, onNavigate }: {
           <section className="db-card">
             <h3>Sessions per day</h3>
             <BarList
-              color="#059669"
+              color="var(--chart-4)"
               rows={data.agenda.per_day.map((d) => ({ key: d.day, label: fmtDay(d.day), value: d.count }))}
             />
           </section>
           <section className="db-card">
             <h3>Sessions per room</h3>
             <BarList
-              color="#2563eb"
+              color="var(--chart-1)"
               rows={data.agenda.per_room.map((r) => ({ key: r.room, label: r.room, value: r.count }))}
             />
           </section>
@@ -653,15 +653,15 @@ function TrackingBoard({ data, busy, onRemind, onSpeaker }: {
           <Donut
             centre={String(t.accepted_speakers)}
             segments={[
-              { label: 'Confirmed', color: '#059669', value: t.confirmation.confirmed },
-              { label: 'Awaiting confirmation', color: '#d97706', value: t.confirmation.awaiting },
+              { label: 'Confirmed', color: 'var(--chart-good)', value: t.confirmation.confirmed },
+              { label: 'Awaiting confirmation', color: 'var(--chart-warn)', value: t.confirmation.awaiting },
             ]}
           />
         </section>
         <section className="db-card db-span2">
           <h3>Top speakers by outstanding tasks</h3>
           <BarList
-            color="#d97706"
+            color="var(--chart-2)"
             rows={t.top_speakers.map((s) => ({
               key: s.contact_id,
               label: s.name,
@@ -776,7 +776,7 @@ function PipelineBoard({ data, onNavigate }: {
               <div className="db-funnel-row" key={stage.key}>
                 <span className="db-bar-label">{stage.label}</span>
                 <span className="db-bar-track">
-                  <span className="db-bar-fill" style={{ width: `${(p.funnel[stage.key] / max) * 100}%`, background: '#059669' }} />
+                  <span className="db-bar-fill" style={{ width: `${(p.funnel[stage.key] / max) * 100}%`, background: 'var(--chart-4)' }} />
                 </span>
                 <span className="db-bar-value">{p.funnel[stage.key]}</span>
               </div>
@@ -785,11 +785,11 @@ function PipelineBoard({ data, onNavigate }: {
         </section>
         <section className="db-card">
           <h3>Submissions by form</h3>
-          <BarList color="#2563eb" rows={p.by_form.map((f) => ({ key: f.name, label: f.name, value: f.count }))} />
+          <BarList color="var(--chart-1)" rows={p.by_form.map((f) => ({ key: f.name, label: f.name, value: f.count }))} />
         </section>
         <section className="db-card db-span2">
           <h3>Submissions by track</h3>
-          <BarList color="#7c3aed" rows={p.by_track.map((tr) => ({ key: tr.name, label: tr.name, value: tr.count }))} />
+          <BarList color="var(--chart-3)" rows={p.by_track.map((tr) => ({ key: tr.name, label: tr.name, value: tr.count }))} />
         </section>
       </div>
     </>

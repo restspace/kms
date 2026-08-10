@@ -1,0 +1,334 @@
+/**
+ * KMS design tokens — the single source for colour, type and density across
+ * every surface: the admin SPA, the Worker-rendered auth/error pages, the
+ * speaker portal and the public event pages.
+ *
+ * Direction per docs/11 §4 as revised by the Editorial Broadsheet theme
+ * (tests/workplan-6-theme-editorial.md): a warm paper ground with a display
+ * serif for headings and a sans for all data, 14px base / 13px in grids,
+ * compact 32px rows on an 8px spacing scale, one deep ink-blue accent with red
+ * reserved for danger, status colours reserved for status (always paired with
+ * a label), hairline rules instead of card chrome (shadows only on overlays),
+ * motion ≤150ms, both themes defined explicitly.
+ *
+ * Theme resolution has three states: bare :root is the complete light palette;
+ * the prefers-color-scheme block (guarded with :not([data-theme="light"]))
+ * covers OS-dark with no explicit choice; [data-theme="dark"] covers an
+ * explicit dark choice. Components must only ever use the tokens.
+ *
+ * THIS FILE IS THE CANONICAL SOURCE. `src/generated.ts` is derived from it by
+ * `node build.mjs` so the Worker can inline the same tokens into its SSR'd
+ * <style> blocks; `tokens.test.ts` fails if the two drift apart.
+ */
+
+/**
+ * Display face, self-hosted from the ASSETS binding (apps/public/public/fonts
+ * -> /static/fonts) rather than a CDN: this is a Workers app that already
+ * serves an asset directory, so a third-party request on every page load is
+ * avoidable latency. Latin subset, variable weight 200-900, one file per style.
+ *
+ * The two "Fallback" faces below are Georgia and Times re-metricked to match
+ * Source Serif 4, so the swap at load time does not reflow the headings.
+ * size-adjust is the ratio of the two faces' xAvgCharWidth (558/1000 em for
+ * Source Serif 4 vs 901/2048 for Georgia, 821/2048 for Times); the ascent and
+ * descent overrides restate Source Serif 4's hhea metrics (1036/-335) as a
+ * percentage of that adjusted em. Recompute these if the display face changes.
+ */
+@font-face {
+  font-family: "Source Serif 4";
+  font-style: normal;
+  font-weight: 200 900;
+  font-display: swap;
+  src: url("/static/fonts/source-serif-4-v14-latin-normal.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA,
+    U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193,
+    U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+@font-face {
+  font-family: "Source Serif 4";
+  font-style: italic;
+  font-weight: 200 900;
+  font-display: swap;
+  src: url("/static/fonts/source-serif-4-v14-latin-italic.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA,
+    U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193,
+    U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+@font-face {
+  font-family: "Source Serif 4 Fallback";
+  src: local("Georgia");
+  size-adjust: 126.84%;
+  ascent-override: 81.68%;
+  descent-override: 26.41%;
+  line-gap-override: 0%;
+}
+
+@font-face {
+  font-family: "Source Serif 4 Fallback 2";
+  src: local("Times New Roman"), local("Times");
+  size-adjust: 139.19%;
+  ascent-override: 74.43%;
+  descent-override: 24.07%;
+  line-gap-override: 0%;
+}
+
+:root {
+  /**
+   * Type has three roles and they are not interchangeable.
+   *
+   * --font-display is a *display* face: page and card headings, the sidebar
+   * brand and nav, and the small-caps section labels. It must never reach
+   * grid rows, table bodies, form inputs or any other data — a serif at
+   * --text-grid in a 40-row DataList is unreadable. --font-ui owns all of
+   * that and is the default for the document.
+   */
+  --font-display: "Source Serif 4", "Source Serif 4 Fallback", "Source Serif 4 Fallback 2", Georgia, "Times New Roman", serif;
+  --font-ui: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --text-display: 1.9rem;
+  --text-base: 14px;
+  --text-grid: 13px;
+  --text-label: 12px;
+  --text-caption: 11px;
+
+  /**
+   * The one tracking value for uppercase micro-labels ("ALSO CHECK",
+   * "RECENT SUBMISSIONS", column headers). Set here rather than re-declared
+   * per component, which is how the 0.04/0.05/0.08em spread happened.
+   */
+  --tracking-label: 0.08em;
+
+  /* Density */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --row-height: 32px;
+  --tab-height: 44px;
+  --control-height: 28px;
+  /* Near-square. The editorial treatment separates regions with rules, and
+     a visible corner radius reads as a card, which is what it replaces. */
+  --radius-sm: 1px;
+  --radius: 2px;
+
+  /* Ground and surfaces — warm paper. --surface deliberately equals --bg:
+     the theme separates regions with hairline rules, not with filled cards. */
+  --bg: #faf7f0;
+  --surface: #faf7f0;
+  /* The one surface allowed to differ from the ground: things that float
+     (dialogs, menus, popovers) and small control fills (checkboxes) that
+     would otherwise disappear into it. Flat regions must not use it. */
+  --surface-raised: #fffdf8;
+  --surface-hover: #f2ede1;
+  --chrome: #f0ebdf;
+  --border: #e3ddce;
+  /* Draws form-control boundaries, so it has to clear 3:1 on the ground
+     (WCAG 1.4.11) — that is why it is darker than a decorative hairline. */
+  --border-strong: #978e83;
+
+  /* Text — warm near-black, not the ink navy of the mockup. A navy body text
+     sits at almost the same value as the ink-blue accent and the accent stops
+     reading as one; the warm cast also suits the paper ground. */
+  --text: #1c1917;
+  --text-secondary: #44403c;
+  --text-muted: #6b6259;
+  --text-faint: #776f66;
+
+  /* Accent — deep ink blue. Red is reserved for --danger so the primary and
+     destructive actions never share a hue. */
+  --accent: #2c4a73;
+  --accent-strong: #1f3a5f;
+  --accent-contrast: #ffffff;
+  --accent-soft: #edf0f6;
+  --accent-soft-hover: #e0e7f1;
+  --accent-border: #b9c6da;
+
+  /* A second categorical hue. Only for sets of outcomes that must be told
+     apart at a glance (the import preview badges); never for state. */
+  --accent-alt: #6d3f73;
+
+  /* Danger. The filled colour keeps its saturation for buttons; danger *text*
+     uses the darker step, which the warm ground needs to clear 4.5:1. */
+  --danger: #dc2626;
+  --danger-strong: #a81e1e;
+  --danger-soft: #fbefec;
+  --danger-border: #efc8c2;
+  --danger-contrast: #ffffff;
+
+  /* Notice (paused filters, warnings) */
+  --notice-soft: #faefd4;
+  --notice-border: #e9d7a6;
+  --notice-text: #78500f;
+  /* Solid enough to carry a 3px rule or marker, unlike --notice-border. */
+  --notice-strong: #a06a15;
+
+  /* Status — used ONLY for record status, always with a visible label.
+     Re-tuned for the warm ground: the cool-grey palette's greens and yellows
+     go muddy on paper and its slate "withdrawn" chip reads distinctly blue. */
+  --status-accepted-bg: #dfeed9;
+  --status-accepted-text: #2e6b34;
+  --status-pending-bg: #fbf0ce;
+  --status-pending-text: #7a5410;
+  --status-queue-bg: #faebd3;
+  --status-queue-text: #7a4e14;
+  --status-declined-bg: #fae1dc;
+  --status-declined-text: #a3231f;
+  --status-withdrawn-bg: #e8e3d8;
+  --status-withdrawn-text: #524b42;
+  --status-draft-bg: #f0ece2;
+  --status-draft-text: #55504a;
+
+  /**
+   * Chart series. Categorical hues are assigned in this fixed order and never
+   * cycled — a chart's colour follows the entity, not its rank, so a filter
+   * that drops a series must not repaint the survivors.
+   *
+   * Validated (dataviz six-checks) against the paper ground: lightness band,
+   * chroma floor, CVD separation on every adjacent pair, normal-vision floor
+   * and 3:1 contrast all pass. The order matters — green and orange are
+   * deliberately non-adjacent, which is what lifts the deutan pair over ΔE 8.
+   * Re-run the validator if these change.
+   *
+   * Single-series charts use --accent instead; status-shaped charts (accepted
+   * vs pending) use the --status-* marks below, because status colour is
+   * reserved and must not double as "series 4".
+   */
+  --chart-1: #2b62b0;
+  --chart-2: #c05a1a;
+  --chart-3: #933d8f;
+  --chart-4: #227a54;
+  /* Status marks for charts: a strong and a soft step per family, so a donut
+     can split "sessions vs abstracts" inside one status without inventing a
+     hue. Distinct from the chip --status-*-text, which is tuned for text. */
+  --chart-good: #227a54;
+  --chart-good-soft: #63a985;
+  --chart-warn: #b8791c;
+  --chart-warn-soft: #dcae55;
+
+  /* Overlays are the one permitted elevation */
+  --shadow-overlay: 0 4px 20px rgba(41, 33, 20, 0.18);
+  --scrim: rgba(28, 25, 23, 0.45);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #16130f;
+    --surface: #16130f;
+    --surface-raised: #221e18;
+    --surface-hover: #221e19;
+    --chrome: #1e1b16;
+    --border: #332e27;
+    --border-strong: #6b6358;
+
+    --text: #f0eae0;
+    --text-secondary: #c9c0b3;
+    --text-muted: #9c9284;
+    --text-faint: #8b8173;
+
+    --accent: #8fb4e0;
+    --accent-strong: #a8c6e8;
+    --accent-contrast: #12203a;
+    --accent-soft: #1c2532;
+    --accent-soft-hover: #24303f;
+    --accent-border: #3e5877;
+    --accent-alt: #c9a0d0;
+
+    --danger: #f08a8a;
+    --danger-strong: #f5afaf;
+    --danger-soft: #2a1917;
+    --danger-border: #5a2e2c;
+    --danger-contrast: #2a1917;
+
+    --notice-soft: #2b2312;
+    --notice-border: #55471f;
+    --notice-text: #f0b429;
+    --notice-strong: #d99a1c;
+
+    --status-accepted-bg: #182a19;
+    --status-accepted-text: #7fc98a;
+    --status-pending-bg: #2b2611;
+    --status-pending-text: #e3c04a;
+    --status-queue-bg: #2c2413;
+    --status-queue-text: #e0aa4e;
+    --status-declined-bg: #2e1917;
+    --status-declined-text: #f0918c;
+    --status-withdrawn-bg: #272219;
+    --status-withdrawn-text: #b3a897;
+    --status-draft-bg: #221e18;
+    --status-draft-text: #a49a8b;
+
+    --chart-1: #4a86cc;
+    --chart-2: #ce7726;
+    --chart-3: #b36bc2;
+    --chart-4: #3a9e6b;
+    --chart-good: #3a9e6b;
+    --chart-good-soft: #6ec098;
+    --chart-warn: #c98a2a;
+    --chart-warn-soft: #e0b569;
+
+    --shadow-overlay: 0 4px 20px rgba(0, 0, 0, 0.6);
+    --scrim: rgba(10, 8, 6, 0.62);
+  }
+}
+
+:root[data-theme="dark"] {
+  --bg: #16130f;
+  --surface: #16130f;
+  --surface-raised: #221e18;
+  --surface-hover: #221e19;
+  --chrome: #1e1b16;
+  --border: #332e27;
+  --border-strong: #6b6358;
+
+  --text: #f0eae0;
+  --text-secondary: #c9c0b3;
+  --text-muted: #9c9284;
+  --text-faint: #8b8173;
+
+  --accent: #8fb4e0;
+  --accent-strong: #a8c6e8;
+  --accent-contrast: #12203a;
+  --accent-soft: #1c2532;
+  --accent-soft-hover: #24303f;
+  --accent-border: #3e5877;
+  --accent-alt: #c9a0d0;
+
+  --danger: #f08a8a;
+  --danger-strong: #f5afaf;
+  --danger-soft: #2a1917;
+  --danger-border: #5a2e2c;
+  --danger-contrast: #2a1917;
+
+  --notice-soft: #2b2312;
+  --notice-border: #55471f;
+  --notice-text: #f0b429;
+  --notice-strong: #d99a1c;
+
+  --status-accepted-bg: #182a19;
+  --status-accepted-text: #7fc98a;
+  --status-pending-bg: #2b2611;
+  --status-pending-text: #e3c04a;
+  --status-queue-bg: #2c2413;
+  --status-queue-text: #e0aa4e;
+  --status-declined-bg: #2e1917;
+  --status-declined-text: #f0918c;
+  --status-withdrawn-bg: #272219;
+  --status-withdrawn-text: #b3a897;
+  --status-draft-bg: #221e18;
+  --status-draft-text: #a49a8b;
+
+  --chart-1: #4a86cc;
+  --chart-2: #ce7726;
+  --chart-3: #b36bc2;
+  --chart-4: #3a9e6b;
+  --chart-good: #3a9e6b;
+  --chart-good-soft: #6ec098;
+  --chart-warn: #c98a2a;
+  --chart-warn-soft: #e0b569;
+
+  --shadow-overlay: 0 4px 20px rgba(0, 0, 0, 0.6);
+  --scrim: rgba(10, 8, 6, 0.62);
+}

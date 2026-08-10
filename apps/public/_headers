@@ -1,0 +1,12 @@
+# Cloudflare Workers Static Assets header rules. Copied to the root of the
+# assets directory at build time (see scripts/copy-asset-headers.mjs).
+
+# Font filenames carry the upstream release (…-v14-…), so a new cut of the
+# face lands under a new URL and never has to bust an existing cache entry.
+/static/fonts/*
+  Cache-Control: public, max-age=31536000, immutable
+  Access-Control-Allow-Origin: *
+
+# Vite emits hashed filenames for the admin bundle.
+/app/assets/*
+  Cache-Control: public, max-age=31536000, immutable

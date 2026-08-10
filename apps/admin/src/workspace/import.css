@@ -2,11 +2,11 @@
    only the wizard's own internals are styled here. */
 
 .import-error {
-  border: 1px solid var(--danger, #dc2626);
-  border-radius: 6px;
+  border: 1px solid var(--danger);
+  border-radius: var(--radius);
   padding: 8px 10px;
   margin-bottom: 12px;
-  color: var(--danger, #dc2626);
+  color: var(--danger);
   font-size: 13px;
 }
 
@@ -23,11 +23,12 @@
   color: var(--text-muted);
 }
 
-.import-map-step h4 {
+.import-map-step h4 { font-family: var(--font-display);
   margin: 16px 0 8px;
   font-size: 12px;
   text-transform: uppercase;
-  letter-spacing: 0.04em;
+  font-family: var(--font-display);
+  letter-spacing: var(--tracking-label);
   color: var(--text-muted);
 }
 
@@ -75,7 +76,7 @@
   max-height: 320px;
   overflow: auto;
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--radius);
 }
 
 .import-preview table {
@@ -105,7 +106,7 @@
 
 .import-badge {
   display: inline-block;
-  border-radius: 999px;
+  border-radius: var(--radius);
   padding: 1px 8px;
   font-size: 11px;
   font-weight: 600;
@@ -114,10 +115,10 @@
   white-space: nowrap;
 }
 
-.import-badge-create { border-color: #16a34a; color: #16a34a; }
-.import-badge-update { border-color: #2563eb; color: #2563eb; }
-.import-badge-merge { border-color: #7c3aed; color: #7c3aed; }
-.import-badge-error { border-color: #dc2626; color: #dc2626; }
+.import-badge-create { border-color: var(--status-accepted-text); color: var(--status-accepted-text); }
+.import-badge-update { border-color: var(--accent); color: var(--accent); }
+.import-badge-merge { border-color: var(--accent-alt); color: var(--accent-alt); }
+.import-badge-error { border-color: var(--danger-strong); color: var(--danger-strong); }
 
 .data-list-toolbar-actions.after-export {
   left: max(96px, calc(env(safe-area-inset-left) + 96px));

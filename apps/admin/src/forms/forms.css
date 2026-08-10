@@ -17,7 +17,7 @@
   background: var(--chrome);
 }
 
-.forms-header h1 {
+.forms-header h1 { font-family: var(--font-display);
   font-size: 15px;
   margin: 0;
   flex: 1 1 auto;
@@ -92,7 +92,7 @@
   align-items: center;
   height: 20px;
   padding: 0 var(--space-2);
-  border-radius: 10px;
+  border-radius: var(--radius);
   font-size: var(--text-caption);
   font-weight: 600;
   white-space: nowrap;
@@ -213,7 +213,7 @@
   padding: var(--space-4) var(--space-5);
 }
 
-.builder-pane h2 {
+.builder-pane h2 { font-family: var(--font-display);
   font-size: 15px;
   margin: 0 0 var(--space-1);
 }
@@ -303,7 +303,7 @@
   background: var(--accent-soft);
 }
 
-.setup-card h3 { margin: 0 0 var(--space-1); font-size: var(--text-base); }
+.setup-card h3 { font-family: var(--font-display); margin: 0 0 var(--space-1); font-size: var(--text-base); }
 .setup-card p { margin: 0; color: var(--text-muted); font-size: var(--text-label); }
 
 /* --- question list --- */
@@ -342,7 +342,7 @@
   align-items: center;
   height: 18px;
   padding: 0 6px;
-  border-radius: 9px;
+  border-radius: var(--radius);
   font-size: var(--text-caption);
   background: var(--chrome);
   border: 1px solid var(--border);
@@ -376,7 +376,7 @@
 }
 
 .fmodal {
-  background: var(--surface);
+  background: var(--surface-raised);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   box-shadow: var(--shadow-overlay);

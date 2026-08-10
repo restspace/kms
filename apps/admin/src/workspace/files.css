@@ -21,8 +21,8 @@
   list-style: none;
   margin: 6px 0 0;
   padding: 0;
-  border: 1px solid var(--border, #e5e7eb);
-  border-radius: 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
 }
 
 .file-versions li {
@@ -32,7 +32,7 @@
   flex-wrap: wrap;
   padding: 6px 10px;
   font-size: 13px;
-  border-bottom: 1px solid var(--border, #e5e7eb);
+  border-bottom: 1px solid var(--border);
 }
 
 .file-versions li:last-child {
@@ -42,19 +42,19 @@
 .file-vtag {
   font-size: 11px;
   font-weight: 700;
-  border-radius: 4px;
+  border-radius: var(--radius);
   padding: 1px 6px;
-  background: var(--surface-2, #f3f4f6);
-  color: var(--text-muted, #6b7280);
+  background: var(--chrome);
+  color: var(--text-muted);
 }
 
 .file-vtag.current {
-  background: #dcfce7;
-  color: #15803d;
+  background: var(--status-accepted-bg);
+  color: var(--status-accepted-text);
 }
 
 .file-vmeta {
-  color: var(--text-muted, #6b7280);
+  color: var(--text-muted);
   font-size: 12px;
   margin-left: auto;
 }
@@ -64,23 +64,23 @@
 }
 
 .file-comment {
-  border-left: 3px solid var(--border, #e5e7eb);
+  border-left: 3px solid var(--border);
   padding: 2px 0 2px 8px;
   margin-bottom: 8px;
   font-size: 13px;
 }
 
 .file-comment.speaker {
-  border-left-color: #f59e0b;
+  border-left-color: var(--notice-strong);
 }
 
 .file-comment .fc-head {
-  color: var(--text-muted, #6b7280);
+  color: var(--text-muted);
   font-size: 12px;
 }
 
 .file-comment .fc-head strong {
-  color: var(--text, #1f2937);
+  color: var(--text);
 }
 
 .file-comment .fc-body {
@@ -100,8 +100,8 @@
   font: inherit;
   font-size: 13px;
   padding: 6px 8px;
-  border: 1px solid var(--border, #d1d5db);
-  border-radius: 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
   resize: vertical;
 }
 
@@ -112,11 +112,11 @@
 }
 
 .file-empty {
-  color: var(--text-muted, #6b7280);
+  color: var(--text-muted);
   font-size: 13px;
 }
 
 .file-error {
-  color: var(--danger, #dc2626);
+  color: var(--danger);
   font-size: 12px;
 }

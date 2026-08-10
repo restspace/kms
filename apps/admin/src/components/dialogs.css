@@ -8,7 +8,7 @@
   align-items: center;
   justify-content: center;
   z-index: 1000;
-  padding: var(--space-4, 16px);
+  padding: var(--space-4);
   overflow-y: auto;
 }
 
@@ -23,13 +23,13 @@
  * unreachable rather than "obscured" by another element.
  */
 .app-dialog {
-  background: var(--surface);
+  background: var(--surface-raised);
   color: var(--text);
   border: 1px solid var(--border);
-  border-radius: 10px;
-  box-shadow: var(--shadow-overlay, 0 12px 32px rgba(0, 0, 0, 0.25));
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-overlay);
   width: min(420px, 100%);
-  max-height: calc(100vh - 2 * var(--space-4, 16px));
+  max-height: calc(100vh - 2 * var(--space-4));
   padding: 18px 20px 16px;
   display: flex;
   flex-direction: column;
@@ -56,6 +56,7 @@
 }
 
 .app-dialog-title {
+  font-family: var(--font-display);
   margin: 0 0 8px;
   font-size: 15px;
   font-weight: 650;
@@ -70,13 +71,13 @@
   line-height: 1;
   padding: 2px 4px;
   margin: -2px -4px 0 0;
-  border-radius: 6px;
+  border-radius: var(--radius);
   cursor: pointer;
 }
 
 .app-dialog-close:hover {
   color: var(--text);
-  background: var(--surface-hover, color-mix(in srgb, var(--text) 8%, transparent));
+  background: var(--surface-hover);
 }
 
 .app-dialog-close:focus-visible {
@@ -107,7 +108,7 @@
 }
 
 .app-dialog-actions button {
-  border-radius: 6px;
+  border-radius: var(--radius);
   font-size: 13px;
   font-weight: 600;
   padding: 6px 14px;
@@ -127,11 +128,11 @@
 .app-dialog-primary {
   background: var(--accent);
   border-color: var(--accent);
-  color: var(--accent-contrast, #fff);
+  color: var(--accent-contrast);
 }
 
 .app-dialog-primary:hover {
-  background: var(--accent-strong, var(--accent));
+  background: var(--accent-strong);
 }
 
 .app-dialog-primary.danger {

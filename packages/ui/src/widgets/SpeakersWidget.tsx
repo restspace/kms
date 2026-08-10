@@ -123,12 +123,12 @@ export function SpeakersWidget({ eventSlug }: SpeakersWidgetProps) {
 }
 
 const speakersWidgetCss = `
-.speakers-search { width: 100%; max-width: 360px; padding: .5rem .75rem; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--fg); font-size: .95rem; margin-bottom: .5rem; }
+.speakers-search { width: 100%; max-width: 360px; padding: .5rem .75rem; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); color: var(--text); font-size: .95rem; margin-bottom: .5rem; }
 .speakers-count { margin: 0 0 .75rem; font-size: .85rem; }
 .speakers-grid { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: .85rem; }
-.speaker-card { border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+.speaker-card { border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
 .speaker-card-link { display: flex; align-items: center; gap: .75rem; padding: .85rem; color: inherit; text-decoration: none; }
-.speaker-card-link:hover { background: color-mix(in srgb, var(--fg) 5%, transparent); }
+.speaker-card-link:hover { background: color-mix(in srgb, var(--text) 5%, transparent); }
 .speaker-avatar { border-radius: 999px; object-fit: cover; flex-shrink: 0; }
 .speaker-avatar-fallback { display: flex; align-items: center; justify-content: center; background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); font-weight: 600; font-size: .95rem; }
 .speaker-card-body { display: flex; flex-direction: column; gap: .2rem; min-width: 0; }

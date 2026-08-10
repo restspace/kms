@@ -14,6 +14,8 @@ export interface ThemeConfig {
   primary_color?: string | null;
   background_color?: string | null;
   font?: string | null;
+  /** Heading face. A *stack*, never a webfont — see DEFAULT_THEME. */
+  display_font?: string | null;
   header_html?: string | null;
   footer_html?: string | null;
 }
@@ -191,10 +193,22 @@ export const DEFAULT_TEMPLATES: Record<string, DefaultTemplate> = {
   },
 };
 
-const DEFAULT_THEME: Required<Pick<ThemeConfig, 'primary_color' | 'background_color' | 'font'>> = {
-  primary_color: '#2563eb',
-  background_color: '#f5f6f8',
+/**
+ * Sympathetic to the app theme, not identical to it (workplan §4). Email
+ * clients do not reliably support webfonts, so the heading face is a *stack*
+ * that lands on something serif everywhere rather than the app's Source
+ * Serif 4; and every value here is a literal 6-digit hex on an opaque
+ * background, because Outlook drops custom properties, most modern CSS colour
+ * functions, and border-radius. Losing the radius is harmless — the editorial
+ * theme is near-square anyway.
+ */
+const DEFAULT_THEME: Required<
+  Pick<ThemeConfig, 'primary_color' | 'background_color' | 'font' | 'display_font'>
+> = {
+  primary_color: '#2c4a73',
+  background_color: '#faf7f0',
   font: "-apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif",
+  display_font: "Georgia, 'Times New Roman', Times, serif",
 };
 
 /** Wrap a rendered body in the themed 600px table layout (docs/08 §2). */
@@ -207,25 +221,26 @@ export function applyTheme(
   const primary = theme?.primary_color ?? DEFAULT_THEME.primary_color;
   const background = theme?.background_color ?? DEFAULT_THEME.background_color;
   const font = theme?.font ?? DEFAULT_THEME.font;
+  const displayFont = theme?.display_font ?? DEFAULT_THEME.display_font;
   const header =
     theme?.header_html ??
-    `<h2 style="margin:0;font-size:18px;color:#ffffff;">${escapeHtml(eventName)}</h2>`;
+    `<h2 style="margin:0;font-family:${displayFont};font-size:20px;font-weight:normal;color:#ffffff;">${escapeHtml(eventName)}</h2>`;
   const footer =
     theme?.footer_html ??
-    `<p style="margin:0;color:#6b7280;font-size:12px;">You are receiving this because of your participation in ${escapeHtml(eventName)}.</p>`;
+    `<p style="margin:0;color:#6b6259;font-size:12px;">You are receiving this because of your participation in ${escapeHtml(eventName)}.</p>`;
 
   return `<!doctype html>
 <html><head><meta charset="utf-8"><meta name="color-scheme" content="light dark"><title>${escapeHtml(subject)}</title></head>
 <body style="margin:0;padding:0;background:${background};">
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:${background};">
 <tr><td align="center" style="padding:24px 12px;">
-<table role="presentation" width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%;background:#ffffff;border-radius:8px;overflow:hidden;font-family:${font};font-size:15px;line-height:1.6;color:#1f2937;">
+<table role="presentation" width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%;background:#fffdf8;border-radius:2px;overflow:hidden;font-family:${font};font-size:15px;line-height:1.6;color:#1c1917;">
 <tr><td style="background:${primary};padding:18px 28px;">${header}</td></tr>
 <tr><td style="padding:26px 28px;">
-<style>a.btn{display:inline-block;background:${primary};color:#ffffff !important;text-decoration:none;padding:10px 22px;border-radius:6px;font-weight:600;}</style>
+<style>a.btn{display:inline-block;background:${primary};color:#ffffff !important;text-decoration:none;padding:10px 22px;border-radius:2px;font-weight:600;}</style>
 ${bodyHtml}
 </td></tr>
-<tr><td style="padding:16px 28px;border-top:1px solid #e5e7eb;">${footer}</td></tr>
+<tr><td style="padding:16px 28px;border-top:1px solid #e3ddce;">${footer}</td></tr>
 </table>
 </td></tr>
 </table>

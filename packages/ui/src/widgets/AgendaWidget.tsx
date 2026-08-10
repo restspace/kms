@@ -476,43 +476,43 @@ export function AgendaWidget({ eventSlug, filter }: AgendaWidgetProps) {
 const agendaCss = `
 .ag-toolbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .75rem; margin-bottom: .5rem; }
 .ag-days { display: flex; flex-wrap: wrap; gap: .3rem; }
-.ag-day { padding: .35rem .8rem; border-radius: 999px; border: 1px solid var(--line); background: transparent; color: var(--muted); font-size: .9rem; cursor: pointer; }
-.ag-day:hover { color: var(--fg); border-color: var(--accent); }
+.ag-day { padding: .35rem .8rem; border-radius: 999px; border: 1px solid var(--border); background: transparent; color: var(--text-muted); font-size: .9rem; cursor: pointer; }
+.ag-day:hover { color: var(--text); border-color: var(--accent); }
 .ag-day-active, .ag-day-active:hover { color: var(--accent); border-color: var(--accent); font-weight: 600; background: color-mix(in srgb, var(--accent) 12%, transparent); }
-.ag-ics { font-size: .85rem; color: var(--muted); text-decoration: none; border-bottom: 1px dotted currentColor; }
+.ag-ics { font-size: .85rem; color: var(--text-muted); text-decoration: none; border-bottom: 1px dotted currentColor; }
 .ag-ics:hover { color: var(--accent); }
 .ag-daymeta { margin: 0 0 .75rem; font-size: .85rem; }
 
-.ag-scroll { overflow-x: auto; overflow-y: visible; border: 1px solid var(--line); border-radius: 12px; }
+.ag-scroll { overflow-x: auto; overflow-y: visible; border: 1px solid var(--border); border-radius: var(--radius); }
 /* min-content = the gutter plus one --ag-col per room, so wide events overflow
    into the container's horizontal scroll instead of squeezing columns. Using
    max-content here would let a long session title dictate column width. */
 .ag-grid { --ag-gutter: 62px; --ag-col: 170px; display: grid; position: relative; min-width: min-content; }
 
-.ag-corner, .ag-colhead { position: sticky; top: 0; z-index: 3; background: var(--bg); border-bottom: 1px solid var(--line); padding: .5rem .6rem; }
+.ag-corner, .ag-colhead { position: sticky; top: 0; z-index: 3; background: var(--surface); border-bottom: 1px solid var(--border); padding: .5rem .6rem; }
 .ag-corner { left: 0; z-index: 4; }
-.ag-colhead { display: flex; flex-direction: column; gap: .1rem; border-left: 1px solid var(--line); }
+.ag-colhead { display: flex; flex-direction: column; gap: .1rem; border-left: 1px solid var(--border); }
 .ag-colhead-name { font-weight: 600; font-size: .9rem; }
-.ag-colhead-sub { color: var(--muted); font-size: .72rem; }
+.ag-colhead-sub { color: var(--text-muted); font-size: .72rem; }
 
-.ag-gutter { position: sticky; left: 0; z-index: 2; grid-column: 1; background: var(--bg); color: var(--muted); font-size: .72rem; padding: 2px .5rem 0 .6rem; text-align: right; border-right: 1px solid var(--line); }
-.ag-hourline { border-top: 1px solid var(--line); pointer-events: none; z-index: 0; }
+.ag-gutter { position: sticky; left: 0; z-index: 2; grid-column: 1; background: var(--surface); color: var(--text-muted); font-size: .72rem; padding: 2px .5rem 0 .6rem; text-align: right; border-right: 1px solid var(--border); }
+.ag-hourline { border-top: 1px solid var(--border); pointer-events: none; z-index: 0; }
 
-.ag-block { position: relative; z-index: 1; overflow: hidden; display: flex; flex-direction: column; gap: .1rem; align-items: flex-start; text-align: left; margin-block: 1px; padding: .3rem .45rem; font: inherit; font-size: .78rem; line-height: 1.25; cursor: pointer; color: var(--fg); border: 1px solid var(--line); border-left: 3px solid var(--ag-track, var(--accent)); border-radius: 7px; background: color-mix(in srgb, var(--ag-track, var(--accent)) 10%, var(--bg)); }
-.ag-block:hover, .ag-block:focus-visible { border-color: var(--accent); background: color-mix(in srgb, var(--ag-track, var(--accent)) 22%, var(--bg)); }
-.ag-block-time { color: var(--muted); font-size: .7rem; white-space: nowrap; }
+.ag-block { position: relative; z-index: 1; overflow: hidden; display: flex; flex-direction: column; gap: .1rem; align-items: flex-start; text-align: left; margin-block: 1px; padding: .3rem .45rem; font: inherit; font-size: .78rem; line-height: 1.25; cursor: pointer; color: var(--text); border: 1px solid var(--border); border-left: 3px solid var(--ag-track, var(--accent)); border-radius: var(--radius); background: color-mix(in srgb, var(--ag-track, var(--accent)) 10%, var(--surface)); }
+.ag-block:hover, .ag-block:focus-visible { border-color: var(--accent); background: color-mix(in srgb, var(--ag-track, var(--accent)) 22%, var(--surface)); }
+.ag-block-time { color: var(--text-muted); font-size: .7rem; white-space: nowrap; }
 .ag-block-title { font-weight: 600; }
-.ag-block-speakers, .ag-block-track { color: var(--muted); font-size: .7rem; }
+.ag-block-speakers, .ag-block-track { color: var(--text-muted); font-size: .7rem; }
 
-.ag-overlay { position: fixed; inset: 0; z-index: 50; background: color-mix(in srgb, #000 55%, transparent); display: flex; align-items: flex-start; justify-content: center; padding: 4vh 1rem; overflow-y: auto; }
-.ag-panel { background: var(--bg); color: var(--fg); border: 1px solid var(--line); border-radius: 14px; padding: 1.25rem 1.4rem 1.5rem; max-width: 44rem; width: 100%; }
+.ag-overlay { position: fixed; inset: 0; z-index: 50; background: var(--scrim); display: flex; align-items: flex-start; justify-content: center; padding: 4vh 1rem; overflow-y: auto; }
+.ag-panel { background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: var(--radius); padding: 1.25rem 1.4rem 1.5rem; max-width: 44rem; width: 100%; }
 .ag-panel:focus { outline: none; }
 .ag-panel-head { margin-bottom: .75rem; }
 .ag-back { font-size: .85rem; }
 .ag-panel-title { margin: 0 0 .25rem; font-size: 1.35rem; }
-.ag-panel-when { margin: 0 0 1rem; color: var(--muted); font-size: .9rem; }
+.ag-panel-when { margin: 0 0 1rem; color: var(--text-muted); font-size: .9rem; }
 .ag-facts { display: grid; grid-template-columns: max-content 1fr; gap: .35rem .9rem; margin: 0 0 1rem; font-size: .9rem; }
-.ag-facts dt { color: var(--muted); }
+.ag-facts dt { color: var(--text-muted); }
 .ag-facts dd { margin: 0; }
 .ag-panel-desc p { margin: 0 0 .75rem; }
 .ag-panel-desc p:last-child { margin-bottom: 0; }

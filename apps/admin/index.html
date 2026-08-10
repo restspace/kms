@@ -4,6 +4,18 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>KMS Admin</title>
+    <!--
+      The dashboard h1 is the first thing painted and it is set in the display
+      face, so fetch it in parallel with the CSS rather than after it. Only the
+      upright face — the italics are incidental labels and can arrive late.
+    -->
+    <link
+      rel="preload"
+      as="font"
+      type="font/woff2"
+      crossorigin
+      href="/static/fonts/source-serif-4-v14-latin-normal.woff2"
+    />
   </head>
   <body>
     <div id="root"></div>
