@@ -153,6 +153,52 @@
   text-decoration: underline;
 }
 
+/* Compact chrome (docs/16 item 9). Present in the markup at every width; the
+   medium media query at the foot of this file is what turns it on. */
+.shell-topbar {
+  display: none;
+  align-items: center;
+  gap: var(--space-2);
+  height: 44px;
+  flex: 0 0 auto;
+  padding: 0 var(--space-2);
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+}
+
+.shell-topbar-toggle {
+  width: 44px;
+  height: 44px;
+  border: 0;
+  background: none;
+  color: var(--text);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.shell-topbar-brand {
+  font-family: var(--font-display);
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.shell-topbar-event {
+  color: var(--text-muted);
+  font-size: var(--text-label);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.shell-scrim {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 55;
+  background: var(--scrim);
+}
+
 .shell-main {
   flex: 1 1 auto;
   display: flex;
@@ -492,4 +538,43 @@
   .detail-panel dl { grid-template-columns: 1fr; }
 
   .detail-panel .detail-actions button { height: 44px; }
+}
+
+/* Medium (768): the 184px rail becomes a top bar plus a slide-over drawer.
+   Every rule here is additive — nothing above this block is edited, so the
+   desktop shell is byte-for-byte what it was. */
+@media (max-width: 768px) {
+  .shell {
+    flex-direction: column;
+  }
+
+  .shell-topbar {
+    display: flex;
+  }
+
+  .shell-scrim {
+    display: block;
+  }
+
+  .shell-sidebar {
+    position: fixed;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: min(260px, 80vw);
+    z-index: 60;
+    overflow-y: auto;
+    transform: translateX(-100%);
+    transition: transform 0.15s ease;
+  }
+
+  .shell-sidebar.is-open {
+    transform: translateX(0);
+  }
+}
+
+@media (max-width: 768px) and (prefers-reduced-motion: reduce) {
+  .shell-sidebar {
+    transition: none;
+  }
 }
