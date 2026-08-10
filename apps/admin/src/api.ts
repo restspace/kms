@@ -523,6 +523,8 @@ export const sendDecisions = (ids: string[]) =>
     tasks_assigned: number
     skipped: number
     skipped_notified: number
+    /** Submissions flipped without an email because no submitter contact/address exists. */
+    skipped_no_submitter?: number
     /** CFP-14: null when nothing was in a decision queue; poll it for real sent/failed counts. */
     job_id: string | null
   }>(
@@ -622,6 +624,14 @@ export interface FileLibraryRow extends FileVersion {
   submission_title: string | null
   version_count: number
   comment_count: number
+  /**
+   * The actual uploader (fa.uploaded_by_contact_id) — distinct from
+   * `uploader_name`/`uploader_email` (FileVersion), which is the chain's
+   * `contact_id` and, for headshots set from the admin side, is the subject
+   * contact rather than whoever clicked upload (SPK-10).
+   */
+  uploaded_by_name: string | null
+  uploaded_by_email: string | null
 }
 
 const fileQuery = (params: Record<string, string | number | undefined>): string => {

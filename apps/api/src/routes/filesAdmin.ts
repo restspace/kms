@@ -40,6 +40,15 @@ filesAdminRoutes.use('*', async (c, next) => {
  * `version_count` and `comment_count` are correlated aggregates over the
  * indexed chain columns, and is_current makes "the file" a single row rather
  * than a MAX() over uploaded_at.
+ *
+ * `uploader_name`/`uploader_email` come from u.contact_id, which for the
+ * original file-request flow (a speaker responding to a request themselves)
+ * is always the same person who performed the upload. Headshots break that
+ * assumption when set from the admin side (SPK-10): u.contact_id there is
+ * the *subject* contact (the speaker the headshot is for), not necessarily
+ * whoever clicked upload, so `uploaded_by_name`/`uploaded_by_email` are
+ * added from fa.uploaded_by_contact_id — the actual uploader saveFile always
+ * records — to keep "for" and "uploaded by" distinguishable in the UI.
  */
 const LIBRARY_SELECT = `SELECT u.id AS upload_id, u.file_asset_id, u.uploaded_at, u.version,
        u.submission_id, u.file_request_id, u.contact_id,
@@ -48,6 +57,8 @@ const LIBRARY_SELECT = `SELECT u.id AS upload_id, u.file_asset_id, u.uploaded_at
        s.code AS submission_code, s.title AS submission_title,
        NULLIF(TRIM(COALESCE(c.first_name, '') || ' ' || COALESCE(c.last_name, '')), '') AS uploader_name,
        c.email AS uploader_email,
+       NULLIF(TRIM(COALESCE(ub.first_name, '') || ' ' || COALESCE(ub.last_name, '')), '') AS uploaded_by_name,
+       ub.email AS uploaded_by_email,
        (SELECT COUNT(*) FROM file_request_uploads p
          WHERE p.file_request_id = u.file_request_id AND p.contact_id = u.contact_id
            AND COALESCE(p.submission_id, '') = COALESCE(u.submission_id, '')) AS version_count,
@@ -59,7 +70,8 @@ FROM file_request_uploads u
 JOIN file_assets fa ON fa.id = u.file_asset_id
 LEFT JOIN file_requests fr ON fr.id = u.file_request_id
 LEFT JOIN submissions s ON s.id = u.submission_id
-LEFT JOIN contacts c ON c.id = u.contact_id`;
+LEFT JOIN contacts c ON c.id = u.contact_id
+LEFT JOIN contacts ub ON ub.id = fa.uploaded_by_contact_id`;
 
 /**
  * GET /app/api/files/library — the central files view, one row per chain.

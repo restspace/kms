@@ -156,12 +156,35 @@ function systemColumns(questions: QuestionDef[], answers: Answers): Record<strin
 }
 
 /** Track names picked in the answers. A multiselect track question yields every
- *  selected value (Swyx multi-track gap) — all of them are resolved. */
+ *  selected value (Swyx multi-track gap) — all of them are resolved.
+ *
+ *  The organizer's form builder "Create Field" flow (formsAdmin.ts) mints a
+ *  synthetic `custom_<label>_<id4>` field_key for any field created inline
+ *  while adding a question, so an organizer-authored "Track" question on a
+ *  custom-built form never has field_key === 'track' — the exact-match
+ *  lookup silently resolved to no track at all (same root cause the 'level'
+ *  system column mapping above hit). Mirrors the admin's own label-based
+ *  fallback for that bug (workspace/extras.tsx's `levelAnswer` lookup): the
+ *  canonical field_key match is tried first, then any question whose label
+ *  reads as a track field, in question order. The value shape is unchanged
+ *  either way — a track name (or names, for multiselect) resolved against
+ *  this event's tracks by name just below in the submit handler. */
 function trackAnswers(questions: QuestionDef[], answers: Answers): string[] {
-  const q = questions.find((x) => x.field_key === 'track');
-  const v = q ? answers[q.id] : undefined;
-  if (Array.isArray(v)) return v.map(String).filter((s) => s !== '');
-  return typeof v === 'string' && v !== '' ? [v] : [];
+  const byFieldKey = questions.find((x) => x.field_key === 'track');
+  const byLabel = questions.filter(
+    (x) => x.field_key !== 'track' && typeof x.label === 'string' && x.label.trim().toLowerCase().includes('track'),
+  );
+  const candidates = byFieldKey ? [byFieldKey, ...byLabel] : byLabel;
+  for (const q of candidates) {
+    const v = answers[q.id];
+    if (Array.isArray(v)) {
+      const names = v.map(String).filter((s) => s !== '');
+      if (names.length > 0) return names;
+      continue;
+    }
+    if (typeof v === 'string' && v !== '') return [v];
+  }
+  return [];
 }
 
 function tagAnswers(questions: QuestionDef[], answers: Answers): string[] {

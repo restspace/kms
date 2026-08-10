@@ -622,13 +622,25 @@ evaluationRoutes.get('/submissions/:id/detail', async (c) => {
        FROM submission_participants sp JOIN contacts c ON c.id = sp.contact_id
        WHERE sp.submission_id = ? ORDER BY sp.position`,
     ).bind(id).all(),
+    // Every review recorded against this submission in *any* round of this
+    // event. It used to filter on `submissions.evaluation_plan_id`, which
+    // since 0012 is only the legacy routing column: a submission routed to
+    // plan A and then put into round B by an organiser keeps A there, so
+    // reviews saved in B were written, aggregated and counted but never
+    // read back — the detail said "No reviews yet" while the dashboard said
+    // 1/1 done. Reviews of a round the submission was later removed from
+    // stay visible too; they are a record of work done, and the plan name
+    // says which round each one belongs to.
     db.prepare(
       `SELECT r.weighted_total, r.comment, r.conflict_of_interest, r.created_at,
+              r.plan_id, p.name AS plan_name,
               NULLIF(TRIM(COALESCE(c.first_name, '') || ' ' || COALESCE(c.last_name, '')), '') AS reviewer_name
-       FROM reviews r JOIN contacts c ON c.id = r.reviewer_contact_id
-       WHERE r.submission_id = ? AND r.plan_id = (SELECT evaluation_plan_id FROM submissions WHERE id = ?)
-       ORDER BY r.created_at`,
-    ).bind(id, id).all(),
+       FROM reviews r
+       JOIN contacts c ON c.id = r.reviewer_contact_id
+       JOIN evaluation_plans p ON p.id = r.plan_id
+       WHERE r.submission_id = ? AND p.event_id = ?
+       ORDER BY p.created_at, r.created_at`,
+    ).bind(id, session.eventId).all(),
     db.prepare(
       `SELECT tg.name FROM submission_tags st JOIN tags tg ON tg.id = st.tag_id WHERE st.submission_id = ?`,
     ).bind(id).all(),

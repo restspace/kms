@@ -15,6 +15,7 @@ import { decodeCursor, encodeCursor, keysetWhere } from '../cursor';
 import { bumpEventRevision, getEventRevision } from '../revision';
 import { createSessionToken, getRevalidatedPrivilegedSession, setSessionCookie, type SessionPayload } from '../session';
 import { IMAGE_TYPES, MAX_HEADSHOT_BYTES, saveFile } from '../filestore';
+import { appendUploadVersion } from '../fileVersions';
 import { formsAdminRoutes } from './formsAdmin';
 import { evaluationRoutes } from './evaluation';
 import { agendaRoutes } from './agenda';
@@ -313,10 +314,15 @@ const RESOURCE_SPECS: Record<string, Omit<ResourceDef, 'fromSql'>> = {
     selectSql: `SELECT s.*, ev.name AS event_name, t.name AS track_name,
                 NULLIF(TRIM(COALESCE(sc.first_name, '') || ' ' || COALESCE(sc.last_name, '')), '') AS submitter_name,
                 ep.name AS plan_name,
+                -- Across every round the submission has been scored in, not
+                -- just the legacy evaluation_plan_id routing column: since
+                -- 0012 a submission can sit in a round it was never routed to,
+                -- and filtering on that column blanked the Ratings column for
+                -- exactly those (reviews recorded, nothing shown).
                 (SELECT ROUND(AVG(r.weighted_total), 2) FROM reviews r
-                 WHERE r.submission_id = s.id AND r.plan_id = s.evaluation_plan_id) AS rating,
+                 WHERE r.submission_id = s.id) AS rating,
                 (SELECT COUNT(*) FROM reviews r
-                 WHERE r.submission_id = s.id AND r.plan_id = s.evaluation_plan_id) AS review_count`,
+                 WHERE r.submission_id = s.id) AS review_count`,
     sortable: {
       code: 's.code',
       title: 's.title',
@@ -327,9 +333,13 @@ const RESOURCE_SPECS: Record<string, Omit<ResourceDef, 'fromSql'>> = {
       created_at: 's.created_at',
       notified_at: 's.notified_at',
       // rating_cache is json { "<plan_id>": 4.2 } (0001_init.sql:218), kept
-      // current by evaluation.ts refreshRatingCache — reading the cached value
-      // costs one json_extract instead of a correlated AVG per row (P2-18).
-      rating: `json_extract(s.rating_cache, '$."' || COALESCE(s.evaluation_plan_id, '') || '"')`,
+      // current by evaluation.ts ratingCacheStatement — sorting off the cache
+      // costs a walk of one small json object instead of a correlated AVG over
+      // reviews per row (P2-18). Averaging every key, rather than reading the
+      // legacy `evaluation_plan_id` one, keeps the sort in step with the
+      // `rating` column above for submissions scored in a round they were
+      // never routed to; no cache entry (never scored) still sorts as NULL.
+      rating: `(SELECT AVG(je.value) FROM json_each(COALESCE(s.rating_cache, '{}')) je)`,
     },
     defaultSort: 's.created_at DESC',
     filters: {
@@ -870,6 +880,41 @@ adminApiRoutes.delete('/contacts/:id', async (c) => {
   return c.json({ ok: true });
 });
 
+// SPK-10 fix: headshots were stored as a plain file_assets row (via
+// saveFile) plus a pointer on contacts.headshot_asset_id, but the Files
+// library (filesAdminRoutes.get('/library'), the query behind the Files
+// workspace tab) reads exclusively from file_request_uploads — one row per
+// "chain" (file_request_id, contact_id, submission_id) — joined onto
+// file_assets. A file_assets row with no matching file_request_uploads row
+// is invisible to that query, so uploaded headshots never appeared there
+// (0 records before and after), even though GET /files/:id could always
+// serve the bytes.
+//
+// Fix: give every event a standing, idempotently-created "Headshots" file
+// request (id is deterministic per event, so concurrent first-uploads can't
+// race to create two), and register each headshot save as a version in that
+// contact's chain via fileVersions.ts's existing appendUploadVersion — the
+// same helper the speaker-portal file-request flow already uses, so a
+// headshot shows up in the library exactly like any other uploaded file:
+// filename, size, uploader, timestamp, and the existing /files/:id
+// view/download link. No schema migration needed — file_requests and
+// file_request_uploads already support this without any new columns.
+// `contact_id` on the upload row is the contact the headshot is *for* (the
+// speaker), matching the library's "for" semantics; file_assets separately
+// keeps uploaded_by_contact_id as who actually performed the upload
+// (an admin here, the speaker themselves on the portal path).
+async function ensureHeadshotFileRequestId(db: D1Database, eventId: string): Promise<string> {
+  const id = `file-request-headshots-${eventId}`;
+  await db
+    .prepare(
+      `INSERT OR IGNORE INTO file_requests (id, event_id, title, type, created_at)
+       VALUES (?, ?, 'Headshots', 'contacts', ?)`,
+    )
+    .bind(id, eventId, new Date().toISOString())
+    .run();
+  return id;
+}
+
 // POST /contacts/:id/headshot { headshot: File } → { ok, headshot_asset_id }
 //
 // CNT-10: the organiser speaker edit form had no photo control at all — the
@@ -902,6 +947,13 @@ adminApiRoutes.post('/contacts/:id/headshot', async (c) => {
     allowedTypes: IMAGE_TYPES,
   });
   if ('error' in saved) return c.json({ error: saved.error }, 400);
+
+  const fileRequestId = await ensureHeadshotFileRequestId(db, session.eventId);
+  await appendUploadVersion(
+    db,
+    { fileRequestId, contactId: id, submissionId: null },
+    { assetId: saved.id, uploadedAt: new Date().toISOString() },
+  );
 
   await db
     .prepare('UPDATE contacts SET headshot_asset_id = ?, updated_at = ? WHERE id = ? AND event_id = ?')

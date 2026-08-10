@@ -558,13 +558,18 @@ export function SubmissionDetailPanel({ id, onEdit, onItemSaved }: {
         {s.plan_name ? <DetailPair term="Evaluation plan">{String(s.plan_name)}</DetailPair> : null}
         {detail.tags.length > 0 && <DetailPair term="Tags">{detail.tags.join(', ')}</DetailPair>}
         {detail.answers
-          // The submission form's own "Track" question (field_key `track`,
-          // manual-QA item) duplicates the built-in Track pair above, which
+          // The submission form's own "Track" and "Format" questions
+          // duplicate the built-in DetailPairs above (manual-QA item): Track
           // already shows the resolved, canonical track name from the
-          // `tracks` relation (`s.track_name`) — the raw form answer is an
-          // unresolved id/label list for the same field. Show it once, from
-          // the relation.
-          .filter((a) => a.label.trim().toLowerCase() !== 'track')
+          // `tracks` relation (`s.track_name`) rather than the raw,
+          // unresolved answer value, and Format duplicates `s.format`
+          // verbatim. Conservative exact match (trim + lowercase) so a
+          // differently-labelled question (e.g. "Track / Theme") still shows
+          // through — only an exact 'track' or 'format' label is suppressed.
+          .filter((a) => {
+            const label = a.label.trim().toLowerCase();
+            return label !== 'track' && label !== 'format';
+          })
           .map((a, i) => (
             <DetailPair key={i} term={a.label}>{answerText(a.value_json)}</DetailPair>
           ))}
@@ -722,6 +727,32 @@ export function SubmissionEditForm({ initialValues, onSubmit, onCancel, onDelete
       .catch((e: unknown) => { if (!cancelled) setLoadError(e instanceof Error ? e.message : 'Failed to load') })
     return () => { cancelled = true }
   }, [id])
+
+  // Same manual-review defect as the Level fallback above, for Track: a
+  // "Create Field"-built Track question has a `custom_*` field_key, so its
+  // answer only ever lands in `submission_answers`, not `submissions.track_id`
+  // — the MAJOR eval item (organizer's list showed a blank Track cell, and
+  // the auto-created agenda session inherited the empty track). The read
+  // path here mirrors the write-side fix in submit.tsx's `trackAnswers()`
+  // (label-based fallback, canonical field_key still wins), resolving the
+  // raw answer text to a real track id via the event's track list so this
+  // form's Track picker — and, on Save, the `track_id` column — get backfilled
+  // instead of silently staying blank. Runs once the track list and the
+  // detail answers are both in, and only when the column itself is empty.
+  useEffect(() => {
+    if (!detail || tracks.length === 0) return
+    setFields((prev) => {
+      if (prev.track_id) return prev
+      const trackAnswer = detail.answers.find((a) => a.label.trim().toLowerCase().includes('track'))
+      const trackText = trackAnswer ? answerText(trackAnswer.value_json) : ''
+      if (!trackText || trackText === '—') return prev
+      // Multi-select answers join as "First, Second" (answerText above); the
+      // first selected value is the primary track, same as submit.tsx.
+      const firstName = trackText.split(',')[0]!.trim().toLowerCase()
+      const match = tracks.find((t) => t.name.trim().toLowerCase() === firstName)
+      return match ? { ...prev, track_id: match.id } : prev
+    })
+  }, [detail, tracks])
 
   const setField = (key: keyof typeof fields, value: string) => {
     setFields((prev) => ({ ...prev, [key]: value }))

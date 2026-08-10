@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import type { Dispatch, SetStateAction } from 'react'
 import { appConfirm, ModalDialog } from '../components/dialogs'
 import {
   addQuestion,
@@ -110,7 +111,15 @@ export function FormBuilder({
   const [error, setError] = useState<string | null>(null)
   const dirtyRef = useRef(false)
   const editVersionRef = useRef(0)
-  const saveInFlightRef = useRef(false)
+  // The form as of *right now*, updated synchronously by `patch` — a save
+  // started in the same tick as an edit must not read a pre-render snapshot
+  // (CFP-S1: "click responses return pre-update DOM").
+  const formRef = useRef<FormRow | null>(null)
+  // Saves are serialised through this chain instead of being dropped while
+  // one is in flight. Dropping them is what made wizard navigation need two
+  // clicks: Next -> goToStep -> save() returned false (busy) -> no advance.
+  const saveChainRef = useRef<Promise<boolean>>(Promise.resolve(true))
+  const savesInFlightRef = useRef(0)
   // Snapshot of the status as fetched, so the Settings step can tell "the
   // admin just flipped Closed -> Open in this session" (which the save will
   // treat as a reopen and clear a stale close date) apart from "status was
@@ -120,6 +129,7 @@ export function FormBuilder({
   useEffect(() => {
     void Promise.all([getFormDetail(formId), getBuilderMeta()])
       .then(([detail, builderMeta]) => {
+        formRef.current = detail.form
         setForm(detail.form)
         loadedStatusRef.current = detail.form.status
         setQuestions(detail.questions)
@@ -131,7 +141,9 @@ export function FormBuilder({
   const patch = useCallback((changes: Partial<FormRow>) => {
     dirtyRef.current = true
     editVersionRef.current += 1
-    setForm((prev) => (prev ? { ...prev, ...changes } : prev))
+    if (!formRef.current) return
+    formRef.current = { ...formRef.current, ...changes }
+    setForm(formRef.current)
   }, [])
 
   useEffect(() => {
@@ -144,31 +156,60 @@ export function FormBuilder({
     return () => window.removeEventListener('beforeunload', guard)
   }, [])
 
-  const save = useCallback(async (): Promise<boolean> => {
-    if (!form || saveInFlightRef.current) return false
-    saveInFlightRef.current = true
-    const savedVersion = editVersionRef.current
+  /**
+   * One save attempt, retried in place when the admin edits something while
+   * the request is in flight: the server's fresh `updated_at` is adopted (so
+   * the optimistic-concurrency guard still matches) while the newer local
+   * values are kept, and the loop saves again. Previously this bailed out with
+   * "Newer changes were made while saving", which stranded the edit *and*
+   * blocked wizard navigation.
+   */
+  const runSave = useCallback(async (): Promise<boolean> => {
+    if (!formRef.current) return false
+    savesInFlightRef.current += 1
     setSaving(true)
     setError(null)
     try {
-      const result = await updateForm(form.id, editablePatch(form))
-      if (editVersionRef.current !== savedVersion) {
-        setError('Newer changes were made while saving. Save again to continue.')
-        return false
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        const current = formRef.current
+        if (!current) return false
+        const version = editVersionRef.current
+        let result: { form: FormRow }
+        try {
+          result = await updateForm(current.id, editablePatch(current))
+        } catch (e) {
+          setError(e instanceof Error ? e.message : 'Save failed')
+          return false
+        }
+        loadedStatusRef.current = result.form.status
+        if (editVersionRef.current === version) {
+          formRef.current = { ...result.form }
+          setForm(formRef.current)
+          dirtyRef.current = false
+          setSavedAt(new Date().toLocaleTimeString())
+          return true
+        }
+        formRef.current = { ...(formRef.current as FormRow), updated_at: result.form.updated_at }
+        setForm(formRef.current)
       }
-      setForm({ ...result.form })
-      loadedStatusRef.current = result.form.status
-      dirtyRef.current = false
-      setSavedAt(new Date().toLocaleTimeString())
-      return true
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Save failed')
+      setError('Changes are still arriving faster than they can be saved. Press Save again.')
       return false
     } finally {
-      saveInFlightRef.current = false
-      setSaving(false)
+      savesInFlightRef.current -= 1
+      if (savesInFlightRef.current === 0) setSaving(false)
     }
-  }, [form])
+  }, [])
+
+  /** Serialised save: a second request waits for the first instead of being
+   * silently dropped, so one click on Save/Next is always enough. */
+  const save = useCallback((): Promise<boolean> => {
+    const next = saveChainRef.current.then(runSave, runSave)
+    saveChainRef.current = next.then(
+      () => true,
+      () => false,
+    )
+    return next
+  }, [runSave])
 
   const goToStep = useCallback(
     async (next: StepKey) => {
@@ -176,14 +217,14 @@ export function FormBuilder({
       setStep(next)
       onStepChange?.(next)
     },
-    [save],
+    [save, onStepChange],
   )
 
   if (!form || !meta) {
     return (
       <div className="forms-section">
         <div className="forms-header">
-          <button className="fbtn" onClick={onClose}>← Forms</button>
+          <button type="button" className="fbtn" onClick={onClose}>← Forms</button>
           <h1>{error ?? 'Loading…'}</h1>
         </div>
       </div>
@@ -197,27 +238,33 @@ export function FormBuilder({
   return (
     <div className="forms-section">
       <div className="forms-header">
-        <button className="fbtn" onClick={() => void (async () => {
+        <button type="button" className="fbtn" onClick={() => void (async () => {
           if (dirtyRef.current && !(await save())) return
           onClose()
         })()}>← Forms</button>
         <h1>{form.internal_name}</h1>
         {savedAt && <span className="builder-saved">Saved {savedAt}</span>}
-        <button className="fbtn" onClick={() => window.open(publicUrl, '_blank')}>View Form</button>
+        <button type="button" className="fbtn" onClick={() => window.open(publicUrl, '_blank')}>View Form</button>
         <button
+          type="button"
           className="fbtn"
           onClick={() => void navigator.clipboard.writeText(`${window.location.origin}${publicUrl}`)}
         >
           Copy Link
         </button>
-        <button className="fbtn primary" disabled={saving} onClick={() => void save()}>
+        <button type="button" className="fbtn primary" onClick={() => void save()}>
           {saving ? 'Saving…' : 'Save'}
         </button>
       </div>
       <div className="builder">
         <nav className="builder-rail" aria-label="Builder steps">
           {STEPS.map((s) => (
-            <button key={s.key} className={s.key === step ? 'active' : ''} onClick={() => goToStep(s.key)}>
+            <button
+              key={s.key}
+              type="button"
+              className={s.key === step ? 'active' : ''}
+              onClick={() => void goToStep(s.key)}
+            >
               <span className="rail-n">{s.n}</span> {s.title}
             </button>
           ))}
@@ -266,12 +313,12 @@ export function FormBuilder({
 
           <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 24, maxWidth: 680 }}>
             {stepIndex > 0 ? (
-              <button className="fbtn" onClick={() => goToStep(STEPS[stepIndex - 1]!.key)}>Back</button>
+              <button type="button" className="fbtn" onClick={() => void goToStep(STEPS[stepIndex - 1]!.key)}>Back</button>
             ) : <span />}
             {stepIndex < STEPS.length - 1 ? (
-              <button className="fbtn primary" onClick={() => goToStep(STEPS[stepIndex + 1]!.key)}>Next</button>
+              <button type="button" className="fbtn primary" onClick={() => void goToStep(STEPS[stepIndex + 1]!.key)}>Next</button>
             ) : (
-              <button className="fbtn primary" disabled={saving} onClick={() => void save().then((ok) => ok && onClose())}>
+              <button type="button" className="fbtn primary" onClick={() => void save().then((ok) => ok && onClose())}>
                 Save
               </button>
             )}
@@ -330,22 +377,22 @@ function WelcomeStep({ form, patch }: { form: FormRow; patch: (c: Partial<FormRo
   return (
     <section>
       <div className="bfield">
-        <label>
+        <label htmlFor="form-internal-name">
           Internal Form Name *<span className="bcount">{form.internal_name.length}/255</span>
         </label>
-        <input type="text" maxLength={255} value={form.internal_name} onChange={(e) => patch({ internal_name: e.target.value })} />
+        <input id="form-internal-name" type="text" maxLength={255} value={form.internal_name} onChange={(e) => patch({ internal_name: e.target.value })} />
       </div>
       <div className="bfield">
-        <label>
+        <label htmlFor="form-external-title">
           External Form Title *<span className="bcount">{(form.external_title ?? '').length}/255</span>
         </label>
-        <input type="text" maxLength={255} value={form.external_title ?? ''} onChange={(e) => patch({ external_title: e.target.value })} />
+        <input id="form-external-title" type="text" maxLength={255} value={form.external_title ?? ''} onChange={(e) => patch({ external_title: e.target.value })} />
       </div>
       <div className="bfield">
-        <label>
+        <label htmlFor="form-page-heading">
           Page Heading *<span className="bcount">{(form.page_heading ?? '').length}/15</span>
         </label>
-        <input type="text" maxLength={15} value={form.page_heading ?? ''} onChange={(e) => patch({ page_heading: e.target.value.slice(0, 15) })} />
+        <input id="form-page-heading" type="text" maxLength={15} value={form.page_heading ?? ''} onChange={(e) => patch({ page_heading: e.target.value.slice(0, 15) })} />
         <p className="bhelp">Hard 15-character cap, shown as the compact public header.</p>
       </div>
       <label className="btoggle">
@@ -384,7 +431,10 @@ function QuestionList({
   formId: string
   section: 'abstract' | 'participant'
   questions: FormQuestion[]
-  setQuestions: (qs: FormQuestion[]) => void
+  /** Functional updates only — see `run`: every list mutation composes onto
+   * the *current* list, never onto the array captured when the handler was
+   * created (CFP-S1 "stale-reference races"). */
+  setQuestions: Dispatch<SetStateAction<FormQuestion[]>>
   meta: BuilderMeta
   setError: (e: string | null) => void
 }) {
@@ -397,6 +447,14 @@ function QuestionList({
   const [adding, setAdding] = useState(false)
   const [editing, setEditing] = useState<FormQuestion | null>(null)
   const [logicFor, setLogicFor] = useState<FormQuestion | null>(null)
+  // In-flight latches. Every list action is a plain SPA interaction, so the
+  // only protection against a double-fire (impatient double-click, or a
+  // second click landing before the optimistic re-render) is a ref set
+  // synchronously inside the handler — the same shape as the evaluation
+  // criteria fix. Without it, "Create & add" posted twice and left a
+  // duplicated field behind (CFP-S1).
+  const addInFlightRef = useRef(false)
+  const removingRef = useRef<Set<string>>(new Set())
 
   // Race guard (CFP-01): each question-field edit (e.g. the Required
   // checkbox) returns a FULL question-list snapshot from the server. Two
@@ -445,19 +503,46 @@ function QuestionList({
           count: (existing?.count ?? 0) + 1,
           patch: { ...existing?.patch, ...optimistic.patch },
         })
-        setQuestions(questions.map((q) => (q.id === optimistic.qid ? ({ ...q, ...optimistic.patch } as FormQuestion) : q)))
+        setQuestions((prev) =>
+          prev.map((q) => (q.id === optimistic.qid ? ({ ...q, ...optimistic.patch } as FormQuestion) : q)),
+        )
       }
       return p
         .then((r) => {
           release()
-          setQuestions(mergeWithPending(r.questions))
+          setQuestions(() => mergeWithPending(r.questions))
         })
         .catch((e: unknown) => {
           release()
           setError(e instanceof Error ? e.message : 'Failed')
         })
     },
-    [questions, setQuestions, setError, mergeWithPending],
+    [setQuestions, setError, mergeWithPending],
+  )
+
+  const addField = useCallback(
+    (body: Record<string, unknown>) => {
+      if (addInFlightRef.current) return
+      addInFlightRef.current = true
+      setAdding(false)
+      void run(addQuestion(formId, { ...body, section })).then(() => {
+        addInFlightRef.current = false
+      })
+    },
+    [formId, section, run],
+  )
+
+  const removeQuestion = useCallback(
+    (q: FormQuestion) => {
+      if (removingRef.current.has(q.id)) return
+      removingRef.current.add(q.id)
+      void appConfirm(`Remove "${q.label}"?`, { title: 'Remove question', confirmLabel: 'Remove', danger: true })
+        .then((confirmed) => (confirmed ? run(deleteQuestion(formId, q.id)) : undefined))
+        .then(() => {
+          removingRef.current.delete(q.id)
+        })
+    },
+    [formId, run],
   )
 
   const handleDrop = useCallback(
@@ -504,18 +589,10 @@ function QuestionList({
               />
               Required
             </label>
-            <button className="fbtn-link" onClick={() => setEditing(q)}>Edit</button>
-            <button className="fbtn-link" onClick={() => setLogicFor(q)}>Logic</button>
+            <button type="button" className="fbtn-link" onClick={() => setEditing(q)}>Edit</button>
+            <button type="button" className="fbtn-link" onClick={() => setLogicFor(q)}>Logic</button>
             {!q.locked && (
-              <button
-                className="fbtn-link danger"
-                onClick={() => {
-                  void appConfirm(`Remove "${q.label}"?`, { title: 'Remove question', confirmLabel: 'Remove', danger: true })
-                    .then((confirmed) => {
-                      if (confirmed) void run(deleteQuestion(formId, q.id))
-                    })
-                }}
-              >
+              <button type="button" className="fbtn-link danger" onClick={() => removeQuestion(q)}>
                 Remove
               </button>
             )}
@@ -523,14 +600,14 @@ function QuestionList({
         ))}
         {rows.length === 0 && <div className="qrow">No questions yet.</div>}
       </div>
-      <button className="fbtn" onClick={() => setAdding(true)}>+ Add Field</button>
+      <button type="button" className="fbtn" onClick={() => setAdding(true)}>+ Add Field</button>
 
       {adding && (
         <AddFieldModal
           meta={meta}
           section={section}
           usedFieldIds={new Set(rows.map((r) => r.field_id))}
-          onAdd={(body) => { setAdding(false); void run(addQuestion(formId, { ...body, section })) }}
+          onAdd={addField}
           onClose={() => setAdding(false)}
         />
       )}
@@ -570,6 +647,17 @@ function AddFieldModal({ meta, section, usedFieldIds, onAdd, onClose }: {
 }) {
   const [query, setQuery] = useState('')
   const [creating, setCreating] = useState(false)
+  // Second latch, alongside QuestionList's: set synchronously so a double
+  // click on "Create & add" (or two library picks in the same tick) can never
+  // reach `onAdd` twice, even before the modal has unmounted.
+  const submittedRef = useRef(false)
+  const [submitted, setSubmitted] = useState(false)
+  const submitOnce = (body: Record<string, unknown>) => {
+    if (submittedRef.current) return
+    submittedRef.current = true
+    setSubmitted(true)
+    onAdd(body)
+  }
   const [label, setLabel] = useState('')
   const [type, setType] = useState('text')
   const [optionsText, setOptionsText] = useState('')
@@ -592,12 +680,13 @@ function AddFieldModal({ meta, section, usedFieldIds, onAdd, onClose }: {
         onClose={onClose}
         footer={
           <>
-            <button className="fbtn" onClick={() => setCreating(false)}>Back</button>
+            <button type="button" className="fbtn" onClick={() => setCreating(false)}>Back</button>
             <button
+              type="button"
               className="fbtn primary"
-              disabled={!label.trim() || (needsOptions && !optionsText.trim())}
+              disabled={submitted || !label.trim() || (needsOptions && !optionsText.trim())}
               onClick={() =>
-                onAdd({
+                submitOnce({
                   new_field: {
                     label: label.trim(),
                     type,
@@ -609,18 +698,18 @@ function AddFieldModal({ meta, section, usedFieldIds, onAdd, onClose }: {
                 })
               }
             >
-              Create & add
+              {submitted ? 'Adding…' : 'Create & add'}
             </button>
           </>
         }
       >
         <div className="bfield">
-          <label>Label *</label>
-          <input type="text" value={label} onChange={(e) => setLabel(e.target.value)} />
+          <label htmlFor="new-field-label">Label *</label>
+          <input id="new-field-label" type="text" value={label} onChange={(e) => setLabel(e.target.value)} />
         </div>
         <div className="bfield">
-          <label>Type</label>
-          <select value={type} onChange={(e) => setType(e.target.value)}>
+          <label htmlFor="new-field-type">Type</label>
+          <select id="new-field-type" value={type} onChange={(e) => setType(e.target.value)}>
             {CREATABLE_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
           </select>
         </div>
@@ -642,14 +731,20 @@ function AddFieldModal({ meta, section, usedFieldIds, onAdd, onClose }: {
 
   return (
     <ModalDialog open title="Add Field" onClose={onClose}>
-      <button className="field-pick" onClick={() => setCreating(true)}>
+      <button type="button" className="field-pick" onClick={() => setCreating(true)}>
         <strong>Create Field ›</strong>
       </button>
       <div className="bfield" style={{ marginTop: 8 }}>
         <input type="text" placeholder="Search the field library…" value={query} onChange={(e) => setQuery(e.target.value)} />
       </div>
       {candidates.map((f) => (
-        <button key={f.id} className="field-pick" onClick={() => onAdd({ field_id: f.id })}>
+        <button
+          key={f.id}
+          type="button"
+          className="field-pick"
+          disabled={submitted}
+          onClick={() => submitOnce({ field_id: f.id })}
+        >
           {f.label} <span className="qchip">{f.type}</span>
           {f.system === 1 && <span className="qchip locked">system</span>}
         </button>
@@ -679,8 +774,9 @@ function QuestionEditModal({ question, onSave, onClose }: {
       onClose={onClose}
       footer={
         <>
-          <button className="fbtn" onClick={onClose}>Cancel</button>
+          <button type="button" className="fbtn" onClick={onClose}>Cancel</button>
           <button
+            type="button"
             className="fbtn primary"
             disabled={!label.trim()}
             onClick={() =>
@@ -770,8 +866,9 @@ function LogicModal({ question, earlier, onSave, onClose }: {
       onClose={onClose}
       footer={
         <>
-          <button className="fbtn" onClick={onClose}>Cancel</button>
+          <button type="button" className="fbtn" onClick={onClose}>Cancel</button>
           <button
+            type="button"
             className="fbtn primary"
             onClick={() => {
               if (!enabled || conditions.length === 0) {
@@ -859,11 +956,12 @@ function LogicModal({ question, earlier, onSave, onClose }: {
                         />
                       )
                     )}
-                    <button className="fbtn-link danger" onClick={() => setConditions((prev) => prev.filter((_, j) => j !== i))}>−</button>
+                    <button type="button" className="fbtn-link danger" onClick={() => setConditions((prev) => prev.filter((_, j) => j !== i))}>−</button>
                   </div>
                 )
               })}
               <button
+                type="button"
                 className="fbtn"
                 onClick={() => setConditions((prev) => [...prev, { question_id: '', op: 'equals', value: [] }])}
               >
@@ -949,7 +1047,7 @@ function RoutingPanel({ form, patch, meta, questions }: {
           <div className="rule-card" key={rule.id}>
             <div className="rule-head">
               Rule {i + 1}
-              <button className="fbtn-link danger" onClick={() => write(rules.filter((_, j) => j !== i), fallbackPlan)}>
+              <button type="button" className="fbtn-link danger" onClick={() => write(rules.filter((_, j) => j !== i), fallbackPlan)}>
                 Remove
               </button>
             </div>
@@ -1005,6 +1103,7 @@ function RoutingPanel({ form, patch, meta, questions }: {
       })}
       <div className="cond-row">
         <button
+          type="button"
           className="fbtn"
           onClick={() =>
             write(
@@ -1115,8 +1214,12 @@ function SettingsStep({
   return (
     <section>
       <div className="bfield">
-        <label>Status</label>
-        <select value={form.status} onChange={(e) => patch({ status: e.target.value as FormRow['status'] })}>
+        <label htmlFor="form-status">Status</label>
+        <select
+          id="form-status"
+          value={form.status}
+          onChange={(e) => patch({ status: e.target.value as FormRow['status'] })}
+        >
           <option value="open">Open</option>
           <option value="closed">Closed</option>
         </select>
@@ -1133,14 +1236,32 @@ function SettingsStep({
           </p>
         )}
       </div>
+      {/* Submission deadline. Rendered unconditionally next to Status — the
+        * two together are the whole close story, and the input carries a real
+        * htmlFor/id pair so it is reachable by its label (the eval agent read
+        * the deadline as "not editable" when this input was label-less and
+        * only the list's binary Close/Reopen button was discoverable). */}
       <div className="bfield">
-        <label>Close Date</label>
+        <label htmlFor="form-close-at">Close Date &amp; Time (submission deadline)</label>
         <input
+          id="form-close-at"
           type="datetime-local"
           value={isoToLocalInput(form.close_at, timezone)}
           onChange={(e) => patch({ close_at: e.target.value ? localInputToIso(e.target.value, timezone) : null })}
         />
-        <p className="bhelp">If set, form and submissions will close after the specified date.</p>
+        <p className="bhelp">
+          If set, the form stops accepting submissions after this moment ({timezone}). Leave empty to keep it open
+          until Status is set to Closed. Press Save to apply.
+        </p>
+        {form.close_at !== null && (
+          <button
+            type="button"
+            className="fbtn-link"
+            onClick={() => patch({ close_at: null })}
+          >
+            Clear close date
+          </button>
+        )}
       </div>
       <label className="btoggle">
         <input

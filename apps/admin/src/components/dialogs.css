@@ -9,8 +9,19 @@
   justify-content: center;
   z-index: 1000;
   padding: var(--space-4, 16px);
+  overflow-y: auto;
 }
 
+/*
+ * The dialog itself is a fixed-height flex column that never grows past the
+ * viewport: header/footer stay put, and .app-dialog-body scrolls internally.
+ * Previously the card had no max-height/overflow, so a tall form (e.g. the
+ * create-event dialog with its rooms/tracks repeatable fields) simply
+ * overflowed the backdrop — the footer (and its submit button) could end up
+ * rendered off-screen with nothing scrollable to reach it, since the
+ * backdrop itself didn't scroll either. That made the submit control
+ * unreachable rather than "obscured" by another element.
+ */
 .app-dialog {
   background: var(--surface);
   color: var(--text);
@@ -18,7 +29,10 @@
   border-radius: 10px;
   box-shadow: var(--shadow-overlay, 0 12px 32px rgba(0, 0, 0, 0.25));
   width: min(420px, 100%);
+  max-height: calc(100vh - 2 * var(--space-4, 16px));
   padding: 18px 20px 16px;
+  display: flex;
+  flex-direction: column;
 }
 
 .app-dialog-sm {
@@ -38,6 +52,7 @@
   align-items: flex-start;
   justify-content: space-between;
   gap: 8px;
+  flex-shrink: 0;
 }
 
 .app-dialog-title {
@@ -71,6 +86,8 @@
 
 .app-dialog-body {
   margin: 0 0 16px;
+  overflow-y: auto;
+  min-height: 0;
 }
 
 .app-dialog-message {
@@ -86,6 +103,7 @@
   display: flex;
   justify-content: flex-end;
   gap: 8px;
+  flex-shrink: 0;
 }
 
 .app-dialog-actions button {

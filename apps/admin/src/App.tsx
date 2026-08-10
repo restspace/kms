@@ -1234,8 +1234,25 @@ function buildWorkspaceConfig(
           </a>
         ),
       },
-      { field: 'uploader_name', header: 'Uploaded by', render: (value: string | null, item) => value ?? item.uploader_email ?? '' },
-      { field: 'submission_code', header: 'For', width: '80px', mobileHidden: true },
+      {
+        field: 'uploaded_by_name',
+        header: 'Uploaded by',
+        // Prefer the actual uploader (fa.uploaded_by_contact_id); older rows
+        // and the self-service portal path never populated a distinct
+        // uploaded_by_* (uploader == subject there), so fall back to the
+        // chain's contact.
+        render: (value: string | null, item) =>
+          value ?? item.uploaded_by_email ?? item.uploader_name ?? item.uploader_email ?? '',
+      },
+      {
+        field: 'submission_code',
+        header: 'For',
+        width: '80px',
+        mobileHidden: true,
+        // Submission-scoped uploads show the submission code; a headshot (no
+        // submission) shows the speaker it's for instead (SPK-10).
+        render: (value: string | null, item) => value ?? item.uploader_name ?? item.uploader_email ?? '',
+      },
       { field: 'size_bytes', header: 'Size', width: '90px', render: (value: number | null) => formatBytes(value) },
       { field: 'version_count', header: 'Versions', width: '90px' },
       { field: 'uploaded_at', header: 'Uploaded', width: '110px', render: (value: string) => fmtDate(value) },
@@ -1686,22 +1703,35 @@ export default function App() {
           const r = await sendDecisions(checkedIds)
           const planned = r.accepted + r.declined
           const other = r.skipped - r.skipped_notified
+          // r.skipped_no_submitter is a subset of the *queued* (accepted +
+          // declined) rows, not of r.skipped — those still get their status
+          // flipped by the expander, they just have no address to mail. Call
+          // that out explicitly so "queued" copy never implies every queued
+          // decision will actually reach an inbox.
           const skippedNote =
             (r.skipped_notified > 0 ? `; ${r.skipped_notified} skipped (already notified)` : '') +
-            (other > 0 ? `; ${other} skipped (not in a queue)` : '')
+            (other > 0 ? `; ${other} skipped (not in a queue)` : '') +
+            ((r.skipped_no_submitter ?? 0) > 0 ? `; ${r.skipped_no_submitter} skipped — no submitter email` : '')
           const plan = `${r.accepted} accepted, ${r.declined} declined`
           if (!r.job_id) {
             // Nothing was in a decision queue, so no job exists to poll.
             setBulkNote(`No decision emails to send${skippedNote}`)
           } else {
             polling = true
-            setBulkNote(`Queueing ${planned} decision ${planned === 1 ? 'email' : 'emails'} (${plan})…`)
+            setBulkNote(`Queued decision emails for ${planned} ${planned === 1 ? 'submission' : 'submissions'} (${plan})${skippedNote} — delivery completes within a minute…`)
             decisionPollRef.current = pollBulkJob(r.job_id, {
               onProgress: (job) =>
                 setBulkNote(`Sending decisions… ${job.enqueued}/${job.total ?? planned} processed (${plan})`),
               onSettled: (job) => {
                 setBulkNote(`${describeSettledJob(job, 'decision email')} ${plan}${skippedNote}`)
                 setBulkBusy(false)
+                // The expander flips accept_queue/decline_queue to their final
+                // status (and sets notified_at) inside this same job run, so
+                // the grid — which last refetched right when the job was
+                // *queued*, above — is now showing stale statuses and no
+                // Notified checkmarks. Bump the list version again now that
+                // the flip has actually landed.
+                setChecklistResetKey((k) => k + 1)
               },
               onError: (message) => {
                 setBulkNote(message)

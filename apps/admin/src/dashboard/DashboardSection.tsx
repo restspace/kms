@@ -421,13 +421,13 @@ function TodayBoard({ data, tab, onTab, onNudge, onNavigate }: {
   return (
     <>
       <div className="db-kpis">
+        <div className="db-kpi" title="Distinct people listed as a participant on at least one accepted submission">
+          <div className="db-kpi-value">{data.kpis.accepted_speakers}</div>
+          <div className="db-kpi-label">Participants</div>
+        </div>
         <div className="db-kpi">
           <div className="db-kpi-value">{data.kpis.submissions}</div>
           <div className="db-kpi-label">Submissions</div>
-        </div>
-        <div className="db-kpi">
-          <div className="db-kpi-value">{data.kpis.accepted_speakers}</div>
-          <div className="db-kpi-label">Accepted Speakers</div>
         </div>
         {(Object.keys(tiles) as Array<keyof typeof tiles>).map((key) => (
           <button

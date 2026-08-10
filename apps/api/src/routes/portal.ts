@@ -652,6 +652,30 @@ bio.addEventListener('input',upd);upd();
   );
 }
 
+// SPK-10 fix: mirrors adminApi.ts's ensureHeadshotFileRequestId. A headshot
+// saved through filestore.ts's saveFile only produces a file_assets row (plus
+// the contacts.headshot_asset_id pointer) — the Files library query
+// (filesAdminRoutes.get('/library')) reads file_request_uploads joined onto
+// file_assets, so without a matching upload row the headshot never appeared
+// there. Every event gets one standing "Headshots" file_requests row
+// (deterministic id, INSERT OR IGNORE so concurrent first-uploads can't
+// race), and each save is registered as a version in that contact's chain via
+// fileVersions.ts's existing appendUploadVersion — same helper the
+// file-request upload flow already uses, so a self-service headshot shows up
+// in the library with filename/size/uploader/timestamp and the existing
+// /files/:id view/download link, no schema migration required.
+async function ensureHeadshotFileRequestId(db: D1Database, eventId: string): Promise<string> {
+  const id = `file-request-headshots-${eventId}`;
+  await db
+    .prepare(
+      `INSERT OR IGNORE INTO file_requests (id, event_id, title, type, created_at)
+       VALUES (?, ?, 'Headshots', 'contacts', ?)`,
+    )
+    .bind(id, eventId, new Date().toISOString())
+    .run();
+  return id;
+}
+
 portalRoutes.get('/:slug/profile', async (c) => {
   const ctx = await loadPortalCtx(c);
   if (ctx instanceof Response) return ctx;
@@ -708,6 +732,12 @@ portalRoutes.post('/:slug/profile', async (c) => {
       return c.html(profilePageHtml(ctx, values, [{ key: 'headshot', message: saved.error }], null), 400);
     }
     headshotId = saved.id;
+    const fileRequestId = await ensureHeadshotFileRequestId(c.env.DB, ctx.event.id);
+    await appendUploadVersion(
+      c.env.DB,
+      { fileRequestId, contactId: ctx.session.contactId, submissionId: null },
+      { assetId: saved.id, uploadedAt: new Date().toISOString() },
+    );
   }
 
   // Only touch `links` when the form actually carried the controls and the

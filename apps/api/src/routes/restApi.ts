@@ -325,8 +325,9 @@ restApiRoutes.get('/events/:event_id/submissions/:id', async (c) => {
     ).bind(id).all(),
     db.prepare(
       `SELECT ROUND(AVG(r.weighted_total), 2) AS avg, COUNT(*) AS reviews FROM reviews r
+       JOIN evaluation_plans p ON p.id = r.plan_id
        WHERE r.submission_id = ?1
-         AND r.plan_id = (SELECT evaluation_plan_id FROM submissions WHERE id = ?1)`,
+         AND p.event_id = (SELECT event_id FROM submissions WHERE id = ?1)`,
     ).bind(id).first<{ avg: number | null; reviews: number }>(),
   ]);
 

@@ -121,6 +121,19 @@ export function CreateEventDialog({ open, onClose, defaultTimezone, onCreated }:
     return next;
   };
 
+  // Resilience: Enter in a single-line text/date/select field submits the
+  // form even if the browser's own implicit-submission behavior doesn't
+  // kick in (varies by input type and is easy to lose if a future edit
+  // wraps a field in extra markup). Skip textareas, where Enter must stay
+  // a newline, and skip anything already producing a native submit.
+  const handleFormKeyDown = (e: React.KeyboardEvent<HTMLFormElement>) => {
+    if (e.key !== 'Enter') return
+    const target = e.target as HTMLElement
+    if (target.tagName === 'TEXTAREA' || target.tagName === 'BUTTON') return
+    e.preventDefault()
+    void handleSubmit(e as unknown as React.FormEvent)
+  }
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setSubmitError(null);
@@ -181,7 +194,12 @@ export function CreateEventDialog({ open, onClose, defaultTimezone, onCreated }:
         </>
       }
     >
-      <form id="create-event-form" className="record-form-fields" onSubmit={(e) => void handleSubmit(e)}>
+      <form
+        id="create-event-form"
+        className="record-form-fields"
+        onSubmit={(e) => void handleSubmit(e)}
+        onKeyDown={handleFormKeyDown}
+      >
         {submitError && <div className="record-form-error" role="alert">{submitError}</div>}
         <div className="record-form-field">
           <label htmlFor="ce-name">
