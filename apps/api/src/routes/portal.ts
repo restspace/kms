@@ -124,7 +124,7 @@ dl.detail dd{margin:0;overflow-wrap:anywhere}
 @media(max-width:640px){
 .wrap{padding:1rem .75rem 3rem}
 nav.pills{gap:.25rem}
-nav.pills a{padding:.5rem .8rem}
+nav.pills a{display:flex;align-items:center;min-height:44px;padding:.5rem .8rem}
 button,.btn{min-height:44px;padding:.6rem 1.1rem}
 dl.detail{grid-template-columns:1fr;gap:.15rem .8rem}
 dl.detail dt{margin-top:.5rem}
