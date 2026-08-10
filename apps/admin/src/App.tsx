@@ -10,10 +10,12 @@ import {
   createContact,
   createSubmission,
   createTask,
+  updateTask,
   deleteContact,
   getMe,
   getSubmissionDetail,
   listContactFields,
+  listRooms,
   queryResource,
   sendDecisions,
   switchEvent,
@@ -24,6 +26,7 @@ import {
   type ContactRow,
   type Me,
   type MessageRow,
+  type RoomRow,
   type SubmissionRow,
   type TaskAssignmentRow,
   getFileLibrary,
@@ -112,6 +115,25 @@ const fmtDate = (iso: string | null | undefined): string => {
 const contactName = (c: ContactRow): string =>
   [c.first_name, c.last_name].filter(Boolean).join(' ') || c.email
 
+/**
+ * Contacts-hygiene item 4: `POST /submit/:slug/:formId/account` (submit.tsx)
+ * stakes out a bare `{ email }` contact the moment someone starts a public
+ * submission, before any name is collected — and a submission form that
+ * doesn't collect participant identity (`collect_participants` off) never
+ * requires one either. A visitor who abandons at that point, or who
+ * completes such a form, leaves a permanent nameless stub — not seeded, and
+ * not flagged at the source (submit.tsx is another lane's region), so this is
+ * a narrow, documented heuristic applied at the display boundary instead:
+ * a contact with no first *or* last name is treated as a placeholder and
+ * kept out of the Speakers tab's default view and the 'Speakers' bulk-email
+ * preset (see `speakersDataSource` below and messagingAdmin.ts's
+ * `resolveAudience`). A genuine speaker who simply hasn't filled in a name
+ * yet is indistinguishable from this stub by design — deliberately narrow,
+ * not a hard invariant, and still reachable by searching their email.
+ */
+export const isPlaceholderContact = (c: Pick<ContactRow, 'first_name' | 'last_name'>): boolean =>
+  !(c.first_name ?? '').trim() && !(c.last_name ?? '').trim()
+
 const initials = (c: ContactRow): string => {
   const parts = [c.first_name, c.last_name].filter(Boolean) as string[]
   if (parts.length > 0) return parts.map((p) => p[0]?.toUpperCase() ?? '').join('')
@@ -146,9 +168,88 @@ const stripHtml = (html: string): string => {
   return el.textContent ?? ''
 }
 
+/** Just enough of the submissions resource row for the compact list below. */
+interface SpeakerSessionRow {
+  id: string
+  code: string
+  title: string
+  starts_at: string | null
+  room_id: string | null
+}
+
+/**
+ * Contacts-hygiene item 3: the speaker detail panel had no view of what they
+ * are actually presenting. Reuses the submissions resource's existing broad
+ * `contact_id` filter (adminApi.ts RESOURCE_SPECS.submissions — submitter OR
+ * participant, see its filterDocs) rather than adding a new endpoint; room
+ * names come from `listRooms()` (already used by the agenda builder) since
+ * the submissions resource doesn't join rooms, fetched once per mount and
+ * matched by id.
+ */
+const SpeakerSessions = ({ contactId }: { contactId: string }) => {
+  const [rows, setRows] = useState<SpeakerSessionRow[] | null>(null)
+  const [roomNames, setRoomNames] = useState<Map<string, string>>(new Map())
+
+  useEffect(() => {
+    let cancelled = false
+    setRows(null)
+    void (async () => {
+      const [subs, roomList] = await Promise.all([
+        queryResource<SpeakerSessionRow>('submissions')({
+          from: 0,
+          size: 25,
+          filters: { contact_id: contactId },
+        }),
+        listRooms().catch(() => ({ items: [] as RoomRow[] })),
+      ])
+      if (cancelled) return
+      setRows(subs.items)
+      setRoomNames(new Map(roomList.items.map((r) => [r.id, r.name])))
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [contactId])
+
+  if (!rows || rows.length === 0) return null
+  return (
+    <div className="detail-body">
+      <h3>Sessions</h3>
+      <ul style={{ margin: 0, paddingLeft: '1.2em' }}>
+        {rows.map((s) => (
+          <li key={s.id}>
+            {s.title}
+            <span style={{ color: 'var(--text-faint)' }}>
+              {' — '}
+              {s.starts_at ? fmtDate(s.starts_at) : 'unscheduled'}
+              {s.room_id && roomNames.get(s.room_id) ? ` · ${roomNames.get(s.room_id)}` : ''}
+            </span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  )
+}
+
 const StatusChip = ({ status }: { status: string }) => (
   <span className={`status-chip status-${status}`}>{status.replace(/_/g, ' ')}</span>
 )
+
+// Contacts-hygiene item 2: the portal profile (portal.ts's LINK_FIELDS) lets a
+// speaker save LinkedIn/X/Facebook/Website into `contacts.links` (json), but
+// the organiser-side speaker form had no matching control — an organiser
+// editing a speaker record from the workspace couldn't see or correct them.
+// `link_*` are flat schema keys (RecordForm's static JSON-Schema has no
+// nested-object control) that round-trip through `flattenContactLinks` /
+// `unflattenContactLinks` below, the same "flatten for the form, re-nest for
+// the request" trick `splitCustomFieldsFromFormData` already uses for
+// per-event custom fields.
+const SOCIAL_LINK_FORM_FIELDS = [
+  ['link_linkedin', 'linkedin', 'LinkedIn'],
+  ['link_twitter', 'twitter', 'X (Twitter)'],
+  ['link_facebook', 'facebook', 'Facebook'],
+  ['link_website', 'website', 'Website'],
+] as const
 
 const speakerSchema = {
   type: 'object',
@@ -162,8 +263,37 @@ const speakerSchema = {
     mobile_phone: { type: 'string', title: 'Mobile phone' },
     pronouns: { type: 'string', title: 'Pronouns' },
     biography: { type: 'string', format: 'textarea', title: 'Biography' },
+    ...Object.fromEntries(
+      SOCIAL_LINK_FORM_FIELDS.map(([control, , label]) => [control, { type: 'string', format: 'url', title: label }]),
+    ),
     notes: { type: 'string', format: 'textarea', title: 'Internal notes' },
   },
+}
+
+/** `contacts.links` json → the `link_*` flat form keys, for RecordForm's initialValues seeding. */
+const flattenContactLinks = (linksJson: string | null | undefined): Record<string, string> => {
+  const links = parseContactFieldValues(linksJson)
+  const out: Record<string, string> = {}
+  for (const [control, key] of SOCIAL_LINK_FORM_FIELDS) out[control] = links[key] ?? ''
+  return out
+}
+
+/** The `link_*` flat form keys → the `links` object the API's `pickContactLinks` expects, dropping the flat keys from the payload. */
+const unflattenContactLinks = (data: Record<string, unknown>): Record<string, unknown> => {
+  const out: Record<string, unknown> = {}
+  const links: Record<string, string> = {}
+  let hasAnyLinkKey = false
+  for (const [key, value] of Object.entries(data)) {
+    const control = SOCIAL_LINK_FORM_FIELDS.find(([c]) => c === key)
+    if (control) {
+      hasAnyLinkKey = true
+      if (typeof value === 'string' && value.trim() !== '') links[control[1]] = value.trim()
+    } else {
+      out[key] = value
+    }
+  }
+  if (hasAnyLinkKey) out.links = links
+  return out
 }
 
 /**
@@ -507,7 +637,14 @@ function buildWorkspaceConfig(
   // alone; see buildScopedSources' doc comment for why that matters).
   const speakersDataSource = async (params: DataSourceParams): Promise<DataSourceResult<ContactRow>> => {
     const result = await scopedSources.contacts(params)
-    return { ...result, items: result.items.map((item) => attachCustomFieldFormKeys(item, contactFields)) }
+    const items = result.items
+      // Contacts-hygiene item 4: keep nameless stub contacts out of the
+      // roster's default view (isPlaceholderContact's doc comment has the
+      // full story). `total` still reflects the unfiltered page count from
+      // the server — a small, accepted discrepancy for a display-layer filter.
+      .filter((item) => !isPlaceholderContact(item))
+      .map((item) => ({ ...attachCustomFieldFormKeys(item, contactFields), ...flattenContactLinks(item.links) }))
+    return { ...result, items }
   }
   const speakers: TabConfig<ContactRow> = {
     displayTitle: 'Speakers',
@@ -548,6 +685,10 @@ function buildWorkspaceConfig(
     ],
     detailComponent: ({ item, onEdit, onItemSaved }) => {
       const customValues = parseContactFieldValues(item.custom_fields_json)
+      // Contacts-hygiene item 2: same `links` json the portal profile page
+      // reads/writes, surfaced read-only here (edited via the `link_*` form
+      // fields — see speakerSchema / unflattenContactLinks above).
+      const socialLinks = parseContactFieldValues(item.links)
       return (
         <div className="detail-panel">
           <div className="detail-panel-head">
@@ -582,6 +723,22 @@ function buildWorkspaceConfig(
             <dt>Created</dt><dd>{fmtDate(item.created_at)}</dd>
           </dl>
           {item.biography && <div className="detail-body">{stripHtml(item.biography)}</div>}
+          {SOCIAL_LINK_FORM_FIELDS.some(([, key]) => socialLinks[key]) && (
+            <div className="detail-body">
+              <h3>Links</h3>
+              <dl>
+                {SOCIAL_LINK_FORM_FIELDS.map(([, key, label]) =>
+                  socialLinks[key] ? (
+                    <Fragment key={key}>
+                      <dt>{label}</dt>
+                      <dd><a href={socialLinks[key]} target="_blank" rel="noreferrer">{socialLinks[key]}</a></dd>
+                    </Fragment>
+                  ) : null,
+                )}
+              </dl>
+            </div>
+          )}
+          <SpeakerSessions contactId={item.id} />
           {/*
             * SPK-06: the organiser can now put a known contact into the speaker
             * portal directly. Deliberately outside the `onEdit` guard — inviting
@@ -611,7 +768,7 @@ function buildWorkspaceConfig(
     // to open (consistent with the importer's fill-blanks-only merge: never
     // clobber, always land the organiser on the real record instead).
     onUpsert: async (data, existing?: ContactRow) => {
-      const payload = splitCustomFieldsFromFormData(data, contactFields)
+      const payload = splitCustomFieldsFromFormData(unflattenContactLinks(data), contactFields)
       try {
         return existing ? await updateContact(existing.id, payload) : await createContact(payload)
       } catch (err) {
@@ -789,6 +946,117 @@ function buildWorkspaceConfig(
     },
   }
 
+  // Item 1 (O4 manual-review): "no edit control or due-date change is
+  // available anywhere in the Tasks UI, so deadlines cannot be adjusted
+  // after creation." PUT /app/api/tasks/:id already accepted title/due_at
+  // (see adminApi.ts's pickTaskFields) — nothing in the admin UI ever called
+  // it. This is a small inline editor on the assignment detail panel rather
+  // than reusing TaskCreateForm: that form's target-picker fields describe
+  // *creating* new assignments (a different shape than the definition this
+  // edits — see the Tasks TabConfig's own `createComponent` doc comment a few
+  // lines down), which would be actively misleading to show mid-edit.
+  // Deliberately narrow to title/due date/required: `TaskAssignmentRow` (the
+  // grid's row shape) doesn't carry the definition's `description`, and
+  // pickTaskFields on the server treats an omitted key as "leave unchanged"
+  // but an empty string as "clear it" — pre-filling a description input
+  // with nothing and then saving would silently wipe a real description on
+  // every edit, so it's left off this form rather than added half-safely.
+  const TaskEditPanel = ({
+    item,
+    onItemSaved,
+  }: {
+    item: TaskAssignmentRow
+    onItemSaved?: (item: TaskAssignmentRow) => void
+  }) => {
+    const [editing, setEditing] = useState(false)
+    const [title, setTitle] = useState(item.task_title)
+    const [dueAt, setDueAt] = useState(item.due_at ? item.due_at.slice(0, 10) : '')
+    const [required, setRequired] = useState(item.required === 1)
+    const [saving, setSaving] = useState(false)
+    const [error, setError] = useState<string | null>(null)
+
+    const startEdit = () => {
+      setTitle(item.task_title)
+      setDueAt(item.due_at ? item.due_at.slice(0, 10) : '')
+      setRequired(item.required === 1)
+      setError(null)
+      setEditing(true)
+    }
+
+    const save = async () => {
+      const trimmed = title.trim()
+      if (!trimmed) {
+        setError('Title is required.')
+        return
+      }
+      setSaving(true)
+      setError(null)
+      try {
+        // Writes the *definition* (`tasks`, keyed by `task_id`), not this row's
+        // assignment id — see the TabConfig doc comment on `createComponent`
+        // for why the grid's `id` is the wrong target.
+        await updateTask(item.task_id, {
+          title: trimmed,
+          due_at: dueAt ? new Date(dueAt).toISOString() : null,
+          required,
+        })
+        onItemSaved?.({
+          ...item,
+          task_title: trimmed,
+          due_at: dueAt ? new Date(dueAt).toISOString() : null,
+          required: required ? 1 : 0,
+        })
+        setEditing(false)
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Could not save the task.')
+      } finally {
+        setSaving(false)
+      }
+    }
+
+    if (!editing) {
+      return (
+        <button type="button" className="record-form-cancel" style={{ marginTop: 8 }} onClick={startEdit}>
+          Edit task
+        </button>
+      )
+    }
+    return (
+      <div className="record-form-fields" style={{ marginTop: 8, maxWidth: 320 }}>
+        {error && <div className="record-form-submit-error" role="alert"><span>{error}</span></div>}
+        <div className="record-form-field">
+          <label htmlFor="task-edit-title">Title</label>
+          <input id="task-edit-title" value={title} disabled={saving} onChange={(e) => setTitle(e.target.value)} />
+        </div>
+        <div className="record-form-field">
+          <label htmlFor="task-edit-due">Due date</label>
+          <input id="task-edit-due" type="date" value={dueAt} disabled={saving} onChange={(e) => setDueAt(e.target.value)} />
+        </div>
+        <div className="record-form-field">
+          <label htmlFor="task-edit-required" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <input
+              id="task-edit-required"
+              type="checkbox"
+              checked={required}
+              disabled={saving}
+              onChange={(e) => setRequired(e.target.checked)}
+            />
+            Required
+          </label>
+        </div>
+        <div className="record-form-actions">
+          <span className="record-form-actions-spacer" />
+          <button type="button" className="record-form-cancel" disabled={saving} onClick={() => setEditing(false)}>
+            Cancel
+          </button>
+          <button type="button" className="record-form-submit" disabled={saving} onClick={() => void save()}>
+            {saving ? 'Saving…' : 'Save'}
+          </button>
+        </div>
+      </div>
+    )
+  }
+
   const tasks: TabConfig<TaskAssignmentRow> = {
     displayTitle: 'Tasks',
     dataSource: tasksDataSourceWithStatusFilter(scopedSources.tasks),
@@ -836,7 +1104,7 @@ function buildWorkspaceConfig(
       },
       eventColumn,
     ],
-    detailComponent: ({ item }) => (
+    detailComponent: ({ item, onItemSaved }) => (
       <div className="detail-panel">
         <h2>
           {item.task_title} <StatusChip status={item.status} />
@@ -848,6 +1116,11 @@ function buildWorkspaceConfig(
           {item.due_at && <><dt>Due</dt><dd>{fmtDate(item.due_at)}</dd></>}
           {item.completed_at && <><dt>Completed</dt><dd>{fmtDate(item.completed_at)}</dd></>}
         </dl>
+        {/* Item 1: due dates (and the title/required flag) were frozen at
+            creation with no UI anywhere to change them — see TaskEditPanel's
+            doc comment above the Tasks TabConfig for why this edits the
+            *definition* via `item.task_id`, not this assignment row. */}
+        <TaskEditPanel item={item} onItemSaved={onItemSaved} />
         {/* The file the task produced — invisible to organisers before W2-C. */}
         <TaskFilesPanel assignmentId={item.id} actionType={item.action_type} />
       </div>

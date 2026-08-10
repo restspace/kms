@@ -29,6 +29,8 @@ const changePlanSubmissions = vi.fn()
 const addReviewer = vi.fn()
 const sendReviewerSigninLink = vi.fn()
 const remindReviewers = vi.fn()
+const addPlanReviewer = vi.fn()
+const removePlanReviewer = vi.fn()
 
 vi.mock('./evaluationApi', () => ({
   getPlanSubmissions: (...a: unknown[]) => getPlanSubmissions(...a),
@@ -36,6 +38,8 @@ vi.mock('./evaluationApi', () => ({
   addReviewer: (...a: unknown[]) => addReviewer(...a),
   sendReviewerSigninLink: (...a: unknown[]) => sendReviewerSigninLink(...a),
   remindReviewers: (...a: unknown[]) => remindReviewers(...a),
+  addPlanReviewer: (...a: unknown[]) => addPlanReviewer(...a),
+  removePlanReviewer: (...a: unknown[]) => removePlanReviewer(...a),
 }))
 
 import { EvaluationSection } from './EvaluationSection'
@@ -62,13 +66,18 @@ beforeEach(() => {
   for (const fn of [
     getEvaluationOverview, createPlan, addCriterion, assignReviewers, updatePlan,
     getPlanSubmissions, changePlanSubmissions, addReviewer, sendReviewerSigninLink, remindReviewers,
+    addPlanReviewer, removePlanReviewer,
   ]) fn.mockReset()
+  addPlanReviewer.mockResolvedValue({ ok: true, plan_id: 'p1', contact_id: 'r1' })
+  removePlanReviewer.mockResolvedValue({ ok: true, plan_id: 'p1', contact_id: 'r1', removed_assignments: 1 })
   getPlanSubmissions.mockResolvedValue(submissions)
   changePlanSubmissions.mockResolvedValue({ ok: true, matched: 1, changed: 1, total: 2 })
   addCriterion.mockResolvedValue({ ok: true })
   assignReviewers.mockResolvedValue({ ok: true, total_assignments: 0, created: 0, submissions: 0 })
   addReviewer.mockResolvedValue({ ok: true, id: 'r2', email: 'new@example.com', name: 'New Person', created: true })
-  sendReviewerSigninLink.mockResolvedValue({ ok: true, email: 'r@example.com', dev_link: null })
+  sendReviewerSigninLink.mockResolvedValue({
+    ok: true, contact_id: 'r1', email: 'r@example.com', name: 'Ada Lovelace', dev_link: null,
+  })
   remindReviewers.mockResolvedValue({ ok: true, sent: 1, lagging: [{ contact_id: 'r1', outstanding: 2 }] })
   updatePlan.mockResolvedValue({ ok: true })
 })
@@ -244,6 +253,94 @@ describe('EvaluationSection — round editor (lane L3)', () => {
     const [planId, patch] = updatePlan.mock.calls[0] as [string, { closes_at: string }]
     expect(planId).toBe('p1')
     expect(new Date(patch.closes_at).getTime()).toBe(new Date('2026-09-01T17:00').getTime())
+  })
+
+  // ABS-07: the anonymise checkbox reverted to unchecked on the next refetch.
+  it('keeps the anonymise checkbox on what the server stored', async () => {
+    await openCard()
+    const { fireEvent } = await import('@testing-library/preact')
+    const box = screen.getByLabelText('Hide submitter identities from reviewers') as HTMLInputElement
+    expect(box.checked).toBe(false)
+
+    // The PUT answers with the stored row, and the refetch agrees.
+    updatePlan.mockResolvedValue({ ok: true, plan: { ...full.plans[0], anonymise_submitters: 1 } })
+    getEvaluationOverview.mockResolvedValue({
+      ...full,
+      plans: [{ ...full.plans[0], anonymise_submitters: 1 }],
+    })
+    fireEvent.click(box)
+
+    await waitFor(() => expect(updatePlan).toHaveBeenCalledWith('p1', { anonymise_submitters: true }))
+    await waitFor(() =>
+      expect((screen.getByLabelText('Hide submitter identities from reviewers') as HTMLInputElement).checked).toBe(true),
+    )
+  })
+
+  it('puts the anonymise checkbox back when the save fails', async () => {
+    await openCard()
+    const { fireEvent } = await import('@testing-library/preact')
+    updatePlan.mockRejectedValue(new Error('Nope'))
+    fireEvent.click(screen.getByLabelText('Hide submitter identities from reviewers'))
+
+    expect(await screen.findByText('Nope')).toBeTruthy()
+    expect((screen.getByLabelText('Hide submitter identities from reviewers') as HTMLInputElement).checked).toBe(false)
+  })
+
+  // The reviewer pool: unticking someone used to be local state only, so the
+  // reviewer came back ticked on the next reload.
+  it('persists a reviewer removal from the round pool', async () => {
+    await openCard()
+    const { fireEvent } = await import('@testing-library/preact')
+    const tick = screen.getByLabelText('Ada Lovelace in this round') as HTMLInputElement
+    expect(tick.checked).toBe(true)
+
+    getEvaluationOverview.mockResolvedValue({ ...full, pool: [] })
+    fireEvent.click(tick)
+
+    await waitFor(() => expect(removePlanReviewer).toHaveBeenCalledWith('p1', 'r1'))
+    await waitFor(() =>
+      expect((screen.getByLabelText('Ada Lovelace in this round') as HTMLInputElement).checked).toBe(false),
+    )
+  })
+
+  it('re-ticks a reviewer whose removal failed', async () => {
+    await openCard()
+    const { fireEvent } = await import('@testing-library/preact')
+    removePlanReviewer.mockRejectedValue(new Error('Server said no'))
+    fireEvent.click(screen.getByLabelText('Ada Lovelace in this round'))
+
+    expect(await screen.findByText('Server said no')).toBeTruthy()
+    expect((screen.getByLabelText('Ada Lovelace in this round') as HTMLInputElement).checked).toBe(true)
+  })
+
+  it('ticking a reviewer pools them without waiting for Assign', async () => {
+    getEvaluationOverview.mockResolvedValue({ ...full, pool: [] })
+    render(<EvaluationSection />)
+    await screen.findByDisplayValue('Round 1')
+    const { fireEvent } = await import('@testing-library/preact')
+    const tick = screen.getByLabelText('Ada Lovelace in this round') as HTMLInputElement
+    fireEvent.click(tick) // untick (default is everyone when the pool is empty)
+    await waitFor(() => expect(removePlanReviewer).toHaveBeenCalledWith('p1', 'r1'))
+    fireEvent.click(screen.getByLabelText('Ada Lovelace in this round'))
+    await waitFor(() => expect(addPlanReviewer).toHaveBeenCalledWith('p1', 'r1'))
+  })
+
+  // CFP-11: the surfaced link must be shown as the target reviewer's.
+  it('shows the demo sign-in link labelled with the reviewer it belongs to', async () => {
+    await openCard()
+    sendReviewerSigninLink.mockResolvedValue({
+      ok: true,
+      contact_id: 'r1',
+      email: 'r@example.com',
+      name: 'Ada Lovelace',
+      dev_link: 'https://kms.example/auth/callback?t=abc123',
+    })
+    const { fireEvent } = await import('@testing-library/preact')
+    fireEvent.click(screen.getByLabelText('Send sign-in link to Ada Lovelace'))
+
+    const field = (await screen.findByLabelText('Sign-in link for Ada Lovelace')) as HTMLInputElement
+    expect(field.value).toBe('https://kms.example/auth/callback?t=abc123')
+    expect(screen.getByText(/Sign-in link for Ada Lovelace \(r@example.com\)/)).toBeTruthy()
   })
 
   // The reported "+ Add criterion occasionally created duplicates": Enter and

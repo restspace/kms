@@ -10,10 +10,12 @@ import {
   type EvaluationOverview,
 } from '../api'
 import {
+  addPlanReviewer,
   addReviewer,
   changePlanSubmissions,
   getPlanSubmissions,
   remindReviewers,
+  removePlanReviewer,
   sendReviewerSigninLink,
   type MembershipFilter,
   type PlanSubmissionsPayload,
@@ -260,6 +262,26 @@ function PlanCard({
   const [chosen, setChosen] = useState<string[]>(
     pooled.length > 0 ? pooled : overview.reviewers.map((r) => r.id),
   )
+  // …and it keeps following the stored pool afterwards. The ticks used to be
+  // pure local state seeded once at mount, so a removal that never reached the
+  // server still *looked* applied until the next remount — the "unchecking a
+  // reviewer doesn't stick" defect. Now the server's pool is the truth: a
+  // failed removal visibly comes back, a successful one stays gone.
+  const pooledKey = pooled.join(',')
+  useEffect(() => {
+    if (pooled.length > 0) setChosen(pooled)
+    // pooledKey is the stable identity of `pooled` (a fresh array each render).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pooledKey])
+
+  // ABS-07: mirrored locally so the checkbox shows what the *server* stored —
+  // set from the row the PUT hands back, reverted if the save fails, and
+  // re-synced from every refetch.
+  const [anon, setAnon] = useState(plan.anonymise_submitters === 1)
+  useEffect(() => { setAnon(plan.anonymise_submitters === 1) }, [plan.anonymise_submitters])
+
+  // CFP-11: the demo/dev sign-in link, shown with the reviewer it belongs to.
+  const [signin, setSignin] = useState<{ who: string; email: string; link: string } | null>(null)
   const [strategy, setStrategy] = useState<'all' | 'round_robin'>('all')
   const [perSubmission, setPerSubmission] = useState(2)
   const [assigning, setAssigning] = useState(false)
@@ -328,11 +350,25 @@ function PlanCard({
       <label className="eval-anon">
         <input
           type="checkbox"
-          checked={plan.anonymise_submitters === 1}
+          aria-label="Hide submitter identities from reviewers"
+          checked={anon}
           onChange={(e) => {
             const on = (e.target as HTMLInputElement).checked
+            setAnon(on)
             run(`${plan.name}: ${on ? 'anonymised' : 'submitters visible'}`, () =>
-              updatePlan(plan.id, { anonymise_submitters: on }),
+              updatePlan(plan.id, { anonymise_submitters: on })
+                .then((res) => {
+                  // Trust the stored row over the click that caused it.
+                  const stored = (res as { plan?: { anonymise_submitters?: number } } | null)?.plan
+                  if (stored && typeof stored.anonymise_submitters === 'number') {
+                    setAnon(stored.anonymise_submitters === 1)
+                  }
+                  return res
+                })
+                .catch((err: unknown) => {
+                  setAnon(!on)
+                  throw err
+                }),
             )
           }}
         />
@@ -439,12 +475,29 @@ function PlanCard({
               <label style={{ flex: 1 }}>
                 <input
                   type="checkbox"
+                  aria-label={`${r.name ?? r.email} in this round`}
                   checked={chosen.includes(r.id)}
-                  onChange={(e) =>
+                  onChange={(e) => {
+                    const on = (e.target as HTMLInputElement).checked
+                    // Persist immediately (the pool is server state), and put
+                    // the tick back if the write fails.
                     setChosen((prev) =>
-                      (e.target as HTMLInputElement).checked ? [...prev, r.id] : prev.filter((id) => id !== r.id),
+                      on ? [...new Set([...prev, r.id])] : prev.filter((id) => id !== r.id),
                     )
-                  }
+                    const who = r.name ?? r.email
+                    run(
+                      on ? `${who} added to ${plan.name}` : `${who} removed from ${plan.name}`,
+                      () =>
+                        (on ? addPlanReviewer(plan.id, r.id) : removePlanReviewer(plan.id, r.id)).catch(
+                          (err: unknown) => {
+                            setChosen((prev) =>
+                              on ? prev.filter((id) => id !== r.id) : [...new Set([...prev, r.id])],
+                            )
+                            throw err
+                          },
+                        ),
+                    )
+                  }}
                 />
                 {r.name ?? r.email}
                 {load && (
@@ -459,11 +512,14 @@ function PlanCard({
                 onClick={() => {
                   sendReviewerSigninLink(r.id)
                     .then((res) => {
-                      onNote(
-                        res.dev_link
-                          ? `Sign-in link for ${res.email}: ${res.dev_link}`
-                          : `Sign-in link sent to ${res.email}`,
-                      )
+                      // The panel is labelled with the identity the *server*
+                      // minted the link for, not the row that was clicked.
+                      if (res.dev_link) {
+                        setSignin({ who: res.name ?? r.name ?? res.email, email: res.email, link: res.dev_link })
+                      } else {
+                        setSignin(null)
+                        onNote(`Sign-in link sent to ${res.email}`)
+                      }
                     })
                     .catch((e: unknown) => onError(message(e)))
                 }}
@@ -488,6 +544,40 @@ function PlanCard({
             </div>
           )
         })}
+
+        {/* CFP-11: on the demo instance a reviewer account is only reachable
+            through this link, so it is shown as a durable, copyable panel
+            naming its owner — not a transient note that could be mistaken for
+            somebody else's link. */}
+        {signin && (
+          <div className="eval-signin" role="status" style={{ display: 'grid', gap: 4, margin: '6px 0', fontSize: 12 }}>
+            <strong>Sign-in link for {signin.who} ({signin.email})</strong>
+            <span className="pane-sub">
+              Valid for 15 minutes, single use. Send it to this reviewer — opening it here signs you in as them.
+            </span>
+            <div style={{ display: 'flex', gap: 6 }}>
+              <input
+                readOnly
+                aria-label={`Sign-in link for ${signin.who}`}
+                value={signin.link}
+                style={{ flex: 1, fontFamily: 'monospace', fontSize: 11 }}
+                onFocus={(e) => (e.target as HTMLInputElement).select()}
+              />
+              <button
+                className="fbtn-link"
+                onClick={() => {
+                  void navigator.clipboard?.writeText(signin.link).then(
+                    () => onNote(`Copied the sign-in link for ${signin.who}`),
+                    () => onError('Could not copy — select the link and copy it manually.'),
+                  )
+                }}
+              >
+                Copy
+              </button>
+              <button className="fbtn-link" onClick={() => setSignin(null)}>Dismiss</button>
+            </div>
+          </div>
+        )}
 
         <AddReviewer planId={plan.id} run={run} />
 

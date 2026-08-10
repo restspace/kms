@@ -101,6 +101,12 @@ function participantIdentity(questions: QuestionDef[], answers: Answers): { name
   return { name, email: typeof email === 'string' ? email : '' }
 }
 
+// Item 2: matches the organiser workspace's own `readableRole` (admin's
+// workspace/extras.tsx) so 'co-speaker' reads "Co-Speaker" here too, not the
+// raw hyphenated role id.
+const readableRole = (role: string): string =>
+  role.split('-').map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join('-')
+
 type Step = 'welcome' | 'account' | 'submission' | 'participant' | 'review'
 
 const STEPS: Array<{ key: Step; label: string }> = [
@@ -985,7 +991,7 @@ function ParticipantCard({
         <span className="sb-card-tools">
           <select value={participant.role} onChange={(e) => onRoleChange(e.currentTarget.value)} aria-label={`Role for ${title}`}>
             {roles.map((r) => (
-              <option key={r.role} value={r.role}>{r.role}</option>
+              <option key={r.role} value={r.role}>{readableRole(r.role)}</option>
             ))}
           </select>
           {onRemove && <button type="button" className="sb-link" onClick={onRemove}>Remove</button>}

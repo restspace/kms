@@ -98,4 +98,18 @@ describe('SubmitPage participant contract', () => {
     expect(activeStep).toBeTruthy()
     expect(activeStep?.textContent).toContain('Welcome')
   })
+
+  it('item 2: offers co-speaker (not just speaker) when the form has no explicit role config', () => {
+    render(<SubmitPage data={makeBootstrap([])} />)
+
+    fireEvent.click(screen.getByRole('button', { name: /^Next$/ })) // welcome -> account
+    fireEvent.click(screen.getByRole('button', { name: /^Next$/ })) // account -> submission
+    fireEvent.click(screen.getByRole('button', { name: /^Next$/ })) // submission -> participant
+
+    const select = screen.getByLabelText(/Role for/i) as unknown as HTMLSelectElement
+    const optionLabels = Array.from(select.options).map((o) => o.textContent)
+    expect(optionLabels).toContain('Co-Speaker')
+    const optionValues = Array.from(select.options).map((o) => o.value)
+    expect(optionValues).toEqual(expect.arrayContaining(['speaker', 'co-speaker']))
+  })
 })

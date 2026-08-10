@@ -115,6 +115,13 @@ async function loadContext(db: D1Database, slug: string, formId: string): Promis
   };
 }
 
+/** Shared limit_reached body: names exactly what counts so a blocked
+ * submitter (or an agent reading the response) knows withdrawing frees a
+ * slot instead of assuming the cap is stuck. */
+const LIMIT_REACHED_MESSAGE =
+  'Submission limit reached. Active submissions and saved drafts count toward the limit; withdrawn submissions do not — withdraw one to free up a slot.';
+const limitReachedBody = () => ({ error: 'limit_reached', message: LIMIT_REACHED_MESSAGE });
+
 /** Drafts + submitted both count toward the limit (docs/02 §9); withdrawn does not. */
 async function countForLimit(db: D1Database, formId: string, contactId: string): Promise<number> {
   const row = await db
@@ -450,7 +457,7 @@ submitRoutes.post('/:slug/:formId/draft', async (c) => {
   const isCreate = submissionId === null;
   if (!submissionId) {
     if (ctx.limit !== null && (await countForLimit(db, ctx.form.id, session.contactId)) >= ctx.limit) {
-      return c.json({ error: 'limit_reached' }, 409);
+      return c.json(limitReachedBody(), 409);
     }
     submissionId = crypto.randomUUID();
   }
@@ -506,7 +513,7 @@ submitRoutes.post('/:slug/:formId/draft', async (c) => {
 
   const results = await db.batch([head, ...answerStatements(db, submissionId, answers)]);
   if (isCreate && results[0]?.meta.changes === 0) {
-    return c.json({ error: 'limit_reached' }, 409);
+    return c.json(limitReachedBody(), 409);
   }
   await bumpEventRevision(c.env, ctx.event.id);
   return c.json({ submission_id: submissionId });
@@ -866,7 +873,7 @@ submitRoutes.post('/:slug/:formId/submit', async (c) => {
   // racing request cannot squeeze past it.
   if (isCreate && replayOf === null && ctx.limit !== null) {
     if ((await countForLimit(db, ctx.form.id, session.contactId)) >= ctx.limit) {
-      return c.json({ error: 'limit_reached' }, 409);
+      return c.json(limitReachedBody(), 409);
     }
   }
 
@@ -1278,7 +1285,7 @@ submitRoutes.post('/:slug/:formId/submit', async (c) => {
       if (dup) return replayResponse(dup);
     }
     if (isCreate && ctx.limit !== null && (await countForLimit(db, ctx.form.id, session.contactId)) >= ctx.limit) {
-      return c.json({ error: 'limit_reached' }, 409);
+      return c.json(limitReachedBody(), 409);
     }
     code = await peekNextSessionCode(db, ctx.event.id);
   }

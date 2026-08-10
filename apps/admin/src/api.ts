@@ -38,6 +38,11 @@ export interface ContactRow {
   headshot_asset_id: string | null
   /** organiser-only; never rendered in portal/public surfaces */
   notes: string | null
+  /** Contacts-hygiene item 2: `{linkedin, twitter, facebook, website}` json
+   * text, same shape and column the portal profile (portal.ts's LINK_FIELDS)
+   * already writes — the workspace speaker form just had no control for it.
+   * `c.*` in the contacts resource query already selects this. */
+  links?: string | null
   /** SPK-15: `{ <contact_field_definitions.key>: value }` json text for this
    * contact's event, or null when it has no custom-field values set. */
   custom_fields_json?: string | null

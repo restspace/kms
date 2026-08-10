@@ -46,10 +46,22 @@ export async function demoLogins(db: D1Database): Promise<DemoLogins | null> {
     .first<{ email: string }>();
 
   // A speaker, not an organiser: someone who submitted but holds no event role.
+  //
+  // Contacts-hygiene item 5: this used to match on email alone (no name
+  // requirement), which is fine against a freshly-seeded event but not
+  // guaranteed to stay pointed at the same person once the demo picks up
+  // runtime data — a nameless stub contact (submit.tsx's Account-step
+  // upsert, see App.tsx's isPlaceholderContact for the full story) sorts by
+  // `created_at, email` exactly like any seeded row and, if it happens to
+  // land first, would advertise an email nobody can meaningfully sign in as
+  // (there is no one to greet as). Requiring a real name pins the advertised
+  // login to an actual person, so the emailed/displayed identity here always
+  // matches the contact the session and its portal display name resolve to.
   const speaker = await db
     .prepare(
       `SELECT c.email FROM contacts c
        WHERE c.event_id = ?
+         AND TRIM(COALESCE(c.first_name, '') || COALESCE(c.last_name, '')) != ''
          AND EXISTS (SELECT 1 FROM submissions s WHERE s.submitter_contact_id = c.id)
          AND NOT EXISTS (SELECT 1 FROM event_users eu WHERE eu.contact_id = c.id)
        ORDER BY c.created_at, c.email LIMIT 1`,

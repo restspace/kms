@@ -169,9 +169,16 @@ export async function resolveAudience(
     return results;
   }
   const statusClause = audience === 'accepted_speakers' ? "AND s.status = 'accepted'" : '';
+  // Contacts-hygiene item 4: a contact staked out by the public submission
+  // wizard's Account step (submit.tsx) before any name is collected — or
+  // left over from a form that never collects one — can be attached to a
+  // submission with a blank name on both columns. That stub is not someone
+  // to message; excluded here the same way the Speakers grid's default view
+  // excludes it (App.tsx's isPlaceholderContact).
+  const hasName = "TRIM(COALESCE(first_name, '') || COALESCE(last_name, '')) != ''";
   const { results } = await db
     .prepare(
-      `${select} WHERE event_id = ?1 AND ${hasEmail} AND id IN (
+      `${select} WHERE event_id = ?1 AND ${hasEmail} AND ${hasName} AND id IN (
          SELECT s.submitter_contact_id FROM submissions s
           WHERE s.event_id = ?1 AND s.submitter_contact_id IS NOT NULL ${statusClause}
          UNION

@@ -85,7 +85,11 @@ async function deliverNow(db: D1Database, env: Env, logKey: string, payload: Out
     await deliverEmail(db, env, payload);
     await createDb(db).outbox.markDoneByKey(logKey);
   } catch (err) {
-    console.error(`bulk remind: immediate send failed (${logKey}):`, err instanceof Error ? err.message : 'unknown');
+    const message = err instanceof Error ? err.message : 'unknown';
+    console.error(`bulk remind: immediate send failed (${logKey}):`, message);
+    // Count the attempt toward the normal backoff/dead-letter sequence instead
+    // of leaving the row in_flight until the passive claim lease expires.
+    await createDb(db).outbox.markFailed(claimed.id, message);
   }
 }
 

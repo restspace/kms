@@ -10,6 +10,7 @@ import {
 import { appConfirm } from '../components/dialogs'
 import { fmtDateInTz } from '../utils/dates'
 import { FormBuilder } from './FormBuilder'
+import { EFFECTIVE_STATUS_LABEL, effectiveFormStatus } from './formStatus'
 import './forms.css'
 
 /**
@@ -99,13 +100,22 @@ export function FormsSection({
           <p className="pane-sub">No forms yet — create one to open your call for speakers.</p>
         ) : (
           <div className="forms-list">
-            {forms.map((f) => (
+            {forms.map((f) => {
+              const effStatus = effectiveFormStatus(f)
+              const closed = effStatus !== 'open'
+              return (
               <div key={f.id} className="form-card" onClick={() => setOpenFormId(f.id)}>
                 <div className="form-count">{f.submission_count ?? 0}</div>
                 <div className="form-card-main">
                   <div className="form-card-name">
                     {f.internal_name}{' '}
-                    <span className={`form-chip ${f.status}`}>{f.status === 'open' ? 'Open' : 'Closed'}</span>{' '}
+                    <span className={`form-chip ${closed ? 'closed' : 'open'}`} title={
+                      effStatus === 'closed-by-date'
+                        ? 'Status is set to Open, but the close date has passed — the public form treats it as closed.'
+                        : undefined
+                    }>
+                      {EFFECTIVE_STATUS_LABEL[effStatus]}
+                    </span>{' '}
                     <span className="form-chip kind">
                       {f.collection_type === 'abstracts' ? 'Abstracts' : 'Sessions'}
                       {f.collect_participants === 1 ? ' & Participants' : ''}
@@ -140,10 +150,19 @@ export function FormsSection({
                   <button
                     className="fbtn"
                     onClick={() =>
-                      void updateForm(f.id, { status: f.status === 'open' ? 'closed' : 'open' }).then(reload)
+                      // Reopen is keyed off *effective* status (docs/04 defect: a form
+                      // whose status column is still 'open' but whose close_at has
+                      // elapsed reads as "Closed" to the public — the button must
+                      // reflect that, and must always send close_at:null explicitly
+                      // rather than relying on a literal closed->open transition on
+                      // the server, so a single click reopens no matter which side of
+                      // the status/close_at duality caused the closure.
+                      void updateForm(f.id, closed ? { status: 'open', close_at: null } : { status: 'closed' }).then(
+                        reload,
+                      )
                     }
                   >
-                    {f.status === 'open' ? 'Close' : 'Reopen'}
+                    {closed ? 'Reopen' : 'Close'}
                   </button>
                   <button
                     className="fbtn danger"
@@ -161,7 +180,8 @@ export function FormsSection({
                   </button>
                 </div>
               </div>
-            ))}
+              )
+            })}
           </div>
         )}
       </div>

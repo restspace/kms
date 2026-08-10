@@ -10,6 +10,7 @@ import type { AppEnv, Env } from '../env';
 import type { SendTemplatedArgs } from '../mailer';
 import { sendTemplated } from '../mailer';
 import { requestMagicLink } from './auth';
+import { mintToken } from '../tokens';
 import { bumpEventRevision } from '../revision';
 import { isWriter } from '../access';
 import type { SessionPayload } from '../session';
@@ -76,6 +77,22 @@ const planBinds = (planId: string): [string, string] => [planId, planId];
 
 /** Submission statuses that can be reviewed — drafts and withdrawals cannot. */
 const REVIEWABLE_STATUS_SQL = `status NOT IN ('draft', 'withdrawn')`;
+
+/**
+ * ABS-07: the anonymise flag reverted to unchecked after a refetch. The
+ * accepted-fields list only ever matched `typeof v === 'boolean'`, so any
+ * other truthy spelling a client might send (1/0, "true"/"false" — what a
+ * form post or a non-JS client produces) fell straight through the whole
+ * `sets` builder and the handler still answered `{ ok: true }` with a 200:
+ * a silent no-op that reads to the UI as "saved" and to the next GET as
+ * "never happened". Parse permissively, and reject what we cannot read
+ * instead of pretending it was stored.
+ */
+function parseBoolish(raw: unknown): boolean | null {
+  if (raw === true || raw === 1 || raw === '1' || raw === 'true') return true;
+  if (raw === false || raw === 0 || raw === '0' || raw === 'false') return false;
+  return null;
+}
 
 /** ISO-8601 text or null; anything unparseable is rejected by the caller. */
 function parseIsoOrNull(raw: unknown): { ok: true; value: string | null } | { ok: false } {
@@ -682,6 +699,10 @@ evaluationRoutes.get('/evaluation/overview', async (c) => {
          GROUP BY ra.plan_id, ra.reviewer_contact_id`,
       ).bind(session.eventId).all(),
     ]);
+    // ABS-07: this payload carries the plan flags the editor re-renders from
+    // (anonymise, window, status). It must never be answered from a cache —
+    // a stale overview is exactly what "the checkbox reverted" looks like.
+    c.header('Cache-Control', 'no-store');
     return c.json({
       plans: plans.results ?? [],
       criteria: criteria.results ?? [],
@@ -718,7 +739,12 @@ evaluationRoutes.put('/evaluation/plans/:id', async (c) => {
   if (typeof body.name === 'string' && body.name.trim()) { sets.push('name = ?'); params.push(body.name.trim()); }
   if (typeof body.description === 'string' || body.description === null) { sets.push('description = ?'); params.push(body.description); }
   if (body.status === 'draft' || body.status === 'active' || body.status === 'closed') { sets.push('status = ?'); params.push(body.status); }
-  if (typeof body.anonymise_submitters === 'boolean') { sets.push('anonymise_submitters = ?'); params.push(body.anonymise_submitters ? 1 : 0); }
+  if ('anonymise_submitters' in body) {
+    const anon = parseBoolish(body.anonymise_submitters);
+    if (anon === null) return c.json({ error: 'invalid_anonymise_submitters' }, 400);
+    sets.push('anonymise_submitters = ?');
+    params.push(anon ? 1 : 0);
+  }
   // ABS-01 review window. Both are optional and independently clearable —
   // send '' or null to remove a bound and go back to "always open".
   for (const key of ['opens_at', 'closes_at'] as const) {
@@ -729,14 +755,20 @@ evaluationRoutes.put('/evaluation/plans/:id', async (c) => {
       params.push(parsed.value);
     }
   }
-  if (sets.length === 0) return c.json({ ok: true });
+  if (sets.length === 0) return c.json({ error: 'no_fields' }, 400);
   const result = await c.env.DB.prepare(
     `UPDATE evaluation_plans SET ${sets.join(', ')} WHERE id = ? AND event_id = ?`,
   )
     .bind(...params, c.req.param('id'), session.eventId)
     .run();
   if (result.meta.changes === 0) return c.json({ error: 'not_found' }, 404);
-  return c.json({ ok: true });
+  // Answer with the stored row (ABS-07): the client can then render what the
+  // database actually holds instead of trusting its own optimistic guess and
+  // discovering on the next refetch that the write never landed.
+  const plan = await c.env.DB.prepare('SELECT * FROM evaluation_plans WHERE id = ? AND event_id = ?')
+    .bind(c.req.param('id'), session.eventId)
+    .first<Record<string, unknown>>();
+  return c.json({ ok: true, plan });
 });
 
 evaluationRoutes.post('/evaluation/plans/:id/criteria', async (c) => {
@@ -1055,6 +1087,89 @@ evaluationRoutes.post('/evaluation/plans/:id/assign', async (c) => {
 });
 
 // ---------------------------------------------------------------------------
+// Plan reviewer pool (evaluation_plan_reviewers, 0012)
+//
+// The pool was write-only: `assign` INSERT-OR-IGNOREs the ticked reviewers and
+// nothing ever deleted a row, so unchecking somebody in the editor changed a
+// local checkbox, the next Assign (or the next reload) read the pool back from
+// the database and the reviewer reappeared ticked — the "removals don't
+// persist" defect. These two endpoints are the missing half.
+// ---------------------------------------------------------------------------
+
+/** A contact who may sit in a plan's pool: seated on the event, eligible role. */
+async function eligibleReviewer(db: D1Database, eventId: string, contactId: string): Promise<boolean> {
+  const row = await db
+    .prepare(
+      `SELECT 1 AS n FROM event_users
+       WHERE event_id = ? AND contact_id = ? AND role IN ('reviewer', 'admin', 'owner')`,
+    )
+    .bind(eventId, contactId)
+    .first();
+  return row !== null;
+}
+
+/** POST /evaluation/plans/:id/reviewers { contact_id } — pool without assigning. */
+evaluationRoutes.post('/evaluation/plans/:id/reviewers', async (c) => {
+  const session = c.get('session');
+  if (!isWriter(session.role)) return c.json({ error: 'forbidden' }, 403);
+  const db = c.env.DB;
+  const planId = c.req.param('id');
+  const plan = await loadPlan(db, planId, session.eventId);
+  if (!plan) return c.json({ error: 'not_found' }, 404);
+
+  const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+  const contactId = typeof body.contact_id === 'string' ? body.contact_id : '';
+  if (!contactId) return c.json({ error: 'contact_id_required' }, 400);
+  if (!(await eligibleReviewer(db, session.eventId, contactId))) {
+    return c.json({ error: 'invalid_reviewer' }, 400);
+  }
+
+  await db
+    .prepare('INSERT OR IGNORE INTO evaluation_plan_reviewers (plan_id, contact_id, added_at) VALUES (?, ?, ?)')
+    .bind(planId, contactId, nowIso())
+    .run();
+  return c.json({ ok: true, plan_id: planId, contact_id: contactId }, 201);
+});
+
+/**
+ * DELETE /evaluation/plans/:id/reviewers/:contactId — take a reviewer out of
+ * the round. Their *outstanding* assignments go with them (leaving them in a
+ * queue the organiser has just removed them from is the same lingering-work
+ * bug the submission-removal path already fixes), but anything already
+ * complete or skipped is kept: those rows own real scores and the round's
+ * aggregates depend on them.
+ */
+evaluationRoutes.delete('/evaluation/plans/:id/reviewers/:contactId', async (c) => {
+  const session = c.get('session');
+  if (!isWriter(session.role)) return c.json({ error: 'forbidden' }, 403);
+  const db = c.env.DB;
+  const planId = c.req.param('id');
+  const contactId = c.req.param('contactId');
+  const plan = await loadPlan(db, planId, session.eventId);
+  if (!plan) return c.json({ error: 'not_found' }, 404);
+
+  const removedAssignments = await db
+    .prepare(
+      `DELETE FROM review_assignments
+       WHERE plan_id = ? AND reviewer_contact_id = ? AND status IN ('pending', 'in_progress')`,
+    )
+    .bind(planId, contactId)
+    .run();
+  await db
+    .prepare('DELETE FROM evaluation_plan_reviewers WHERE plan_id = ? AND contact_id = ?')
+    .bind(planId, contactId)
+    .run();
+
+  await bumpEventRevision(c.env, session.eventId);
+  return c.json({
+    ok: true,
+    plan_id: planId,
+    contact_id: contactId,
+    removed_assignments: removedAssignments.meta.changes ?? 0,
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Reviewer provisioning + nudges (CFP-10 / ABS-09)
 // ---------------------------------------------------------------------------
 
@@ -1136,11 +1251,23 @@ evaluationRoutes.post('/evaluation/reviewers', async (c) => {
 });
 
 /**
- * POST /evaluation/reviewers/:contactId/signin-link — mint and email a
- * magic link so a freshly provisioned reviewer can actually get in. Reuses
- * `requestMagicLink` verbatim (auth.ts), so the send goes through the normal
- * template pipeline and lands in message_log like every other email, and the
- * demo/DEV inline-link carve-out applies unchanged.
+ * POST /evaluation/reviewers/:contactId/signin-link — mint a magic link so a
+ * reviewer can actually get in, and hand the organiser something they can pass
+ * on when the mail path cannot serve them.
+ *
+ * CFP-11: this used to delegate the whole decision to `requestMagicLink`
+ * (auth.ts), including whether to surface the link inline. That function's
+ * demo carve-out is scoped to two *seeded* identities — the demo organiser and
+ * the demo speaker of the first event in the database — so on the demo
+ * instance (DEMO_RESET=on, DEV_MODE off) the only link the button could ever
+ * reveal belonged to the organiser, never to the reviewer it was clicked for;
+ * for everybody else it answered `dev_link: null` and relied on an email the
+ * demo cannot send. The link is therefore minted here, against the target
+ * contact, whenever the instance is in demo/dev mode — the surfaced link is
+ * bound to `contact.id` by construction and cannot be the caller's — and the
+ * response names the reviewer it belongs to so the UI can never mislabel it.
+ * The ordinary (production) path is unchanged: requestMagicLink, one token,
+ * the template pipeline, a message_log row.
  */
 evaluationRoutes.post('/evaluation/reviewers/:contactId/signin-link', async (c) => {
   const session = c.get('session');
@@ -1148,12 +1275,13 @@ evaluationRoutes.post('/evaluation/reviewers/:contactId/signin-link', async (c) 
   const db = c.env.DB;
   const contact = await db
     .prepare(
-      `SELECT c.id, c.email FROM contacts c
+      `SELECT c.id, c.email, NULLIF(TRIM(COALESCE(c.first_name, '') || ' ' || COALESCE(c.last_name, '')), '') AS name
+       FROM contacts c
        JOIN event_users eu ON eu.contact_id = c.id AND eu.event_id = c.event_id
        WHERE c.id = ? AND c.event_id = ?`,
     )
     .bind(c.req.param('contactId'), session.eventId)
-    .first<{ id: string; email: string }>();
+    .first<{ id: string; email: string; name: string | null }>();
   if (!contact) return c.json({ error: 'not_found' }, 404);
 
   const event = await db
@@ -1162,6 +1290,27 @@ evaluationRoutes.post('/evaluation/reviewers/:contactId/signin-link', async (c) 
     .first<{ id: string; name: string; slug: string }>();
   if (!event) return c.json({ error: 'not_found' }, 404);
 
+  const identity = { contact_id: contact.id, email: contact.email, name: contact.name };
+
+  // Demo instance, DEV_MODE off: mint here for *this* contact and show it.
+  // No email — the demo has no deliverable mail path, and a link the organiser
+  // can copy is the only way a reviewer account is reachable at all.
+  if (c.env.DEV_MODE !== 'on' && c.env.DEMO_RESET === 'on') {
+    const { raw: token, statement } = await mintToken(c.env.DB, {
+      contactId: contact.id,
+      eventId: event.id,
+      purpose: 'portal-login',
+      redirectTo: '/app',
+    });
+    await statement.run();
+    return c.json({
+      ok: true,
+      ...identity,
+      dev_link: `${c.env.APP_URL}/auth/callback?t=${token}`,
+      emailed: false,
+    });
+  }
+
   // requestMagicLink is typed against the bare AppEnv context; this route's
   // context only adds a `session` variable on top of the same bindings.
   const { devLink } = await requestMagicLink(c as unknown as Context<AppEnv>, {
@@ -1169,7 +1318,7 @@ evaluationRoutes.post('/evaluation/reviewers/:contactId/signin-link', async (c) 
     event: { id: event.id, name: event.name },
     redirectTo: '/app',
   });
-  return c.json({ ok: true, email: contact.email, dev_link: devLink });
+  return c.json({ ok: true, ...identity, dev_link: devLink, emailed: true });
 });
 
 /**
@@ -1313,13 +1462,22 @@ evaluationRoutes.get('/review/queue', async (c) => {
       }
     }
 
-    // Participants shown unless the plan anonymises submitters (docs/06 §4).
+    // ABS-07 — participants are shown unless the plan anonymises submitters
+    // (docs/06 §4), and the redaction is done *here*, not in the client: an
+    // anonymised submission's identity never enters the response, so it cannot
+    // leak through devtools, a copied payload or a UI that forgot to hide it.
+    // Anonymised submissions still get an explicit empty list rather than a
+    // missing key, so "hidden" is a stated fact the client can render.
+    const anonymised = new Set(
+      assignments.filter((a) => a.anonymise_submitters === 1).map((a) => a.submission_id as string),
+    );
     const submissionIds = [
       ...new Set(
         assignments.filter((a) => a.anonymise_submitters !== 1).map((a) => a.submission_id as string),
       ),
-    ];
+    ].filter((id) => !anonymised.has(id));
     const participants: Record<string, unknown[]> = {};
+    for (const id of anonymised) participants[id] = [];
     for (const id of submissionIds) participants[id] = [];
     if (submissionIds.length > 0) {
       const placeholders = submissionIds.map(() => '?').join(', ');

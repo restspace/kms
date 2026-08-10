@@ -34,6 +34,7 @@ const ERRORS: Record<string, string> = {
   invalid_closes_at: 'The closing date could not be read.',
   reviewers_required: 'Tick at least one reviewer before assigning.',
   invalid_reviewer: 'One of those reviewers is no longer seated on this event.',
+  invalid_anonymise_submitters: 'The anonymise setting could not be read — reload and try again.',
 }
 
 export interface PlanSubmissionRow {
@@ -81,10 +82,40 @@ export const addReviewer = (body: { name?: string; email: string; plan_id?: stri
     { method: 'POST', body: JSON.stringify(body) },
   )
 
+/**
+ * CFP-11: the response now names the reviewer the link belongs to
+ * (`contact_id`/`name`), so the UI can label it with that identity rather than
+ * whatever row happened to be clicked — the surfaced link and the name beside
+ * it can no longer disagree.
+ */
 export const sendReviewerSigninLink = (contactId: string) =>
-  request<{ ok: boolean; email: string; dev_link: string | null }>(
+  request<{
+    ok: boolean
+    contact_id: string
+    email: string
+    name: string | null
+    dev_link: string | null
+    emailed?: boolean
+  }>(
     `/app/api/evaluation/reviewers/${contactId}/signin-link`,
     { method: 'POST', body: JSON.stringify({}) },
+  )
+
+/**
+ * The round's reviewer pool (evaluation_plan_reviewers). Ticking/unticking a
+ * reviewer used to be local state only — `assign` inserts pool rows and
+ * nothing ever deleted one, so a removal came back on the next reload.
+ */
+export const addPlanReviewer = (planId: string, contactId: string) =>
+  request<{ ok: boolean; plan_id: string; contact_id: string }>(
+    `/app/api/evaluation/plans/${planId}/reviewers`,
+    { method: 'POST', body: JSON.stringify({ contact_id: contactId }) },
+  )
+
+export const removePlanReviewer = (planId: string, contactId: string) =>
+  request<{ ok: boolean; plan_id: string; contact_id: string; removed_assignments: number }>(
+    `/app/api/evaluation/plans/${planId}/reviewers/${contactId}`,
+    { method: 'DELETE' },
   )
 
 export const remindReviewers = (planId: string, contactIds?: string[]) =>

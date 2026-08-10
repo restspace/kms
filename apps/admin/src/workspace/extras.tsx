@@ -698,7 +698,26 @@ export function SubmissionEditForm({ initialValues, onSubmit, onCancel, onDelete
         if (cancelled) return
         setDetail(d)
         const roomId = typeof d.submission.room_id === 'string' ? d.submission.room_id : ''
-        setFields((prev) => ({ ...prev, room_id: roomId }))
+        setFields((prev) => {
+          // Manual-review item: "Level" is blank in this form for some
+          // submitted records even though the submitter answered it on the
+          // public form. Root cause — the answer is only mirrored onto the
+          // first-class `submissions.level` column when the form's question
+          // is wired to the canonical `level` field_key (systemColumns in
+          // submit.tsx); a form question built via FormBuilder's "Create
+          // Field" flow with its own label (e.g. "Level") gets a distinct
+          // `custom_*` key, so its answer only ever lands in
+          // submission_answers — which the read-only detail panel above
+          // already surfaces (via `detail.answers`, matched by label, not by
+          // field_key) but this edit form did not. Falling back to that same
+          // answer here — only when the column itself came back empty — means
+          // the field is populated instead of appearing to have lost data,
+          // and saving now backfills the proper column going forward.
+          if (prev.level) return { ...prev, room_id: roomId }
+          const levelAnswer = d.answers.find((a) => a.label.trim().toLowerCase().includes('level'))
+          const fallbackLevel = levelAnswer ? answerText(levelAnswer.value_json) : ''
+          return { ...prev, room_id: roomId, level: fallbackLevel === '—' ? '' : fallbackLevel }
+        })
       })
       .catch((e: unknown) => { if (!cancelled) setLoadError(e instanceof Error ? e.message : 'Failed to load') })
     return () => { cancelled = true }

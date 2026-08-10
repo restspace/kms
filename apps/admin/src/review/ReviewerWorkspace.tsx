@@ -134,6 +134,7 @@ function ScoringForm({
   const [conflict, setConflict] = useState(assignment.my_conflict === 1)
   const [saving, setSaving] = useState(false)
   const windowClosed = isWindowClosed(assignment)
+  const anonymised = assignment.anonymise_submitters === 1
   const [formError, setFormError] = useState<string | null>(null)
 
   const complete = conflict || criteria.every((c) => scores[c.id] !== undefined)
@@ -168,8 +169,17 @@ function ScoringForm({
         {assignment.track_name ? ` · ${String(assignment.track_name)}` : ''}
         {assignment.format ? ` · ${String(assignment.format)}` : ''}
         {assignment.level ? ` · ${String(assignment.level)}` : ''}
-        {participants && participants.length > 0 && (
-          <> · {participants.map((p) => `${p.name ?? '—'} (${p.role})`).join(', ')}</>
+        {/* ABS-07: an anonymised round never carries participants in the
+            payload (the redaction is server-side, in GET /review/queue), and
+            this second gate means a stale or hand-crafted payload cannot put
+            a submitter's name on screen either. The state is stated rather
+            than left blank, so a reviewer knows the omission is deliberate. */}
+        {anonymised ? (
+          <> · <span style={{ fontStyle: 'italic' }}>Submitter hidden (anonymous review)</span></>
+        ) : (
+          participants && participants.length > 0 && (
+            <> · {participants.map((p) => `${p.name ?? '—'} (${p.role})`).join(', ')}</>
+          )
         )}
       </div>
       {assignment.description ? (

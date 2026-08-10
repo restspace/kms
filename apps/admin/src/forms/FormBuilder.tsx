@@ -13,6 +13,7 @@ import {
   type FormRow,
 } from '../api'
 import { isoToLocalInput, localInputToIso } from '../utils/dates'
+import { effectiveFormStatus } from './formStatus'
 
 /**
  * Form builder wizard (docs/04 §2): left rail of steps, content pane, sticky
@@ -1105,6 +1106,12 @@ function SettingsStep({
 }) {
   const closeAtPast = form.close_at !== null && new Date(form.close_at).getTime() < Date.now()
   const reopening = wasClosed && form.status === 'open'
+  // Status duality (docs/04 defect): status='open' and a past close_at are
+  // two independent controls that can disagree — the public form is closed
+  // either way (submit.tsx isFormClosed). Surface that next to the select so
+  // "why does this say Open when submitters see Closed" is answered in place,
+  // whether or not the admin is mid-way through an explicit reopen.
+  const effStatus = effectiveFormStatus(form)
   return (
     <section>
       <div className="bfield">
@@ -1113,6 +1120,12 @@ function SettingsStep({
           <option value="open">Open</option>
           <option value="closed">Closed</option>
         </select>
+        {effStatus === 'closed-by-date' && !reopening && (
+          <p className="bhelp">
+            Shows as <strong>Closed (by date)</strong> to submitters — the close date below has passed even
+            though Status is set to Open. Clear or move the close date, or set Status to Closed to match.
+          </p>
+        )}
         {reopening && closeAtPast && (
           <p className="bhelp">
             Reopening clears the past close date below on save — set a new one here if you want this form to

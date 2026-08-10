@@ -373,8 +373,22 @@ export interface ParticipantRoleConfig {
   max: number | null;
 }
 
+// Manual-review item (O4/item 2): the public submit form's role dropdown
+// only ever offered 'speaker' for any form an organiser hadn't explicitly
+// configured with a `participant_roles` JSON blob (FormBuilder's own
+// RolesPanel defaults an unconfigured form to speaker-only too — see
+// apps/admin/src/forms/FormBuilder.tsx's RolesPanel), while the organiser
+// workspace's ParticipantsEditor always offers the full canonical vocabulary
+// (ALL_PARTICIPANT_ROLES) regardless of the originating form — so a
+// co-author/co-presenter added to an existing submission from the admin side
+// could never have been labelled that way by the submitter themselves.
+// 'co-speaker' is added here as the shared minimum baseline both sides now
+// agree on for a form nobody has explicitly restricted; an organiser who
+// still wants speaker-only can say so explicitly via RolesPanel, same as
+// today.
 export const DEFAULT_PARTICIPANT_ROLES: ParticipantRoleConfig[] = [
   { role: 'speaker', min: 1, max: null },
+  { role: 'co-speaker', min: 0, max: null },
 ];
 
 export function parseParticipantRoles(json: string | null | undefined): ParticipantRoleConfig[] {

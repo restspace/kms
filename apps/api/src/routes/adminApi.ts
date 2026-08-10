@@ -704,6 +704,27 @@ const CONTACT_FIELDS = [
   'mobile_phone', 'biography', 'pronouns', 'notes',
 ] as const;
 
+// SPK contacts-hygiene item 2: the portal profile (portal.ts's LINK_FIELDS)
+// already writes these four into `contacts.links` (0001_init.sql:60, json
+// {linkedin, twitter, facebook, website}) — the organiser-side speaker form
+// had no matching control, so a speaker's own social links were invisible in
+// the workspace. Same json shape both ends so the two writers never fight
+// over the column's format.
+const SOCIAL_LINK_KEYS = ['linkedin', 'twitter', 'facebook', 'website'] as const;
+
+/** `body.links` (an object keyed by SOCIAL_LINK_KEYS) → the `links` column's json text, or null when every link is blank. Absent entirely when the request didn't send `links` at all, so a PUT that only changes e.g. company never touches the column. */
+function pickContactLinks(body: Record<string, unknown>): string | null | undefined {
+  if (!('links' in body)) return undefined;
+  const value = body.links;
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return null;
+  const out: Record<string, string> = {};
+  for (const key of SOCIAL_LINK_KEYS) {
+    const v = (value as Record<string, unknown>)[key];
+    if (typeof v === 'string' && v.trim() !== '') out[key] = v.trim();
+  }
+  return Object.keys(out).length > 0 ? JSON.stringify(out) : null;
+}
+
 function pickContactFields(raw: unknown): Record<string, string | null> {
   const body = (raw ?? {}) as Record<string, unknown>;
   const out: Record<string, string | null> = {};
@@ -714,6 +735,8 @@ function pickContactFields(raw: unknown): Record<string, string | null> {
     else if (typeof value === 'string') out[field] = value.trim();
   }
   if (typeof out.email === 'string') out.email = out.email.toLowerCase();
+  const links = pickContactLinks(body);
+  if (links !== undefined) out.links = links;
   return out;
 }
 
