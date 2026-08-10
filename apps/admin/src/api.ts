@@ -304,6 +304,9 @@ export interface BulkJobStatus {
   enqueued: number
   sent: number
   failed: number
+  /** Messages this job wrote that are neither sent nor failed yet (delivery in
+   * flight). Optional: older deployments of the worker omit it. */
+  queued?: number
   error: string | null
   /** send-decisions only: accepted/declined submissions with no submitter contact to notify. */
   skipped_no_submitter?: number

@@ -1035,8 +1035,23 @@ submitRoutes.post('/:slug/:formId/submit', async (c) => {
       .first<{ code: string; track_id: string | null }>();
   }
   // Primary-track semantics: an explicit routing set_track_id always wins,
-  // otherwise the first resolved track fills a still-empty primary slot.
-  const primaryTrackId = routedTrackId ?? existing?.track_id ?? resolvedTrackIds[0] ?? null;
+  // then what THIS submission actually answered, and only then the row's
+  // existing track.
+  //
+  // CFP defect (live-reproduced 2026-08-11): the previous order put
+  // `existing?.track_id` ahead of the answer, described as "primary track is
+  // sticky". That is wrong for the ordinary flow. The wizard's autosave
+  // creates (or, without allow_multiple_drafts, *reuses*) a draft row, and the
+  // draft path never writes track_id — so by the time Submit runs, `existing`
+  // is whatever that row already carried. Reusing a seeded/older draft whose
+  // track was "Agents" therefore pinned every subsequent submission to
+  // "Agents" no matter which track the submitter picked, and re-submitting an
+  // edited submission could never change its track at all. The submitter's own
+  // answer is the authority; the existing value survives only when this
+  // request resolved no track (an update that didn't touch the track question,
+  // or a form with no track field), which is what "sticky" was meant to
+  // protect.
+  const primaryTrackId = routedTrackId ?? resolvedTrackIds[0] ?? existing?.track_id ?? null;
   const primaryTrackName = primaryTrackId
     ? (
         await db

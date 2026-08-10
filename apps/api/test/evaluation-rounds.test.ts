@@ -389,10 +389,8 @@ describe('review window (ABS-01)', () => {
     await seedSubmission(eventId);
     const planId = await makePlan(admin.cookie);
     await addAll(admin.cookie, planId);
-    await SELF.fetch(
-      `${base}/evaluation/plans/${planId}/criteria`,
-      jsonReq(admin.cookie, { name: 'Relevance', weight: 1 }),
-    );
+    // No extra criterion: plan creation seeds one weight-1 'Overall' criterion,
+    // and a saved review must score every criterion on its plan.
     await SELF.fetch(
       `${base}/evaluation/plans/${planId}/assign`,
       jsonReq(admin.cookie, { reviewer_contact_ids: [reviewer.contactId], strategy: 'all' }),

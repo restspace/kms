@@ -285,6 +285,8 @@ function PlanCard({
 
   // CFP-11: the demo/dev sign-in link, shown with the reviewer it belongs to.
   const [signin, setSignin] = useState<{ who: string; email: string; link: string } | null>(null)
+  // Target for the Copy button's manual-selection fallback (see below).
+  const signinInputRef = useRef<HTMLInputElement | null>(null)
   const [strategy, setStrategy] = useState<'all' | 'round_robin'>('all')
   const [perSubmission, setPerSubmission] = useState(2)
   const [assigning, setAssigning] = useState(false)
@@ -560,6 +562,7 @@ function PlanCard({
             </span>
             <div style={{ display: 'flex', gap: 6 }}>
               <input
+                ref={signinInputRef}
                 readOnly
                 aria-label={`Sign-in link for ${signin.who}`}
                 value={signin.link}
@@ -569,10 +572,32 @@ function PlanCard({
               <button
                 className="fbtn-link"
                 onClick={() => {
-                  void navigator.clipboard?.writeText(signin.link).then(
-                    () => onNote(`Copied the sign-in link for ${signin.who}`),
-                    () => onError('Could not copy — select the link and copy it manually.'),
-                  )
+                  // Writing to the clipboard needs a permission the browser
+                  // will not always grant (headless runs never do, and neither
+                  // does an unfocused or insecure context) — and
+                  // `navigator.clipboard` may be absent entirely, in which
+                  // case the old `navigator.clipboard?.writeText(...).then(…)`
+                  // threw on `.then` of undefined. A refused copy is not an
+                  // error the organiser caused or can fix: fall back to
+                  // selecting the link so Ctrl+C works, and say so as an
+                  // ordinary note rather than a red failure.
+                  const selectInstead = () => {
+                    const el = signinInputRef.current
+                    el?.focus()
+                    el?.select()
+                    onNote('Press Ctrl+C (Cmd+C) to copy — the link is selected.')
+                  }
+                  let attempt: Promise<void> | undefined
+                  try {
+                    attempt = navigator.clipboard?.writeText(signin.link)
+                  } catch {
+                    attempt = undefined
+                  }
+                  if (!attempt) {
+                    selectInstead()
+                    return
+                  }
+                  void attempt.then(() => onNote(`Copied the sign-in link for ${signin.who}`), selectInstead)
                 }}
               >
                 Copy

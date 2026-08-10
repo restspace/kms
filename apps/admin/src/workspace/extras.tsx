@@ -566,9 +566,19 @@ export function SubmissionDetailPanel({ id, onEdit, onItemSaved }: {
           // pre-edit content — the columns are the single source of truth.
           // Conservative exact match (trim + lowercase) so a differently-
           // labelled question (e.g. "Track / Theme") still shows through.
+          // ...but only while the canonical column actually has a value to
+          // show. CFP defect: a submission whose track_id/track_name is NULL
+          // renders no Track pair above AND had its raw "Track" answer
+          // suppressed here, so the track the submitter chose vanished from
+          // the detail view entirely. Suppress a duplicate, never the only
+          // copy.
           .filter((a) => {
             const label = a.label.trim().toLowerCase();
-            return label !== 'track' && label !== 'format' && label !== 'title' && label !== 'description';
+            if (label === 'track') return !s.track_name;
+            if (label === 'format') return !s.format;
+            if (label === 'title') return !s.title;
+            if (label === 'description') return !s.description;
+            return true;
           })
           .map((a, i) => (
             <DetailPair key={i} term={a.label}>{answerText(a.value_json)}</DetailPair>

@@ -765,6 +765,19 @@ evaluationRoutes.post('/evaluation/plans', async (c) => {
   )
     .bind(id, session.eventId, name, typeof body.description === 'string' ? body.description : null, nowIso())
     .run();
+  // Seed one criterion. A plan with no scoring_criteria rows renders a
+  // scorecard with nothing to score, and the reviewer's Save is rejected for
+  // having no scores — a brand-new plan was unusable until the organiser
+  // happened to notice it needed criteria added first. One weight-1 "Overall"
+  // row makes the plan work out of the box; it is renameable and deletable
+  // like any other, so this costs an organiser who wants their own scheme
+  // nothing but a rename.
+  await c.env.DB.prepare(
+    `INSERT INTO scoring_criteria (id, plan_id, name, description, weight, position)
+     VALUES (?, ?, 'Overall', NULL, 1, 1)`,
+  )
+    .bind(crypto.randomUUID(), id)
+    .run();
   return c.json({ ok: true, id }, 201);
 });
 

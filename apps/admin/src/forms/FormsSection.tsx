@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   createForm,
   deleteForm,
@@ -49,11 +49,36 @@ export function FormsSection({
     onOpenForm?.(id)
   }
 
+  // Every row action ends in `reload()`, and those refetches are not ordered
+  // by the network. CFP defect ("closing a form appears to succeed but reverts
+  // to Open"): two row actions in quick succession start two list GETs, and
+  // whichever *responds* last wins — so an older response, taken before the
+  // write landed, repaints the list with the pre-close status and the closure
+  // looks like it was rolled back even though the server has it. Stamp each
+  // refetch and drop any response that is not the newest one.
+  const reloadSeqRef = useRef(0)
   const reload = useCallback(() => {
+    const seq = (reloadSeqRef.current += 1)
     listForms()
-      .then((r) => setForms(r.items))
-      .catch((e: unknown) => setError(e instanceof Error ? e.message : 'Failed to load forms'))
+      .then((r) => {
+        if (seq !== reloadSeqRef.current) return
+        setForms(r.items)
+      })
+      .catch((e: unknown) => {
+        if (seq !== reloadSeqRef.current) return
+        setError(e instanceof Error ? e.message : 'Failed to load forms')
+      })
   }, [])
+
+  // The Close/Reopen control is a single button whose label and action flip in
+  // place. While its PUT and the follow-up refetch are in flight the row still
+  // shows the pre-write label, so a second click — a double click, or an agent
+  // re-using a element handle from before the re-render — silently toggles the
+  // form straight back. Disable the button for the row being written.
+  // Held in a ref as well as state: state updates are async, so two clicks in
+  // the same tick would both pass a state-only check.
+  const statusBusyRef = useRef<string | null>(null)
+  const [statusBusyId, setStatusBusyId] = useState<string | null>(null)
 
   useEffect(reload, [reload])
 
@@ -149,7 +174,12 @@ export function FormsSection({
                   </button>
                   <button
                     className="fbtn"
-                    onClick={() =>
+                    disabled={statusBusyId === f.id}
+                    aria-busy={statusBusyId === f.id}
+                    onClick={() => {
+                      if (statusBusyRef.current !== null) return
+                      statusBusyRef.current = f.id
+                      setStatusBusyId(f.id)
                       // Reopen is keyed off *effective* status (docs/04 defect: a form
                       // whose status column is still 'open' but whose close_at has
                       // elapsed reads as "Closed" to the public — the button must
@@ -157,12 +187,27 @@ export function FormsSection({
                       // rather than relying on a literal closed->open transition on
                       // the server, so a single click reopens no matter which side of
                       // the status/close_at duality caused the closure.
-                      void updateForm(f.id, closed ? { status: 'open', close_at: null } : { status: 'closed' }).then(
-                        reload,
-                      )
-                    }
+                      void updateForm(f.id, closed ? { status: 'open', close_at: null } : { status: 'closed' })
+                        .then(
+                          // Trust the row the write returned rather than only a
+                          // follow-up list GET: the PUT's own response is the
+                          // authoritative post-write state, so the chip is
+                          // correct even if the refetch is slow or superseded.
+                          (r) => {
+                            setForms((prev) =>
+                              prev === null ? prev : prev.map((row) => (row.id === f.id ? { ...row, ...r.form } : row)),
+                            )
+                          },
+                          (e: unknown) => setError(e instanceof Error ? e.message : 'Could not change the form status'),
+                        )
+                        .finally(() => {
+                          statusBusyRef.current = null
+                          setStatusBusyId((current) => (current === f.id ? null : current))
+                          reload()
+                        })
+                    }}
                   >
-                    {closed ? 'Reopen' : 'Close'}
+                    {statusBusyId === f.id ? '…' : closed ? 'Reopen' : 'Close'}
                   </button>
                   <button
                     className="fbtn danger"

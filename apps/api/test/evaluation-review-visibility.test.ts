@@ -50,7 +50,10 @@ async function seedRound(options: { extraPlanFirst?: boolean } = {}) {
   const planId = ((await (
     await SELF.fetch(`${base}/evaluation/plans`, jsonReq(admin.cookie, { name: 'Round 1' }))
   ).json()) as { id: string }).id;
-  await SELF.fetch(`${base}/evaluation/plans/${planId}/criteria`, jsonReq(admin.cookie, { name: 'Relevance', weight: 1 }));
+  // Plan creation already seeds one weight-1 'Overall' criterion (a plan with
+  // no criteria has an unsaveable scorecard), and a review must score every
+  // criterion on its plan — so this fixture uses that seeded one rather than
+  // adding a second it would then also have to score.
   await SELF.fetch(
     `${base}/evaluation/plans/${planId}/submissions`,
     jsonReq(admin.cookie, { mode: 'add', submission_ids: [submissionId] }),

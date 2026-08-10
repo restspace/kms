@@ -195,7 +195,7 @@ async function expandSendDecisions(env: Env, job: BulkJobRow, limit: number): Pr
     }
 
     if (s.submitter_email) {
-      const { outcome } = await queueTemplated(db, {
+      const { outcome, payload } = await queueTemplated(db, {
         templateKey: isAccept ? 'decision_accepted' : 'decision_declined',
         eventId: job.event_id,
         contactId: s.submitter_contact_id,
@@ -218,6 +218,17 @@ async function expandSendDecisions(env: Env, job: BulkJobRow, limit: number): Pr
       if (outcome === 'queued' || outcome === 'duplicate') {
         await db.prepare(`UPDATE submissions SET notified_at = COALESCE(notified_at, ?) WHERE id = ?`).bind(ts, s.id).run();
       }
+      // Deliver inline, exactly as expandRemindTasks and
+      // expandSendConfirmations already do — see deliverNow's doc comment.
+      // CFP defect: this expander was the one that never did. It flipped
+      // bulk_jobs to 'done' the moment every submission was processed, while
+      // the message_log rows it had just written were still 'queued' awaiting
+      // the next tick's sweepOutbox. GET /bulk-jobs/:id counts only
+      // status='sent'/'failed', so the poll that settled on 'done' read
+      // sent=0, failed=0 and the toast said "No decision emails were sent."
+      // — for mail that was queued, was delivered seconds later, and had
+      // already stamped notified_at on the submission.
+      if (outcome === 'queued' && payload) await deliverNow(db, env, payload.log_key, payload);
     }
     if (isAccept) {
       await autoAssignAcceptTasksCore(db, job.event_id, s, event.name, event.slug, env.APP_URL, send, job.id);

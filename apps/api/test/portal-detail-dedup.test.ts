@@ -7,6 +7,12 @@
 // stale relative to) the canonical column value. This pins the fix: the
 // canonical columns are the only place Title/Description/Format/Track show,
 // and everything else still lists as an answer row.
+//
+// Amended for the CFP track defect: suppression applies only while the
+// canonical column actually HAS a value. A submission with no track_id renders
+// no Track pair, so suppressing the raw answer as well made the track the
+// submitter chose vanish from their own submission entirely. Suppress a
+// duplicate, never the only copy.
 
 import { env, SELF } from 'cloudflare:test';
 import { beforeEach, describe, expect, it } from 'vitest';
@@ -40,8 +46,14 @@ describe('portal submission detail — Title/Description/Format/Track dedup', ()
 
     const id = await createSubmission(eventId, { formId, title: 'Fresh Title' });
     await addParticipant(id, speakerId);
-    await env.DB.prepare('UPDATE submissions SET format = ?, description = ? WHERE id = ?')
-      .bind('Talk', 'Fresh description', id)
+    // Canonical track too, so the frozen 'Old Track' answer really is a stale
+    // duplicate of a column that has something to show.
+    const trackId = `trk-${crypto.randomUUID()}`;
+    await env.DB.prepare('INSERT INTO tracks (id, event_id, name, position) VALUES (?, ?, ?, 1)')
+      .bind(trackId, eventId, 'Fresh Track')
+      .run();
+    await env.DB.prepare('UPDATE submissions SET format = ?, description = ?, track_id = ? WHERE id = ?')
+      .bind('Talk', 'Fresh description', trackId, id)
       .run();
 
     // Stale, frozen-at-submit-time answers — exactly what would linger after
@@ -71,6 +83,43 @@ describe('portal submission detail — Title/Description/Format/Track dedup', ()
     // An unrelated answer still lists normally.
     expect(html).toContain('<dt>Target audience</dt>');
     expect(html).toContain('<dd>Beginners</dd>');
+  });
+
+  it('falls back to the raw Track answer when the submission has no canonical track', async () => {
+    const titleQ = await createQuestion(eventId, formId, { key: 'title', label: 'Title', position: 0 });
+    const trackQ = await createQuestion(eventId, formId, { key: 'track', label: 'Track', position: 1 });
+
+    const id = await createSubmission(eventId, { formId, title: 'Untracked Talk' });
+    await addParticipant(id, speakerId);
+    await setAnswer(id, titleQ, 'Untracked Talk');
+    await setAnswer(id, trackQ, 'Infra & Serving');
+
+    const res = await SELF.fetch(`${ORIGIN}/portal/${slug}/submissions/${id}`, { headers: { cookie } });
+    expect(res.status).toBe(200);
+    const html = await res.text();
+
+    // Exactly one Track row, sourced from the answer since the column is null.
+    expect(countOccurrences(html, '<dt>Track</dt>')).toBe(1);
+    expect(html).toContain('Infra &amp; Serving');
+  });
+
+  it('renders an em-dash, not the literal word null, for an unanswered question', async () => {
+    const titleQ = await createQuestion(eventId, formId, { key: 'title', label: 'Title', position: 0 });
+    const capacityQ = await createQuestion(eventId, formId, { key: 'capacity', label: 'Capacity', position: 1 });
+
+    const id = await createSubmission(eventId, { formId, title: 'Blank number talk' });
+    await addParticipant(id, speakerId);
+    await setAnswer(id, titleQ, 'Blank number talk');
+    await env.DB.prepare(
+      'INSERT INTO submission_answers (submission_id, question_id, value_json) VALUES (?, ?, ?)',
+    )
+      .bind(id, capacityQ, 'null')
+      .run();
+
+    const res = await SELF.fetch(`${ORIGIN}/portal/${slug}/submissions/${id}`, { headers: { cookie } });
+    const html = await res.text();
+    expect(html).toContain('<dt>Capacity</dt>');
+    expect(html).not.toContain('<dd>null</dd>');
   });
 });
 

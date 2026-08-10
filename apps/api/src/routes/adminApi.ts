@@ -2083,7 +2083,7 @@ adminApiRoutes.get('/events', async (c) => {
 // Bulk jobs (sweep item P2-19) — progress for the 202-style bulk routes.
 // ---------------------------------------------------------------------------
 
-// GET /app/api/bulk-jobs/:id → { id, kind, status, total, enqueued, sent, failed, error }
+// GET /app/api/bulk-jobs/:id → { id, kind, status, total, enqueued, sent, failed, queued, error }
 //
 // Progress for all three producers of a bulk_jobs row: this file's remind
 // handler ('remind-tasks'), agenda send-confirmations (BE-1) and evaluation
@@ -2092,6 +2092,11 @@ adminApiRoutes.get('/events', async (c) => {
 // entityId = "<jobId>:<naturalId>", so the key reads
 // "<template>:<contactId>:<jobId>:<naturalId>:v<version>" — the job id is an
 // interior segment, matched as ':<jobId>:' (frozen contract with BE-4).
+// `queued` is every message_log row for this job that is neither sent nor
+// failed yet, so a caller that settles on 'done' can distinguish "nothing was
+// ever queued" from "queued, delivery still in flight" — reporting the former
+// for the latter is what made the decision-email toast contradict the
+// Notified stamp the same run had just set.
 adminApiRoutes.get('/bulk-jobs/:id', async (c) => {
   const session = c.get('session');
   const jobId = c.req.param('id');
@@ -2100,13 +2105,16 @@ adminApiRoutes.get('/bulk-jobs/:id', async (c) => {
             (SELECT COUNT(*) FROM message_log m
               WHERE m.idempotency_key LIKE '%:' || ?1 || ':%' AND m.status = 'sent') AS sent,
             (SELECT COUNT(*) FROM message_log m
-              WHERE m.idempotency_key LIKE '%:' || ?1 || ':%' AND m.status = 'failed') AS failed
+              WHERE m.idempotency_key LIKE '%:' || ?1 || ':%' AND m.status = 'failed') AS failed,
+            (SELECT COUNT(*) FROM message_log m
+              WHERE m.idempotency_key LIKE '%:' || ?1 || ':%'
+                AND m.status NOT IN ('sent', 'failed')) AS queued
      FROM bulk_jobs j WHERE j.id = ?1 AND j.event_id = ?2`,
   )
     .bind(jobId, session.eventId)
     .first<{
       id: string; kind: string; status: string; total: number | null; enqueued: number;
-      error: string | null; params_json: string; sent: number; failed: number;
+      error: string | null; params_json: string; sent: number; failed: number; queued: number;
     }>();
   if (!row) return c.json({ error: 'not_found' }, 404);
   const { params_json, ...body } = row;

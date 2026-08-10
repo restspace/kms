@@ -84,9 +84,19 @@ export function pollBulkJob(
 /** "12 sent, 1 failed" / "nothing sent" — the settled wording, shared. */
 export function describeSettledJob(job: BulkJobStatus, noun: string): string {
   if (job.status === 'failed') return job.error ?? `Sending ${noun}s failed.`
-  if (job.sent === 0 && job.failed === 0) return `No ${noun}s were sent.`
+  if (job.sent === 0 && job.failed === 0) {
+    // "No emails were sent" is only true when nothing was ever queued. A job
+    // can settle with messages still in the outbox (delivery retrying, or a
+    // tick that queued without delivering inline) — claiming nothing was sent
+    // there directly contradicted the Notified stamps the same run set.
+    const queued = job.queued ?? 0
+    if (queued > 0) return `${queued} ${noun}${queued === 1 ? '' : 's'} queued — delivery in progress.`
+    return `No ${noun}s were sent.`
+  }
   const sent = `${job.sent} ${noun}${job.sent === 1 ? '' : 's'} sent`
-  return job.failed > 0 ? `${sent}, ${job.failed} failed.` : `${sent}.`
+  const stillQueued = job.queued ?? 0
+  const tail = stillQueued > 0 ? `, ${stillQueued} still queued` : ''
+  return job.failed > 0 ? `${sent}, ${job.failed} failed${tail}.` : `${sent}${tail}.`
 }
 
 /** "Sending… 20/50 queued." — the in-flight wording, shared. */

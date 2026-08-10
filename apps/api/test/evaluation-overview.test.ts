@@ -53,7 +53,11 @@ describe('GET /app/api/evaluation/overview', () => {
     };
 
     expect(body.plans.find((p) => p.id === planId)?.name).toBe('Round 1');
+    // A new plan is seeded with one default 'Overall' criterion (a plan with
+    // none renders an unsaveable scorecard), so the explicitly added one joins
+    // it rather than being the only row.
     expect(body.criteria.filter((c) => c.plan_id === planId)).toEqual([
+      expect.objectContaining({ name: 'Overall', weight: 1 }),
       expect.objectContaining({ name: 'Relevance', weight: 2 }),
     ]);
     expect(body.stats.find((s) => s.plan_id === planId)).toMatchObject({
@@ -63,7 +67,7 @@ describe('GET /app/api/evaluation/overview', () => {
     });
   });
 
-  it('a plan with no criteria and no assignments still reports zeroed stats', async () => {
+  it('a new plan is usable immediately: one default criterion, zeroed stats', async () => {
     const eventId = await seedEvent();
     const admin = await seedStaff(eventId, 'admin');
     const created = await SELF.fetch(
@@ -76,7 +80,12 @@ describe('GET /app/api/evaluation/overview', () => {
       criteria: Array<{ plan_id: string }>;
       stats: Array<{ plan_id: string; submissions: number; assignments: number; completed: number }>;
     };
-    expect(body.criteria.filter((c) => c.plan_id === planId)).toEqual([]);
+    // Not empty: a brand-new plan whose scorecard has nothing to score cannot
+    // be saved by a reviewer at all, so creation seeds a single weight-1
+    // 'Overall' criterion that the organiser can rename or replace.
+    expect(body.criteria.filter((c) => c.plan_id === planId)).toEqual([
+      expect.objectContaining({ name: 'Overall', weight: 1 }),
+    ]);
     expect(body.stats.find((s) => s.plan_id === planId)).toMatchObject({
       submissions: 0, assignments: 0, completed: 0,
     });

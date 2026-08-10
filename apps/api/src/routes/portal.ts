@@ -478,9 +478,16 @@ portalRoutes.get('/:slug/submissions/:id', async (c) => {
     if (!json) return '—';
     try {
       const v = JSON.parse(json) as unknown;
-      if (Array.isArray(v)) return v.join(', ');
+      // An unanswered optional question stores the JSON literal `null` (and a
+      // cleared number can store `""`). String(null) is the four characters
+      // "null", which is what the speaker-facing detail page was printing at
+      // the reader — an em-dash is the same "nothing here" the missing-row
+      // case already renders.
+      if (v === null || v === undefined) return '—';
+      if (Array.isArray(v)) return v.length > 0 ? v.join(', ') : '—';
       if (typeof v === 'boolean') return v ? 'Yes' : 'No';
-      return String(v).replace(/<[^>]*>/g, '') || '—';
+      if (typeof v === 'number') return Number.isFinite(v) ? String(v) : '—';
+      return String(v).replace(/<[^>]*>/g, '').trim() || '—';
     } catch {
       return json;
     }
@@ -515,9 +522,17 @@ ${answers
   // the DetailPairs immediately above this map) — same defect and fix as
   // the admin SubmissionDetailPanel. Conservative exact match (trim +
   // lowercase) so a differently-labelled question still shows through.
+  // ...but only while the canonical column has something to show: with no
+  // track_name the Track pair above is not rendered either, and suppressing
+  // the raw answer too made the submitter's own chosen track disappear from
+  // their submission entirely.
   .filter((a) => {
     const label = a.label.trim().toLowerCase();
-    return label !== 'title' && label !== 'description' && label !== 'track' && label !== 'format';
+    if (label === 'track') return !submission.track_name;
+    if (label === 'format') return !submission.format;
+    if (label === 'title') return !submission.title;
+    if (label === 'description') return !submission.description;
+    return true;
   })
   .map((a) => `<dt>${esc(a.label)}</dt><dd>${esc(answerValue(a.value_json))}</dd>`)
   .join('')}
