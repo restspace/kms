@@ -13,8 +13,9 @@ import {
   type FormQuestion,
   type FormRow,
 } from '../api'
+import { DesktopOnlyNotice } from '@kms/ui/desktop-only'
 import { isoToLocalInput, localInputToIso } from '../utils/dates'
-import { effectiveFormStatus } from './formStatus'
+import { EFFECTIVE_STATUS_LABEL, effectiveFormStatus } from './formStatus'
 
 /**
  * Form builder wizard (docs/04 §2): left rail of steps, content pane, sticky
@@ -236,7 +237,31 @@ export function FormBuilder({
   const abstractQuestions = questions.filter((q) => q.section === 'abstract')
 
   return (
-    <div className="forms-section">
+    <>
+      {/*
+        * Tier C refusal (docs/16 item 7): a step rail plus a drag-ordered
+        * question list with conditional-logic popovers is "arrange many
+        * things", not "act on one record". The gate is the CSS-only
+        * compact/wide pair, so nothing here needs viewport detection.
+        */}
+      <div className="kms-compact-only">
+        <DesktopOnlyNotice
+          title="The form builder needs a wider window."
+          message="Ordering questions and setting conditional logic needs more room than a phone has. The forms list still works here."
+          summary={
+            <dl className="builder-compact-summary">
+              <dt>Form</dt>
+              <dd>{form.internal_name}</dd>
+              <dt>Status</dt>
+              <dd>{EFFECTIVE_STATUS_LABEL[effectiveFormStatus(form)]}</dd>
+              <dt>Questions</dt>
+              <dd>{questions.length === 1 ? '1 question' : `${questions.length} questions`}</dd>
+            </dl>
+          }
+          action={{ label: 'Preview the public form', onClick: () => window.open(publicUrl, '_blank') }}
+        />
+      </div>
+      <div className="forms-section kms-wide-only">
       <div className="forms-header">
         <button type="button" className="fbtn" onClick={() => void (async () => {
           if (dirtyRef.current && !(await save())) return
@@ -325,7 +350,8 @@ export function FormBuilder({
           </div>
         </div>
       </div>
-    </div>
+      </div>
+    </>
   )
 }
 

@@ -635,3 +635,9 @@
   cursor: pointer;
   font-size: var(--text-grid);
 }
+
+/* Compact (640) — Tier C refusal. Appended; desktop rules above are untouched. */
+@media (max-width: 640px) {
+  .agenda-body { display: block; }
+  .agenda-list { overflow-x: auto; }
+}

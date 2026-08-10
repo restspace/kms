@@ -490,3 +490,10 @@
 .status-chip.status-in_progress { background: var(--status-pending-bg); color: var(--status-pending-text); }
 .status-chip.status-complete { background: var(--status-accepted-bg); color: var(--status-accepted-text); }
 .status-chip.status-skipped { background: var(--status-withdrawn-bg); color: var(--status-withdrawn-text); }
+
+/* Compact (640): the bulk bar arranges many records at once — the other side
+   of the docs/15 §6 line from "act on one record". Hidden, not refused; the
+   list and its detail tabs stay usable (docs/16 decision 3). */
+@media (max-width: 640px) {
+  .bulk-bar { display: none; }
+}

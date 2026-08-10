@@ -1,4 +1,17 @@
-import type { ReactNode } from 'react'
+/** @jsxImportSource react */
+// The pragma is load-bearing. This is the one file in packages/ui that both
+// builds compile: the admin bundles real React, while apps/public aliases
+// react/jsx-runtime onto preact/jsx-runtime. Without it the nearest tsconfig
+// (the repo root's, which targets preact) wins and the admin renders preact
+// vnodes inside a React tree — React error #31.
+
+/**
+ * Renderable slot. Deliberately loose: this file is compiled under two JSX
+ * type universes (React's in the admin, preact's in the public build) and
+ * neither ReactNode nor ComponentChildren is assignable in both — naming
+ * either one turns the *other* build's typecheck red.
+ */
+type Slot = any
 
 /**
  * The Tier C refusal panel (docs/15 §6, docs/16 item 6).
@@ -25,9 +38,9 @@ export interface DesktopOnlyNoticeProps {
   title: string
   /** One sentence saying why. Prefer `children` for anything richer. */
   message?: string
-  children?: ReactNode
+  children?: Slot
   /** Optional read-only digest — today's schedule, the form's question count. */
-  summary?: ReactNode
+  summary?: Slot
   /** Exactly one action is permitted; the type allows only one. */
   action?: DesktopOnlyNoticeAction
 }

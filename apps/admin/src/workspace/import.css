@@ -123,3 +123,17 @@
 .data-list-toolbar-actions.after-export {
   left: max(96px, calc(env(safe-area-inset-left) + 96px));
 }
+
+/* Compact (640) — Tier C refusal. Appended; desktop rules above are untouched. */
+@media (max-width: 640px) {
+  .import-compact-summary {
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    gap: 4px 12px;
+    margin: 0;
+    font-size: var(--text-grid);
+  }
+
+  .import-compact-summary dt { color: var(--text-muted); }
+  .import-compact-summary dd { margin: 0; overflow-wrap: anywhere; }
+}

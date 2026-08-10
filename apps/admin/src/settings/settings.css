@@ -228,3 +228,17 @@
   gap: 8px;
   margin-top: 4px;
 }
+
+/* Compact (640) — Tier C refusal. Appended; desktop rules above are untouched. */
+@media (max-width: 640px) {
+  .settings-compact-summary {
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    gap: 4px 12px;
+    margin: 0;
+    font-size: var(--text-grid);
+  }
+
+  .settings-compact-summary dt { color: var(--text-muted); }
+  .settings-compact-summary dd { margin: 0; overflow-wrap: anywhere; }
+}

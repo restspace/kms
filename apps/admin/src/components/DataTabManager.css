@@ -881,3 +881,12 @@
     transform: translateY(0);
   }
 }
+
+/* Compact (640): the global-anchor chip belongs to the "arrange many records"
+   half of docs/15 §6 — and anchors are only ever set by shift/right-click, so
+   nothing on a phone can produce one (docs/16 decision 3). */
+@media (max-width: 640px) {
+  .data-tab-global-filter-chip {
+    display: none;
+  }
+}
