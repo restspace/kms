@@ -300,6 +300,10 @@ export interface BulkJobStatus {
   sent: number
   failed: number
   error: string | null
+  /** send-decisions only: accepted/declined submissions with no submitter contact to notify. */
+  skipped_no_submitter?: number
+  /** remind-tasks only: overdue assignments whose contact has no email on file. */
+  skipped_no_email?: number
 }
 
 export const getBulkJob = (id: string) => request<BulkJobStatus>(`/app/api/bulk-jobs/${id}`)

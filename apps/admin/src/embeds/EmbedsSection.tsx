@@ -11,7 +11,9 @@ import './embeds.css'
  *
  * The five widgets are the five public pages (apps/api/src/routes/landing.tsx);
  * the loader script is GET /embed.js and the feeds are agenda.json /
- * speakers.json / agenda.xml / agenda.ics.
+ * sessions.json / speakers.json / agenda.xml / sessions.xml / agenda.ics /
+ * sessions.ics — sessions.* mirror the agenda.* payload under a URL that
+ * says what the "Sessions list" widget actually is (EMB-15).
  */
 
 type WidgetKey = 'sessions' | 'speakers' | 'agenda' | 'schedule' | 'gallery'
@@ -163,13 +165,27 @@ export function EmbedsSection({ me }: { me: Me }) {
     return s ? `?${s}` : ''
   }, [effTrack, effDay])
 
+  // EMB-15 (major defect): every JSON/XML/iCal feed used to point at the
+  // agenda endpoints regardless of which widget was selected, so choosing
+  // "Sessions list" handed out .../agenda.json instead of a sessions feed —
+  // "Speakers list" was the only widget that got its own URL right. Each
+  // widget now maps to the feed that actually describes it: sessions gets
+  // its own sessions.json/.xml/.ics (apps/api/src/routes/landing.tsx),
+  // speakers/gallery keep speakers.json (their only format), and
+  // agenda/schedule keep the agenda feeds since both really are views over
+  // the full published agenda, not a distinct payload.
   const feedUrl = useMemo(() => {
     const base = `${origin}/e/${encodeURIComponent(slug)}`
-    if (format === 'json') {
-      return widget === 'speakers' || widget === 'gallery'
-        ? `${base}/speakers.json`
-        : `${base}/agenda.json`
+    if (widget === 'speakers' || widget === 'gallery') {
+      return `${base}/speakers.json`
     }
+    if (widget === 'sessions') {
+      if (format === 'json') return `${base}/sessions.json`
+      if (format === 'xml') return `${base}/sessions.xml${feedQuery}`
+      if (format === 'ics') return `${base}/sessions.ics`
+      return pageUrl
+    }
+    if (format === 'json') return `${base}/agenda.json`
     if (format === 'xml') return `${base}/agenda.xml${feedQuery}`
     if (format === 'ics') return `${base}/agenda.ics`
     return pageUrl

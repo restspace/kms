@@ -11,8 +11,10 @@ import {
   queryResource,
   removeSubmissionParticipant,
   setSubmissionParticipantConfirmed,
+  updateSubmission,
   updateSubmissionNotes,
   updateSubmissionParticipantRole,
+  updateSubmissionStatus,
   type ContactRow,
   type RoomRow,
   type SubmissionDetail,
@@ -213,18 +215,234 @@ function ParticipantHeadshot({ p }: {
   )
 }
 
-/** Submission detail tab: answers, participants with roles, review summary. */
-export function SubmissionDetailPanel({ id }: { id: string }) {
+/**
+ * Add / change-role / confirm / remove participants for one submission.
+ *
+ * Extracted from `SubmissionEditForm` so the read-only-looking detail tab can
+ * render it too (eval defect AIA-04: "No UI exists anywhere to link a
+ * speaker/participant to a submission" — the controls did exist, but only
+ * behind a row *double*-click, while a single click opens the detail tab; the
+ * detail tab's Participants section was a bare list with no add control, so an
+ * exhaustive search concluded the feature was missing).
+ *
+ * Every action here is an immediate API call rather than staged form state:
+ * the submission already exists, and a role change has no reason to wait on
+ * unrelated title/abstract edits.
+ */
+export function ParticipantsEditor({
+  submissionId,
+  participants,
+  onChanged,
+  idPrefix = 'sub-edit',
+}: {
+  submissionId: string
+  participants: SubmissionDetail['participants']
+  onChanged: () => void | Promise<void>
+  /** Distinguishes the label/input ids when both surfaces are mounted. */
+  idPrefix?: string
+}) {
+  const [participantError, setParticipantError] = useState<string | null>(null)
+  const [addingRole, setAddingRole] = useState<string>('co-speaker')
+  const [contactQuery, setContactQuery] = useState('')
+  const [contactResults, setContactResults] = useState<ContactRow[]>([])
+  const [busyParticipantId, setBusyParticipantId] = useState<string | null>(null)
+
+  const searchContacts = async (q: string) => {
+    setContactQuery(q)
+    if (!q.trim()) {
+      setContactResults([])
+      return
+    }
+    try {
+      const result = await queryResource<ContactRow>('contacts')({ from: 0, size: 8, filters: { q } })
+      setContactResults(result.items)
+    } catch (err) {
+      setParticipantError(err instanceof Error ? err.message : 'Could not search speakers.')
+    }
+  }
+
+  const addParticipant = async (contact: ContactRow) => {
+    setParticipantError(null)
+    try {
+      await addSubmissionParticipant(submissionId, { contact_id: contact.id, role: addingRole })
+      await onChanged()
+      setContactQuery('')
+      setContactResults([])
+    } catch (err) {
+      setParticipantError(err instanceof Error ? err.message : 'Could not add participant.')
+    }
+  }
+
+  const changeRole = async (participantId: string, role: string) => {
+    setBusyParticipantId(participantId)
+    setParticipantError(null)
+    try {
+      await updateSubmissionParticipantRole(submissionId, participantId, role)
+      await onChanged()
+    } catch (err) {
+      setParticipantError(err instanceof Error ? err.message : 'Could not change role.')
+    } finally {
+      setBusyParticipantId(null)
+    }
+  }
+
+  // SPK-04/w2: the only place an organiser can set a speaker's confirmed
+  // status — see setSubmissionParticipantConfirmed in api.ts for why this
+  // control didn't exist before.
+  const toggleConfirmed = async (participantId: string, next: boolean) => {
+    setBusyParticipantId(participantId)
+    setParticipantError(null)
+    try {
+      await setSubmissionParticipantConfirmed(submissionId, participantId, next)
+      await onChanged()
+    } catch (err) {
+      setParticipantError(err instanceof Error ? err.message : 'Could not update confirmation.')
+    } finally {
+      setBusyParticipantId(null)
+    }
+  }
+
+  const removeParticipant = async (participantId: string, name: string) => {
+    const confirmed = await appConfirm(`Remove ${name} from this submission?`, {
+      title: 'Remove participant',
+      confirmLabel: 'Remove',
+      danger: true,
+    })
+    if (!confirmed) return
+    setBusyParticipantId(participantId)
+    setParticipantError(null)
+    try {
+      await removeSubmissionParticipant(submissionId, participantId)
+      await onChanged()
+    } catch (err) {
+      setParticipantError(err instanceof Error ? err.message : 'Could not remove participant.')
+    } finally {
+      setBusyParticipantId(null)
+    }
+  }
+
+  const addInputId = `${idPrefix}-add-participant`
+
+  return (
+    <div className="participants-editor">
+      {participantError && <p className="record-form-error" role="alert">{participantError}</p>}
+      {participants.map((p) => {
+        const name = [p.first_name, p.last_name].filter(Boolean).join(' ') || p.email
+        return (
+          <div className="part-row" key={p.participant_id}>
+            <ParticipantHeadshot p={p} />
+            <strong>{name}</strong>
+            <select
+              aria-label={`Role for ${name}`}
+              value={p.role}
+              disabled={busyParticipantId === p.participant_id}
+              onChange={(e) => void changeRole(p.participant_id, (e.target as HTMLSelectElement).value)}
+            >
+              {PARTICIPANT_ROLES.map((role) => <option key={role} value={role}>{readableRole(role)}</option>)}
+            </select>
+            {p.is_primary_contact === 1 && <span style={{ color: 'var(--text-muted)' }}>primary</span>}
+            <button
+              type="button"
+              aria-pressed={p.confirmed_at !== null}
+              disabled={busyParticipantId === p.participant_id}
+              onClick={() => void toggleConfirmed(p.participant_id, p.confirmed_at === null)}
+              title={p.confirmed_at ? `Confirmed ${fmtDate(p.confirmed_at)}` : 'Not yet confirmed'}
+            >
+              {p.confirmed_at ? 'Confirmed ✓' : 'Mark confirmed'}
+            </button>
+            <button
+              type="button"
+              className="record-form-delete"
+              disabled={busyParticipantId === p.participant_id}
+              onClick={() => void removeParticipant(p.participant_id, name)}
+            >
+              Remove
+            </button>
+          </div>
+        )
+      })}
+      {participants.length === 0 && (
+        <p style={{ color: 'var(--text-muted)', fontSize: 13 }}>No participants yet.</p>
+      )}
+
+      <div className="record-form-field" style={{ marginTop: 8 }}>
+        <label htmlFor={addInputId}>Add participant</label>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <input
+            id={addInputId}
+            placeholder="Search speakers by name or email…"
+            value={contactQuery}
+            onChange={(e) => void searchContacts((e.target as HTMLInputElement).value)}
+            autoComplete="off"
+          />
+          <select
+            aria-label="Role to add"
+            value={addingRole}
+            onChange={(e) => setAddingRole((e.target as HTMLSelectElement).value)}
+          >
+            {PARTICIPANT_ROLES.map((role) => <option key={role} value={role}>{readableRole(role)}</option>)}
+          </select>
+        </div>
+        {contactResults.length > 0 && (
+          <ul className="contact-picker-results">
+            {contactResults.map((c) => {
+              const already = participants.some((p) => p.contact_id === c.id)
+              const name = [c.first_name, c.last_name].filter(Boolean).join(' ') || c.email
+              return (
+                <li key={c.id}>
+                  <button type="button" disabled={already} onClick={() => void addParticipant(c)}>
+                    {name} — {c.email}{already ? ' (already added)' : ''}
+                  </button>
+                </li>
+              )
+            })}
+          </ul>
+        )}
+      </div>
+    </div>
+  )
+}
+
+/**
+ * Submission detail tab: answers, participants with roles, review summary —
+ * plus the controls an organiser reaches for straight after opening a record.
+ *
+ * This panel is what a single row click opens, so it can't be read-only: an
+ * "Edit" button (DataTabManager hands `onEdit` to every detail component whose
+ * tab config has `onUpsert` + `schema` — the submissions tab has both) opens
+ * the full SubmissionEditForm for title/abstract editing (CNT-09), the
+ * participants section is directly actionable (AIA-04), and the public-agenda
+ * gate and status are editable in place (CNT-12).
+ */
+export function SubmissionDetailPanel({ id, onEdit, onItemSaved }: {
+  id: string
+  /** Opens the edit tab; omitted in read-only hosts. */
+  onEdit?: () => void
+  /** Lets the tab manager refresh the parent list after an in-panel save. */
+  onItemSaved?: (item: Record<string, unknown>) => void
+}) {
   const [detail, setDetail] = useState<SubmissionDetail | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [notes, setNotes] = useState('')
   const [savedNotes, setSavedNotes] = useState('')
   const [notesSaving, setNotesSaving] = useState(false)
   const [notesError, setNotesError] = useState<string | null>(null)
+  /** Inline save feedback for the status / visibility controls. */
+  const [fieldSaving, setFieldSaving] = useState(false)
+  const [fieldSaved, setFieldSaved] = useState(false)
+  const [fieldError, setFieldError] = useState<string | null>(null)
+
+  const load = async () => {
+    const d = await getSubmissionDetail(id)
+    setDetail(d)
+    return d
+  }
 
   useEffect(() => {
     setDetail(null)
     setNotesError(null)
+    setFieldError(null)
+    setFieldSaved(false)
     getSubmissionDetail(id)
       .then((d) => {
         setDetail(d)
@@ -234,6 +452,27 @@ export function SubmissionDetailPanel({ id }: { id: string }) {
       })
       .catch((e: unknown) => setError(e instanceof Error ? e.message : 'Failed to load'))
   }, [id])
+
+  /**
+   * Run one field write, refresh the panel from the server (so the header
+   * chip/checkbox reflect what was actually stored) and tell the tab manager
+   * so the parent grid row updates too.
+   */
+  const saveField = async (write: () => Promise<unknown>) => {
+    setFieldSaving(true)
+    setFieldSaved(false)
+    setFieldError(null)
+    try {
+      await write()
+      const fresh = await load()
+      onItemSaved?.(fresh.submission)
+      setFieldSaved(true)
+    } catch (e) {
+      setFieldError(e instanceof Error ? e.message : 'Could not save')
+    } finally {
+      setFieldSaving(false)
+    }
+  }
 
   const saveNotes = async () => {
     setNotesSaving(true)
@@ -269,6 +508,50 @@ export function SubmissionDetailPanel({ id }: { id: string }) {
         {String(s.code)} · {String(s.form_name ?? 'Manual')} · Submitted {fmtDate(s.created_at)}
         {s.notified_at ? ` · Notified ${fmtDate(s.notified_at)}` : ' · Not notified'}
       </div>
+
+      {/* CNT-09/CNT-12: the actions an organiser wants the moment the record
+          opens. "Edit" is first and unmissable — everything the bespoke form
+          offers (title, abstract, track, room) was otherwise reachable only by
+          a row double-click nobody discovers. */}
+      <div className="detail-actions submission-detail-actions">
+        {onEdit && (
+          <button type="button" className="primary" onClick={onEdit}>
+            Edit submission
+          </button>
+        )}
+        <label htmlFor="sub-detail-status">Status</label>
+        <select
+          id="sub-detail-status"
+          className={`status-edit status-chip status-${String(s.status)}`}
+          value={String(s.status)}
+          disabled={fieldSaving}
+          onChange={(e) => {
+            const next = (e.target as HTMLSelectElement).value
+            void saveField(() => updateSubmissionStatus(id, next))
+          }}
+        >
+          {SUBMISSION_STATUSES.map((st) => (
+            <option key={st} value={st}>{statusLabel(st)}</option>
+          ))}
+        </select>
+        <label htmlFor="sub-detail-content-approved" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <input
+            id="sub-detail-content-approved"
+            type="checkbox"
+            checked={s.content_approved !== 0}
+            disabled={fieldSaving}
+            onChange={(e) => {
+              const next = (e.target as HTMLInputElement).checked
+              void saveField(() => updateSubmission(id, { content_approved: next }))
+            }}
+          />
+          Visible in public agenda
+        </label>
+        {fieldSaving && <span className="detail-save-note" role="status">Saving…</span>}
+        {!fieldSaving && fieldSaved && <span className="detail-save-note" role="status">Saved</span>}
+        {fieldError && <span className="internal-notes-error" role="alert">{fieldError}</span>}
+      </div>
+
       <dl>
         {s.format ? <DetailPair term="Format">{String(s.format)}</DetailPair> : null}
         {s.track_name ? <DetailPair term="Track">{String(s.track_name)}</DetailPair> : null}
@@ -308,20 +591,13 @@ export function SubmissionDetailPanel({ id }: { id: string }) {
       </div>
 
       <h2 style={{ fontSize: 14 }}>Participants</h2>
-      {detail.participants.map((p) => (
-        <div className="part-row" key={p.contact_id}>
-          <ParticipantHeadshot p={p} />
-          <strong>{[p.first_name, p.last_name].filter(Boolean).join(' ') || p.email}</strong>
-          <span style={{ color: 'var(--text-muted)' }}>
-            {p.role}{p.is_primary_contact === 1 ? ' · primary' : ''}
-          </span>
-          <span className="part-flags">
-            {p.has_bio === 1 ? 'bio ✓' : 'bio –'}
-            {' · '}
-            {p.confirmed_at ? 'confirmed ✓' : 'awaiting confirmation'}
-          </span>
-        </div>
-      ))}
+      {/* AIA-04: previously a bare list with no add/remove control at all. */}
+      <ParticipantsEditor
+        submissionId={id}
+        participants={detail.participants}
+        onChanged={async () => { await load() }}
+        idPrefix="sub-detail"
+      />
 
       {/* Submission-scoped uploads (slides and the like) with download links —
           manual-QA item (b): these were invisible to organisers. */}
@@ -361,10 +637,12 @@ const readableRole = (role: string): string =>
  * consistent look.
  *
  * Participant add/role-change/remove are immediate API calls (like the
- * "Save notes" button on the read-only detail panel above), not staged into
- * the form's own Save — the submission has to exist first, and there is no
- * reason to make a role change wait on unrelated title/description edits
- * (and hence never apply in create mode, before the record exists).
+ * "Save notes" button on the detail panel above), not staged into the form's
+ * own Save — the submission has to exist first, and there is no reason to
+ * make a role change wait on unrelated title/description edits (and hence
+ * never apply in create mode, before the record exists). The controls
+ * themselves now live in the shared `ParticipantsEditor`, which the detail
+ * panel renders too.
  */
 export function SubmissionEditForm({ initialValues, onSubmit, onCancel, onDelete, title, onDirtyChange }: CreateFormProps) {
   const id = typeof initialValues?.id === 'string' ? initialValues.id : undefined
@@ -462,89 +740,11 @@ export function SubmissionEditForm({ initialValues, onSubmit, onCancel, onDelete
   }
 
   // --- Participants -------------------------------------------------------
-  const [participantError, setParticipantError] = useState<string | null>(null)
-  const [addingRole, setAddingRole] = useState<string>('co-speaker')
-  const [contactQuery, setContactQuery] = useState('')
-  const [contactResults, setContactResults] = useState<ContactRow[]>([])
-  const [busyParticipantId, setBusyParticipantId] = useState<string | null>(null)
-
+  // The controls themselves live in `ParticipantsEditor` above, shared with
+  // the detail tab; the form only owns refreshing its own copy of the detail.
   const refreshDetail = async () => {
     if (!id) return
     setDetail(await getSubmissionDetail(id))
-  }
-
-  const searchContacts = async (q: string) => {
-    setContactQuery(q)
-    if (!q.trim()) {
-      setContactResults([])
-      return
-    }
-    const result = await queryResource<ContactRow>('contacts')({ from: 0, size: 8, filters: { q } })
-    setContactResults(result.items)
-  }
-
-  const addParticipant = async (contact: ContactRow) => {
-    if (!id) return
-    setParticipantError(null)
-    try {
-      await addSubmissionParticipant(id, { contact_id: contact.id, role: addingRole })
-      await refreshDetail()
-      setContactQuery('')
-      setContactResults([])
-    } catch (err) {
-      setParticipantError(err instanceof Error ? err.message : 'Could not add participant.')
-    }
-  }
-
-  const changeRole = async (participantId: string, role: string) => {
-    if (!id) return
-    setBusyParticipantId(participantId)
-    setParticipantError(null)
-    try {
-      await updateSubmissionParticipantRole(id, participantId, role)
-      await refreshDetail()
-    } catch (err) {
-      setParticipantError(err instanceof Error ? err.message : 'Could not change role.')
-    } finally {
-      setBusyParticipantId(null)
-    }
-  }
-
-  // SPK-04/w2: the only place an organiser can set a speaker's confirmed
-  // status — see setSubmissionParticipantConfirmed in api.ts for why this
-  // control didn't exist before.
-  const toggleConfirmed = async (participantId: string, next: boolean) => {
-    if (!id) return
-    setBusyParticipantId(participantId)
-    setParticipantError(null)
-    try {
-      await setSubmissionParticipantConfirmed(id, participantId, next)
-      await refreshDetail()
-    } catch (err) {
-      setParticipantError(err instanceof Error ? err.message : 'Could not update confirmation.')
-    } finally {
-      setBusyParticipantId(null)
-    }
-  }
-
-  const removeParticipant = async (participantId: string, name: string) => {
-    if (!id) return
-    const confirmed = await appConfirm(`Remove ${name} from this submission?`, {
-      title: 'Remove participant',
-      confirmLabel: 'Remove',
-      danger: true,
-    })
-    if (!confirmed) return
-    setBusyParticipantId(participantId)
-    setParticipantError(null)
-    try {
-      await removeSubmissionParticipant(id, participantId)
-      await refreshDetail()
-    } catch (err) {
-      setParticipantError(err instanceof Error ? err.message : 'Could not remove participant.')
-    } finally {
-      setBusyParticipantId(null)
-    }
   }
 
   return (
@@ -622,76 +822,12 @@ export function SubmissionEditForm({ initialValues, onSubmit, onCancel, onDelete
       <>
       <h2 style={{ fontSize: 14 }}>Participants</h2>
       {loadError && <p className="record-form-error" role="alert">{loadError}</p>}
-      {participantError && <p className="record-form-error" role="alert">{participantError}</p>}
-      {detail?.participants.map((p) => {
-        const name = [p.first_name, p.last_name].filter(Boolean).join(' ') || p.email
-        return (
-          <div className="part-row" key={p.participant_id}>
-            <ParticipantHeadshot p={p} />
-            <strong>{name}</strong>
-            <select
-              aria-label={`Role for ${name}`}
-              value={p.role}
-              disabled={busyParticipantId === p.participant_id}
-              onChange={(e) => void changeRole(p.participant_id, e.target.value)}
-            >
-              {PARTICIPANT_ROLES.map((role) => <option key={role} value={role}>{readableRole(role)}</option>)}
-            </select>
-            {p.is_primary_contact === 1 && <span style={{ color: 'var(--text-muted)' }}>primary</span>}
-            <button
-              type="button"
-              aria-pressed={p.confirmed_at !== null}
-              disabled={busyParticipantId === p.participant_id}
-              onClick={() => void toggleConfirmed(p.participant_id, p.confirmed_at === null)}
-              title={p.confirmed_at ? `Confirmed ${fmtDate(p.confirmed_at)}` : 'Not yet confirmed'}
-            >
-              {p.confirmed_at ? 'Confirmed ✓' : 'Mark confirmed'}
-            </button>
-            <button
-              type="button"
-              className="record-form-delete"
-              disabled={busyParticipantId === p.participant_id}
-              onClick={() => void removeParticipant(p.participant_id, name)}
-            >
-              Remove
-            </button>
-          </div>
-        )
-      })}
-      {(!detail || detail.participants.length === 0) && !loadError && (
-        <p style={{ color: 'var(--text-muted)', fontSize: 13 }}>No participants yet.</p>
-      )}
-
-      <div className="record-form-field" style={{ marginTop: 8 }}>
-        <label htmlFor="sub-edit-add-participant">Add participant</label>
-        <div style={{ display: 'flex', gap: 8 }}>
-          <input
-            id="sub-edit-add-participant"
-            placeholder="Search speakers by name or email…"
-            value={contactQuery}
-            onChange={(e) => void searchContacts(e.target.value)}
-            autoComplete="off"
-          />
-          <select aria-label="Role to add" value={addingRole} onChange={(e) => setAddingRole(e.target.value)}>
-            {PARTICIPANT_ROLES.map((role) => <option key={role} value={role}>{readableRole(role)}</option>)}
-          </select>
-        </div>
-        {contactResults.length > 0 && (
-          <ul className="contact-picker-results">
-            {contactResults.map((c) => {
-              const already = detail?.participants.some((p) => p.contact_id === c.id)
-              const name = [c.first_name, c.last_name].filter(Boolean).join(' ') || c.email
-              return (
-                <li key={c.id}>
-                  <button type="button" disabled={already} onClick={() => void addParticipant(c)}>
-                    {name} — {c.email}{already ? ' (already added)' : ''}
-                  </button>
-                </li>
-              )
-            })}
-          </ul>
-        )}
-      </div>
+      <ParticipantsEditor
+        submissionId={id!}
+        participants={detail?.participants ?? []}
+        onChanged={refreshDetail}
+        idPrefix="sub-edit"
+      />
       </>
       )}
 

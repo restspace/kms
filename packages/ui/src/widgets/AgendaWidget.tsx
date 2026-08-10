@@ -30,6 +30,18 @@ const SLOT_MIN = 5
 /** Pixels per slot row — 5 min ≙ 6px, i.e. an hour is 72px tall. */
 const SLOT_PX = 6
 const NO_ROOM = '__unscheduled__'
+/**
+ * Minimum on-grid duration a block is laid out with, in minutes (minor
+ * defect, seen twice: a real 15/30-min session was only 18-36px tall — too
+ * short for its time badge + title, so the title read as "cut off"). This is
+ * applied to the *layout* span (before lane assignment), not just a CSS
+ * min-height: stretching the box in isolation, without feeding the wider
+ * span back into overlap detection, is what let a stretched block visually
+ * run into a neighbour that `assignLanes` had judged non-overlapping.
+ * Stretching first means two blocks that become adjacent because of the
+ * padding still get split into side-by-side lanes like any other overlap.
+ */
+const MIN_VISUAL_MIN = 40
 
 interface PlacedSession {
   session: PublicSession
@@ -92,7 +104,11 @@ function buildDayLayout(feed: AgendaFeed, day: string): DayLayout {
     const end = utcToLocal(s.ends_at, tz)
     // A session ending on a later local date (or exactly at midnight) is
     // clamped to the end of its own day rather than wrapping to minute 0.
-    const endMin = end.day === start.day && end.minutes > start.minutes ? end.minutes : 24 * 60
+    const rawEndMin = end.day === start.day && end.minutes > start.minutes ? end.minutes : 24 * 60
+    // Guarantee every block enough vertical room for its title (see
+    // MIN_VISUAL_MIN) — clamped to the day boundary so a session ending at
+    // 23:55 doesn't get padded past midnight.
+    const endMin = Math.min(Math.max(rawEndMin, start.minutes + MIN_VISUAL_MIN), 24 * 60)
     return { session: s, startMin: start.minutes, endMin, lane: 0, lanes: 1 }
   })
 

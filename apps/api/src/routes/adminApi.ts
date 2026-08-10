@@ -960,6 +960,92 @@ async function taskRefsBelongToEvent(
   return true;
 }
 
+/**
+ * CNT-01: a task *definition* row (`tasks`) is invisible in the admin Tasks
+ * grid, which lists `task_assignments` (one row per assignee). Creating a
+ * manual task with no assignments therefore looked like a silent failure. The
+ * create endpoint now takes explicit targets and materialises the assignment
+ * rows in the same request.
+ */
+const MAX_TASK_TARGETS = 500;
+
+interface TaskTargets {
+  contactIds: string[];
+  submissionIds: string[];
+  error?: string;
+}
+
+/** Read + shape-validate the (optional) target id arrays on a create body. */
+function pickTaskTargets(raw: unknown): TaskTargets {
+  const body = (raw ?? {}) as Record<string, unknown>;
+  const read = (key: string): string[] | null => {
+    const v = body[key];
+    if (v === undefined || v === null) return [];
+    if (!Array.isArray(v) || v.length > MAX_TASK_TARGETS) return null;
+    const ids: string[] = [];
+    for (const item of v) {
+      if (typeof item !== 'string' || item.trim() === '') return null;
+      if (!ids.includes(item)) ids.push(item);
+    }
+    return ids;
+  };
+  const contactIds = read('assignee_contact_ids');
+  if (contactIds === null) return { contactIds: [], submissionIds: [], error: 'invalid_assignee_contact_ids' };
+  const submissionIds = read('submission_ids');
+  if (submissionIds === null) return { contactIds: [], submissionIds: [], error: 'invalid_submission_ids' };
+  return { contactIds, submissionIds };
+}
+
+/** Every id in `ids` exists in `table` under `eventId` (tenant isolation). */
+async function idsBelongToEvent(
+  db: D1Database,
+  table: 'contacts' | 'submissions',
+  ids: string[],
+  eventId: string,
+): Promise<boolean> {
+  if (ids.length === 0) return true;
+  const row = await db
+    .prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE event_id = ? AND id IN (${ids.map(() => '?').join(',')})`)
+    .bind(eventId, ...ids)
+    .first<{ n: number }>();
+  return (row?.n ?? 0) === ids.length;
+}
+
+/**
+ * Expand the requested targets into (contact_id, submission_id) assignment
+ * pairs. `task_assignments.contact_id` is NOT NULL, so a submission target
+ * resolves to that submission's people — the explicitly picked contacts when
+ * the organiser named some, otherwise its participants plus its submitter.
+ */
+async function expandTaskTargets(
+  db: D1Database,
+  targets: TaskTargets,
+): Promise<Array<{ contactId: string; submissionId: string | null }>> {
+  const pairs: Array<{ contactId: string; submissionId: string | null }> = [];
+  if (targets.submissionIds.length > 0) {
+    const placeholders = targets.submissionIds.map(() => '?').join(',');
+    const people = targets.contactIds.length > 0
+      ? targets.submissionIds.flatMap((submissionId) =>
+          targets.contactIds.map((contactId) => ({ submission_id: submissionId, contact_id: contactId })),
+        )
+      : (
+          await db
+            .prepare(
+              `SELECT submission_id, contact_id FROM submission_participants WHERE submission_id IN (${placeholders})
+               UNION
+               SELECT id AS submission_id, submitter_contact_id AS contact_id FROM submissions
+               WHERE id IN (${placeholders}) AND submitter_contact_id IS NOT NULL`,
+            )
+            .bind(...targets.submissionIds, ...targets.submissionIds)
+            .all<{ submission_id: string; contact_id: string }>()
+        ).results;
+    for (const p of people) pairs.push({ contactId: p.contact_id, submissionId: p.submission_id });
+  } else {
+    for (const contactId of targets.contactIds) pairs.push({ contactId, submissionId: null });
+  }
+  return pairs;
+}
+
 const taskRow = (db: D1Database, id: string, eventId: string) =>
   db.prepare(
     `SELECT id, event_id, title, description, target, assignment_mode, "trigger", action_type,
@@ -970,9 +1056,18 @@ const taskRow = (db: D1Database, id: string, eventId: string) =>
 adminApiRoutes.post('/tasks', async (c) => {
   const session = c.get('session');
   if (!isWriter(session.role)) return c.json({ error: 'forbidden' }, 403);
-  const { values, error } = pickTaskFields(await c.req.json().catch(() => ({})), { requireTitle: true });
+  const body = await c.req.json().catch(() => ({}));
+  const { values, error } = pickTaskFields(body, { requireTitle: true });
   if (error) return c.json({ error }, 400);
   if (!(await taskRefsBelongToEvent(c.env.DB, session.eventId, values))) {
+    return c.json({ error: 'reference_not_in_event' }, 400);
+  }
+  const targets = pickTaskTargets(body);
+  if (targets.error) return c.json({ error: targets.error }, 400);
+  if (
+    !(await idsBelongToEvent(c.env.DB, 'contacts', targets.contactIds, session.eventId)) ||
+    !(await idsBelongToEvent(c.env.DB, 'submissions', targets.submissionIds, session.eventId))
+  ) {
     return c.json({ error: 'reference_not_in_event' }, 400);
   }
 
@@ -984,8 +1079,28 @@ adminApiRoutes.post('/tasks', async (c) => {
   )
     .bind(id, session.eventId, new Date().toISOString(), ...cols.map((k) => values[k]))
     .run();
+
+  // OR IGNORE: 0005_integrity added a unique logical index over
+  // (task_id, contact_id, COALESCE(submission_id,'')), and a submission's
+  // participant list can legitimately name the same person twice by role.
+  const pairs = await expandTaskTargets(c.env.DB, targets);
+  if (pairs.length > 0) {
+    await c.env.DB.batch(
+      pairs.map((p) =>
+        c.env.DB.prepare(
+          `INSERT OR IGNORE INTO task_assignments (id, task_id, contact_id, submission_id, status)
+           VALUES (?, ?, ?, ?, 'not_started')`,
+        ).bind(crypto.randomUUID(), id, p.contactId, p.submissionId),
+      ),
+    );
+  }
+  const assignmentCount = await c.env.DB.prepare('SELECT COUNT(*) AS n FROM task_assignments WHERE task_id = ?')
+    .bind(id)
+    .first<{ n: number }>();
+
   await bumpEventRevision(c.env, session.eventId);
-  return c.json(await taskRow(c.env.DB, id, session.eventId), 201);
+  const row = await taskRow(c.env.DB, id, session.eventId);
+  return c.json({ ...(row as Record<string, unknown>), assignments_created: assignmentCount?.n ?? 0 }, 201);
 });
 
 adminApiRoutes.put('/tasks/:id', async (c) => {
@@ -1908,7 +2023,43 @@ adminApiRoutes.get('/bulk-jobs/:id', async (c) => {
     }
   }
 
-  return c.json(skippedNoSubmitter === undefined ? body : { ...body, skipped_no_submitter: skippedNoSubmitter });
+  // Additive for the remind-tasks flow (CNT-08 follow-up): expandRemindTasks
+  // now delivers inline (see jobs/bulkJobs.ts's deliverNow), so `sent` here
+  // is trustworthy the moment the job reports 'done' — but a snapshot id
+  // whose contact has no email address (or was deleted) still can't be
+  // mailed. Surfacing that count separately means the completion banner can
+  // say "1 sent, 1 skipped — no email" instead of a bare "1 reminder sent"
+  // that leaves the second id unaccounted for. Computed defensively, same
+  // pattern as skippedNoSubmitter above: any parse/query failure just omits
+  // the field.
+  let skippedNoEmail: number | undefined;
+  if (row.kind === 'remind-tasks') {
+    try {
+      const assignmentIds = (JSON.parse(params_json) as { assignment_ids?: unknown }).assignment_ids;
+      if (Array.isArray(assignmentIds) && assignmentIds.length > 0) {
+        const idList = assignmentIds.filter((v): v is string => typeof v === 'string');
+        if (idList.length > 0) {
+          const placeholders = idList.map(() => '?').join(', ');
+          const skipped = await c.env.DB.prepare(
+            `SELECT COUNT(*) AS n FROM task_assignments ta
+             LEFT JOIN contacts c ON c.id = ta.contact_id
+             WHERE ta.id IN (${placeholders}) AND (c.id IS NULL OR c.email IS NULL OR TRIM(c.email) = '')`,
+          )
+            .bind(...idList)
+            .first<{ n: number }>();
+          skippedNoEmail = skipped?.n ?? 0;
+        }
+      }
+    } catch {
+      // leave skippedNoEmail undefined
+    }
+  }
+
+  return c.json({
+    ...body,
+    ...(skippedNoSubmitter === undefined ? {} : { skipped_no_submitter: skippedNoSubmitter }),
+    ...(skippedNoEmail === undefined ? {} : { skipped_no_email: skippedNoEmail }),
+  });
 });
 
 // ---------------------------------------------------------------------------

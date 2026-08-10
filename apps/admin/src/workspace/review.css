@@ -181,6 +181,61 @@
 .record-form .contact-picker-results li button:hover:not(:disabled) { background: var(--surface-hover); }
 .record-form .contact-picker-results li button:disabled { color: var(--text-faint); cursor: default; }
 
+/* AIA-04: the participant controls above used to live only in the edit form,
+   so their rules were scoped to .record-form. They now also render inside the
+   detail tab (the surface a single row click opens) via <ParticipantsEditor>,
+   which carries .participants-editor on both surfaces — these twins give the
+   detail-panel copy the same layout without re-scoping the originals. */
+.participants-editor .part-row select { margin-left: auto; }
+.participants-editor .part-row .record-form-delete {
+  padding: 2px var(--space-2);
+  font-size: var(--text-caption);
+}
+
+.participants-editor .contact-picker-results {
+  list-style: none;
+  margin: var(--space-1) 0 0;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  max-height: 160px;
+  overflow-y: auto;
+}
+
+.participants-editor .contact-picker-results li button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: var(--space-1) var(--space-2);
+  border: none;
+  background: none;
+  cursor: pointer;
+  font-size: var(--text-grid);
+  color: var(--text);
+}
+
+.participants-editor .contact-picker-results li button:hover:not(:disabled) { background: var(--surface-hover); }
+.participants-editor .contact-picker-results li button:disabled { color: var(--text-faint); cursor: default; }
+
+/* CNT-09/CNT-12: the submission detail tab's action bar — Edit, status and the
+   public-visibility gate, in-place rather than behind a row double-click. */
+.detail-panel .submission-detail-actions {
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin: var(--space-2) 0 var(--space-3);
+}
+
+.detail-panel .submission-detail-actions label {
+  font-size: var(--text-caption);
+  color: var(--text-secondary);
+}
+
+.detail-panel .detail-save-note {
+  color: var(--text-muted);
+  font-size: var(--text-caption);
+}
+
 /* --- evaluation section --- */
 
 .eval-grid {

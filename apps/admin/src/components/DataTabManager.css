@@ -847,3 +847,38 @@
     display: none;
   }
 }
+
+/* Export status feedback (CNT-14: bulk ZIP export feedback) */
+.data-tab-export-status {
+  position: relative;
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-soft);
+  color: var(--text);
+  font-size: var(--text-caption);
+  line-height: 1.4;
+  animation: slideDown 0.2s ease-out;
+}
+
+.data-tab-export-status-info {
+  background: var(--info-soft, #e3f2fd);
+  color: var(--info, #1976d2);
+  border-left: 3px solid var(--info, #1976d2);
+}
+
+.data-tab-export-status-error {
+  background: var(--danger-soft, #ffebee);
+  color: var(--danger, #d32f2f);
+  border-left: 3px solid var(--danger, #d32f2f);
+}
+
+@keyframes slideDown {
+  from {
+    opacity: 0;
+    transform: translateY(-10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}

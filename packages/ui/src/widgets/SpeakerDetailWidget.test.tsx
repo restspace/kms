@@ -55,4 +55,21 @@ describe('SpeakerDetailWidget', () => {
     expect(screen.getByText(/10 AM – 10:30 AM PDT/)).toBeTruthy();
     expect(screen.getByText(/Main Stage/)).toBeTruthy();
   });
+
+  it('renders a real <img> with the feed headshot_url when a speaker has one, instead of the initials fallback', async () => {
+    const withHeadshot: SpeakersFeed = {
+      ...feed,
+      speakers: [{ ...feed.speakers[0]!, headshot_url: '/e/devflow/speakers/sp1/headshot' }],
+    };
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({ ok: true, json: async () => withHeadshot }) as Response),
+    );
+
+    render(<SpeakerDetailWidget eventSlug="devflow" speakerId="sp1" />);
+    await waitFor(() => expect(screen.getByText('Ada Lovelace')).toBeTruthy());
+
+    const img = screen.getByRole('img', { hidden: true }) as HTMLImageElement;
+    expect(img.src).toContain('/e/devflow/speakers/sp1/headshot');
+  });
 });

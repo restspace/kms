@@ -223,6 +223,35 @@ INSERT INTO event_users (event_id, contact_id, role, invited_at, accepted_at) VA
   ('evt00000-0000-4000-8000-000000000001', 'con00000-0000-4000-8000-000000000001', 'owner', '2026-08-08T12:00:00Z', '2026-08-08T12:00:00Z');
 
 -- ---------------------------------------------------------------------------
+-- Speaker biographies (EMB-05/EMB-13, root cause of "bio never renders"):
+-- the `contacts` INSERT above never set `biography`, so every seeded speaker
+-- had a NULL bio and the public speaker detail page / gallery modal had
+-- nothing to show — SpeakerDetailBody (packages/ui/widgets/SpeakerDetailWidget.tsx)
+-- and the speakers.json feed (apps/api/src/routes/landing.tsx) were already
+-- wired correctly end to end; there was just no data flowing through them.
+-- Additive UPDATEs rather than reshaping the INSERT above, per this lane's
+-- scope. No headshot_asset_id is seeded — there is no actual R2 object for
+-- seed.sql to reference, so speakers correctly fall back to the initials
+-- tile (SpeakerAvatar); the headshot render path itself is covered by a
+-- widget test with a synthetic headshot_url instead.
+-- ---------------------------------------------------------------------------
+
+UPDATE contacts SET biography = '<p>Ada is a principal engineer building tool-use guardrails for multi-agent systems, with a decade in developer platforms before that. She speaks regularly on reliability engineering for LLM-backed products.</p>'
+  WHERE id = 'con00000-0000-4000-8000-000000000002';
+UPDATE contacts SET biography = '<p>Grace leads engineering at Flowmatic AI, where she built the eval pipelines that now gate every model release. She previously ran platform infrastructure for two Series C startups.</p>'
+  WHERE id = 'con00000-0000-4000-8000-000000000003';
+UPDATE contacts SET biography = '<p>Alan is a research scientist at Enigma Labs working on hybrid retrieval and search ranking. His writing on evaluation methodology is widely cited in the applied-ML community.</p>'
+  WHERE id = 'con00000-0000-4000-8000-000000000004';
+UPDATE contacts SET biography = '<p>Margaret directs software engineering at Apollo Systems, where she champions rigorous tracing and replay tooling for production agent systems. She started her career writing mission-critical flight software.</p>'
+  WHERE id = 'con00000-0000-4000-8000-000000000005';
+UPDATE contacts SET biography = '<p>Joan is a staff ML engineer at Cipher AI, focused on guardrail benchmarking and CI-gated model evaluation. She mentors early-career engineers moving into applied ML.</p>'
+  WHERE id = 'con00000-0000-4000-8000-000000000006';
+UPDATE contacts SET biography = '<p>Claude is CTO of Bitstream, where he oversees the text-to-SQL platform serving enterprise analytics teams. He writes and speaks on grounding language models in structured data.</p>'
+  WHERE id = 'con00000-0000-4000-8000-000000000007';
+UPDATE contacts SET biography = '<p>Barbara is a distinguished engineer at Substrate working on prompt compression and serving efficiency for large language models. She previously led infrastructure teams at two cloud providers.</p>'
+  WHERE id = 'con00000-0000-4000-8000-000000000008';
+
+-- ---------------------------------------------------------------------------
 -- Contact custom fields (SPK-15): 0009_contact_custom_fields.sql added the
 -- Settings > Speaker fields mechanism, but this demo shipped with zero field
 -- definitions, so the feature was invisible without an organiser manually

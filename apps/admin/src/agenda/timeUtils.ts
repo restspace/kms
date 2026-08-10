@@ -111,3 +111,20 @@ export function durationMinutes(startIso: string, endIso: string): number {
 }
 
 export const snapTo = (minutes: number, step: number): number => Math.round(minutes / step) * step
+
+/**
+ * Format an event's date range for display in the sidebar (e.g., "May 12 – May 14").
+ * Handles the common case where ends_at is exclusive (midnight UTC of the next day)
+ * by using eventDays to compute the inclusive day range in the event's timezone.
+ */
+export function formatEventDateRange(startsAt: string | null | undefined, endsAt: string | null | undefined, timezone: string): string {
+  if (!startsAt || !endsAt) return ''
+  try {
+    const days = eventDays(startsAt, endsAt, timezone)
+    if (days.length === 0) return ''
+    if (days.length === 1) return fmtDay(days[0])
+    return `${fmtDay(days[0])} – ${fmtDay(days[days.length - 1])}`
+  } catch {
+    return ''
+  }
+}

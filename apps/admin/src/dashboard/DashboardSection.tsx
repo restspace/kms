@@ -253,10 +253,18 @@ export function DashboardSection({ onNavigate }: { onNavigate: (target: AppNavTa
         if (job.status === 'done' || job.status === 'failed') {
           remindPollTimerRef.current = null
           setBusy(false)
+          const skippedNoEmail = job.skipped_no_email ?? 0
           setNote(
             job.status === 'failed'
               ? (job.error ?? 'Sending reminders failed.')
-              : `${job.sent} reminder${job.sent === 1 ? '' : 's'} sent${job.failed > 0 ? `, ${job.failed} failed` : ''}.`,
+              : `${job.sent} reminder${job.sent === 1 ? '' : 's'} sent` +
+                (job.failed > 0 ? `, ${job.failed} failed` : '') +
+                // Additive (CNT-08 follow-through): a snapshot id can't be
+                // mailed when its contact has no email on file — say so
+                // instead of letting "N sent" imply every overdue id was
+                // reached when some were silently unreachable.
+                (skippedNoEmail > 0 ? `, ${skippedNoEmail} skipped — no email` : '') +
+                '.',
           )
           await load(true)
           return

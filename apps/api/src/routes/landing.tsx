@@ -229,13 +229,21 @@ function dayKey(iso: string, timezone: string): string {
   }
 }
 
-landingRoutes.get('/e/:slug/agenda.json', async (c) => {
-  const db = c.env.DB;
+/**
+ * Shared by GET /e/:slug/agenda.json and GET /e/:slug/sessions.json (EMB-15):
+ * the two feeds carry the identical published-session payload — SessionsWidget
+ * already reads the agenda shape (rooms/tracks/day grouping is what lets its
+ * facets work) — under two URLs, so the embed builder can hand out a URL that
+ * actually says "sessions" for the Sessions list widget instead of the
+ * agenda one. Returns null on an unknown slug or an unpublished agenda,
+ * exactly like the route handlers did before this was extracted.
+ */
+async function loadAgendaFeed(db: D1Database, slug: string) {
   const event = await db
     .prepare('SELECT id, name, slug, timezone, agenda_published, starts_at, ends_at FROM events WHERE slug = ?')
-    .bind(c.req.param('slug'))
+    .bind(slug)
     .first<PublicEventRow>();
-  if (!event || event.agenda_published !== 1) return c.json({ error: 'not_found' }, 404);
+  if (!event || event.agenda_published !== 1) return null;
 
   const [sessions, rooms, tracks, speakers] = await Promise.all([
     db
@@ -303,22 +311,44 @@ landingRoutes.get('/e/:slug/agenda.json', async (c) => {
 
   const days = [...new Set(sessions.map((s) => dayKey(s.starts_at, event.timezone)))].sort();
 
-  return c.json(
-    {
-      event: redactInternal({ name: event.name, slug: event.slug, timezone: event.timezone, starts_at: event.starts_at, ends_at: event.ends_at }),
-      days,
-      rooms: redactInternalAll(rooms),
-      tracks: redactInternalAll(tracks),
-      sessions: redactInternalAll(sessions).map((s) => ({
-        ...s,
-        day: dayKey(s.starts_at, event.timezone),
-        speakers: speakersBySession.get(s.id) ?? [],
-        speaker_details: redactInternalAll(speakerDetailsBySession.get(s.id) ?? []),
-      })),
-    },
-    200,
-    { 'cache-control': 'public, max-age=0, s-maxage=60, stale-while-revalidate=300' },
-  );
+  return {
+    // Non-null: the object literal handed to redactInternal is never null/undefined
+    // itself, only its (never-taken) input-`null` branch returns null.
+    event: redactInternal({ name: event.name, slug: event.slug, timezone: event.timezone, starts_at: event.starts_at, ends_at: event.ends_at })!,
+    days,
+    rooms: redactInternalAll(rooms),
+    tracks: redactInternalAll(tracks),
+    sessions: redactInternalAll(sessions).map((s) => ({
+      ...s,
+      day: dayKey(s.starts_at, event.timezone),
+      speakers: speakersBySession.get(s.id) ?? [],
+      speaker_details: redactInternalAll(speakerDetailsBySession.get(s.id) ?? []),
+    })),
+  };
+}
+
+landingRoutes.get('/e/:slug/agenda.json', async (c) => {
+  const feed = await loadAgendaFeed(c.env.DB, c.req.param('slug'));
+  if (!feed) return c.json({ error: 'not_found' }, 404);
+  return c.json(feed, 200, { 'cache-control': 'public, max-age=0, s-maxage=60, stale-while-revalidate=300' });
+});
+
+// ---------------------------------------------------------------------------
+// GET /e/:slug/sessions.json — the same published-session payload as
+// agenda.json, under the URL the Sessions list widget's embed actually is
+// (EMB-15, major defect): the admin Embeds screen previously handed out
+// .../agenda.json for every JSON-feed widget, including "Sessions list",
+// which reads oddly to an organiser wiring up a sessions-only integration
+// even though the shape SessionsWidget needs (rooms/tracks for its facets,
+// not just a flat session array) is identical to the agenda feed's. Same
+// gate, same cache policy, same payload — `loadAgendaFeed` above is the one
+// source of truth for both routes.
+// ---------------------------------------------------------------------------
+
+landingRoutes.get('/e/:slug/sessions.json', async (c) => {
+  const feed = await loadAgendaFeed(c.env.DB, c.req.param('slug'));
+  if (!feed) return c.json({ error: 'not_found' }, 404);
+  return c.json(feed, 200, { 'cache-control': 'public, max-age=0, s-maxage=60, stale-while-revalidate=300' });
 });
 
 // ---------------------------------------------------------------------------
@@ -470,13 +500,18 @@ function icsDate(iso: string): string {
   return new Date(iso).toISOString().replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z');
 }
 
-landingRoutes.get('/e/:slug/agenda.ics', async (c) => {
-  const db = c.env.DB;
+/**
+ * Shared by GET /e/:slug/agenda.ics and GET /e/:slug/sessions.ics (EMB-15):
+ * same published, scheduled session set either way — only the downloaded
+ * filename differs, so an organiser embedding "Sessions list" gets a file
+ * named for what it is. Returns null on an unknown slug or unpublished agenda.
+ */
+async function buildAgendaIcsBody(db: D1Database, slug: string): Promise<string | null> {
   const event = await db
     .prepare('SELECT id, name, slug, timezone, agenda_published, starts_at, ends_at FROM events WHERE slug = ?')
-    .bind(c.req.param('slug'))
+    .bind(slug)
     .first<PublicEventRow>();
-  if (!event || event.agenda_published !== 1) return c.json({ error: 'not_found' }, 404);
+  if (!event || event.agenda_published !== 1) return null;
 
   const [sessions, rooms, speakers] = await Promise.all([
     db
@@ -562,9 +597,112 @@ landingRoutes.get('/e/:slug/agenda.ics', async (c) => {
 
   lines.push('END:VCALENDAR');
 
-  return c.body(lines.join('\r\n') + '\r\n', 200, {
+  return lines.join('\r\n') + '\r\n';
+}
+
+landingRoutes.get('/e/:slug/agenda.ics', async (c) => {
+  const slug = c.req.param('slug');
+  const body = await buildAgendaIcsBody(c.env.DB, slug);
+  if (body === null) return c.json({ error: 'not_found' }, 404);
+  return c.body(body, 200, {
     'content-type': 'text/calendar; charset=utf-8',
-    'content-disposition': `inline; filename="${event.slug}-agenda.ics"`,
+    'content-disposition': `inline; filename="${slug}-agenda.ics"`,
+    'cache-control': 'public, max-age=0, s-maxage=60, stale-while-revalidate=300',
+  });
+});
+
+// GET /e/:slug/sessions.ics — same body as agenda.ics (EMB-15), different
+// filename, for the "Sessions list" widget's embed builder iCal link.
+landingRoutes.get('/e/:slug/sessions.ics', async (c) => {
+  const slug = c.req.param('slug');
+  const body = await buildAgendaIcsBody(c.env.DB, slug);
+  if (body === null) return c.json({ error: 'not_found' }, 404);
+  return c.body(body, 200, {
+    'content-type': 'text/calendar; charset=utf-8',
+    'content-disposition': `inline; filename="${slug}-sessions.ics"`,
+    'cache-control': 'public, max-age=0, s-maxage=60, stale-while-revalidate=300',
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GET /e/:slug/sessions.xml — the published sessions as well-formed XML
+// (EMB-15): the embed builder's XML feed link for the "Sessions list" widget
+// previously pointed at /agenda.xml (routes/embed.ts) regardless of which
+// widget was selected. That endpoint lives in a different lane's file, so
+// rather than editing it this mirrors its shape locally — same session set,
+// same escaping rules, same day/room/track/speaker structure — under a URL
+// that actually says "sessions". If the two ever drift, agenda.xml stays the
+// source of truth for the agenda-grid embed.
+// ---------------------------------------------------------------------------
+
+/** Escape text for an XML text node or attribute value. */
+function xmlEscape(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;')
+    // XML 1.0 forbids most control characters outright — drop them rather
+    // than emit a document no parser will accept.
+    .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g, '');
+}
+
+function xmlTag(name: string, value: string | number | null | undefined): string {
+  if (value === null || value === undefined || value === '') return '';
+  return `<${name}>${xmlEscape(String(value))}</${name}>`;
+}
+
+landingRoutes.get('/e/:slug/sessions.xml', async (c) => {
+  const slug = c.req.param('slug');
+  const feed = await loadAgendaFeed(c.env.DB, slug);
+  if (!feed) {
+    return c.body('<?xml version="1.0" encoding="UTF-8"?><error code="not_found"/>', 404, {
+      'content-type': 'application/xml; charset=utf-8',
+    });
+  }
+
+  const parts: string[] = ['<?xml version="1.0" encoding="UTF-8"?>'];
+  parts.push(
+    `<sessions-feed slug="${xmlEscape(feed.event.slug)}" timezone="${xmlEscape(feed.event.timezone)}" generated="${new Date().toISOString()}">`,
+  );
+  parts.push(
+    `<event>${xmlTag('name', feed.event.name)}${xmlTag('slug', feed.event.slug)}${xmlTag('timezone', feed.event.timezone)}</event>`,
+  );
+  parts.push(`<days>${feed.days.map((d) => xmlTag('day', d)).join('')}</days>`);
+
+  const roomsById = new Map(feed.rooms.map((r) => [r.id, r]));
+  const tracksById = new Map(feed.tracks.map((t) => [t.id, t]));
+
+  parts.push('<sessions>');
+  for (const s of feed.sessions) {
+    const room = s.room_id ? roomsById.get(s.room_id) ?? null : null;
+    const track = s.track_id ? tracksById.get(s.track_id) ?? null : null;
+    parts.push(`<session id="${xmlEscape(s.id)}">`);
+    parts.push(xmlTag('code', s.code));
+    parts.push(xmlTag('title', s.title));
+    parts.push(xmlTag('description', s.description));
+    parts.push(xmlTag('format', s.format));
+    parts.push(xmlTag('level', s.level));
+    parts.push(xmlTag('capacity', s.capacity));
+    parts.push(xmlTag('day', s.day));
+    parts.push(xmlTag('starts_at', s.starts_at));
+    parts.push(xmlTag('ends_at', s.ends_at));
+    if (room) parts.push(`<room id="${xmlEscape(room.id)}">${xmlEscape(room.name)}</room>`);
+    if (track) parts.push(`<track id="${xmlEscape(track.id)}">${xmlEscape(track.name)}</track>`);
+    parts.push('<speakers>');
+    for (const sp of s.speaker_details) {
+      parts.push(`<speaker>${xmlTag('name', sp.name)}${xmlTag('title', sp.title)}${xmlTag('company', sp.company)}</speaker>`);
+    }
+    parts.push('</speakers>');
+    parts.push('</session>');
+  }
+  parts.push('</sessions>');
+  parts.push('</sessions-feed>');
+
+  return c.body(parts.join(''), 200, {
+    'content-type': 'application/xml; charset=utf-8',
+    'access-control-allow-origin': '*',
     'cache-control': 'public, max-age=0, s-maxage=60, stale-while-revalidate=300',
   });
 });

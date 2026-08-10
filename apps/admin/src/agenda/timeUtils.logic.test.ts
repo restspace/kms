@@ -6,7 +6,7 @@
 // `eventDays()` — fixing it here fixes those call sites too.
 
 import { describe, expect, it } from 'vitest'
-import { eventDays, localToUtc, utcToLocal } from './timeUtils'
+import { eventDays, localToUtc, utcToLocal, formatEventDateRange } from './timeUtils'
 
 describe('eventDays', () => {
   it('a US-timezone (west of UTC) event spanning local May 12–14 yields exactly those three days', () => {
@@ -46,5 +46,66 @@ describe('eventDays', () => {
       const iso = localToUtc('2027-05-14', 9 * 60, tz)
       expect(utcToLocal(iso, tz)).toEqual({ day: '2027-05-14', minutes: 9 * 60 })
     }
+  })
+})
+
+describe('formatEventDateRange', () => {
+  it('formats a multi-day event with midnight-exclusive ends_at (typical case)', () => {
+    // An event on May 12–14 (inclusive, in LA time) has ends_at at midnight
+    // UTC of May 15 (exclusive). Should display as "May 12 – May 14".
+    const range = formatEventDateRange(
+      '2027-05-12T07:00:00.000Z',
+      '2027-05-15T06:59:59.999Z',
+      'America/Los_Angeles'
+    )
+    expect(range).toMatch(/May 12.*May 14/)
+  })
+
+  it('formats a multi-day event with mid-day ends_at', () => {
+    // An event ending mid-day on Oct 14 at 10 PM UTC.
+    const range = formatEventDateRange(
+      '2026-10-12T13:00:00Z',
+      '2026-10-14T22:00:00Z',
+      'America/Los_Angeles'
+    )
+    expect(range).toMatch(/Oct 12.*Oct 14/)
+  })
+
+  it('formats a single-day event', () => {
+    // An event on May 12 only (in LA time).
+    const range = formatEventDateRange(
+      '2027-05-12T07:00:00.000Z',
+      '2027-05-13T06:59:59.999Z',
+      'America/Los_Angeles'
+    )
+    expect(range).toMatch(/May 12/)
+    expect(range).not.toMatch(/–/) // No range separator for single-day events
+  })
+
+  it('formats an event in a timezone east of UTC', () => {
+    // Same event (May 12–14) but in Tokyo time.
+    const range = formatEventDateRange(
+      '2027-05-11T15:00:00.000Z',
+      '2027-05-14T14:59:59.999Z',
+      'Asia/Tokyo'
+    )
+    expect(range).toMatch(/May 12.*May 14/)
+  })
+
+  it('handles bare date format (no time component)', () => {
+    // Bare dates like "2027-05-12" should work too.
+    const range = formatEventDateRange(
+      '2027-05-12',
+      '2027-05-14',
+      'America/Los_Angeles'
+    )
+    expect(range).toMatch(/May 12.*May 14/)
+  })
+
+  it('returns empty string when inputs are null or undefined', () => {
+    // Edge case: handles null/undefined gracefully
+    expect(formatEventDateRange(null, null, 'America/Los_Angeles')).toBe('')
+    expect(formatEventDateRange(undefined, undefined, 'America/Los_Angeles')).toBe('')
+    expect(formatEventDateRange('2027-05-12T07:00:00Z', null, 'America/Los_Angeles')).toBe('')
   })
 })

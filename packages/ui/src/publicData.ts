@@ -117,6 +117,18 @@ export function speakersJsonUrl(slug: string): string {
   return `/e/${encodeURIComponent(slug)}/speakers.json`;
 }
 
+/**
+ * The Sessions list widget's own feed URL (EMB-15): same payload shape as
+ * agenda.json (see landing.tsx's `loadAgendaFeed`), under a URL that names
+ * what it is rather than the agenda grid it happens to share data with.
+ * Not used by SessionsWidget itself (which reads `fetchAgenda`, since the
+ * shape it needs — rooms/tracks for facets — is the agenda shape) — this
+ * exists for the embed builder to hand out.
+ */
+export function sessionsJsonUrl(slug: string): string {
+  return `/e/${encodeURIComponent(slug)}/sessions.json`;
+}
+
 export function agendaIcsUrl(slug: string): string {
   return `/e/${encodeURIComponent(slug)}/agenda.ics`;
 }

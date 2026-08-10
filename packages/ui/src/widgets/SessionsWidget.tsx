@@ -9,6 +9,10 @@ import {
 // Session descriptions come through as organiser-authored rich text (HTML);
 // the shared helper strips tags so the card shows plain, truncatable text.
 import { stripHtml } from './richText'
+// EMB-01: clicking a session title opens the full detail (description,
+// speakers, date/time, room) in the same modal ScheduleWidget's cards use —
+// shared rather than duplicated, same pattern as GalleryWidget/SpeakerDetailBody.
+import { SessionDetailModal, roomAndTrackNames } from './SessionDetailModal'
 // EMB-16: times must render in the EVENT's own timezone, matching the agenda
 // grid — not `toLocaleTimeString`'s viewer-local rendering, which is what a
 // raw/unconverted-looking "18:00 – 18:30" turned out to be.
@@ -31,11 +35,13 @@ function SessionCard({
   roomName,
   trackName,
   tz,
+  onOpen,
 }: {
   session: PublicSession
   roomName: string | null
   trackName: string | null
   tz: string
+  onOpen: () => void
 }) {
   const [expanded, setExpanded] = useState(false)
   const description = stripHtml(session.description ?? '')
@@ -45,7 +51,11 @@ function SessionCard({
   return (
     <li className="sessions-card">
       <div className="sessions-card-head">
-        <h3 className="sessions-card-title">{session.title}</h3>
+        <h3 className="sessions-card-title">
+          <button type="button" className="sessions-card-title-link" onClick={onOpen}>
+            {session.title}
+          </button>
+        </h3>
         <div className="sessions-card-tags">
           {session.format && <span className="sessions-tag sessions-tag-format">{session.format}</span>}
           {trackName && <span className="sessions-tag sessions-tag-track">{trackName}</span>}
@@ -105,6 +115,7 @@ export function SessionsWidget({ eventSlug, filter }: SessionsWidgetProps) {
   const [track, setTrack] = useState(ALL)
   const [format, setFormat] = useState(ALL)
   const [room, setRoom] = useState(ALL)
+  const [openSessionId, setOpenSessionId] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -148,6 +159,8 @@ export function SessionsWidget({ eventSlug, filter }: SessionsWidgetProps) {
   if (feed === undefined) return <p className="muted">Loading sessions…</p>
   if (feed === null) return <p className="event-widget-empty">The agenda isn't published yet — check back soon.</p>
   if (feed.sessions.length === 0) return <p className="event-widget-empty">No sessions are scheduled yet.</p>
+
+  const openSession = openSessionId ? feed.sessions.find((s) => s.id === openSessionId) ?? null : null
 
   return (
     <div className="sessions-widget">
@@ -220,10 +233,24 @@ export function SessionsWidget({ eventSlug, filter }: SessionsWidgetProps) {
               roomName={s.room_id ? roomsById.get(s.room_id)?.name ?? null : null}
               trackName={s.track_id ? tracksById.get(s.track_id)?.name ?? null : null}
               tz={feed.event.timezone}
+              onOpen={() => setOpenSessionId(s.id)}
             />
           ))}
         </ul>
       )}
+      {openSession &&
+        (() => {
+          const { roomName, trackName } = roomAndTrackNames(openSession, roomsById, tracksById)
+          return (
+            <SessionDetailModal
+              session={openSession}
+              roomName={roomName}
+              trackName={trackName}
+              tz={feed.event.timezone}
+              onClose={() => setOpenSessionId(null)}
+            />
+          )
+        })()}
     </div>
   )
 }
@@ -238,6 +265,8 @@ const sessionsWidgetCss = `
 .sessions-card { border: 1px solid var(--line); border-radius: 10px; padding: .9rem 1rem; }
 .sessions-card-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: flex-start; gap: .5rem; }
 .sessions-card-title { margin: 0; font-size: 1.02rem; }
+.sessions-card-title-link { display: inline; background: none; border: none; padding: 0; margin: 0; font: inherit; font-weight: 600; text-align: left; color: var(--fg); cursor: pointer; text-decoration: none; }
+.sessions-card-title-link:hover, .sessions-card-title-link:focus-visible { color: var(--accent); text-decoration: underline; }
 .sessions-card-tags { display: flex; flex-wrap: wrap; gap: .35rem; flex-shrink: 0; }
 .sessions-tag { font-size: .72rem; padding: .15rem .5rem; border-radius: 999px; background: color-mix(in srgb, var(--fg) 8%, transparent); color: var(--muted); white-space: nowrap; }
 .sessions-tag-track { background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent); }

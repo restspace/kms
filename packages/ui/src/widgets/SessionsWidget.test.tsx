@@ -71,4 +71,19 @@ describe('SessionsWidget', () => {
 
     expect(screen.getByText('No sessions match your search or filters.')).toBeTruthy();
   });
+
+  it('opens a session detail modal (full description + speaker) when the title is clicked', async () => {
+    const user = userEvent.setup();
+    render(<SessionsWidget eventSlug="devflow" />);
+    await waitFor(() => expect(screen.getByText(/Building Reliable Multi-Agent Pipelines/)).toBeTruthy());
+
+    await user.click(screen.getByRole('button', { name: 'Building Reliable Multi-Agent Pipelines' }));
+    const dialog = screen.getByRole('dialog', { name: 'Building Reliable Multi-Agent Pipelines' });
+    expect(dialog).toBeTruthy();
+    expect(screen.getByText('Principal Engineer · Analytical Co')).toBeTruthy();
+
+    const closeButton = screen.getByRole('button', { name: 'Close' });
+    await user.click(closeButton);
+    expect(screen.queryByRole('dialog')).toBeNull();
+  });
 });

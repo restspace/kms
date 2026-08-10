@@ -109,6 +109,82 @@ describe('sweepBulkJobs / remind-tasks', () => {
     expect(job?.status).toBe('done');
   });
 
+  // CNT-08 follow-up: the previous fix (frozen assignment_ids snapshot) made
+  // `enqueued` reliably reach `total`, but every seeded overdue reminder then
+  // reported "0 reminders sent" on the live demo. Root cause: the cron sweep
+  // order in index.ts is sweepReminders -> sweepOutbox -> sweepBulkJobs, so
+  // an outbox row *this* expander enqueues is invisible to *this* tick's
+  // sweepOutbox — it would only be delivered (message_log flips to 'sent')
+  // on the *next* minute's cron tick. But bulk_jobs.status already flips to
+  // 'done' the moment `enqueued` reaches `total`, in the very same tick the
+  // messages were only just queued. The dashboard's poll loop stops the
+  // instant it sees 'done' and reports GET /bulk-jobs/:id's `sent` (counted
+  // from message_log status = 'sent') right then — always 0, even though the
+  // messages really did go out a few seconds later, invisibly to an admin
+  // who'd already dismissed the banner. The fix (bulkJobs.ts's `deliverNow`)
+  // delivers inline within expandRemindTasks, so this must be true after a
+  // *single* sweepBulkJobs tick with no separate sweepOutbox call at all.
+  it('delivers reminders inline so message_log is already sent by the time the job reports done (CNT-08)', async () => {
+    await clearPendingJobs();
+    const eventId = await createEvent();
+    const speaker1 = await createContact(eventId, { email: 'inline1@example.com' });
+    const speaker2 = await createContact(eventId, { email: 'inline2@example.com' });
+    const { assignId: a1 } = await seedOverdueAssignment(eventId, speaker1);
+    const { assignId: a2 } = await seedOverdueAssignment(eventId, speaker2);
+    const jobId = await seedRemindJob(eventId, [a1, a2]);
+
+    await sweepBulkJobs(env, 50); // no sweepOutbox call — delivery must happen inline
+
+    const job = await env.DB.prepare('SELECT status, enqueued, total FROM bulk_jobs WHERE id = ?')
+      .bind(jobId)
+      .first<{ status: string; enqueued: number; total: number }>();
+    expect(job).toEqual({ status: 'done', enqueued: 2, total: 2 });
+
+    const sent = await env.DB.prepare(
+      `SELECT COUNT(*) AS n FROM message_log
+       WHERE template_key = 'task_reminder' AND status = 'sent' AND idempotency_key LIKE '%:' || ? || ':%'`,
+    ).bind(jobId).first<{ n: number }>();
+    expect(sent?.n).toBe(2);
+  });
+
+  // A snapshot id whose contact has no email (deleted contact, or a contact
+  // record missing an address) used to be silently dropped by the expander's
+  // inner JOIN contacts — indistinguishable from "no longer overdue" and
+  // invisible in the completion banner. It must now be reported as a
+  // countable skip, not folded into an unexplained "1 sent" with the other
+  // id unaccounted for.
+  it('reports assignments whose contact has no email as skipped_no_email instead of silently dropping them', async () => {
+    await clearPendingJobs();
+    const eventId = await createEvent();
+    const speaker1 = await createContact(eventId, { email: 'has-email@example.com' });
+    const speaker2 = await createContact(eventId, { email: 'placeholder@example.com' });
+    await env.DB.prepare(`UPDATE contacts SET email = '' WHERE id = ?`).bind(speaker2).run();
+    const { assignId: a1 } = await seedOverdueAssignment(eventId, speaker1);
+    const { assignId: a2 } = await seedOverdueAssignment(eventId, speaker2);
+    const jobId = await seedRemindJob(eventId, [a1, a2]);
+
+    await sweepBulkJobs(env, 50);
+
+    const job = await env.DB.prepare('SELECT status, enqueued, total FROM bulk_jobs WHERE id = ?')
+      .bind(jobId)
+      .first<{ status: string; enqueued: number; total: number }>();
+    expect(job).toEqual({ status: 'done', enqueued: 2, total: 2 });
+
+    const sent = await env.DB.prepare(
+      `SELECT COUNT(*) AS n FROM message_log
+       WHERE status = 'sent' AND idempotency_key LIKE '%:' || ? || ':%'`,
+    ).bind(jobId).first<{ n: number }>();
+    expect(sent?.n).toBe(1);
+
+    const adminId = await createContact(eventId, { email: `admin-${crypto.randomUUID()}@example.com` });
+    await createEventUser(eventId, adminId, 'admin');
+    const cookie = await sessionCookieFor({ contactId: adminId, eventId, eventSlug: eventId, role: 'admin' });
+    const pollRes = await SELF.fetch(`https://example.com/app/api/bulk-jobs/${jobId}`, { headers: { cookie } });
+    const polled = (await pollRes.json()) as { sent: number; skipped_no_email?: number };
+    expect(polled.sent).toBe(1);
+    expect(polled.skipped_no_email).toBe(1);
+  });
+
   it('end to end: POST /app/api/dashboard/remind → sweep → GET /app/api/bulk-jobs/:id reports progress and completion', async () => {
     await clearPendingJobs();
     const eventId = await createEvent();

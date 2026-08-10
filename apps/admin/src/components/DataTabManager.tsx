@@ -1110,6 +1110,8 @@ export const DataTabManager: React.FC<DataTabManagerProps> = ({
   const tabChecklistRef = useRef<Record<string, string[]>>({});
   /** State for the unsaved changes confirmation dialog. */
   const [pendingCloseTabId, setPendingCloseTabId] = useState<string | null>(null);
+  /** Bulk export status message for feedback on the Submissions grid (CNT-14). */
+  const [exportStatus, setExportStatus] = useState<{ message: string; tone: 'info' | 'error' } | null>(null);
   /**
    * Before opening a new create/edit tab for a parent, check whether that parent already
    * has a dirty create/edit tab open. If so, route through the same unsaved-changes
@@ -2509,6 +2511,42 @@ export const DataTabManager: React.FC<DataTabManagerProps> = ({
   }, [tabCounts]);
 
   /**
+   * Wrap toolbar actions to add export status feedback. When the files-zip
+   * action is clicked, show a status message while the download is in progress
+   * (CNT-14: bulk ZIP export has no feedback).
+   */
+  const wrapToolbarActions = useCallback(
+    (actions: DataListToolbarAction[] | undefined): DataListToolbarAction[] | undefined => {
+      if (!actions) return undefined;
+      return actions.map((action) => {
+        if (action.id !== 'files-zip') return action;
+        return {
+          ...action,
+          onClick: async (ctx) => {
+            const count = ctx.checkedIds.length;
+            setExportStatus({
+              message: `Preparing ZIP of files for ${count} submission${count === 1 ? '' : 's'}…`,
+              tone: 'info'
+            });
+            try {
+              await action.onClick(ctx);
+              setExportStatus({ message: 'Download started', tone: 'info' });
+              // Clear status after 3 seconds
+              setTimeout(() => setExportStatus(null), 3000);
+            } catch (err) {
+              const message = err instanceof Error ? err.message : 'Download failed';
+              setExportStatus({ message, tone: 'error' });
+              // Keep error visible for 5 seconds
+              setTimeout(() => setExportStatus(null), 5000);
+            }
+          }
+        };
+      });
+    },
+    []
+  );
+
+  /**
    * Render tab content
    */
   const renderTabContent = useCallback((tab: DataTabState) => {
@@ -2595,7 +2633,7 @@ export const DataTabManager: React.FC<DataTabManagerProps> = ({
           globalFilter={globalFiltersByTab[tab.id]}
           filterConfig={tabConfig.filterConfig}
           exportConfig={tabConfig.exportConfig}
-          toolbarActions={tabConfig.toolbarActions}
+          toolbarActions={wrapToolbarActions(tabConfig.toolbarActions)}
           onQueryChange={handleQueryChange}
           getSummaryData={tabConfig.getSummaryData}
           initialSort={tabConfig.initialSort}
@@ -3018,6 +3056,11 @@ export const DataTabManager: React.FC<DataTabManagerProps> = ({
           </div>
         )}
       </div>
+      {exportStatus && (
+        <div className={`data-tab-export-status data-tab-export-status-${exportStatus.tone}`} role="status">
+          {exportStatus.message}
+        </div>
+      )}
       <div className="data-tab-content">
         {isReceiverPanelShown ? (
           <div className="data-tab-content-split" ref={splitContainerRef}>

@@ -15,7 +15,8 @@
 // bare jobId prefix doesn't line up, but embedding it *inside* entityId does
 // and survives the `:v<version>` suffix untouched.
 
-import { queueTemplated, type SendOutcome } from '../mailer';
+import { createDb } from '@kms/db';
+import { deliverEmail, queueTemplated, type OutboxEmailPayload, type SendOutcome } from '../mailer';
 import { autoAssignAcceptTasksCore } from '../routes/evaluation';
 import { sendScheduleEmailsCore } from '../scheduleMail';
 import type { Env } from '../env';
@@ -43,6 +44,49 @@ function queueSend(db: D1Database) {
     const { outcome } = await queueTemplated(db, args);
     return outcome;
   };
+}
+
+/**
+ * Context-free sibling of mailer.ts's `attemptImmediate` (bulk expanders run
+ * from the cron `scheduled` handler, which has no Hono `Context`/`waitUntil`
+ * to hand it): claim the just-queued outbox row and deliver inline, awaited,
+ * instead of leaving it for the *next* cron tick's `sweepOutbox`.
+ *
+ * This matters specifically for remind-tasks (CNT-08 follow-up): the sweep
+ * order in index.ts is sweepReminders -> sweepOutbox -> sweepBulkJobs, so an
+ * outbox row this expander enqueues is invisible to *this* tick's
+ * sweepOutbox — it would otherwise sit `queued` until the next tick. But
+ * `bulk_jobs.status` flips to 'done' as soon as `enqueued` reaches `total`,
+ * which happens in *this* tick, right after the queueTemplated calls above
+ * return. The dashboard's poll loop stops polling the moment it sees 'done'
+ * and reports whatever `message_log` shows *right then* — so without this,
+ * every remind-all run reported "0 reminders sent" even though the messages
+ * were sent a few seconds later by the next tick, invisibly to the admin who
+ * already dismissed the banner. Delivering inline means the message_log rows
+ * this tick creates are already 'sent' (or 'failed') by the time `enqueued`
+ * reaches `total`, so the completion banner's count is the true one.
+ *
+ * Failure just leaves the outbox row claimed with a 5-minute lease, same as
+ * attemptImmediate — the regular sweepOutbox reclaims and retries it once
+ * that lease expires; nothing here needs to duplicate its backoff/dead-letter
+ * logic.
+ */
+async function deliverNow(db: D1Database, env: Env, logKey: string, payload: OutboxEmailPayload): Promise<void> {
+  const claimed = await db
+    .prepare(
+      `UPDATE outbox SET status = 'in_flight', next_attempt_at = ?
+       WHERE idempotency_key = ? AND status = 'pending'
+       RETURNING id`,
+    )
+    .bind(new Date(Date.now() + 5 * 60_000).toISOString(), logKey)
+    .first<{ id: string }>();
+  if (!claimed) return;
+  try {
+    await deliverEmail(db, env, payload);
+    await createDb(db).outbox.markDoneByKey(logKey);
+  } catch (err) {
+    console.error(`bulk remind: immediate send failed (${logKey}):`, err instanceof Error ? err.message : 'unknown');
+  }
 }
 
 async function claimJob(db: D1Database): Promise<BulkJobRow | null> {
@@ -260,20 +304,31 @@ async function expandRemindTasks(env: Env, job: BulkJobRow, limit: number): Prom
   const slice = ids.slice(job.enqueued, job.enqueued + limit);
   if (slice.length > 0) {
     const placeholders = slice.map(() => '?').join(', ');
+    // LEFT JOIN contacts, not the inner join this used to be: an inner join
+    // silently dropped an overdue assignment whose contact has no email (or
+    // was deleted) from `rows` with no trace anywhere, which is exactly the
+    // "disqualified with no explanation" shape CNT-08 described. Every id
+    // still matching the same overdue predicate the dashboard panel and
+    // POST /remind use (t.event_id, ta.status != 'complete', t.due_at) now
+    // comes back, so a missing email is a countable, reportable skip instead
+    // of a silent no-op.
     const { results: rows } = await db
       .prepare(
         `SELECT ta.id AS assignment_id, ta.contact_id, c.email, c.first_name, t.title AS task_title
          FROM task_assignments ta
          JOIN tasks t ON t.id = ta.task_id
-         JOIN contacts c ON c.id = ta.contact_id
+         LEFT JOIN contacts c ON c.id = ta.contact_id
          WHERE t.event_id = ? AND ta.status != 'complete' AND t.due_at IS NOT NULL AND t.due_at < ?
            AND ta.id IN (${placeholders})`,
       )
       .bind(job.event_id, now, ...slice)
-      .all<{ assignment_id: string; contact_id: string; email: string; first_name: string | null; task_title: string }>();
+      .all<{
+        assignment_id: string; contact_id: string; email: string | null; first_name: string | null; task_title: string;
+      }>();
 
     for (const row of rows) {
-      await queueTemplated(db, {
+      if (!row.email || row.email.trim() === '') continue; // no address to mail — counted by GET /bulk-jobs/:id's skipped_no_email
+      const { outcome, payload } = await queueTemplated(db, {
         templateKey: 'task_reminder',
         eventId: job.event_id,
         contactId: row.contact_id,
@@ -286,6 +341,10 @@ async function expandRemindTasks(env: Env, job: BulkJobRow, limit: number): Prom
           task: { title: row.task_title, due_line: ' — now overdue', url: `${env.APP_URL}/portal/${event.slug}/tasks` },
         },
       });
+      // Deliver inline rather than waiting for the next cron tick's
+      // sweepOutbox — see deliverNow's doc comment for why that's required
+      // for the completion banner's sent count to be truthful.
+      if (outcome === 'queued' && payload) await deliverNow(db, env, payload.log_key, payload);
     }
   }
   const enqueued = Math.min(ids.length, job.enqueued + slice.length);

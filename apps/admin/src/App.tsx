@@ -33,7 +33,8 @@ import {
 } from './api'
 import { buildExportUrl, downloadFilesBundle } from './api'
 import { appAlert, appConfirm } from './components/dialogs'
-import { RecordForm, RecordFormActionableError } from './components/RecordForm'
+import { RecordFormActionableError } from './components/RecordForm'
+import { TaskCreateForm } from './workspace/TaskCreateForm'
 import { CreateEventDialog } from './components/CreateEventDialog'
 import { FormsSection } from './forms/FormsSection'
 import { SettingsSection } from './settings/SettingsSection'
@@ -72,6 +73,7 @@ import {
 } from './eventScope'
 import { currentRoute, navigate, stableStringify, useRoute, type ViewKey } from './router'
 import { AdminErrorBoundary } from './components/AdminErrorBoundary'
+import { formatEventDateRange } from './agenda/timeUtils'
 import './shell.css'
 
 /**
@@ -261,48 +263,14 @@ const submissionSchema = {
 }
 
 /**
- * Task *definition* schema (deferred-gap item: tasks were read-only in
- * admin). The Tasks tab's rows are assignments (one per assignee), a
- * different shape from what this schema describes — see the `tasks`
- * TabConfig below for why that means create-only via `createComponent`
- * rather than schema-driven edit-in-grid.
+ * Task creation lives in `workspace/TaskCreateForm.tsx` (CNT-01): the old
+ * generic RecordForm over a static `taskSchema` could only write a task
+ * *definition*, and this tab's rows are assignments (one per assignee), so a
+ * created task never appeared and looked like a silent failure. The bespoke
+ * form adds the assignee/submission pickers a JSON-Schema field can't
+ * express. It stays wired via `createComponent` rather than `schema` so a row
+ * double-click doesn't also open an *edit* form over the wrong shape.
  */
-const taskSchema = {
-  type: 'object',
-  required: ['title'],
-  properties: {
-    title: { type: 'string', title: 'Title' },
-    description: { type: 'string', format: 'textarea', title: 'Description' },
-    target: { type: 'string', enum: ['contact', 'group', 'submission'], title: 'Target' },
-    assignment_mode: { type: 'string', enum: ['manual', 'automatic'], title: 'Assignment mode' },
-    trigger: { type: 'string', enum: ['none', 'on_accept', 'on_schedule'], title: 'Trigger' },
-    action_type: {
-      type: 'string',
-      enum: ['acknowledge', 'file_upload', 'portal_form', 'external_link'],
-      title: 'Action type',
-    },
-    due_at: { type: 'string', format: 'date', title: 'Due date' },
-    required: { type: 'boolean', title: 'Required' },
-  },
-}
-
-/**
- * Create-only form for task definitions (see `taskSchema` above). A thin
- * RecordForm wrapper so it can be wired via `TabConfig.createComponent`
- * without also enabling `TabConfig.schema`, which DataTabManager also reads
- * to decide whether a row double-click opens an *edit* form — wrong here,
- * since the tab's rows are assignments, not task definitions.
- */
-const TaskCreateForm = ({ initialValues, onSubmit, onCancel, title, onDirtyChange }: CreateFormProps) => (
-  <RecordForm
-    schema={taskSchema}
-    initialValues={initialValues}
-    onSubmit={onSubmit}
-    onCancel={onCancel}
-    title={title}
-    onDirtyChange={onDirtyChange}
-  />
-)
 
 /** Workspace tab keys addressable by dashboard deep-links. */
 type WorkspaceTabKey = 'speakers' | 'submissions' | 'tasks' | 'messages' | 'files' | 'events'
@@ -727,7 +695,25 @@ function buildWorkspaceConfig(
       { field: 'submitter_name', header: 'Submitter', sortable: true, mobileRow: 2 },
       eventColumn,
     ],
-    detailComponent: ({ item }) => <SubmissionDetailPanel id={item.id} />,
+    // A single row click opens this panel, so it carries the record's primary
+    // actions rather than being read-only (eval defects AIA-04/CNT-09/CNT-12).
+    // `onEdit` is supplied by DataTabManager for any tab config with both
+    // `onUpsert` and `schema` (both set below) and opens the `editComponent`
+    // tab — the same form a row double-click reaches, which nobody found.
+    detailComponent: ({ item, onEdit, onItemSaved }) => (
+      <SubmissionDetailPanel
+        id={item.id}
+        onEdit={onEdit}
+        // Same cast as `onUpsert` below: the panel hands back the submission
+        // row it re-read from the server, which only has to satisfy the tab's
+        // generic here — the list refetch is what the grid renders from.
+        onItemSaved={onItemSaved && ((row) => onItemSaved(row as unknown as SubmissionRow & {
+          rating: number | null
+          notified_at: string | null
+          review_count: number
+        }))}
+      />
+    ),
     globalFilterSets: { id: 'submission_id' },
     globalFilterReceives: { contact_id: 'contact_id' },
     exportConfig: exportFor('submissions'),
@@ -1499,7 +1485,7 @@ export default function App() {
             )}
           </div>
           <div className="shell-event-dates">
-            {fmtDate(me.event.starts_at)} – {fmtDate(me.event.ends_at)}
+            {formatEventDateRange(me.event.starts_at, me.event.ends_at, me.event.timezone)}
           </div>
         </div>
         {!isReviewer && (
