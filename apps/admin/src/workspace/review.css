@@ -497,3 +497,26 @@
 @media (max-width: 640px) {
   .bulk-bar { display: none; }
 }
+
+/* Compact (640): read an abstract, tap a score, next — the queue sits above
+   the pane instead of beside it (docs/15 §6 Tier B). Appended; the desktop
+   split above is untouched. */
+@media (max-width: 640px) {
+  .review-shell { flex-direction: column; }
+
+  .review-queue {
+    flex: 0 0 auto;
+    max-height: 35vh;
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .review-pane { padding: var(--space-3); }
+
+  .score-scale { flex-wrap: wrap; }
+
+  .score-scale button {
+    min-width: 44px;
+    min-height: 44px;
+  }
+}

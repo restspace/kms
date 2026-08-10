@@ -483,3 +483,13 @@
   color: var(--text-muted);
   font-weight: 500;
 }
+
+/* Compact (640): a single submission's detail panel reads top-to-bottom, and
+   its Approve/Decline row clears a tap target. Appended; desktop untouched. */
+@media (max-width: 640px) {
+  .detail-panel { padding: var(--space-3); }
+
+  .detail-panel dl { grid-template-columns: 1fr; }
+
+  .detail-panel .detail-actions button { height: 44px; }
+}
