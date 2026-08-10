@@ -117,9 +117,14 @@ async function loadContext(db: D1Database, slug: string, formId: string): Promis
 
 /** Shared limit_reached body: names exactly what counts so a blocked
  * submitter (or an agent reading the response) knows withdrawing frees a
- * slot instead of assuming the cap is stuck. */
+ * slot instead of assuming the cap is stuck. The cap is per FORM (docs/02
+ * §9: "Submissions per submitter per form <= submission_limit"; docs/04
+ * §2.5's "Event max" chip is only the fallback value a form inherits when it
+ * sets no override of its own) — this is called out explicitly so a
+ * submitter already at one form's limit does not read a 409 on a *different*
+ * form as the same account-wide cap they just hit. */
 const LIMIT_REACHED_MESSAGE =
-  'Submission limit reached. Active submissions and saved drafts count toward the limit; withdrawn submissions do not — withdraw one to free up a slot.';
+  'Submission limit reached for this form. Active submissions and saved drafts count toward the limit; withdrawn submissions do not — withdraw one to free up a slot.';
 const limitReachedBody = () => ({ error: 'limit_reached', message: LIMIT_REACHED_MESSAGE });
 
 /** Drafts + submitted both count toward the limit (docs/02 §9); withdrawn does not. */
@@ -176,13 +181,27 @@ function trackAnswers(questions: QuestionDef[], answers: Answers): string[] {
   );
   const candidates = byFieldKey ? [byFieldKey, ...byLabel] : byLabel;
   for (const q of candidates) {
+    // A dropdown/radio/multiselect question's *submitted* answer is the
+    // option's `value` (SubmitPage.tsx's <option value={o.value}>), which the
+    // form builder's typed-choices flow sets equal to the label — but not
+    // every option list is built that way (an imported/organizer-authored
+    // question can give an option a machine value like an id or slug distinct
+    // from its display text). What a submitter actually picked, and what
+    // tracks.name needs to be matched against, is the LABEL they saw and
+    // clicked, not the value the answer happens to be keyed by. Resolve raw
+    // answer values through the question's own options first; only a value
+    // with no matching option (free text, or options===null) is used as-is.
+    const resolveLabel = (raw: string): string => {
+      const opt = q.options?.find((o) => o.value === raw);
+      return opt ? opt.label : raw;
+    };
     const v = answers[q.id];
     if (Array.isArray(v)) {
-      const names = v.map(String).filter((s) => s !== '');
+      const names = v.map(String).filter((s) => s !== '').map(resolveLabel);
       if (names.length > 0) return names;
       continue;
     }
-    if (typeof v === 'string' && v !== '') return [v];
+    if (typeof v === 'string' && v !== '') return [resolveLabel(v)];
   }
   return [];
 }
@@ -951,14 +970,23 @@ submitRoutes.post('/:slug/:formId/submit', async (c) => {
   // A multiselect track question resolves EVERY selected value, not just one.
   const trackNames = trackAnswers(abstractQuestions, answers);
   if (trackNames.length > 0) {
-    const placeholders = trackNames.map(() => '?').join(', ');
+    // Matched loosely (trimmed, case-insensitive) rather than by exact SQL
+    // equality: the name a submitter picked can carry incidental whitespace
+    // (a trailing space on an organizer-typed option) or case drift from the
+    // track's canonical name without being a *different* track in any way
+    // that matters — an exact-match lookup silently resolved those to no
+    // track at all, same failure mode field_key === 'track' hit before the
+    // label fallback (see trackAnswers above). Tracks per event number in
+    // the tens at most, so fetching them all and matching in JS costs
+    // nothing an IN-list lookup wouldn't already pay for.
     const { results } = await db
-      .prepare(`SELECT id, name FROM tracks WHERE event_id = ? AND name IN (${placeholders})`)
-      .bind(ctx.event.id, ...trackNames)
+      .prepare(`SELECT id, name FROM tracks WHERE event_id = ?`)
+      .bind(ctx.event.id)
       .all<{ id: string; name: string }>();
-    const byName = new Map(results.map((r) => [r.name, r.id]));
+    const normalize = (s: string) => s.trim().toLowerCase();
+    const byName = new Map(results.map((r) => [normalize(r.name), r.id]));
     for (const name of trackNames) {
-      const id = byName.get(name);
+      const id = byName.get(normalize(name));
       if (id && !resolvedTrackIds.includes(id)) resolvedTrackIds.push(id);
     }
   }

@@ -318,11 +318,57 @@ describe('EvaluationSection — round editor (lane L3)', () => {
     render(<EvaluationSection />)
     await screen.findByDisplayValue('Round 1')
     const { fireEvent } = await import('@testing-library/preact')
+    // An empty pool means nobody is checked yet — there is no "everyone by
+    // default" fallback (see the regression below for why).
     const tick = screen.getByLabelText('Ada Lovelace in this round') as HTMLInputElement
-    fireEvent.click(tick) // untick (default is everyone when the pool is empty)
-    await waitFor(() => expect(removePlanReviewer).toHaveBeenCalledWith('p1', 'r1'))
-    fireEvent.click(screen.getByLabelText('Ada Lovelace in this round'))
+    expect(tick.checked).toBe(false)
+    fireEvent.click(tick) // tick
     await waitFor(() => expect(addPlanReviewer).toHaveBeenCalledWith('p1', 'r1'))
+    fireEvent.click(screen.getByLabelText('Ada Lovelace in this round')) // untick
+    await waitFor(() => expect(removePlanReviewer).toHaveBeenCalledWith('p1', 'r1'))
+  })
+
+  // Regression: unchecking a reviewer showed a success toast, but a page
+  // reload (a fresh mount of the section, re-reading the now-correct server
+  // pool) put every reviewer's tick back. Root cause was a mount-time default
+  // that treated "pool empty" as "never configured" and fell back to
+  // checking everyone — which can't be told apart from "deliberately emptied
+  // by removing the last one". Also covers the pool's real shape: pool rows
+  // are `{plan_id, contact_id}` pairs, so a reviewer pooled in one plan must
+  // not read as checked in another.
+  it('renders a reviewer unchecked in a plan whose pool does not include them, and keeps it that way across a reload', async () => {
+    const twoPlans = {
+      ...full,
+      plans: [
+        full.plans[0],
+        { ...full.plans[0], id: 'p2', name: 'Round 2' },
+      ],
+      // r1 is only pooled in p1.
+      pool: [{ plan_id: 'p1', contact_id: 'r1' }],
+    }
+    getEvaluationOverview.mockResolvedValue(twoPlans)
+    const { unmount } = render(<EvaluationSection />)
+    await screen.findByDisplayValue('Round 1')
+
+    const ticks = screen.getAllByLabelText('Ada Lovelace in this round') as HTMLInputElement[]
+    expect(ticks).toHaveLength(2)
+    expect(ticks[0].checked).toBe(true) // p1: pooled
+    expect(ticks[1].checked).toBe(false) // p2: not pooled — must not "leak" from p1
+
+    // Uncheck in p1; the server's pool for p1 is now empty.
+    const { fireEvent } = await import('@testing-library/preact')
+    getEvaluationOverview.mockResolvedValue({ ...twoPlans, pool: [] })
+    fireEvent.click(ticks[0])
+    await waitFor(() => expect(removePlanReviewer).toHaveBeenCalledWith('p1', 'r1'))
+
+    // Simulate a page reload: a fresh mount reading the now-empty pool must
+    // not fall back to "everyone checked".
+    unmount()
+    render(<EvaluationSection />)
+    await screen.findByDisplayValue('Round 1')
+    for (const box of screen.getAllByLabelText('Ada Lovelace in this round') as HTMLInputElement[]) {
+      expect(box.checked).toBe(false)
+    }
   })
 
   // CFP-11: the surfaced link must be shown as the target reviewer's.

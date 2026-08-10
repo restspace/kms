@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import {
   createRoom,
   createTrack,
@@ -36,14 +36,36 @@ const asDraftTrack = (t: TrackRow): TrackDraftRow => ({ key: t.id, name: t.name,
 export function RoomsTracksCard() {
   const [rooms, setRooms] = useState<RoomDraftRow[] | null>(null)
   const [tracks, setTracks] = useState<TrackDraftRow[] | null>(null)
-  const [error, setError] = useState<string | null>(null)
+  // Item 3 fix: previously a single shared `error` string with no matching
+  // "did this list ever resolve?" state — a rejected `listRooms()`/`listTracks()`
+  // left `rooms`/`tracks` at their initial `null` forever, and the `=== null`
+  // checks below render "Loading…" unconditionally on that, so the column
+  // spun forever even once `error` was populated and displayed above it.
+  // Split per-column so one endpoint failing doesn't also block the other's
+  // successful load, and each gets an explicit Retry.
+  const [roomsError, setRoomsError] = useState<string | null>(null)
+  const [tracksError, setTracksError] = useState<string | null>(null)
   const [savingRoom, setSavingRoom] = useState<string | null>(null)
   const [savingTrack, setSavingTrack] = useState<string | null>(null)
 
-  useEffect(() => {
-    listRooms().then((r) => setRooms(r.items.map(asDraftRoom))).catch((e: unknown) => setError(e instanceof Error ? e.message : 'Failed to load rooms'))
-    listTracks().then((r) => setTracks(r.items.map(asDraftTrack))).catch((e: unknown) => setError(e instanceof Error ? e.message : 'Failed to load tracks'))
+  const loadRooms = useCallback(() => {
+    setRoomsError(null)
+    listRooms()
+      .then((r) => setRooms(r.items.map(asDraftRoom)))
+      .catch((e: unknown) => setRoomsError(e instanceof Error ? e.message : 'Failed to load rooms'))
   }, [])
+
+  const loadTracks = useCallback(() => {
+    setTracksError(null)
+    listTracks()
+      .then((r) => setTracks(r.items.map(asDraftTrack)))
+      .catch((e: unknown) => setTracksError(e instanceof Error ? e.message : 'Failed to load tracks'))
+  }, [])
+
+  useEffect(() => {
+    loadRooms()
+    loadTracks()
+  }, [loadRooms, loadTracks])
 
   const handleAddRoom = async () => {
     try {
@@ -51,7 +73,7 @@ export function RoomsTracksCard() {
       const created = await createRoom({ name: `New room ${n}` })
       setRooms((cur) => [...(cur ?? []), asDraftRoom(created)])
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to add the room.')
+      setRoomsError(e instanceof Error ? e.message : 'Failed to add the room.')
     }
   }
 
@@ -68,7 +90,7 @@ export function RoomsTracksCard() {
     try {
       await updateRoom(row.key, { name })
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to rename the room.')
+      setRoomsError(e instanceof Error ? e.message : 'Failed to rename the room.')
     } finally {
       setSavingRoom(null)
     }
@@ -79,7 +101,7 @@ export function RoomsTracksCard() {
     try {
       await updateRoom(row.key, { capacity: row.capacity.trim() === '' ? null : Number(row.capacity) })
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to update the room capacity.')
+      setRoomsError(e instanceof Error ? e.message : 'Failed to update the room capacity.')
     } finally {
       setSavingRoom(null)
     }
@@ -95,7 +117,7 @@ export function RoomsTracksCard() {
       await deleteRoom(row.key)
       setRooms((cur) => (cur ?? []).filter((r) => r.key !== row.key))
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to delete the room.')
+      setRoomsError(e instanceof Error ? e.message : 'Failed to delete the room.')
     }
   }
 
@@ -105,7 +127,7 @@ export function RoomsTracksCard() {
       const created = await createTrack({ name: `New track ${n}` })
       setTracks((cur) => [...(cur ?? []), asDraftTrack(created)])
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to add the track.')
+      setTracksError(e instanceof Error ? e.message : 'Failed to add the track.')
     }
   }
 
@@ -120,7 +142,7 @@ export function RoomsTracksCard() {
     try {
       await updateTrack(row.key, { name })
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to rename the track.')
+      setTracksError(e instanceof Error ? e.message : 'Failed to rename the track.')
     } finally {
       setSavingTrack(null)
     }
@@ -131,7 +153,7 @@ export function RoomsTracksCard() {
     try {
       await updateTrack(row.key, { color: row.color || null })
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to update the track color.')
+      setTracksError(e instanceof Error ? e.message : 'Failed to update the track color.')
     } finally {
       setSavingTrack(null)
     }
@@ -147,7 +169,7 @@ export function RoomsTracksCard() {
       await deleteTrack(row.key)
       setTracks((cur) => (cur ?? []).filter((t) => t.key !== row.key))
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to delete the track.')
+      setTracksError(e instanceof Error ? e.message : 'Failed to delete the track.')
     }
   }
 
@@ -157,14 +179,22 @@ export function RoomsTracksCard() {
       <p className="settings-hint">
         Changes here appear in the agenda builder&rsquo;s Add Session dialog immediately.
       </p>
-      {error && <div className="settings-error">{error}</div>}
 
       <div className="settings-rt-columns">
         <div>
           <h3>Rooms</h3>
-          {rooms === null ? (
+          {roomsError && rooms === null ? (
+            <div className="settings-error">
+              {roomsError}{' '}
+              <button type="button" className="settings-ghost" onClick={() => loadRooms()}>
+                Retry
+              </button>
+            </div>
+          ) : rooms === null ? (
             <div className="settings-hint">Loading…</div>
           ) : (
+            <>
+              {roomsError && <div className="settings-error">{roomsError}</div>}
             <div className="rt-field">
               {rooms.map((row) => (
                 <div key={row.key} className={savingRoom === row.key ? 'rt-row-saving' : undefined}>
@@ -184,14 +214,24 @@ export function RoomsTracksCard() {
                 + Add room
               </button>
             </div>
+            </>
           )}
         </div>
 
         <div>
           <h3>Tracks</h3>
-          {tracks === null ? (
+          {tracksError && tracks === null ? (
+            <div className="settings-error">
+              {tracksError}{' '}
+              <button type="button" className="settings-ghost" onClick={() => loadTracks()}>
+                Retry
+              </button>
+            </div>
+          ) : tracks === null ? (
             <div className="settings-hint">Loading…</div>
           ) : (
+            <>
+              {tracksError && <div className="settings-error">{tracksError}</div>}
             <div className="rt-field">
               {tracks.map((row) => (
                 <div key={row.key} className={savingTrack === row.key ? 'rt-row-saving' : undefined}>
@@ -209,6 +249,7 @@ export function RoomsTracksCard() {
                 + Add track
               </button>
             </div>
+            </>
           )}
         </div>
       </div>

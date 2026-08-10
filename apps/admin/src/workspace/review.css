@@ -124,6 +124,20 @@
 
 .detail-panel .review-row .rev-comment { color: var(--text-secondary); margin-top: 2px; }
 
+/* Reviews grouped by evaluation round (plan) — the header ★ stays pooled
+   across all rounds on purpose; each group's own ★ is that round's mean. */
+.detail-panel .review-plan-group + .review-plan-group { margin-top: var(--space-2); }
+.detail-panel .review-plan-heading {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-weight: 700;
+  font-size: var(--text-label);
+  color: var(--text-secondary);
+  padding-top: var(--space-2);
+}
+.detail-panel .review-plan-group .review-row:first-of-type { border-top: none; }
+
 .detail-panel .part-row,
 .record-form .part-row {
   display: flex;

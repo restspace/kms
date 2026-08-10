@@ -81,7 +81,12 @@ const PARTICIPANT = {
   headshot_asset_id: null,
 }
 
-const detail = (overrides: Record<string, unknown> = {}, participants = [PARTICIPANT]) => ({
+const detail = (
+  overrides: Record<string, unknown> = {},
+  participants = [PARTICIPANT],
+  reviews: Array<Record<string, unknown>> = [],
+  review_plan_means: Array<{ plan_id: string; plan_name: string | null; mean: number; count: number }> = [],
+) => ({
   submission: {
     id: 'sub-1',
     code: 'S-001',
@@ -96,7 +101,8 @@ const detail = (overrides: Record<string, unknown> = {}, participants = [PARTICI
   },
   answers: [],
   participants,
-  reviews: [],
+  reviews,
+  review_plan_means,
   tags: [],
 })
 
@@ -171,6 +177,125 @@ describe('SubmissionDetailPanel — participants (AIA-04)', () => {
 
     await waitFor(() => expect(api.removeSubmissionParticipant).toHaveBeenCalledWith('sub-1', 'sp-1'))
     await screen.findByText('No participants yet.')
+  })
+})
+
+describe('SubmissionDetailPanel — reviews grouped by round (aggregate rating mixes independent rounds)', () => {
+  it('groups reviews under a round heading with a per-round mean, alongside the pooled header rating', async () => {
+    api.getSubmissionDetail.mockResolvedValue(
+      detail(
+        {},
+        [PARTICIPANT],
+        [
+          { reviewer_name: 'Ada Lovelace', weighted_total: 5, comment: null, conflict_of_interest: 0, plan_id: 'plan-a', plan_name: 'Screening Round' },
+          { reviewer_name: 'Grace Hopper', weighted_total: 4, comment: null, conflict_of_interest: 0, plan_id: 'plan-a', plan_name: 'Screening Round' },
+          { reviewer_name: 'Alan Turing', weighted_total: 2, comment: null, conflict_of_interest: 0, plan_id: 'plan-b', plan_name: 'Final Round' },
+        ],
+        [
+          { plan_id: 'plan-a', plan_name: 'Screening Round', mean: 4.5, count: 2 },
+          { plan_id: 'plan-b', plan_name: 'Final Round', mean: 2, count: 1 },
+        ],
+      ),
+    )
+    render(<SubmissionDetailPanel id="sub-1" />)
+
+    await screen.findByText('Screening Round')
+    await screen.findByText('Final Round')
+
+    // Each round shows its own reviewers under its own heading.
+    const screeningHeading = screen.getByText('Screening Round').closest('.review-plan-heading') as HTMLElement
+    const screeningGroup = screeningHeading.closest('.review-plan-group') as HTMLElement
+    expect(screeningGroup.textContent).toContain('Ada Lovelace')
+    expect(screeningGroup.textContent).toContain('Grace Hopper')
+    expect(screeningGroup.textContent).not.toContain('Alan Turing')
+
+    const finalHeading = screen.getByText('Final Round').closest('.review-plan-heading') as HTMLElement
+    const finalGroup = finalHeading.closest('.review-plan-group') as HTMLElement
+    expect(finalGroup.textContent).toContain('Alan Turing')
+
+    // Per-round means are both visible (not just the pooled header ★).
+    expect(screeningGroup.textContent).toContain('4.5')
+    expect(finalGroup.textContent).toContain('★ 2')
+
+    // The header still shows the pooled mean across all rounds (5+4+2)/3 = 3.67 —
+    // the deliberate pooled aggregate this task must NOT undo.
+    await screen.findByText('★ 3.67')
+  })
+})
+
+describe('SubmissionDetailPanel — Title/Description/Format/Track dedup (stale-answer fix)', () => {
+  it('shows the canonical column once and drops the frozen answer, including after an edit', async () => {
+    // Answers as they'd be frozen at submit time — some now stale relative
+    // to the columns above, one ("Audience") unrelated and still current.
+    api.getSubmissionDetail.mockResolvedValue({
+      ...detail({ format: 'Talk', track_name: 'Engineering', description: 'Fresh description' }, [PARTICIPANT]),
+      answers: [
+        { label: 'Title', value_json: JSON.stringify('Old Title') },
+        { label: 'Description', value_json: JSON.stringify('Old description') },
+        { label: 'Format', value_json: JSON.stringify('Workshop') },
+        { label: 'Track', value_json: JSON.stringify('Old Track') },
+        { label: 'Audience', value_json: JSON.stringify('Beginners') },
+      ],
+    })
+
+    render(<SubmissionDetailPanel id="sub-1" />)
+
+    await screen.findByText('Designing for Doubt')
+
+    // Canonical values render, each exactly once.
+    expect(screen.getAllByText('Talk')).toHaveLength(1)
+    expect(screen.getAllByText('Engineering')).toHaveLength(1)
+    expect(screen.getAllByText('Fresh description')).toHaveLength(1)
+
+    // The frozen answer text for the deduped labels never appears.
+    expect(screen.queryByText('Old Title')).toBeNull()
+    expect(screen.queryByText('Old description')).toBeNull()
+    expect(screen.queryByText('Workshop')).toBeNull()
+    expect(screen.queryByText('Old Track')).toBeNull()
+
+    // An unrelated answer still lists normally.
+    expect(screen.getByText('Audience')).toBeTruthy()
+    expect(screen.getByText('Beginners')).toBeTruthy()
+  })
+
+  it('reflects a post-edit refresh: the dl shows the new column value once, no stale duplicate', async () => {
+    api.getSubmissionDetail.mockResolvedValue({
+      submission: {
+        id: 'sub-1', code: 'S-001', title: 'Designing for Doubt', status: 'pending',
+        content_approved: 1, created_at: '2026-01-05T10:00:00Z', notified_at: null, notes: null,
+        form_name: 'Main CFP', format: 'Talk', description: 'Original description',
+      },
+      answers: [
+        { label: 'Description', value_json: JSON.stringify('Original description') },
+      ],
+      participants: [PARTICIPANT],
+      reviews: [],
+      tags: [],
+    })
+
+    render(<SubmissionDetailPanel id="sub-1" />)
+    await screen.findByText('Original description')
+
+    // Simulate a save that updated the column but left the frozen answer
+    // text untouched — the defect this panel used to expose verbatim.
+    api.getSubmissionDetail.mockResolvedValue({
+      submission: {
+        id: 'sub-1', code: 'S-001', title: 'Designing for Doubt', status: 'pending',
+        content_approved: 1, created_at: '2026-01-05T10:00:00Z', notified_at: null, notes: null,
+        form_name: 'Main CFP', format: 'Talk', description: 'Edited description',
+      },
+      answers: [
+        { label: 'Description', value_json: JSON.stringify('Original description') },
+      ],
+      participants: [PARTICIPANT],
+      reviews: [],
+      tags: [],
+    })
+    const checkbox = await screen.findByLabelText('Visible in public agenda')
+    checkbox.click()
+
+    await screen.findByText('Edited description')
+    expect(screen.queryByText('Original description')).toBeNull()
   })
 })
 

@@ -258,18 +258,21 @@ function PlanCard({
   const criteria = overview.criteria.filter((c) => c.plan_id === plan.id)
   const stats = overview.stats.find((s) => s.plan_id === plan.id)
   const pooled = overview.pool.filter((p) => p.plan_id === plan.id).map((p) => p.contact_id)
-  // Default selection: the plan's own pool once it has one, everyone otherwise.
-  const [chosen, setChosen] = useState<string[]>(
-    pooled.length > 0 ? pooled : overview.reviewers.map((r) => r.id),
-  )
-  // …and it keeps following the stored pool afterwards. The ticks used to be
-  // pure local state seeded once at mount, so a removal that never reached the
-  // server still *looked* applied until the next remount — the "unchecking a
-  // reviewer doesn't stick" defect. Now the server's pool is the truth: a
-  // failed removal visibly comes back, a successful one stays gone.
+  // The ticks mirror exactly this plan's pool rows — nothing more. This used
+  // to fall back to "everyone checked" whenever `pooled` was empty, on the
+  // theory that an empty pool meant "never configured". But an emptied pool
+  // (every reviewer deliberately unticked) is indistinguishable from a
+  // never-touched one by that test, so the very case the fallback was meant
+  // to help — a brand-new plan — also fired for "I removed them all", and a
+  // page reload (a fresh mount, re-running this initializer against the
+  // now-empty pool) put every reviewer's tick back. The pool is the only
+  // truth; there is no third state to default into.
+  const [chosen, setChosen] = useState<string[]>(pooled)
+  // …and it keeps following the stored pool afterwards: a failed removal
+  // visibly comes back, a successful one stays gone, on every refetch.
   const pooledKey = pooled.join(',')
   useEffect(() => {
-    if (pooled.length > 0) setChosen(pooled)
+    setChosen(pooled)
     // pooledKey is the stable identity of `pooled` (a fresh array each render).
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pooledKey])

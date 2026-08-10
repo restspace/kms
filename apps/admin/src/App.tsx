@@ -186,37 +186,90 @@ interface SpeakerSessionRow {
  * the submissions resource doesn't join rooms, fetched once per mount and
  * matched by id.
  */
-const SpeakerSessions = ({ contactId }: { contactId: string }) => {
-  const [rows, setRows] = useState<SpeakerSessionRow[] | null>(null)
+// Item 2 fix: this used to be `SpeakerSessionRow[] | null` with `if (!rows ||
+// rows.length === 0) return null` — a genuine empty result ("no sessions")
+// and a *failed* fetch (the `Promise.all` had no `.catch`, so a rejection
+// just left `rows` at its initial `null` forever) rendered identically:
+// nothing. That's how Marcus Okafor — an actual SESS-18 participant per the
+// eval report — could show no Sessions section: not because the broad
+// `contact_id` filter (adminApi.ts's submissions resource, submitter OR
+// participant) failed to match him, but because *some* transient fetch
+// failure for his record silently discarded the section, indistinguishable
+// from Priya's genuinely-different case of having sessions. A tri-state
+// (loading / error / rows) makes "no sessions" and "couldn't check" visibly
+// different, with a Retry for the latter.
+export const SpeakerSessions = ({ contactId }: { contactId: string }) => {
+  const [state, setState] = useState<
+    | { status: 'loading' }
+    | { status: 'error'; message: string }
+    | { status: 'ready'; rows: SpeakerSessionRow[] }
+  >({ status: 'loading' })
   const [roomNames, setRoomNames] = useState<Map<string, string>>(new Map())
+  const [reloadToken, setReloadToken] = useState(0)
 
   useEffect(() => {
     let cancelled = false
-    setRows(null)
+    setState({ status: 'loading' })
     void (async () => {
-      const [subs, roomList] = await Promise.all([
-        queryResource<SpeakerSessionRow>('submissions')({
-          from: 0,
-          size: 25,
-          filters: { contact_id: contactId },
-        }),
-        listRooms().catch(() => ({ items: [] as RoomRow[] })),
-      ])
-      if (cancelled) return
-      setRows(subs.items)
-      setRoomNames(new Map(roomList.items.map((r) => [r.id, r.name])))
+      try {
+        const [subs, roomList] = await Promise.all([
+          queryResource<SpeakerSessionRow>('submissions')({
+            from: 0,
+            size: 25,
+            filters: { contact_id: contactId },
+          }),
+          listRooms().catch(() => ({ items: [] as RoomRow[] })),
+        ])
+        if (cancelled) return
+        setRoomNames(new Map(roomList.items.map((r) => [r.id, r.name])))
+        setState({ status: 'ready', rows: subs.items })
+      } catch (err) {
+        if (cancelled) return
+        setState({ status: 'error', message: err instanceof Error ? err.message : 'Failed to load sessions.' })
+      }
     })()
     return () => {
       cancelled = true
     }
-  }, [contactId])
+  }, [contactId, reloadToken])
 
-  if (!rows || rows.length === 0) return null
+  if (state.status === 'loading') {
+    return (
+      <div className="detail-body">
+        <h3>Sessions</h3>
+        <div className="settings-hint">Loading…</div>
+      </div>
+    )
+  }
+
+  if (state.status === 'error') {
+    return (
+      <div className="detail-body">
+        <h3>Sessions</h3>
+        <div className="settings-error">
+          {state.message}{' '}
+          <button type="button" className="settings-ghost" onClick={() => setReloadToken((t) => t + 1)}>
+            Retry
+          </button>
+        </div>
+      </div>
+    )
+  }
+
+  if (state.rows.length === 0) {
+    return (
+      <div className="detail-body">
+        <h3>Sessions</h3>
+        <div className="settings-hint">No sessions.</div>
+      </div>
+    )
+  }
+
   return (
     <div className="detail-body">
       <h3>Sessions</h3>
       <ul style={{ margin: 0, paddingLeft: '1.2em' }}>
-        {rows.map((s) => (
+        {state.rows.map((s) => (
           <li key={s.id}>
             {s.title}
             <span style={{ color: 'var(--text-faint)' }}>
@@ -571,8 +624,13 @@ export function tasksDataSourceWithStatusFilter(
   }
 }
 
-/** Workspace tab configs against the Worker's generic query endpoints. */
-function buildWorkspaceConfig(
+/**
+ * Workspace tab configs against the Worker's generic query endpoints.
+ * Exported (only) so `App.filesOpenDetails.test.tsx` can exercise the real
+ * Files tab column definitions against DataList, rather than a hand-copied
+ * duplicate that could drift from the fix.
+ */
+export function buildWorkspaceConfig(
   onChecklist: (ids: string[]) => void,
   checklistResetKey: number,
   seeds: WorkspaceSeeds,
@@ -1225,13 +1283,39 @@ function buildWorkspaceConfig(
     getItemTitle: (item) => item.filename,
     columns: [
       {
+        // Eval defect 1: this column is the grid's resolved `titleField`
+        // (DataList falls back to the first non-editable column when a
+        // TabConfig doesn't set one — see DataList.tsx's `resolvedTitleField`),
+        // which is what makes DataList wrap its rendered content in the
+        // "Open details" title-link button (DataList.tsx's `withTitleLink`).
+        // That render used to *be* an `<a>` filling the whole cell with its
+        // own `onClick={(e) => e.stopPropagation()}` — so every click on the
+        // visible filename stopped at the anchor and never reached the
+        // wrapping button, and "Open details" was unreachable through its own
+        // labelled control (clicking elsewhere in the row still opened it via
+        // the row's own click handler, which is why this only looked like a
+        // no-op on the specific control named in the defect). Splitting the
+        // direct-file-open affordance into its own small icon link — leaving
+        // the filename text itself un-wrapped — lets a filename click bubble
+        // to "Open details" while the icon keeps the raw-file shortcut.
         field: 'filename',
         header: 'File',
         width: '1.6fr',
         render: (value: string, item) => (
-          <a href={`/files/${item.file_asset_id}`} target="_blank" rel="noopener" onClick={(e) => e.stopPropagation()}>
-            {value}
-          </a>
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, maxWidth: '100%' }}>
+            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{value}</span>
+            <a
+              href={`/files/${item.file_asset_id}`}
+              target="_blank"
+              rel="noopener"
+              title="Open the file directly"
+              aria-label={`Open ${value} directly`}
+              style={{ flexShrink: 0 }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              ↗
+            </a>
+          </span>
         ),
       },
       {

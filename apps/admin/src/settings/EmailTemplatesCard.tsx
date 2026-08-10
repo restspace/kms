@@ -41,13 +41,15 @@ export function EmailTemplatesCard() {
   const [saving, setSaving] = useState(false)
   const [note, setNote] = useState<string | null>(null)
 
-  const reload = () =>
-    listEmailTemplates()
+  const reload = () => {
+    setError(null)
+    return listEmailTemplates()
       .then((r) => {
         setTemplates(r.items)
         setMergeFields(r.merge_fields)
       })
       .catch((e: unknown) => setError(e instanceof Error ? e.message : 'Failed to load templates'))
+  }
 
   useEffect(() => {
     void reload()
@@ -114,12 +116,26 @@ export function EmailTemplatesCard() {
         template is the reference for what it can use. Unknown fields render as empty text.
       </p>
 
-      {error && <div className="settings-error">{error}</div>}
       {note && <div className="settings-hint" role="status">{note}</div>}
 
-      {templates === null ? (
+      {/*
+        * Item 3 fix: same "Loading…" that never resolves as RoomsTracksCard /
+        * ContactFieldsCard — a rejected `listEmailTemplates()` set `error`
+        * but never `templates`, so `templates === null` kept rendering the
+        * placeholder underneath the error banner forever, with no retry.
+        */}
+      {error && templates === null ? (
+        <div className="settings-error">
+          {error}{' '}
+          <button type="button" className="settings-ghost" onClick={() => void reload()}>
+            Retry
+          </button>
+        </div>
+      ) : templates === null ? (
         <div className="settings-hint">Loading…</div>
       ) : (
+        <>
+          {error && <div className="settings-error">{error}</div>}
         <table className="settings-table">
           <thead>
             <tr>
@@ -182,6 +198,7 @@ export function EmailTemplatesCard() {
             ))}
           </tbody>
         </table>
+        </>
       )}
     </section>
   )

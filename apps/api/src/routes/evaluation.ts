@@ -646,11 +646,36 @@ evaluationRoutes.get('/submissions/:id/detail', async (c) => {
     ).bind(id).all(),
   ]);
 
+  // Per-round means, additive alongside the flat `reviews` list above. The
+  // grid's rating_cache-derived column deliberately pools every plan's
+  // reviews into one number (adminApi.ts's `rating` expression, kept as-is —
+  // it fixed reviews that were invisible after a submission moved rounds);
+  // but a single pooled 3.9 on the detail page hides that it is blending
+  // scores from independent evaluation criteria/scales across rounds. This
+  // mirrors ratingCacheStatement's own AVG(weighted_total) per plan_id so a
+  // round's mean here always matches what rating_cache would say for that
+  // plan — same rows, same aggregation, just grouped instead of pooled.
+  const planMeans = new Map<string, { plan_id: string; plan_name: string | null; mean: number; count: number }>();
+  for (const row of reviews.results as Array<{ plan_id: string; plan_name: string | null; weighted_total: number }>) {
+    let entry = planMeans.get(row.plan_id);
+    if (!entry) {
+      entry = { plan_id: row.plan_id, plan_name: row.plan_name, mean: 0, count: 0 };
+      planMeans.set(row.plan_id, entry);
+    }
+    entry.mean += row.weighted_total;
+    entry.count += 1;
+  }
+  const review_plan_means = [...planMeans.values()].map((entry) => ({
+    ...entry,
+    mean: Math.round((entry.mean / entry.count) * 100) / 100,
+  }));
+
   return c.json({
     submission,
     answers: answers.results,
     participants: participants.results,
     reviews: reviews.results,
+    review_plan_means,
     tags: tags.results.map((t) => (t as { name: string }).name),
   });
 });

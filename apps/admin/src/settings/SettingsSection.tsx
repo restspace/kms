@@ -38,6 +38,7 @@ export function SettingsSection({ me }: { me: Me }) {
   const [resetNote, setResetNote] = useState<string | null>(null)
 
   const reload = useCallback(() => {
+    setLoadError(null)
     listTokens()
       .then((r) => setTokens(r.tokens))
       .catch((err: unknown) => setLoadError(err instanceof Error ? err.message : 'Failed to load tokens'))
@@ -142,7 +143,12 @@ export function SettingsSection({ me }: { me: Me }) {
         </form>
 
         {loadError ? (
-          <div className="settings-error">{loadError}</div>
+          <div className="settings-error">
+            {loadError}{' '}
+            <button type="button" className="settings-ghost" onClick={reload}>
+              Retry
+            </button>
+          </div>
         ) : tokens === null ? (
           <div className="settings-hint">Loading…</div>
         ) : tokens.length === 0 ? (

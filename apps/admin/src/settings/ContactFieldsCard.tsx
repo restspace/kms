@@ -60,10 +60,12 @@ export function ContactFieldsCard() {
   const [error, setError] = useState<string | null>(null)
   const [saving, setSaving] = useState<string | null>(null)
 
-  const reload = () =>
-    listContactFields()
+  const reload = () => {
+    setError(null)
+    return listContactFields()
       .then((r) => setFields(r.items.map(asDraft)))
       .catch((e: unknown) => setError(e instanceof Error ? e.message : 'Failed to load speaker fields'))
+  }
 
   useEffect(() => {
     reload()
@@ -169,12 +171,26 @@ export function ContactFieldsCard() {
         Custom fields shown on every speaker record for this event — e.g. a &ldquo;Travel preferences&rdquo; select
         or a free-text field. Changes appear on the Speakers tab&rsquo;s create/edit form immediately.
       </p>
-      {error && <div className="settings-error">{error}</div>}
-
-      {fields === null ? (
+      {/*
+        * Item 3 fix: `error` used to render alongside `fields === null`'s
+        * permanent "Loading…" placeholder — a rejected `listContactFields()`
+        * left `fields` at its initial `null` forever (nothing ever calls
+        * `setFields` on the error path), so the card showed an error banner
+        * that never replaced the spinner text below it, and no way to retry
+        * short of a full page reload.
+        */}
+      {error && fields === null ? (
+        <div className="settings-error">
+          {error}{' '}
+          <button type="button" className="settings-ghost" onClick={() => reload()}>
+            Retry
+          </button>
+        </div>
+      ) : fields === null ? (
         <div className="settings-hint">Loading…</div>
       ) : (
         <div className="rt-field">
+          {error && <div className="settings-error">{error}</div>}
           {fields.map((row, index) => (
             <div key={row.id} className={saving === row.id ? 'rt-row-saving' : undefined}>
               <div className="rt-row">

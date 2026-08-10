@@ -482,7 +482,20 @@ export interface SubmissionDetail {
     has_headshot: number
     headshot_asset_id: string | null
   }>
-  reviews: Array<{ reviewer_name: string | null; weighted_total: number | null; comment: string | null; conflict_of_interest: number }>
+  reviews: Array<{
+    reviewer_name: string | null
+    weighted_total: number | null
+    comment: string | null
+    conflict_of_interest: number
+    plan_id: string
+    plan_name: string | null
+    created_at: string
+  }>
+  /** Per-round mean, additive alongside `reviews` (evaluation.ts's detail
+   *  route) — the same AVG(weighted_total) grouping rating_cache keeps per
+   *  plan_id, just also handed to the client so round-level results stay
+   *  readable next to the (deliberately pooled) grid rating column. */
+  review_plan_means: Array<{ plan_id: string; plan_name: string | null; mean: number; count: number }>
   tags: string[]
 }
 

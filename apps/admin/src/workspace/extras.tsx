@@ -553,22 +553,22 @@ export function SubmissionDetailPanel({ id, onEdit, onItemSaved }: {
       </div>
 
       <dl>
+        {s.description ? <DetailPair term="Description">{String(s.description)}</DetailPair> : null}
         {s.format ? <DetailPair term="Format">{String(s.format)}</DetailPair> : null}
         {s.track_name ? <DetailPair term="Track">{String(s.track_name)}</DetailPair> : null}
         {s.plan_name ? <DetailPair term="Evaluation plan">{String(s.plan_name)}</DetailPair> : null}
         {detail.tags.length > 0 && <DetailPair term="Tags">{detail.tags.join(', ')}</DetailPair>}
         {detail.answers
-          // The submission form's own "Track" and "Format" questions
-          // duplicate the built-in DetailPairs above (manual-QA item): Track
-          // already shows the resolved, canonical track name from the
-          // `tracks` relation (`s.track_name`) rather than the raw,
-          // unresolved answer value, and Format duplicates `s.format`
-          // verbatim. Conservative exact match (trim + lowercase) so a
-          // differently-labelled question (e.g. "Track / Theme") still shows
-          // through — only an exact 'track' or 'format' label is suppressed.
+          // The submission form's own "Title"/"Description"/"Track"/"Format"
+          // questions duplicate canonical columns rendered above (heading,
+          // Description pair, Format/Track pairs). Those answer rows are
+          // frozen at submit time, so after an organiser edit they show stale
+          // pre-edit content — the columns are the single source of truth.
+          // Conservative exact match (trim + lowercase) so a differently-
+          // labelled question (e.g. "Track / Theme") still shows through.
           .filter((a) => {
             const label = a.label.trim().toLowerCase();
-            return label !== 'track' && label !== 'format';
+            return label !== 'track' && label !== 'format' && label !== 'title' && label !== 'description';
           })
           .map((a, i) => (
             <DetailPair key={i} term={a.label}>{answerText(a.value_json)}</DetailPair>
@@ -612,17 +612,62 @@ export function SubmissionDetailPanel({ id, onEdit, onItemSaved }: {
         Reviews {detail.reviews.length > 0 && <span style={{ color: 'var(--text-muted)', fontWeight: 400 }}>({detail.reviews.length})</span>}
       </h2>
       {detail.reviews.length === 0 && <p style={{ color: 'var(--text-muted)', fontSize: 13 }}>No reviews yet.</p>}
-      {detail.reviews.map((r, i) => (
-        <div className="review-row" key={i}>
-          <div className="rev-head">
-            <span>{r.reviewer_name ?? 'Reviewer'}</span>
-            <span>{r.conflict_of_interest === 1 ? 'Conflict of interest' : r.weighted_total ?? '—'}</span>
+      {/* Grouped by evaluation round (plan): the header ★ above pools every
+          plan's reviews into one number on purpose (adminApi.ts's grid
+          rating does the same, kept as-is — that pooling is what made
+          reviews from a submission's earlier round visible again after it
+          moved rounds). Pooled across independent scoring criteria/scales,
+          though, that single number is unreadable at the review level — a
+          3.9 might be a strong 4.5 in round 1 diluted by a rough 3.0 in
+          round 2. Grouping by round with a per-round mean (server-computed
+          in review_plan_means, mirroring rating_cache's own per-plan AVG)
+          makes each round's result legible again without touching the
+          pooled grid column other panes rely on. */}
+      {reviewsByPlan(detail.reviews).map(([planId, planName, planReviews]) => {
+        const planMean = detail.review_plan_means.find((m) => m.plan_id === planId)?.mean ?? null
+        return (
+          <div className="review-plan-group" key={planId}>
+            <div className="review-plan-heading">
+              <span>{planName ?? 'Evaluation round'}</span>
+              {planMean !== null && <span className="rating-badge">★ {planMean}</span>}
+            </div>
+            {planReviews.map((r, i) => (
+              <div className="review-row" key={i}>
+                <div className="rev-head">
+                  <span>{r.reviewer_name ?? 'Reviewer'}</span>
+                  <span>{r.conflict_of_interest === 1 ? 'Conflict of interest' : r.weighted_total ?? '—'}</span>
+                </div>
+                {r.comment && <div className="rev-comment">{r.comment}</div>}
+              </div>
+            ))}
           </div>
-          {r.comment && <div className="rev-comment">{r.comment}</div>}
-        </div>
-      ))}
+        )
+      })}
     </div>
   )
+}
+
+/** Groups the flat `reviews` list by plan_id, preserving the server's
+ *  ordering (plan.created_at then review.created_at — see evaluation.ts's
+ *  detail query) so rounds appear in the order they were run, oldest first. */
+function reviewsByPlan(
+  reviews: SubmissionDetail['reviews'],
+): Array<[string, string | null, SubmissionDetail['reviews']]> {
+  const order: string[] = []
+  const groups = new Map<string, { name: string | null; rows: SubmissionDetail['reviews'] }>()
+  for (const r of reviews) {
+    let group = groups.get(r.plan_id)
+    if (!group) {
+      group = { name: r.plan_name, rows: [] }
+      groups.set(r.plan_id, group)
+      order.push(r.plan_id)
+    }
+    group.rows.push(r)
+  }
+  return order.map((planId) => {
+    const group = groups.get(planId)!
+    return [planId, group.name, group.rows]
+  })
 }
 
 const readableRole = (role: string): string =>
