@@ -91,4 +91,12 @@ export const eventShellCss = `
 .event-widget-list li { padding: .85rem 0; border-bottom: 1px solid var(--border); }
 .event-widget-list li:last-child { border-bottom: none; }
 .event-widget-empty { color: var(--text-muted); }
+
+/* Compact (640): phone layout, appended so the desktop rules above stand.
+   Five nav items wrap to three rows at 390px; a swipe strip costs one line. */
+@media (max-width: 640px) {
+  .event-shell-header h1 { font-size: 1.5rem; }
+  .event-shell-nav { flex-wrap: nowrap; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .event-shell-nav a { white-space: nowrap; }
+}
 `

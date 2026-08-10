@@ -430,4 +430,10 @@ const scheduleWidgetCss = `
 .schedule-card-desc { margin: .55rem 0 0; line-height: 1.5; color: var(--text-muted); font-size: .9rem; }
 .schedule-card-speakers { margin-top: .45rem; font-size: .88rem; }
 .schedule-toast { margin: 0 0 .75rem; padding: .5rem .8rem; border-radius: var(--radius); background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent); font-size: .85rem; }
+
+/* Compact (640): phone layout, appended so the desktop rules above stand. */
+@media (max-width: 640px) {
+  .schedule-star { min-width: 44px; min-height: 44px; }
+  .schedule-export-button { min-height: 40px; }
+}
 `

@@ -131,4 +131,10 @@ const galleryWidgetCss = `
 .gallery-modal { position: relative; background: var(--surface); color: var(--text); border-radius: var(--radius); padding: 1.5rem; max-width: 480px; width: 100%; max-height: 85vh; overflow-y: auto; box-shadow: var(--shadow-overlay); }
 .gallery-modal-close { position: absolute; top: .6rem; right: .6rem; width: 2rem; height: 2rem; border-radius: 999px; border: none; background: color-mix(in srgb, var(--text) 8%, transparent); color: var(--text); font-size: 1.2rem; line-height: 1; cursor: pointer; }
 .gallery-modal-close:hover { background: color-mix(in srgb, var(--text) 14%, transparent); }
+
+/* Compact (640): phone layout, appended so the desktop rules above stand. */
+@media (max-width: 640px) {
+  .gallery-grid { grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); }
+  .gallery-modal { padding: 1rem; }
+}
 `
