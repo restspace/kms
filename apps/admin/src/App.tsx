@@ -50,6 +50,7 @@ import {
   SubmissionEditForm,
   SUBMISSION_STATUSES,
   statusLabel,
+  TaskStatusFilter,
 } from './workspace/extras'
 import { FileLibraryDetail, TaskFilesPanel, formatBytes } from './workspace/FilePanels'
 import {
@@ -69,7 +70,7 @@ import {
   type EventFilter,
   type EventScopeValue,
 } from './eventScope'
-import { currentRoute, navigate, useRoute, type ViewKey } from './router'
+import { currentRoute, navigate, stableStringify, useRoute, type ViewKey } from './router'
 import { AdminErrorBoundary } from './components/AdminErrorBoundary'
 import './shell.css'
 
@@ -422,6 +423,55 @@ function buildScopedSources(eventFilterId: string | null): ScopedSources {
   }
 }
 
+const TASK_STATE_FILTER_KEY = 'taskState'
+
+/**
+ * Translates the Tasks tab's status chip (`TaskStatusFilter`, workspace/extras.tsx)
+ * into the query the tasks resource (adminApi.ts) actually understands.
+ * `complete` and `overdue` map straight onto existing filter keys (`status`
+ * and `overdue=true`); `open` has no single matching value — the resource's
+ * `status` filter only takes the raw assignment statuses `not_started` /
+ * `in_progress` / `complete`, one at a time — so it's covered by fetching
+ * both incomplete statuses and merging/re-paginating client-side. The demo's
+ * task list is small (dozens of rows), so two extra round trips per page is
+ * an acceptable price for not touching the (other-lane-owned) route file to
+ * add a proper `status=open` alias.
+ */
+export function tasksDataSourceWithStatusFilter(
+  base: (params: DataSourceParams) => Promise<DataSourceResult<TaskAssignmentRow>>,
+): (params: DataSourceParams) => Promise<DataSourceResult<TaskAssignmentRow>> {
+  return async (params: DataSourceParams): Promise<DataSourceResult<TaskAssignmentRow>> => {
+    const { [TASK_STATE_FILTER_KEY]: state, ...rest } = params.filters
+    if (state === 'complete') {
+      return base({ ...params, filters: { ...rest, status: 'complete' } })
+    }
+    if (state === 'overdue') {
+      return base({ ...params, filters: { ...rest, overdue: 'true' } })
+    }
+    if (state === 'open') {
+      const [notStarted, inProgress] = await Promise.all([
+        base({ from: 0, size: 500, filters: { ...rest, status: 'not_started' }, sort: params.sort }),
+        base({ from: 0, size: 500, filters: { ...rest, status: 'in_progress' }, sort: params.sort }),
+      ])
+      const merged: TaskAssignmentRow[] = [...notStarted.items, ...inProgress.items]
+      const field = params.sort?.field
+      if (field) {
+        const dir = params.sort?.direction === 'desc' ? -1 : 1
+        merged.sort((a, b) => {
+          const av = (a as unknown as Record<string, unknown>)[field]
+          const bv = (b as unknown as Record<string, unknown>)[field]
+          if (av === bv) return 0
+          if (av === null || av === undefined) return 1
+          if (bv === null || bv === undefined) return -1
+          return av > bv ? dir : -dir
+        })
+      }
+      return { items: merged.slice(params.from, params.from + params.size), total: merged.length }
+    }
+    return base({ ...params, filters: rest })
+  }
+}
+
 /** Workspace tab configs against the Worker's generic query endpoints. */
 function buildWorkspaceConfig(
   onChecklist: (ids: string[]) => void,
@@ -700,29 +750,63 @@ function buildWorkspaceConfig(
         },
       },
     ],
-    // F14/ABS-11: row double-click now opens a real edit form — previously
-    // submissions had neither `schema` nor `onUpsert`, so double-click fell
-    // through to the read-only detail panel and there was no way to fix a
-    // title/track/room, let alone add a co-speaker after the fact. `schema`
-    // still backs the generic "+ New" create form (a fresh manual submission
-    // has no participants yet); `editComponent` overrides *editing* with the
-    // fuller custom form (track/room pickers + participant management).
+    // F14/ABS-11 + theme-E create-form gap: row double-click opens a real
+    // edit form, and "+ New" now opens the *same* form rather than the bare
+    // generic RecordForm — the plain `schema` render had no track or status
+    // field, so an admin-created submission could never be put on a track or
+    // given a starting status other than the server's hardcoded 'pending'
+    // (baseline defect: "Submissions created via the admin 'Add new record'
+    // form cannot be linked to a speaker/participant afterwards ... no Track
+    // field on the create form"). `schema` still has to stay set — DataTabManager
+    // gates row-double-click-to-edit on `schema && onUpsert` even when
+    // `editComponent` is what actually renders (see its `canEdit` check).
     schema: submissionSchema,
+    createComponent: SubmissionEditForm,
     editComponent: SubmissionEditForm,
     onUpsert: async (data, existing) => {
-      const saved = existing ? await updateSubmission(existing.id, data) : await createSubmission(data)
+      if (existing) {
+        const saved = await updateSubmission(existing.id, data)
+        return saved as unknown as SubmissionRow & { rating: number | null; notified_at: string | null; review_count: number }
+      }
+      // POST /submissions (evaluation.ts) hardcodes a new submission's status
+      // to 'pending' and doesn't read a `status` field — SubmissionEditForm's
+      // create mode sends one anyway (theme-E: create form should offer a
+      // status), so a non-default choice is applied as a second, existing
+      // call (the same one the grid's inline status dropdown uses) once the
+      // record — and its id — exist.
+      const { status: desiredStatus, ...createFields } = data as Record<string, unknown> & { status?: unknown }
+      const created = await createSubmission(createFields)
+      const createdId = typeof (created as { id?: unknown }).id === 'string' ? (created as { id: string }).id : undefined
+      if (createdId && typeof desiredStatus === 'string' && desiredStatus && desiredStatus !== 'pending') {
+        await updateSubmissionStatus(createdId, desiredStatus)
+        return { ...created, status: desiredStatus } as unknown as SubmissionRow & {
+          rating: number | null
+          notified_at: string | null
+          review_count: number
+        }
+      }
       // Mirrors the Tasks tab's cast (line ~589): the write response's shape
       // only needs to satisfy TabConfig's generic signature here — the
       // list refetch after save is what the grid actually renders from.
-      return saved as unknown as SubmissionRow & { rating: number | null; notified_at: string | null; review_count: number }
+      return created as unknown as SubmissionRow & { rating: number | null; notified_at: string | null; review_count: number }
     },
   }
 
   const tasks: TabConfig<TaskAssignmentRow> = {
     displayTitle: 'Tasks',
-    dataSource: scopedSources.tasks,
+    dataSource: tasksDataSourceWithStatusFilter(scopedSources.tasks),
     getItemId: (item) => item.id,
     getItemTitle: (item) => item.task_title,
+    // Baseline defect: no complete/incomplete status filter existed, only
+    // column sorting. `seeds.tasks` (a dashboard deep link, e.g. a specific
+    // assignee) folds in alongside the chip's own key rather than replacing
+    // this filterConfig outright — same pattern as the Speakers tab's
+    // `confirmation` chip above.
+    filterConfig: {
+      initialFilters: { [TASK_STATE_FILTER_KEY]: '', ...(seeds.tasks ?? {}) },
+      defaultFilters: { [TASK_STATE_FILTER_KEY]: '' },
+      FilterComponent: TaskStatusFilter,
+    },
     columns: [
       { field: 'task_title', header: 'Task', width: '1.6fr', sortable: true },
       { field: 'assignee_name', header: 'Assignee', sortable: true },
@@ -857,9 +941,6 @@ function buildWorkspaceConfig(
   // declared above, which already folds seeds.speakers into initialFilters —
   // e.g. a `missing_assets` deep-link seed rides alongside the chip filter's
   // `confirmation` key instead of replacing the whole filter UI.
-  if (seeds.tasks) {
-    tasks.filterConfig = { initialFilters: seeds.tasks, defaultFilters: {}, FilterComponent: NullFilter }
-  }
   if (seeds.messages) {
     messages.filterConfig = { initialFilters: seeds.messages, defaultFilters: {}, FilterComponent: NullFilter }
   }
@@ -1068,12 +1149,27 @@ export default function App() {
   }, [me, route.ev])
   const eventFilterId = filter === 'all' ? null : filter
 
+  /**
+   * `me` is read through a ref so `setFilter` (and everything memoized on it —
+   * `onSelectEvent`, and through it the whole `workspaceConfig`) keeps a stable
+   * identity. Depending on the `me` *object* meant every `/api/me` re-read
+   * rebuilt the config, which hands every mounted DataList a brand-new
+   * `dataSource` closure, which DataList answers by wiping and refetching.
+   * Switching events does that two or three times within a few hundred ms, and
+   * the responses then land against superseded query signatures — which is
+   * exactly what tripped the grid's "kept being reloaded before it could
+   * finish" breaker on the Speakers roster.
+   */
+  const meRef = useRef<Me | null>(me)
+  meRef.current = me
+
   const setFilter = useCallback(
     (next: EventFilter) => {
       navigate({ ev: next, rec: null }, { replace: true })
-      if (next !== 'all' && me && next !== me.event.id) void applyEventCookie(next)
+      const current = meRef.current
+      if (next !== 'all' && current && next !== current.event.id) void applyEventCookie(next)
     },
-    [applyEventCookie, me],
+    [applyEventCookie],
   )
 
   const handleChecklist = useCallback((ids: string[]) => {
@@ -1087,10 +1183,16 @@ export default function App() {
 
   // URL-restored search / extra filters ride in as tab seeds alongside the
   // dashboard's.
+  // Keyed on the *serialised* filters: `parseRoute` allocates a fresh `flt`
+  // object on every route change, so keying on its identity rebuilt the seeds
+  // (and with them every tab's dataSource closure) whenever an unrelated
+  // parameter such as `rec` moved.
+  const routeFilterSignature = useMemo(() => stableStringify(route.flt ?? null), [route.flt])
   const routeSeeds = useMemo<Record<string, unknown> | null>(() => {
     const merged = { ...(route.flt ?? {}), ...(route.q ? { q: route.q } : {}) }
     return Object.keys(merged).length > 0 ? merged : null
-  }, [route.flt, route.q])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [routeFilterSignature, route.q])
 
   const mergedSeeds = useMemo<WorkspaceSeeds>(() => {
     const base = wsPreset?.seeds ?? {}
@@ -1189,6 +1291,18 @@ export default function App() {
    * re-open. A record that 404s just drops out of the URL.
    */
   const handledRec = useRef<string | null>(null)
+  /**
+   * The `rec` the URL asked for while its record is still being fetched.
+   *
+   * Without it the deep link raced the grid: the freshly mounted list reports
+   * its own auto-selected first row through `handleWorkspaceSelection`, which
+   * rewrites `?rec=` *and* stamps `handledRec` — so by the time the requested
+   * record resolved, the URL no longer named it and nothing ever opened its
+   * detail tab. That is the "the agent spent dozens of turns before a Detail
+   * tab eventually appeared" symptom: it only ever appeared when a reload
+   * happened to win the race.
+   */
+  const pendingRec = useRef<string | null>(null)
   useEffect(() => {
     const { rec, tab } = route
     if (view !== 'workspace' || !rec || !isWorkspaceTabKey(tab)) return
@@ -1197,16 +1311,26 @@ export default function App() {
     handledRec.current = key
     if (!REC_RESTORABLE.includes(tab)) return
     let cancelled = false
+    pendingRec.current = rec
+    const settle = () => {
+      if (pendingRec.current === rec) pendingRec.current = null
+    }
     void loadWorkspaceRecord(tab, rec, eventFilterId, contactFields)
       .then((item) => {
-        if (cancelled) return
+        if (cancelled) {
+          settle()
+          return
+        }
         if (!item) {
+          settle()
           navigate({ rec: null }, { replace: true })
           return
         }
         setDetailRequest((prev) => ({ configKey: tab, item, token: (prev?.token ?? 0) + 1 }))
+        settle()
       })
       .catch(() => {
+        settle()
         if (!cancelled) navigate({ rec: null }, { replace: true })
       })
     return () => {
@@ -1235,6 +1359,9 @@ export default function App() {
       const configKey = selection?.configKey ?? null
       if (!isWorkspaceTabKey(configKey) || !REC_RESTORABLE.includes(configKey)) return
       const id = selection?.id ?? null
+      // A deep-linked record still in flight owns the URL until it resolves —
+      // see `pendingRec`. The grid's own auto-selection must not overwrite it.
+      if (pendingRec.current !== null && pendingRec.current !== id) return
       handledRec.current = id ? `${configKey}:${id}` : null
       navigate({ rec: id }, { replace: true })
     },

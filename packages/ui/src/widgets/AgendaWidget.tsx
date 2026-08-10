@@ -9,6 +9,7 @@ import {
   type PublicSession,
 } from '../publicData'
 import { toParagraphs } from './richText'
+import { eventDays, fmtDayLong, fmtDayShort, fmtMinutes, tzAbbr, utcToLocal } from './time'
 
 export interface AgendaWidgetProps {
   eventSlug: string
@@ -18,104 +19,6 @@ export interface AgendaWidgetProps {
    * public page, where the widget's own controls stay in charge.
    */
   filter?: PublicFeedFilter
-}
-
-// ---------------------------------------------------------------------------
-// Event-timezone time math.
-//
-// The feed hands us UTC instants plus a `day` key already computed in the
-// event timezone (landing.tsx `dayKey`); the grid additionally needs
-// minutes-since-local-midnight, which we derive here. This mirrors
-// apps/admin/src/agenda/timeUtils.ts — deliberately re-implemented rather
-// than imported, since packages/ui must not depend on apps/admin.
-// ---------------------------------------------------------------------------
-
-const dtfCache = new Map<string, Intl.DateTimeFormat>()
-
-function dtf(tz: string): Intl.DateTimeFormat {
-  let f = dtfCache.get(tz)
-  if (!f) {
-    try {
-      f = new Intl.DateTimeFormat('en-CA', {
-        timeZone: tz,
-        year: 'numeric',
-        month: '2-digit',
-        day: '2-digit',
-        hour: '2-digit',
-        minute: '2-digit',
-        hour12: false,
-      })
-    } catch {
-      // Unknown/blank tz on the event row: fall back to UTC rather than throw.
-      f = new Intl.DateTimeFormat('en-CA', {
-        timeZone: 'UTC',
-        year: 'numeric',
-        month: '2-digit',
-        day: '2-digit',
-        hour: '2-digit',
-        minute: '2-digit',
-        hour12: false,
-      })
-    }
-    dtfCache.set(tz, f)
-  }
-  return f
-}
-
-interface LocalTime {
-  /** YYYY-MM-DD in the event timezone. */
-  day: string
-  /** Minutes since local midnight. */
-  minutes: number
-}
-
-function utcToLocal(iso: string, tz: string): LocalTime {
-  const parts = dtf(tz).formatToParts(new Date(iso))
-  const get = (type: string) => parts.find((p) => p.type === type)?.value ?? '00'
-  const hour = Number(get('hour')) % 24 // en-CA can emit "24" at midnight
-  return {
-    day: `${get('year')}-${get('month')}-${get('day')}`,
-    minutes: hour * 60 + Number(get('minute')),
-  }
-}
-
-function fmtMinutes(minutes: number): string {
-  const h24 = Math.floor(minutes / 60) % 24
-  const mm = Math.round(minutes % 60)
-  const h12 = h24 % 12 === 0 ? 12 : h24 % 12
-  const suffix = h24 < 12 ? 'AM' : 'PM'
-  return mm === 0 ? `${h12} ${suffix}` : `${h12}:${String(mm).padStart(2, '0')} ${suffix}`
-}
-
-function fmtDayLong(day: string): string {
-  const [y, m, d] = day.split('-').map(Number)
-  if (!y || !m || !d) return day
-  return new Date(Date.UTC(y, m - 1, d, 12)).toLocaleDateString('en-US', {
-    weekday: 'long',
-    month: 'long',
-    day: 'numeric',
-  })
-}
-
-function fmtDayShort(day: string): string {
-  const [y, m, d] = day.split('-').map(Number)
-  if (!y || !m || !d) return day
-  return new Date(Date.UTC(y, m - 1, d, 12)).toLocaleDateString('en-US', {
-    weekday: 'short',
-    month: 'short',
-    day: 'numeric',
-  })
-}
-
-function tzAbbr(tz: string, atIso: string): string {
-  try {
-    const parts = new Intl.DateTimeFormat('en-US', { timeZone: tz, timeZoneName: 'short' }).formatToParts(
-      new Date(atIso),
-    )
-    return parts.find((p) => p.type === 'timeZoneName')?.value ?? tz
-  } catch {
-    return tz
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -278,10 +181,16 @@ export function AgendaWidget({ eventSlug, filter }: AgendaWidgetProps) {
     }
   }, [eventSlug, filter?.track, filter?.day])
 
-  // Days the tab strip offers: the feed's list, plus any day a session lands on
-  // that the feed omitted (defensive — the two are computed the same way).
+  // Days the tab strip offers (EMB-07): when the event has a start/end date
+  // range, every event day gets a tab — including days with nothing
+  // scheduled yet, which render an empty state rather than disappearing.
+  // Falls back to the feed's own day list (plus any day a session lands on
+  // that the feed omitted) when the event carries no date range.
   const days = useMemo(() => {
     if (!feed) return []
+    if (feed.event.starts_at && feed.event.ends_at) {
+      return eventDays(feed.event.starts_at, feed.event.ends_at, feed.event.timezone)
+    }
     const set = new Set<string>(feed.days)
     for (const s of feed.sessions) set.add(s.day)
     return [...set].sort()
@@ -343,7 +252,7 @@ export function AgendaWidget({ eventSlug, filter }: AgendaWidgetProps) {
   const roomById = new Map<string, PublicRoom>(feed.rooms.map((r) => [r.id, r]))
   const trackById = new Map(feed.tracks.map((t) => [t.id, t]))
 
-  if (feed.sessions.length === 0 || !layout || days.length === 0) {
+  if (!layout || days.length === 0) {
     return (
       <>
         <style dangerouslySetInnerHTML={{ __html: agendaCss }} />

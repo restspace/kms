@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   agendaIcsUrl,
   applyFeedFilter,
@@ -8,6 +8,10 @@ import {
   type PublicSession,
 } from '../publicData'
 import { stripHtml } from './richText'
+// EMB-16: render times in the EVENT timezone (matching the agenda grid), not
+// the viewer's local offset. EMB-07: derive the day-tab list from the
+// event's date range so every day appears, not just days with a session.
+import { eventDays, fmtDayShort, fmtTimeRange } from './time'
 
 export interface ScheduleWidgetProps {
   eventSlug: string
@@ -20,23 +24,6 @@ export interface ScheduleWidgetProps {
 }
 
 const MY_SCHEDULE = '__mine__'
-
-function formatTimeRange(startsAt: string, endsAt: string): string {
-  const opts: Intl.DateTimeFormatOptions = { hour: 'numeric', minute: '2-digit' }
-  const start = new Date(startsAt).toLocaleTimeString(undefined, opts)
-  const end = new Date(endsAt).toLocaleTimeString(undefined, opts)
-  return `${start} – ${end}`
-}
-
-function formatDayLabel(day: string): string {
-  // `day` is YYYY-MM-DD in the event's own timezone (publicData.ts); parse
-  // as a plain date (no time component) so the weekday doesn't shift a day
-  // depending on the viewer's own timezone offset.
-  const [y, m, d] = day.split('-').map(Number)
-  if (!y || !m || !d) return day
-  const date = new Date(y, m - 1, d)
-  return date.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' })
-}
 
 function localStorageKey(eventSlug: string): string {
   return `kms:schedule:${eventSlug}`
@@ -123,19 +110,28 @@ function downloadIcs(filename: string, contents: string): void {
   URL.revokeObjectURL(url)
 }
 
+/** description.length above which the itinerary card truncates and shows "…". */
+const DESC_TRUNCATE_AT = 160
+
 function SessionCard({
   session,
   roomName,
   trackName,
+  tz,
   starred,
   onToggleStar,
 }: {
   session: PublicSession
   roomName: string | null
   trackName: string | null
+  tz: string
   starred: boolean
   onToggleStar: () => void
 }) {
+  const description = stripHtml(session.description ?? '')
+  const shownDescription =
+    description.length > DESC_TRUNCATE_AT ? `${description.slice(0, DESC_TRUNCATE_AT).trimEnd()}…` : description
+
   return (
     <li className="schedule-card">
       <button
@@ -157,11 +153,24 @@ function SessionCard({
           </div>
         </div>
         <div className="muted schedule-card-meta">
-          {formatTimeRange(session.starts_at, session.ends_at)}
+          {fmtTimeRange(session.starts_at, session.ends_at, tz)}
           {roomName ? ` · ${roomName}` : ''}
         </div>
-        {session.speakers.length > 0 && (
-          <div className="schedule-card-speakers muted">{session.speakers.join(', ')}</div>
+        {shownDescription && <p className="schedule-card-desc">{shownDescription}</p>}
+        {session.speaker_details.length > 0 ? (
+          <div className="schedule-card-speakers muted">
+            {session.speaker_details.map((sp, i) => (
+              <span key={sp.id}>
+                {i > 0 ? ', ' : ''}
+                {sp.name}
+                {(sp.title || sp.company) && ` — ${[sp.title, sp.company].filter(Boolean).join(', ')}`}
+              </span>
+            ))}
+          </div>
+        ) : (
+          session.speakers.length > 0 && (
+            <div className="schedule-card-speakers muted">{session.speakers.join(', ')}</div>
+          )
         )}
       </div>
     </li>
@@ -180,15 +189,16 @@ export function ScheduleWidget({ eventSlug, filter }: ScheduleWidgetProps) {
   const [feed, setFeed] = useState<AgendaFeed | null | undefined>(undefined)
   const [activeDay, setActiveDay] = useState<string | null>(null)
   const [starred, setStarred] = useState<Set<string>>(() => new Set())
+  // EMB minor: "Export my schedule" gave no feedback that anything happened.
+  // A brief on-page confirmation, cleared after a few seconds.
+  const [toast, setToast] = useState<string | null>(null)
+  const toastTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
 
   useEffect(() => {
     let cancelled = false
     fetchAgenda(eventSlug).then((raw) => {
       const data = applyFeedFilter(raw, filter)
-      if (!cancelled) {
-        setFeed(data)
-        if (data && data.days.length > 0) setActiveDay(data.days[0] ?? null)
-      }
+      if (!cancelled) setFeed(data)
     })
     return () => {
       cancelled = true
@@ -199,6 +209,24 @@ export function ScheduleWidget({ eventSlug, filter }: ScheduleWidgetProps) {
   useEffect(() => {
     setStarred(loadStarred(eventSlug))
   }, [eventSlug])
+
+  // Day tabs (EMB-07): every day of the event's own date range, including
+  // days with nothing scheduled yet — not just days a session happens to
+  // land on. Falls back to the feed's day list when the event has no range.
+  const days = useMemo(() => {
+    if (!feed) return []
+    if (feed.event.starts_at && feed.event.ends_at) {
+      return eventDays(feed.event.starts_at, feed.event.ends_at, feed.event.timezone)
+    }
+    return feed.days
+  }, [feed])
+
+  useEffect(() => {
+    setActiveDay((current) => {
+      if (current && (current === MY_SCHEDULE || days.includes(current))) return current
+      return days[0] ?? null
+    })
+  }, [days])
 
   const roomsById = useMemo(() => new Map((feed?.rooms ?? []).map((r) => [r.id, r])), [feed])
   const tracksById = useMemo(() => new Map((feed?.tracks ?? []).map((t) => [t.id, t])), [feed])
@@ -233,18 +261,25 @@ export function ScheduleWidget({ eventSlug, filter }: ScheduleWidgetProps) {
     if (!feed) return
     const ics = buildMyScheduleIcs(eventSlug, feed.event.name, myScheduleSessions, roomNamesById)
     downloadIcs(`${eventSlug}-my-schedule.ics`, ics)
+    setToast(
+      `Exported ${myScheduleSessions.length} session${myScheduleSessions.length === 1 ? '' : 's'} to ${eventSlug}-my-schedule.ics`,
+    )
+    clearTimeout(toastTimerRef.current)
+    toastTimerRef.current = setTimeout(() => setToast(null), 4000)
   }
+
+  useEffect(() => () => clearTimeout(toastTimerRef.current), [])
 
   if (feed === undefined) return <p className="muted">Loading schedule…</p>
   if (feed === null) return <p className="event-widget-empty">The agenda isn't published yet — check back soon.</p>
-  if (feed.sessions.length === 0) return <p className="event-widget-empty">No sessions are scheduled yet.</p>
+  if (days.length === 0) return <p className="event-widget-empty">No sessions are scheduled yet.</p>
 
   return (
     <div className="schedule-widget">
       <style dangerouslySetInnerHTML={{ __html: scheduleWidgetCss }} />
       <div className="schedule-toolbar">
         <div className="schedule-tabs" role="tablist" aria-label="Schedule day">
-          {feed.days.map((day) => (
+          {days.map((day) => (
             <button
               key={day}
               type="button"
@@ -253,7 +288,7 @@ export function ScheduleWidget({ eventSlug, filter }: ScheduleWidgetProps) {
               className={activeDay === day ? 'schedule-tab schedule-tab-active' : 'schedule-tab'}
               onClick={() => setActiveDay(day)}
             >
-              {formatDayLabel(day)}
+              {fmtDayShort(day)}
             </button>
           ))}
           <button
@@ -280,6 +315,11 @@ export function ScheduleWidget({ eventSlug, filter }: ScheduleWidgetProps) {
           </button>
         </div>
       </div>
+      {toast && (
+        <p className="schedule-toast" role="status">
+          {toast}
+        </p>
+      )}
 
       {visibleSessions.length === 0 && activeDay === MY_SCHEDULE && (
         <p className="event-widget-empty">
@@ -299,6 +339,7 @@ export function ScheduleWidget({ eventSlug, filter }: ScheduleWidgetProps) {
               session={s}
               roomName={s.room_id ? roomsById.get(s.room_id)?.name ?? null : null}
               trackName={s.track_id ? tracksById.get(s.track_id)?.name ?? null : null}
+              tz={feed.event.timezone}
               starred={starred.has(s.id)}
               onToggleStar={() => toggleStar(s.id)}
             />
@@ -333,5 +374,7 @@ const scheduleWidgetCss = `
 .schedule-tag { font-size: .72rem; padding: .15rem .5rem; border-radius: 999px; background: color-mix(in srgb, var(--fg) 8%, transparent); color: var(--muted); white-space: nowrap; }
 .schedule-tag-track { background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent); }
 .schedule-card-meta { margin-top: .3rem; font-size: .85rem; }
+.schedule-card-desc { margin: .55rem 0 0; line-height: 1.5; color: var(--muted); font-size: .9rem; }
 .schedule-card-speakers { margin-top: .45rem; font-size: .88rem; }
+.schedule-toast { margin: 0 0 .75rem; padding: .5rem .8rem; border-radius: 8px; background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent); font-size: .85rem; }
 `

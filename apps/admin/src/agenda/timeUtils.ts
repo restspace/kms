@@ -26,7 +26,18 @@ function dtf(tz: string): Intl.DateTimeFormat {
   return f
 }
 
+/**
+ * A bare "YYYY-MM-DD" (no time component). `new Date(bareDate)` parses it as
+ * UTC midnight, and shifting *that* into a timezone west of UTC lands one
+ * calendar day early (docs/07: a May 12–14 event rendering as May 11–13) —
+ * exactly the eval-reported day-list-off-by-one. A date-only value has no
+ * instant to convert in the first place, so it is read as that literal
+ * calendar day rather than run through `new Date()` at all.
+ */
+const BARE_DATE_RE = /^\d{4}-\d{2}-\d{2}$/
+
 export function utcToLocal(iso: string, tz: string): LocalTime {
+  if (BARE_DATE_RE.test(iso)) return { day: iso, minutes: 0 }
   const parts = dtf(tz).formatToParts(new Date(iso))
   const get = (type: string) => parts.find((p) => p.type === type)?.value ?? '00'
   const hour = Number(get('hour')) % 24 // en-CA can emit "24" at midnight

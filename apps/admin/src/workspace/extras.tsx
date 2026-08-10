@@ -57,6 +57,35 @@ export function StatusChipsFilter({ filters, setFilters }: DataListFilterProps<R
   )
 }
 
+/**
+ * Tasks tab status filter (baseline defect: "the organizer Tasks list has no
+ * complete/incomplete status filter ... Only column sorting is available").
+ * `open` has no single matching value in adminApi.ts's tasks `status` filter
+ * (which only takes the raw assignment statuses `not_started`/`in_progress`/
+ * `complete`) — App.tsx's `tasksDataSourceWithStatusFilter` is what turns
+ * this chip's `open`/`complete`/`overdue` value into the actual query.
+ */
+export function TaskStatusFilter({ filters, setFilters }: DataListFilterProps<Record<string, string>>) {
+  const active = filters.taskState ?? ''
+  const choose = (value: string) => setFilters((prev) => ({ ...prev, taskState: value }))
+  return (
+    <div className="chip-filter" role="group" aria-label="Task status filter">
+      <button className={active === '' ? 'active' : ''} aria-pressed={active === ''} onClick={() => choose('')}>
+        All
+      </button>
+      <button className={active === 'open' ? 'active' : ''} aria-pressed={active === 'open'} onClick={() => choose('open')}>
+        Open
+      </button>
+      <button className={active === 'complete' ? 'active' : ''} aria-pressed={active === 'complete'} onClick={() => choose('complete')}>
+        Complete
+      </button>
+      <button className={active === 'overdue' ? 'active' : ''} aria-pressed={active === 'overdue'} onClick={() => choose('overdue')}>
+        Overdue
+      </button>
+    </div>
+  )
+}
+
 /** Roster filter for the Speakers tab's derived `confirmation` column (SPK-04):
  * confirmed / awaiting a submission_participants.confirmed_at row, or "All"
  * (no filter — includes non-participants, whose column reads "—"). */
@@ -319,22 +348,27 @@ const readableRole = (role: string): string =>
   role.split('-').map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join('-')
 
 /**
- * Submission edit form (F14/ABS-11): the previous edit surface only reached
- * title/description/format via side-channels (notes textarea, status
- * dropdown) — this is the real edit tab, opened on row double-click via
- * `TabConfig.editComponent`. Track/room are dynamic per-event lists the
- * generic RecordForm's static JSON-Schema enum can't express, and adding a
- * participant needs a contact-search picker RecordForm has no field type
- * for — so this is a bespoke form rather than a `schema` render, styled with
- * the same `record-form*` classes RecordForm uses for a consistent look.
+ * Submission edit/create form (F14/ABS-11; theme-E create-form gap: the "+
+ * New" submission form had no track/status field, and a manually-created
+ * record could never be linked to a track or given a non-default status).
+ * Opened on row double-click via `TabConfig.editComponent` AND on "+ New"
+ * via `TabConfig.createComponent` — `id` (from `initialValues.id`) tells the
+ * two modes apart. Track/room are dynamic per-event lists the generic
+ * RecordForm's static JSON-Schema enum can't express (no id→label mapping),
+ * and adding a participant needs a contact-search picker RecordForm has no
+ * field type for — so this is a bespoke form rather than a `schema` render,
+ * styled with the same `record-form*` classes RecordForm uses for a
+ * consistent look.
  *
  * Participant add/role-change/remove are immediate API calls (like the
  * "Save notes" button on the read-only detail panel above), not staged into
  * the form's own Save — the submission has to exist first, and there is no
- * reason to make a role change wait on unrelated title/description edits.
+ * reason to make a role change wait on unrelated title/description edits
+ * (and hence never apply in create mode, before the record exists).
  */
 export function SubmissionEditForm({ initialValues, onSubmit, onCancel, onDelete, title, onDirtyChange }: CreateFormProps) {
   const id = typeof initialValues?.id === 'string' ? initialValues.id : undefined
+  const isCreate = !id
 
   const [detail, setDetail] = useState<SubmissionDetail | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
@@ -349,6 +383,13 @@ export function SubmissionEditForm({ initialValues, onSubmit, onCancel, onDelete
     language: typeof initialValues?.language === 'string' ? initialValues.language : '',
     track_id: typeof initialValues?.track_id === 'string' ? initialValues.track_id : '',
     room_id: '',
+    // Theme-E: only meaningful (and only shown) on create — an existing
+    // submission's status is changed via the Submissions grid's inline
+    // dropdown (App.tsx's `status` column), which also fires decision-queue
+    // side effects the plain field PUT below doesn't. See the App.tsx
+    // `onUpsert` doc comment for how a non-default create-time status is
+    // applied as a second call.
+    status: typeof initialValues?.status === 'string' ? initialValues.status : 'pending',
   })
   // CNT-12/w3: content_approved (0010 migration) gates the public feeds
   // independently of acceptance status — default-on so existing/imported
@@ -357,15 +398,27 @@ export function SubmissionEditForm({ initialValues, onSubmit, onCancel, onDelete
   const [submitError, setSubmitError] = useState<string | null>(null)
   const [isSubmitting, setIsSubmitting] = useState(false)
 
+  // Track/room pickers need the event's lists whether creating or editing;
+  // only the existing-record detail (participants, reviews, files, the
+  // room already on the record) is conditional on an id existing yet.
+  useEffect(() => {
+    let cancelled = false
+    listTracks()
+      .then((t) => { if (!cancelled) setTracks(t.items) })
+      .catch(() => {})
+    listRooms()
+      .then((r) => { if (!cancelled) setRooms(r.items) })
+      .catch(() => {})
+    return () => { cancelled = true }
+  }, [])
+
   useEffect(() => {
     if (!id) return
     let cancelled = false
-    Promise.all([getSubmissionDetail(id), listTracks(), listRooms()])
-      .then(([d, t, r]) => {
+    getSubmissionDetail(id)
+      .then((d) => {
         if (cancelled) return
         setDetail(d)
-        setTracks(t.items)
-        setRooms(r.items)
         const roomId = typeof d.submission.room_id === 'string' ? d.submission.room_id : ''
         setFields((prev) => ({ ...prev, room_id: roomId }))
       })
@@ -396,6 +449,9 @@ export function SubmissionEditForm({ initialValues, onSubmit, onCancel, onDelete
         track_id: fields.track_id || null,
         room_id: fields.room_id || null,
         content_approved: contentApproved,
+        // Only sent on create — see `fields.status`'s doc comment. Reading
+        // App.tsx's submissions `onUpsert`, an edit ignores this key.
+        ...(isCreate ? { status: fields.status } : {}),
       })
       if (!ok) setSubmitError('The submission could not be saved.')
     } catch (err) {
@@ -525,6 +581,14 @@ export function SubmissionEditForm({ initialValues, onSubmit, onCancel, onDelete
             {tracks.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
           </select>
         </div>
+        {isCreate && (
+          <div className="record-form-field">
+            <label htmlFor="sub-edit-status">Status</label>
+            <select id="sub-edit-status" value={fields.status} disabled={isSubmitting} onChange={(e) => setField('status', e.target.value)}>
+              {SUBMISSION_STATUSES.map((s) => <option key={s} value={s}>{statusLabel(s)}</option>)}
+            </select>
+          </div>
+        )}
         <div className="record-form-field">
           <label htmlFor="sub-edit-room">Room</label>
           <select id="sub-edit-room" value={fields.room_id} disabled={isSubmitting} onChange={(e) => setField('room_id', e.target.value)}>
@@ -550,6 +614,12 @@ export function SubmissionEditForm({ initialValues, onSubmit, onCancel, onDelete
         </div>
       </div>
 
+      {/* Add/remove-participant controls (SPK-11, CFP-13/15): the record has
+          to exist first — an unsaved create tab has no submission id yet for
+          `addSubmissionParticipant` to attach to — so this whole section
+          only renders once editing an existing submission. */}
+      {!isCreate && (
+      <>
       <h2 style={{ fontSize: 14 }}>Participants</h2>
       {loadError && <p className="record-form-error" role="alert">{loadError}</p>}
       {participantError && <p className="record-form-error" role="alert">{participantError}</p>}
@@ -622,6 +692,8 @@ export function SubmissionEditForm({ initialValues, onSubmit, onCancel, onDelete
           </ul>
         )}
       </div>
+      </>
+      )}
 
       {/* Submission-scoped uploads and reviews, same as the read-only detail
           panel — the edit form doesn't need its own copy of that logic. */}

@@ -10,29 +10,67 @@ import { render, screen, waitFor } from '@testing-library/preact'
 
 const getEvaluationOverview = vi.fn()
 const createPlan = vi.fn()
+const addCriterion = vi.fn()
+const assignReviewers = vi.fn()
+const updatePlan = vi.fn()
 
 vi.mock('../api', () => ({
   getEvaluationOverview: (...a: unknown[]) => getEvaluationOverview(...a),
   createPlan: (...a: unknown[]) => createPlan(...a),
-  updatePlan: vi.fn(),
-  addCriterion: vi.fn(),
+  updatePlan: (...a: unknown[]) => updatePlan(...a),
+  addCriterion: (...a: unknown[]) => addCriterion(...a),
   updateCriterion: vi.fn(),
   deleteCriterion: vi.fn(),
-  assignReviewers: vi.fn(),
+  assignReviewers: (...a: unknown[]) => assignReviewers(...a),
+}))
+
+const getPlanSubmissions = vi.fn()
+const changePlanSubmissions = vi.fn()
+const addReviewer = vi.fn()
+const sendReviewerSigninLink = vi.fn()
+const remindReviewers = vi.fn()
+
+vi.mock('./evaluationApi', () => ({
+  getPlanSubmissions: (...a: unknown[]) => getPlanSubmissions(...a),
+  changePlanSubmissions: (...a: unknown[]) => changePlanSubmissions(...a),
+  addReviewer: (...a: unknown[]) => addReviewer(...a),
+  sendReviewerSigninLink: (...a: unknown[]) => sendReviewerSigninLink(...a),
+  remindReviewers: (...a: unknown[]) => remindReviewers(...a),
 }))
 
 import { EvaluationSection } from './EvaluationSection'
 
 const full = {
-  plans: [{ id: 'p1', name: 'Round 1', description: null, status: 'active', anonymise_submitters: 0, scoring_scale_min: 1, scoring_scale_max: 5 }],
+  plans: [{ id: 'p1', name: 'Round 1', description: null, status: 'active', anonymise_submitters: 0, scoring_scale_min: 1, scoring_scale_max: 5, opens_at: null, closes_at: null }],
   criteria: [{ id: 'c1', plan_id: 'p1', name: 'Relevance', description: null, weight: 2, position: 1 }],
   reviewers: [{ id: 'r1', email: 'r@example.com', name: 'Ada Lovelace' }],
   stats: [{ plan_id: 'p1', submissions: 3, assignments: 6, completed: 2 }],
+  pool: [{ plan_id: 'p1', contact_id: 'r1' }],
+  workload: [{ plan_id: 'p1', contact_id: 'r1', assigned: 3, completed: 1 }],
+}
+
+const submissions = {
+  items: [
+    { id: 's1', code: 'SESS-1', title: 'In the round', status: 'pending', format: 'Talk', track_id: 't1', track_name: 'AI', member: 1, assignments: 2 },
+    { id: 's2', code: 'SESS-2', title: 'Not yet', status: 'pending', format: 'Workshop', track_id: null, track_name: null, member: 0, assignments: 0 },
+  ],
+  tracks: [{ id: 't1', name: 'AI' }],
+  formats: ['Talk', 'Workshop'],
 }
 
 beforeEach(() => {
-  getEvaluationOverview.mockReset()
-  createPlan.mockReset()
+  for (const fn of [
+    getEvaluationOverview, createPlan, addCriterion, assignReviewers, updatePlan,
+    getPlanSubmissions, changePlanSubmissions, addReviewer, sendReviewerSigninLink, remindReviewers,
+  ]) fn.mockReset()
+  getPlanSubmissions.mockResolvedValue(submissions)
+  changePlanSubmissions.mockResolvedValue({ ok: true, matched: 1, changed: 1, total: 2 })
+  addCriterion.mockResolvedValue({ ok: true })
+  assignReviewers.mockResolvedValue({ ok: true, total_assignments: 0, created: 0, submissions: 0 })
+  addReviewer.mockResolvedValue({ ok: true, id: 'r2', email: 'new@example.com', name: 'New Person', created: true })
+  sendReviewerSigninLink.mockResolvedValue({ ok: true, email: 'r@example.com', dev_link: null })
+  remindReviewers.mockResolvedValue({ ok: true, sent: 1, lagging: [{ contact_id: 'r1', outstanding: 2 }] })
+  updatePlan.mockResolvedValue({ ok: true })
 })
 
 describe('EvaluationSection', () => {
@@ -108,5 +146,121 @@ describe('EvaluationSection', () => {
 
     await waitFor(() => expect(createPlan).toHaveBeenCalledWith('Round 2'))
     expect(promptSpy).not.toHaveBeenCalled()
+  })
+})
+
+/**
+ * Lane L3: the round editor's missing half. The eval run found that a new
+ * round could not be given submissions at all (so Assign reported "0
+ * submissions"), had no way to create a reviewer, and no way to nudge one.
+ */
+describe('EvaluationSection — round editor (lane L3)', () => {
+  const openCard = async () => {
+    getEvaluationOverview.mockResolvedValue(full)
+    render(<EvaluationSection />)
+    return screen.findByDisplayValue('Round 1')
+  }
+
+  it('lets an organiser pick the round submissions by checkbox', async () => {
+    await openCard()
+    const { fireEvent } = await import('@testing-library/preact')
+    fireEvent.click(screen.getByRole('button', { name: 'Choose submissions' }))
+
+    const row = (await screen.findByLabelText('Not yet in this round')) as HTMLInputElement
+    expect(row.checked).toBe(false)
+    expect((screen.getByLabelText('In the round in this round') as HTMLInputElement).checked).toBe(true)
+
+    fireEvent.click(row)
+    await waitFor(() =>
+      expect(changePlanSubmissions).toHaveBeenCalledWith('p1', { mode: 'add', submission_ids: ['s2'] }),
+    )
+  })
+
+  it('adds by filter with "Add matching"', async () => {
+    await openCard()
+    const { fireEvent } = await import('@testing-library/preact')
+    fireEvent.click(screen.getByRole('button', { name: 'Choose submissions' }))
+    // wait for the loaded payload's options, not just the empty select
+    await waitFor(() =>
+      expect((screen.getByLabelText('Filter by track') as HTMLSelectElement).options.length).toBe(2),
+    )
+
+    const track = screen.getByLabelText('Filter by track') as HTMLSelectElement
+    track.value = 't1'
+    // @testing-library/preact rewrites fireEvent.change to an input event under
+    // preact/compat, which a <select>'s onChange never sees — dispatch directly.
+    track.dispatchEvent(new Event('change', { bubbles: true }))
+    fireEvent.click(await screen.findByRole('button', { name: /Add matching/ }))
+
+    await waitFor(() =>
+      expect(changePlanSubmissions).toHaveBeenCalledWith('p1', { mode: 'add', filter: { track_id: 't1' } }),
+    )
+  })
+
+  it('explains a zero-submission Assign instead of silently doing nothing', async () => {
+    await openCard()
+    const { fireEvent } = await import('@testing-library/preact')
+    fireEvent.click(screen.getByRole('button', { name: 'Assign' }))
+
+    await waitFor(() => expect(assignReviewers).toHaveBeenCalled())
+    expect(await screen.findByText(/No submissions in this round yet/)).toBeTruthy()
+  })
+
+  it('creates a reviewer from name + email and pools them on the plan', async () => {
+    await openCard()
+    const { fireEvent } = await import('@testing-library/preact')
+    fireEvent.input(screen.getByLabelText('Reviewer name'), { target: { value: 'New Person' } })
+    fireEvent.input(screen.getByLabelText('Reviewer email'), { target: { value: 'new@example.com' } })
+    fireEvent.click(screen.getByRole('button', { name: '+ Add reviewer' }))
+
+    await waitFor(() =>
+      expect(addReviewer).toHaveBeenCalledWith({ name: 'New Person', email: 'new@example.com', plan_id: 'p1' }),
+    )
+  })
+
+  it('sends a sign-in link and reminds a lagging reviewer', async () => {
+    await openCard()
+    const { fireEvent } = await import('@testing-library/preact')
+    fireEvent.click(screen.getByLabelText('Send sign-in link to Ada Lovelace'))
+    await waitFor(() => expect(sendReviewerSigninLink).toHaveBeenCalledWith('r1'))
+
+    // workload says 1 of 3 done, so a per-reviewer Remind is offered
+    fireEvent.click(screen.getByLabelText('Remind Ada Lovelace'))
+    await waitFor(() => expect(remindReviewers).toHaveBeenCalledWith('p1', ['r1']))
+
+    fireEvent.click(screen.getByRole('button', { name: 'Remind all lagging' }))
+    await waitFor(() => expect(remindReviewers).toHaveBeenCalledWith('p1'))
+  })
+
+  it('persists the review window dates', async () => {
+    await openCard()
+    const closes = screen.getByLabelText('Reviews close') as HTMLInputElement
+    closes.value = '2026-09-01T17:00'
+    // preact/compat maps onBlur to a focusout listener; fireEvent.blur
+    // dispatches the non-bubbling native blur, which never reaches it.
+    closes.dispatchEvent(new Event('focusout', { bubbles: true }))
+
+    await waitFor(() => expect(updatePlan).toHaveBeenCalled())
+    const [planId, patch] = updatePlan.mock.calls[0] as [string, { closes_at: string }]
+    expect(planId).toBe('p1')
+    expect(new Date(patch.closes_at).getTime()).toBe(new Date('2026-09-01T17:00').getTime())
+  })
+
+  // The reported "+ Add criterion occasionally created duplicates": Enter and
+  // the button both call the same handler, and clearing the field only takes
+  // effect on the next render, so two events in one tick both POSTed.
+  it('never double-submits a criterion', async () => {
+    await openCard()
+    const { fireEvent } = await import('@testing-library/preact')
+    const field = screen.getByLabelText('New criterion name')
+    fireEvent.input(field, { target: { value: 'Originality' } })
+
+    fireEvent.keyDown(field, { key: 'Enter' })
+    fireEvent.click(screen.getByRole('button', { name: /Add criterion|Adding/ }))
+    fireEvent.keyDown(field, { key: 'Enter' })
+
+    await waitFor(() => expect(addCriterion).toHaveBeenCalled())
+    expect(addCriterion).toHaveBeenCalledTimes(1)
+    expect(addCriterion).toHaveBeenCalledWith('p1', { name: 'Originality', weight: 1 })
   })
 })

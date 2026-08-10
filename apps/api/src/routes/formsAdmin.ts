@@ -430,21 +430,37 @@ formsAdminRoutes.put('/:id', async (c) => {
   const rawBody = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
   const expected =
     typeof rawBody.expected_updated_at === 'string' ? rawBody.expected_updated_at : null;
-  if (expected) {
-    const current = await c.env.DB.prepare(
-      'SELECT updated_at FROM submission_forms WHERE id = ? AND event_id = ?',
-    )
-      .bind(id, session.eventId)
-      .first<{ updated_at: string }>();
-    if (!current) return c.json({ error: 'not_found' }, 404);
-    if (current.updated_at !== expected) {
-      return c.json({ error: 'conflict', current_updated_at: current.updated_at }, 409);
-    }
+  // Read the current status/close_at unconditionally (not just when guarding
+  // on expected_updated_at) — the reopen-transition detection below needs it.
+  const before = await c.env.DB.prepare(
+    'SELECT updated_at, status, close_at FROM submission_forms WHERE id = ? AND event_id = ?',
+  )
+    .bind(id, session.eventId)
+    .first<{ updated_at: string; status: string; close_at: string | null }>();
+  if (!before) return c.json({ error: 'not_found' }, 404);
+  if (expected && before.updated_at !== expected) {
+    return c.json({ error: 'conflict', current_updated_at: before.updated_at }, 409);
   }
   const configIssues = await formConfigIssues(c.env.DB, session.eventId, rawBody);
   if (configIssues.length > 0) return c.json({ error: 'invalid_config', issues: configIssues }, 400);
 
   const fields = pickFormFields(rawBody);
+
+  // ABS defect: "Reopen" flipped status back to 'open' but the public gate
+  // (submit.tsx isFormClosed, shared with portal.ts) also treats a past
+  // close_at as closed, so a stale close date silently kept the form closed
+  // underneath the new status. Reopening (closed -> open, detected against
+  // the row read above so it fires from the forms list's one-field PUT and
+  // from a builder Save alike) clears a close_at that is still in the past,
+  // unless this same request is also setting a fresh one. A close_at the
+  // caller is explicitly setting to a future date is left alone.
+  if (before.status === 'closed' && fields.status === 'open') {
+    const nextCloseAt = 'close_at' in fields ? (fields.close_at as string | null) : before.close_at;
+    if (nextCloseAt !== null && new Date(nextCloseAt).getTime() < Date.now()) {
+      fields.close_at = null;
+    }
+  }
+
   const cols = Object.keys(fields);
   if (cols.length > 0) {
     // The updated_at guard re-checks inside the write itself, so two racing

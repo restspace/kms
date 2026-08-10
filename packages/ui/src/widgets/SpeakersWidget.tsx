@@ -37,9 +37,18 @@ export function SpeakerAvatar({
       />
     )
   }
+  // Fallback tile: always show initials, never a blank colour circle (EMB-12
+  // fixed a card where neither a photo nor initials rendered). Font size
+  // scales with the avatar's own size instead of a fixed rem value, so a
+  // large 120px gallery tile and a small 72px card both stay legible, and
+  // `initialsFor` always returns at least '?' so the span is never empty.
   return (
-    <div className="speaker-avatar speaker-avatar-fallback" style={style} aria-hidden="true">
-      {initialsFor(speaker.name)}
+    <div
+      className="speaker-avatar speaker-avatar-fallback"
+      style={{ ...style, fontSize: `${Math.max(12, Math.round(size * 0.38))}px` }}
+      aria-hidden="true"
+    >
+      <span>{initialsFor(speaker.name) || '?'}</span>
     </div>
   )
 }

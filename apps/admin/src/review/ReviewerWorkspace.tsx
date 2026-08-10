@@ -10,6 +10,16 @@ import '../workspace/review.css'
 
 type Assignment = Record<string, unknown>
 
+/** A plan's review window (ABS-01) is closed when the queue says so. */
+const isWindowClosed = (a: Assignment): boolean => a.plan_open === 0
+
+/** Human date for the window notice; falls back to nothing useful gracefully. */
+function formatWindowDate(raw: unknown): string {
+  if (typeof raw !== 'string') return 'at the configured time'
+  const d = new Date(raw)
+  return Number.isNaN(d.getTime()) ? 'at the configured time' : d.toLocaleString()
+}
+
 export function ReviewerWorkspace() {
   const [queue, setQueue] = useState<ReviewQueue | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -59,6 +69,7 @@ export function ReviewerWorkspace() {
             <br />
             {String(a.title)}{' '}
             <span className={`status-chip status-${String(a.status)}`}>{String(a.status).replace('_', ' ')}</span>
+            {isWindowClosed(a) && <span className="status-chip status-withdrawn">closed</span>}
           </button>
         ))}
       </aside>
@@ -122,6 +133,7 @@ function ScoringForm({
   const [comment, setComment] = useState(String(assignment.my_comment ?? ''))
   const [conflict, setConflict] = useState(assignment.my_conflict === 1)
   const [saving, setSaving] = useState(false)
+  const windowClosed = isWindowClosed(assignment)
   const [formError, setFormError] = useState<string | null>(null)
 
   const complete = conflict || criteria.every((c) => scores[c.id] !== undefined)
@@ -164,6 +176,17 @@ function ScoringForm({
         <div className="rp-desc">{String(assignment.description).replace(/<[^>]*>/g, '')}</div>
       ) : null}
 
+      {/* ABS-01: the plan's optional review window. The server refuses the
+          save regardless (POST /review/assignments → 403 review_closed); this
+          is so the reviewer is told before they spend time scoring. */}
+      {windowClosed && (
+        <div className="builder-error" style={{ marginTop: 10 }} role="status">
+          {assignment.plan_window_reason === 'not_yet_open'
+            ? `Reviewing for this round opens ${formatWindowDate(assignment.plan_opens_at)}.`
+            : `Reviewing for this round closed ${formatWindowDate(assignment.plan_closes_at)}. Scores can no longer be saved.`}
+        </div>
+      )}
+
       {criteria.map((c) => (
         <div className="score-row" key={c.id}>
           <div className="score-label">
@@ -196,10 +219,10 @@ function ScoringForm({
 
       {formError && <div className="builder-error" style={{ marginTop: 10 }}>{formError}</div>}
       <div className="review-actions">
-        <button className="fbtn primary" disabled={saving || !complete} onClick={() => void save(true)}>
+        <button className="fbtn primary" disabled={saving || !complete || windowClosed} onClick={() => void save(true)}>
           {saving ? 'Saving…' : 'Save & Next'}
         </button>
-        <button className="fbtn" disabled={saving || !complete} onClick={() => void save(false)}>
+        <button className="fbtn" disabled={saving || !complete || windowClosed} onClick={() => void save(false)}>
           Save
         </button>
         {!complete && !conflict && <span className="saved-note">Score every criterion to save.</span>}

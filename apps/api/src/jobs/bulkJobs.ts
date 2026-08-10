@@ -119,10 +119,16 @@ async function expandSendDecisions(env: Env, job: BulkJobRow, limit: number): Pr
     const isAccept = s.status === 'accept_queue';
     // Conditional flip: guards against a concurrent tick (or a resumed job
     // after a mid-tick failure) reprocessing a submission this same sweep
-    // already moved out of the queue state.
+    // already moved out of the queue state. The decision itself (accepted/
+    // declined) is a distinct fact from whether anyone was told about it —
+    // notified_at is deliberately NOT set here (CFP-14 fix): stamping it
+    // unconditionally on flip is what let the UI show a "Notified <date>"
+    // checkmark for admin-created submissions with no submitter contact,
+    // even though nothing was ever queued or sent. It is set below, only
+    // after a send actually succeeds.
     const flipped = await db
-      .prepare(`UPDATE submissions SET status = ?, notified_at = ?, updated_at = ? WHERE id = ? AND status IN ('accept_queue', 'decline_queue')`)
-      .bind(isAccept ? 'accepted' : 'declined', ts, ts, s.id)
+      .prepare(`UPDATE submissions SET status = ?, updated_at = ? WHERE id = ? AND status IN ('accept_queue', 'decline_queue')`)
+      .bind(isAccept ? 'accepted' : 'declined', ts, s.id)
       .run();
     if (flipped.meta.changes === 0) continue;
 
@@ -141,7 +147,7 @@ async function expandSendDecisions(env: Env, job: BulkJobRow, limit: number): Pr
     }
 
     if (s.submitter_email) {
-      await queueTemplated(db, {
+      const { outcome } = await queueTemplated(db, {
         templateKey: isAccept ? 'decision_accepted' : 'decision_declined',
         eventId: job.event_id,
         contactId: s.submitter_contact_id,
@@ -155,6 +161,15 @@ async function expandSendDecisions(env: Env, job: BulkJobRow, limit: number): Pr
           ...(reviewerFeedback ? { reviewer_feedback: reviewerFeedback } : {}),
         },
       });
+      // 'queued' is a fresh send; 'duplicate' means an earlier tick (or an
+      // earlier click of the same bulk action) already queued/sent this
+      // exact (template, contact, entity) — both count as "notified".
+      // 'template_disabled' means the event has switched this template off:
+      // nothing was sent, so notified_at must stay unset, same as the
+      // no-submitter case.
+      if (outcome === 'queued' || outcome === 'duplicate') {
+        await db.prepare(`UPDATE submissions SET notified_at = COALESCE(notified_at, ?) WHERE id = ?`).bind(ts, s.id).run();
+      }
     }
     if (isAccept) {
       await autoAssignAcceptTasksCore(db, job.event_id, s, event.name, event.slug, env.APP_URL, send, job.id);
@@ -209,6 +224,30 @@ async function expandRemindTasks(env: Env, job: BulkJobRow, limit: number): Prom
   const db = env.DB;
   const params = JSON.parse(job.params_json) as RemindTasksParams;
   const now = new Date().toISOString();
+
+  // The candidate list is *frozen* at creation time (dashboard.ts's
+  // POST /remind always resolves and writes a concrete `assignment_ids`
+  // array, even for "remind all" — never omits it), and `job.total` is that
+  // array's length. Bug fixed here (CNT-08): this used to re-derive the
+  // "currently overdue" set fresh on every tick and slice *that* by
+  // `job.enqueued`. If even one targeted assignment stopped matching between
+  // job creation and this tick — completed by the speaker, its task's
+  // due_at edited, whatever — the live-requeried set shrank below `total`
+  // and `enqueued` could never reach it: the job sat in 'running' with
+  // enqueued stuck at 0 forever (reproduced in
+  // test/bulkjobs-expander-remind.test.ts). Paginating the frozen id list
+  // instead — the same pattern expandSendConfirmations/expandCompose use —
+  // guarantees `enqueued` reaches `total` in a bounded number of ticks
+  // regardless of what happens to the underlying rows meanwhile: a slice
+  // that no longer qualifies (already complete, no longer overdue, or the
+  // id no longer exists) is simply skipped, not re-attempted.
+  const ids = params.assignment_ids ?? [];
+  const total = job.total ?? ids.length;
+  if (ids.length === 0) {
+    await db.prepare(`UPDATE bulk_jobs SET status = 'done', updated_at = ? WHERE id = ?`).bind(nowIso(), job.id).run();
+    return;
+  }
+
   const event = await db
     .prepare('SELECT id, name, slug FROM events WHERE id = ?')
     .bind(job.event_id)
@@ -218,48 +257,38 @@ async function expandRemindTasks(env: Env, job: BulkJobRow, limit: number): Prom
     return;
   }
 
-  // Reproduces dashboard.ts's remind logic (overdue, incomplete, due-dated
-  // assignments), scoped to assignment_ids when the caller narrowed the
-  // selection. NOTE: this re-queries "currently overdue" fresh every tick, so
-  // the candidate set can grow between ticks if this job runs long — the
-  // `enqueued` offset can then skip or (harmlessly, thanks to message_log
-  // dedupe) re-touch a boundary row. Acceptable for a coarse admin action;
-  // flagged as a TODO rather than adding a snapshot table for this lane.
-  let sql = `SELECT ta.id AS assignment_id, ta.contact_id, c.email, c.first_name, t.title AS task_title
-     FROM task_assignments ta
-     JOIN tasks t ON t.id = ta.task_id
-     JOIN contacts c ON c.id = ta.contact_id
-     WHERE t.event_id = ? AND ta.status != 'complete' AND t.due_at IS NOT NULL AND t.due_at < ?`;
-  const bindArgs: unknown[] = [job.event_id, now];
-  if (params.assignment_ids && params.assignment_ids.length > 0) {
-    sql += ` AND ta.id IN (${params.assignment_ids.map(() => '?').join(', ')})`;
-    bindArgs.push(...params.assignment_ids);
-  }
-  sql += ' ORDER BY ta.id';
+  const slice = ids.slice(job.enqueued, job.enqueued + limit);
+  if (slice.length > 0) {
+    const placeholders = slice.map(() => '?').join(', ');
+    const { results: rows } = await db
+      .prepare(
+        `SELECT ta.id AS assignment_id, ta.contact_id, c.email, c.first_name, t.title AS task_title
+         FROM task_assignments ta
+         JOIN tasks t ON t.id = ta.task_id
+         JOIN contacts c ON c.id = ta.contact_id
+         WHERE t.event_id = ? AND ta.status != 'complete' AND t.due_at IS NOT NULL AND t.due_at < ?
+           AND ta.id IN (${placeholders})`,
+      )
+      .bind(job.event_id, now, ...slice)
+      .all<{ assignment_id: string; contact_id: string; email: string; first_name: string | null; task_title: string }>();
 
-  const { results: overdue } = await db
-    .prepare(sql)
-    .bind(...bindArgs)
-    .all<{ assignment_id: string; contact_id: string; email: string; first_name: string | null; task_title: string }>();
-
-  const total = job.total ?? overdue.length;
-  const slice = overdue.slice(job.enqueued, job.enqueued + limit);
-  for (const row of slice) {
-    await queueTemplated(db, {
-      templateKey: 'task_reminder',
-      eventId: job.event_id,
-      contactId: row.contact_id,
-      toEmail: row.email,
-      entityId: `${job.id}:${row.assignment_id}`,
-      version: `manual-${now.slice(0, 10)}`,
-      context: {
-        event: { name: event.name },
-        speaker: { first_name: row.first_name ?? 'there' },
-        task: { title: row.task_title, due_line: ' — now overdue', url: `${env.APP_URL}/portal/${event.slug}/tasks` },
-      },
-    });
+    for (const row of rows) {
+      await queueTemplated(db, {
+        templateKey: 'task_reminder',
+        eventId: job.event_id,
+        contactId: row.contact_id,
+        toEmail: row.email,
+        entityId: `${job.id}:${row.assignment_id}`,
+        version: `manual-${now.slice(0, 10)}`,
+        context: {
+          event: { name: event.name },
+          speaker: { first_name: row.first_name ?? 'there' },
+          task: { title: row.task_title, due_line: ' — now overdue', url: `${env.APP_URL}/portal/${event.slug}/tasks` },
+        },
+      });
+    }
   }
-  const enqueued = Math.min(overdue.length, job.enqueued + slice.length);
+  const enqueued = Math.min(ids.length, job.enqueued + slice.length);
   await db
     .prepare(`UPDATE bulk_jobs SET enqueued = ?, status = ?, updated_at = ? WHERE id = ?`)
     .bind(enqueued, enqueued >= total ? 'done' : 'running', nowIso(), job.id)

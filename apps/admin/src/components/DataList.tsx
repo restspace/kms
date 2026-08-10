@@ -366,6 +366,23 @@ export interface DataListProps<T = any, TFilters extends Record<string, any> = R
   columns: ColumnDefinition<T>[];
   getItemId: (item: T) => string;
   onItemClick?: (item: T, index: number) => void;
+  /**
+   * Primary activation for a row: a plain left click anywhere on the row that
+   * is not the checkbox cell or an inline editor, plus Enter/Space on the
+   * focused row, plus a click on the row's title link. Hosts wire this to
+   * "open this record" (the detail tab). Shift+click (the global-filter
+   * gesture) and the second click of a double-click never activate.
+   *
+   * When set, the title column renders as a link-styled button so the
+   * affordance is visible (and reachable by automation/assistive tech) rather
+   * than being a bare row that happens to respond to clicks.
+   */
+  onItemActivate?: (item: T, index: number, event: React.MouseEvent) => void;
+  /**
+   * Field name of the column that carries the row's title link. Defaults to
+   * the first non-editable column.
+   */
+  titleField?: string;
   onItemDoubleClick?: (item: T, index: number, event: React.MouseEvent) => void;
   onItemContextMenu?: (item: T, index: number, event: React.MouseEvent) => void;
   /**
@@ -610,6 +627,9 @@ interface DataListRowData<T> {
   handleRowDragLeave: (item: T, event: React.DragEvent<HTMLDivElement>) => void;
   handleRowDrop: (item: T, event: React.DragEvent<HTMLDivElement>) => void;
   handleItemClick: (item: T, index: number, event: React.MouseEvent) => void;
+  /** Present only when the host wired `onItemActivate` — drives the title link. */
+  canActivate: boolean;
+  titleField: string | null;
   handleItemNativeDoubleClick: (item: T, index: number, event: React.MouseEvent) => void;
   handleItemContextMenu: (item: T, index: number, event: React.MouseEvent) => void;
   getItemAriaLabel: (item: T, index: number) => string;
@@ -626,6 +646,8 @@ export const DataList = <T extends Record<string, any>, TFilters extends Record<
   columns,
   getItemId,
   onItemClick,
+  onItemActivate,
+  titleField,
   onItemDoubleClick,
   onItemContextMenu,
   onShiftClick,
@@ -788,13 +810,45 @@ export const DataList = <T extends Record<string, any>, TFilters extends Record<
     return () => window.removeEventListener('resize', handleResize);
   }, [mobileBreakpoint]);
 
+  /**
+   * A new `dataSource` identity means "this list may now be looking at
+   * different data" (the event-scoping closure bakes the scope in, so the
+   * filters alone can't tell us), and DataList answers it by wiping and
+   * refetching. Hosts, however, hand out a fresh closure whenever the config
+   * object behind them is rebuilt, and an event switch rebuilds it several
+   * times in a row (optimistic `me`, the authoritative re-read, the custom
+   * field refetch, the URL write). Each of those used to be its own
+   * wipe+refetch, and because they land faster than the source can answer,
+   * every response came back against a superseded signature — six of those
+   * spend the load budget and the grid shows "The list kept being reloaded
+   * before it could finish." with rows half-painted behind it.
+   *
+   * So the *burst* is collapsed into one reload: the identity is adopted
+   * immediately (the next fetch already uses it) but the version bump that
+   * actually resets the list is deferred to a macrotask and rescheduled by any
+   * further churn arriving before it fires.
+   */
+  const dataSourceBumpTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
-    if (dataSourceRef.current !== dataSource) {
-      pendingScrollRestoreRef.current = scrollOffsetRef.current;
-      dataSourceRef.current = dataSource;
-      setDataSourceVersion((prev) => prev + 1);
+    if (dataSourceRef.current === dataSource) {
+      return;
     }
+    pendingScrollRestoreRef.current = scrollOffsetRef.current;
+    dataSourceRef.current = dataSource;
+    if (dataSourceBumpTimerRef.current !== null) {
+      clearTimeout(dataSourceBumpTimerRef.current);
+    }
+    dataSourceBumpTimerRef.current = setTimeout(() => {
+      dataSourceBumpTimerRef.current = null;
+      setDataSourceVersion((prev) => prev + 1);
+    }, 0);
   }, [dataSource]);
+
+  useEffect(() => () => {
+    if (dataSourceBumpTimerRef.current !== null) {
+      clearTimeout(dataSourceBumpTimerRef.current);
+    }
+  }, []);
 
   useEffect(() => {
     if (lastInitialFilterSignatureRef.current === initialFilterSignature) {
@@ -1017,6 +1071,8 @@ export const DataList = <T extends Record<string, any>, TFilters extends Record<
     at: 0,
     message: null,
   });
+  /** Last total handed to `onTotalChange` — see the guard at its call site. */
+  const lastReportedTotalRef = useRef<number | null>(null);
 
   /**
    * Load more items from the data source
@@ -1069,7 +1125,14 @@ export const DataList = <T extends Record<string, any>, TFilters extends Record<
 
         if (result.total !== undefined && result.total !== null) {
           setTotalCount(result.total);
-          if (onTotalChange) {
+          // Only announce a total that actually moved. Hosts route this into
+          // their own state (the tab-count badge cache), so re-announcing an
+          // unchanged total on every reload closes a feedback loop: host
+          // re-render -> fresh `dataSource` closure -> wipe + refetch -> same
+          // total announced again, forever. That loop is what pinned the
+          // workspace grids on a permanent reload storm.
+          if (onTotalChange && lastReportedTotalRef.current !== result.total) {
+            lastReportedTotalRef.current = result.total;
             onTotalChange(result.total);
           }
         }
@@ -1128,8 +1191,10 @@ export const DataList = <T extends Record<string, any>, TFilters extends Record<
   /** Re-open loading after a fetch error; the effect below kicks off the fetch. */
   const handleRetryLoad = useCallback(() => {
     setLoadError(null);
-    // An explicit Retry is the user asking for a fresh budget.
+    // An explicit Retry is the user asking for a fresh budget — and for the
+    // total to be re-announced once the page finally lands.
     attemptsRef.current = { failures: 0, rearms: 0, at: 0, message: null };
+    lastReportedTotalRef.current = null;
     needsInitialLoadRef.current = true;
     setEndReached(false);
   }, []);
@@ -1368,7 +1433,16 @@ export const DataList = <T extends Record<string, any>, TFilters extends Record<
     if (onItemClick) {
       onItemClick(item, index);
     }
-  }, [fireItemDoubleClick, getItemId, onItemClick, onShiftClick, selectItem]);
+    // Primary activation (open the record). Deliberately on the *first* click:
+    // detail used to be reachable only through a right-click context menu or a
+    // double-click, neither of which is discoverable — a browser agent (and a
+    // first-time user) clicked rows for dozens of turns without ever opening
+    // one. Shift+click and the second click of a double-click return above, so
+    // the global-filter and edit gestures are untouched.
+    if (onItemActivate) {
+      onItemActivate(item, index, event);
+    }
+  }, [fireItemDoubleClick, getItemId, onItemActivate, onItemClick, onShiftClick, selectItem]);
 
   /**
    * Handle item context menu
@@ -1503,6 +1577,19 @@ export const DataList = <T extends Record<string, any>, TFilters extends Record<
     event.preventDefault();
     void rowDrop.onDrop(item, payload);
   }, [parseRowDropPayload, rowDrop]);
+
+  /**
+   * Column that carries the row's clickable title. Defaults to the first
+   * non-editable column so no caller has to opt in for the affordance to show
+   * up (an editable first column already owns its own click).
+   */
+  const resolvedTitleField = useMemo(() => {
+    if (titleField) {
+      return titleField;
+    }
+    const column = columns.find((c) => !c.editable) ?? columns[0];
+    return column ? String(column.field) : null;
+  }, [columns, titleField]);
 
   /**
    * Calculate grid template columns from column widths
@@ -1791,6 +1878,8 @@ export const DataList = <T extends Record<string, any>, TFilters extends Record<
     handleRowDragLeave,
     handleRowDrop,
     handleItemClick,
+    canActivate: Boolean(onItemActivate),
+    titleField: resolvedTitleField,
     handleItemNativeDoubleClick,
     handleItemContextMenu,
     getItemAriaLabel: resolveItemAriaLabel,
@@ -1819,6 +1908,8 @@ export const DataList = <T extends Record<string, any>, TFilters extends Record<
     handleRowDragLeave,
     handleRowDrop,
     handleItemClick,
+    onItemActivate,
+    resolvedTitleField,
     handleItemNativeDoubleClick,
     handleItemContextMenu,
     resolveItemAriaLabel,
@@ -1896,6 +1987,32 @@ export const DataList = <T extends Record<string, any>, TFilters extends Record<
       </span>
     ) : checklistInput;
 
+    /**
+     * Wrap the title column's content in a link-styled button when the host
+     * wired activation, so "open this record" is a visible, focusable,
+     * automation-discoverable target rather than an invisible row gesture.
+     * The click is stopped from bubbling and replayed through the row handler
+     * so selection + activation stay on exactly one code path.
+     */
+    const withTitleLink = (fieldName: string, content: React.ReactNode): React.ReactNode => {
+      if (!data.canActivate || data.titleField !== fieldName) {
+        return content;
+      }
+      return (
+        <button
+          type="button"
+          className="data-list-cell-link"
+          title="Open details"
+          onClick={(event) => {
+            event.stopPropagation();
+            data.handleItemClick(item, index, event);
+          }}
+        >
+          {content}
+        </button>
+      );
+    };
+
     if (data.isMobile) {
       const row1Cols = columns.filter((c: ColumnDefinition<T>) => !c.mobileHidden && c.mobileRow !== 2);
       const row2Cols = data.hasMobileRow2 ? columns.filter((c: ColumnDefinition<T>) => !c.mobileHidden && c.mobileRow === 2) : [];
@@ -1922,13 +2039,15 @@ export const DataList = <T extends Record<string, any>, TFilters extends Record<
         return (
           <div key={colIndex} className="data-list-cell-mobile" style={column.mobileCellStyle}>
             {label && <span className="data-list-cell-mobile-label">{label}</span>}
-            <div className="data-list-cell-mobile-value">{cellValue}</div>
+            <div className="data-list-cell-mobile-value">
+              {isEditable ? cellValue : withTitleLink(fieldName, cellValue)}
+            </div>
           </div>
         );
       };
       return (
         <div
-          className={`data-list-row-mobile ${isSelected ? 'data-list-row-selected' : ''} ${isDropTarget ? 'data-list-row-drop-target' : ''} ${isEditDisabled ? 'data-list-row-edit-disabled' : ''}`}
+          className={`data-list-row-mobile ${isSelected ? 'data-list-row-selected' : ''} ${data.canActivate ? 'data-list-row-activatable' : ''} ${isDropTarget ? 'data-list-row-drop-target' : ''} ${isEditDisabled ? 'data-list-row-edit-disabled' : ''}`}
           style={rowStyle}
           onClick={(event) => data.handleItemClick(item, index, event)}
           onDoubleClick={(event) => data.handleItemNativeDoubleClick(item, index, event)}
@@ -1964,7 +2083,7 @@ export const DataList = <T extends Record<string, any>, TFilters extends Record<
 
     return (
       <div
-        className={`data-list-row ${isSelected ? 'data-list-row-selected' : ''} ${isDraggable ? 'data-list-row-draggable' : ''} ${isDropTarget ? 'data-list-row-drop-target' : ''} ${isEditDisabled ? 'data-list-row-edit-disabled' : ''}`}
+        className={`data-list-row ${isSelected ? 'data-list-row-selected' : ''} ${data.canActivate ? 'data-list-row-activatable' : ''} ${isDraggable ? 'data-list-row-draggable' : ''} ${isDropTarget ? 'data-list-row-drop-target' : ''} ${isEditDisabled ? 'data-list-row-edit-disabled' : ''}`}
         style={{ ...rowStyle, gridTemplateColumns: data.gridTemplateColumns }}
         onClick={(event) => data.handleItemClick(item, index, event)}
         onDoubleClick={(event) => data.handleItemNativeDoubleClick(item, index, event)}
@@ -2063,7 +2182,7 @@ export const DataList = <T extends Record<string, any>, TFilters extends Record<
           const rendered = column.render ? column.render(value, item) : value;
           return (
             <div key={colIndex} className="data-list-cell" title={String(value || '')} style={column.cellStyle}>
-              {rendered}
+              {withTitleLink(fieldName, rendered)}
             </div>
           );
         })}

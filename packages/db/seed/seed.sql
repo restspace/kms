@@ -223,6 +223,19 @@ INSERT INTO event_users (event_id, contact_id, role, invited_at, accepted_at) VA
   ('evt00000-0000-4000-8000-000000000001', 'con00000-0000-4000-8000-000000000001', 'owner', '2026-08-08T12:00:00Z', '2026-08-08T12:00:00Z');
 
 -- ---------------------------------------------------------------------------
+-- Contact custom fields (SPK-15): 0009_contact_custom_fields.sql added the
+-- Settings > Speaker fields mechanism, but this demo shipped with zero field
+-- definitions, so the feature was invisible without an organiser manually
+-- adding one first. Two sensible logistics fields, seeded so they render out
+-- of the box on the Speakers create/edit form and detail panel. Reseeded
+-- nightly along with everything else above (see this file's header comment).
+-- ---------------------------------------------------------------------------
+
+INSERT INTO contact_field_definitions (id, event_id, key, label, type, options, position) VALUES
+  ('cfd00000-0000-4000-8000-000000000001', 'evt00000-0000-4000-8000-000000000001', 'dietary_requirements', 'Dietary requirements', 'text', NULL, 0),
+  ('cfd00000-0000-4000-8000-000000000002', 'evt00000-0000-4000-8000-000000000001', 'tshirt_size', 'T-shirt size', 'select', '["XS","S","M","L","XL","XXL"]', 1);
+
+-- ---------------------------------------------------------------------------
 -- Submissions: 10 across statuses — 2 accepted, 1 accept_queue, 4 pending,
 -- 1 declined, 1 withdrawn, 1 draft. Ada submits 3 (SESS-1, SESS-4, SESS-10).
 -- ---------------------------------------------------------------------------

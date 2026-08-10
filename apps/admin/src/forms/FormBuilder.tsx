@@ -65,6 +65,7 @@ function editablePatch(form: FormRow): Record<string, unknown> {
     welcome_message_visible: form.welcome_message_visible === 1,
     collection_type: form.collection_type,
     collect_participants: form.collect_participants === 1,
+    status: form.status,
     close_at: form.close_at,
     submission_limit: form.submission_limit,
     allow_multiple_drafts: form.allow_multiple_drafts === 1,
@@ -109,11 +110,17 @@ export function FormBuilder({
   const dirtyRef = useRef(false)
   const editVersionRef = useRef(0)
   const saveInFlightRef = useRef(false)
+  // Snapshot of the status as fetched, so the Settings step can tell "the
+  // admin just flipped Closed -> Open in this session" (which the save will
+  // treat as a reopen and clear a stale close date) apart from "status was
+  // already open" (which it will not touch).
+  const loadedStatusRef = useRef<FormRow['status'] | null>(null)
 
   useEffect(() => {
     void Promise.all([getFormDetail(formId), getBuilderMeta()])
       .then(([detail, builderMeta]) => {
         setForm(detail.form)
+        loadedStatusRef.current = detail.form.status
         setQuestions(detail.questions)
         setMeta(builderMeta)
       })
@@ -149,6 +156,7 @@ export function FormBuilder({
         return false
       }
       setForm({ ...result.form })
+      loadedStatusRef.current = result.form.status
       dirtyRef.current = false
       setSavedAt(new Date().toLocaleTimeString())
       return true
@@ -250,7 +258,9 @@ export function FormBuilder({
               />
             </>
           )}
-          {step === 'settings' && <SettingsStep form={form} patch={patch} timezone={timezone} />}
+          {step === 'settings' && (
+            <SettingsStep form={form} patch={patch} timezone={timezone} wasClosed={loadedStatusRef.current === 'closed'} />
+          )}
           {step === 'notifications' && <NotificationsStep form={form} patch={patch} />}
 
           <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 24, maxWidth: 680 }}>
@@ -387,10 +397,66 @@ function QuestionList({
   const [editing, setEditing] = useState<FormQuestion | null>(null)
   const [logicFor, setLogicFor] = useState<FormQuestion | null>(null)
 
+  // Race guard (CFP-01): each question-field edit (e.g. the Required
+  // checkbox) returns a FULL question-list snapshot from the server. Two
+  // edits fired close together — check Required on field A, then quickly on
+  // field B — race independently over the network, so their snapshot
+  // responses can resolve out of order relative to when their writes
+  // actually committed on the server. Applying whichever snapshot lands last
+  // as-is means an older snapshot (taken before B's write landed) can
+  // overwrite B's now-checked box back to unchecked, even though B's own
+  // save already succeeded — that was the reported "Required reverts right
+  // after a completed save".
+  //
+  // `pendingRef` tracks, per question id, the locally-applied patch and how
+  // many of its own requests are still outstanding. The checkbox (or any
+  // other field edit routed through `run`) is applied to local state
+  // immediately (optimistic, so the UI never visibly reverts), and any
+  // snapshot processed while that question still has an outstanding request
+  // gets the pending patch re-applied on top — last-write-wins on the field
+  // the user actually touched, not on whichever response happened to arrive
+  // last.
+  const pendingRef = useRef<Map<string, { count: number; patch: Record<string, unknown> }>>(new Map())
+
+  const mergeWithPending = useCallback(
+    (serverQuestions: FormQuestion[]): FormQuestion[] =>
+      pendingRef.current.size === 0
+        ? serverQuestions
+        : serverQuestions.map((q) => {
+            const pending = pendingRef.current.get(q.id)
+            return pending ? ({ ...q, ...pending.patch } as FormQuestion) : q
+          }),
+    [],
+  )
+
   const run = useCallback(
-    (p: Promise<{ questions: FormQuestion[] }>) =>
-      p.then((r) => setQuestions(r.questions)).catch((e: unknown) => setError(e instanceof Error ? e.message : 'Failed')),
-    [setQuestions, setError],
+    (p: Promise<{ questions: FormQuestion[] }>, optimistic?: { qid: string; patch: Record<string, unknown> }) => {
+      const release = () => {
+        if (!optimistic) return
+        const entry = pendingRef.current.get(optimistic.qid)
+        if (!entry) return
+        if (entry.count <= 1) pendingRef.current.delete(optimistic.qid)
+        else pendingRef.current.set(optimistic.qid, { ...entry, count: entry.count - 1 })
+      }
+      if (optimistic) {
+        const existing = pendingRef.current.get(optimistic.qid)
+        pendingRef.current.set(optimistic.qid, {
+          count: (existing?.count ?? 0) + 1,
+          patch: { ...existing?.patch, ...optimistic.patch },
+        })
+        setQuestions(questions.map((q) => (q.id === optimistic.qid ? ({ ...q, ...optimistic.patch } as FormQuestion) : q)))
+      }
+      return p
+        .then((r) => {
+          release()
+          setQuestions(mergeWithPending(r.questions))
+        })
+        .catch((e: unknown) => {
+          release()
+          setError(e instanceof Error ? e.message : 'Failed')
+        })
+    },
+    [questions, setQuestions, setError, mergeWithPending],
   )
 
   const handleDrop = useCallback(
@@ -430,7 +496,10 @@ function QuestionList({
                 type="checkbox"
                 checked={q.required}
                 disabled={q.locked}
-                onChange={(e) => void run(updateQuestion(formId, q.id, { required: e.target.checked }))}
+                onChange={(e) => {
+                  const required = e.target.checked
+                  void run(updateQuestion(formId, q.id, { required }), { qid: q.id, patch: { required } })
+                }}
               />
               Required
             </label>
@@ -467,7 +536,10 @@ function QuestionList({
       {editing && (
         <QuestionEditModal
           question={editing}
-          onSave={(patchBody) => { setEditing(null); void run(updateQuestion(formId, editing.id, patchBody)) }}
+          onSave={(patchBody) => {
+            setEditing(null)
+            void run(updateQuestion(formId, editing.id, patchBody), { qid: editing.id, patch: patchBody })
+          }}
           onClose={() => setEditing(null)}
         />
       )}
@@ -475,7 +547,10 @@ function QuestionList({
         <LogicModal
           question={logicFor}
           earlier={rows.filter((r) => r.position < logicFor.position)}
-          onSave={(visibility) => { setLogicFor(null); void run(updateQuestion(formId, logicFor.id, { visibility })) }}
+          onSave={(visibility) => {
+            setLogicFor(null)
+            void run(updateQuestion(formId, logicFor.id, { visibility }), { qid: logicFor.id, patch: { visibility } })
+          }}
           onClose={() => setLogicFor(null)}
         />
       )}
@@ -1018,13 +1093,33 @@ function SettingsStep({
   form,
   patch,
   timezone,
+  wasClosed,
 }: {
   form: FormRow
   patch: (c: Partial<FormRow>) => void
   timezone: string
+  /** Status as last loaded/saved from the server — true while this session's
+   * pending edit is a Closed -> Open transition the save will treat as a
+   * reopen (see formsAdmin.ts PUT /:id). */
+  wasClosed: boolean
 }) {
+  const closeAtPast = form.close_at !== null && new Date(form.close_at).getTime() < Date.now()
+  const reopening = wasClosed && form.status === 'open'
   return (
     <section>
+      <div className="bfield">
+        <label>Status</label>
+        <select value={form.status} onChange={(e) => patch({ status: e.target.value as FormRow['status'] })}>
+          <option value="open">Open</option>
+          <option value="closed">Closed</option>
+        </select>
+        {reopening && closeAtPast && (
+          <p className="bhelp">
+            Reopening clears the past close date below on save — set a new one here if you want this form to
+            close again automatically.
+          </p>
+        )}
+      </div>
       <div className="bfield">
         <label>Close Date</label>
         <input

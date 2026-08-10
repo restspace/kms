@@ -140,6 +140,46 @@
   background: var(--surface-hover);
 }
 
+/*
+ * Rows the host made activatable (single click opens the record). The pointer
+ * cue plus the title link below are the only visible signal that a row is
+ * openable — before them, detail lived behind a right-click menu.
+ */
+.data-list-row-activatable,
+.data-list-row-mobile.data-list-row-activatable {
+  cursor: pointer;
+}
+
+/* Link-styled title cell: a real <button> so it is focusable and announced. */
+.data-list-cell-link {
+  display: inline;
+  max-width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: var(--accent, #2563eb);
+  text-align: left;
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, var(--accent, #2563eb) 40%, transparent);
+  text-underline-offset: 2px;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.data-list-cell-link:hover,
+.data-list-cell-link:focus-visible {
+  text-decoration-color: currentColor;
+}
+
+.data-list-cell-link:focus-visible {
+  outline: 2px solid var(--accent, #2563eb);
+  outline-offset: 1px;
+  border-radius: 2px;
+}
+
 .data-list-row-draggable {
   cursor: grab;
 }

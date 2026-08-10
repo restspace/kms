@@ -233,7 +233,13 @@ export function TimeGrid({
                   key={s.id}
                   style={{
                     top: local.minutes - dayStartMin,
-                    height: Math.max(dur, 18),
+                    // A 30-min (or shorter — Lightning Talks default to 10)
+                    // slot maps to fewer pixels than the time line + title
+                    // line need, clipping the title mid-line. Floor the box
+                    // at a height that fits both single-line rows; short
+                    // sessions render slightly taller than their slot rather
+                    // than lose the title (docs/07 eval fix).
+                    height: Math.max(dur, 36),
                     ...(color ? { ['--track-color' as string]: color } : {}),
                   }}
                   draggable

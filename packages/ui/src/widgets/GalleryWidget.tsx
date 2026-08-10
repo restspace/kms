@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { fetchSpeakers, type PublicSpeaker, type SpeakersFeed } from '../publicData'
 import { SpeakerAvatar } from './SpeakersWidget'
-import { stripHtml } from './richText'
+import { SpeakerDetailBody, speakerDetailCss } from './SpeakerDetailWidget'
 
 export interface GalleryWidgetProps {
   eventSlug: string
@@ -9,12 +9,12 @@ export interface GalleryWidgetProps {
 
 /**
  * Modal shown when a gallery tile is clicked (EMB-13): the same bio/session
- * content as SpeakerDetailWidget, but layered over the gallery instead of
- * navigating away from it. Closes on Escape, backdrop click, or the close
- * button; no route change, so the grid's scroll position and search text
- * survive.
+ * body as SpeakerDetailWidget (`SpeakerDetailBody`, shared rather than
+ * duplicated), layered over the gallery instead of navigating away from it.
+ * Closes on Escape, backdrop click, or the close button; no route change, so
+ * the grid's scroll position and search text survive.
  */
-function SpeakerModal({ speaker, onClose }: { speaker: PublicSpeaker; onClose: () => void }) {
+function SpeakerModal({ speaker, tz, onClose }: { speaker: PublicSpeaker; tz: string; onClose: () => void }) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onClose()
@@ -44,17 +44,7 @@ function SpeakerModal({ speaker, onClose }: { speaker: PublicSpeaker; onClose: (
             )}
           </div>
         </div>
-        {speaker.bio && <p className="speaker-detail-bio">{stripHtml(speaker.bio)}</p>}
-        {speaker.sessions.length > 0 && (
-          <>
-            <h3>Sessions</h3>
-            <ul className="event-widget-list">
-              {speaker.sessions.map((s) => (
-                <li key={s.id}>{s.title}</li>
-              ))}
-            </ul>
-          </>
-        )}
+        <SpeakerDetailBody speaker={speaker} tz={tz} />
       </div>
     </div>
   )
@@ -95,6 +85,7 @@ export function GalleryWidget({ eventSlug }: GalleryWidgetProps) {
   return (
     <div className="gallery-widget">
       <style dangerouslySetInnerHTML={{ __html: galleryWidgetCss }} />
+      <style dangerouslySetInnerHTML={{ __html: speakerDetailCss }} />
       <input
         type="search"
         className="speakers-search"
@@ -112,12 +103,18 @@ export function GalleryWidget({ eventSlug }: GalleryWidgetProps) {
               <button type="button" className="gallery-tile" onClick={() => setOpenSpeaker(s)}>
                 <SpeakerAvatar speaker={s} size={120} />
                 <span className="gallery-tile-name">{s.name}</span>
+                {/* EMB-12: job title/company must show on the card itself, not only in the modal. */}
+                {(s.title || s.company) && (
+                  <span className="muted gallery-tile-role">{[s.title, s.company].filter(Boolean).join(' · ')}</span>
+                )}
               </button>
             </li>
           ))}
         </ul>
       )}
-      {openSpeaker && <SpeakerModal speaker={openSpeaker} onClose={() => setOpenSpeaker(null)} />}
+      {openSpeaker && (
+        <SpeakerModal speaker={openSpeaker} tz={feed.event.timezone} onClose={() => setOpenSpeaker(null)} />
+      )}
     </div>
   )
 }
@@ -129,6 +126,7 @@ const galleryWidgetCss = `
 .gallery-tile:hover { background: color-mix(in srgb, var(--fg) 5%, transparent); }
 .gallery-tile .speaker-avatar { border-radius: 999px; }
 .gallery-tile-name { font-size: .9rem; text-align: center; }
+.gallery-tile-role { font-size: .78rem; text-align: center; }
 .gallery-modal-backdrop { position: fixed; inset: 0; background: color-mix(in srgb, black 55%, transparent); display: flex; align-items: center; justify-content: center; padding: 1.5rem; z-index: 100; }
 .gallery-modal { position: relative; background: var(--bg); color: var(--fg); border-radius: 12px; padding: 1.5rem; max-width: 480px; width: 100%; max-height: 85vh; overflow-y: auto; box-shadow: 0 12px 40px rgba(0,0,0,.3); }
 .gallery-modal-close { position: absolute; top: .6rem; right: .6rem; width: 2rem; height: 2rem; border-radius: 999px; border: none; background: color-mix(in srgb, var(--fg) 8%, transparent); color: var(--fg); font-size: 1.2rem; line-height: 1; cursor: pointer; }

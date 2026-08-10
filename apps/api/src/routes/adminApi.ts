@@ -1864,7 +1864,7 @@ adminApiRoutes.get('/bulk-jobs/:id', async (c) => {
   const session = c.get('session');
   const jobId = c.req.param('id');
   const row = await c.env.DB.prepare(
-    `SELECT j.id, j.kind, j.status, j.total, j.enqueued, j.error,
+    `SELECT j.id, j.kind, j.status, j.total, j.enqueued, j.error, j.params_json,
             (SELECT COUNT(*) FROM message_log m
               WHERE m.idempotency_key LIKE '%:' || ?1 || ':%' AND m.status = 'sent') AS sent,
             (SELECT COUNT(*) FROM message_log m
@@ -1872,9 +1872,43 @@ adminApiRoutes.get('/bulk-jobs/:id', async (c) => {
      FROM bulk_jobs j WHERE j.id = ?1 AND j.event_id = ?2`,
   )
     .bind(jobId, session.eventId)
-    .first();
+    .first<{
+      id: string; kind: string; status: string; total: number | null; enqueued: number;
+      error: string | null; params_json: string; sent: number; failed: number;
+    }>();
   if (!row) return c.json({ error: 'not_found' }, 404);
-  return c.json(row);
+  const { params_json, ...body } = row;
+
+  // Additive for the decision-email flow (CFP-14 fix): a submission with no
+  // submitter contact is flipped to accepted/declined but never queues a
+  // message, so it never picks up notified_at either — the same signal that
+  // now gates the "Notified" stamp. Reporting it here lets the UI say
+  // "2 sent, 1 skipped (no submitter)" instead of implying every decision
+  // was communicated. Computed defensively: any parse/query failure just
+  // omits the field rather than failing the whole poll.
+  let skippedNoSubmitter: number | undefined;
+  if (row.kind === 'send-decisions') {
+    try {
+      const ids = (JSON.parse(params_json) as { ids?: unknown }).ids;
+      if (Array.isArray(ids) && ids.length > 0) {
+        const idList = ids.filter((v): v is string => typeof v === 'string');
+        if (idList.length > 0) {
+          const placeholders = idList.map(() => '?').join(', ');
+          const skipped = await c.env.DB.prepare(
+            `SELECT COUNT(*) AS n FROM submissions
+             WHERE id IN (${placeholders}) AND status IN ('accepted', 'declined') AND notified_at IS NULL`,
+          )
+            .bind(...idList)
+            .first<{ n: number }>();
+          skippedNoSubmitter = skipped?.n ?? 0;
+        }
+      }
+    } catch {
+      // leave skippedNoSubmitter undefined
+    }
+  }
+
+  return c.json(skippedNoSubmitter === undefined ? body : { ...body, skipped_no_submitter: skippedNoSubmitter });
 });
 
 // ---------------------------------------------------------------------------

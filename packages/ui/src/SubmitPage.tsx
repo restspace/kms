@@ -28,8 +28,11 @@ export interface SubmitViewer {
   biography: string | null
   /** submissions (drafts included) this contact already has on this form */
   submission_count: number
-  /** resumable draft, when exactly one open draft exists */
-  draft: { id: string; answers: Answers } | null
+  /** resumable draft, when exactly one open draft exists. Never auto-applied
+   * — the Account step asks the submitter to resume it or start fresh
+   * (ABS defect: silently resuming used to overwrite an unrelated draft
+   * under the same code with no warning). */
+  draft: { id: string; title: string; answers: Answers } | null
 }
 
 export interface SubmitFormInfo {
@@ -133,8 +136,20 @@ export function SubmitPage({ data }: { data: SubmitBootstrap }) {
     [form.collect_participants],
   )
   const [step, setStep] = useState<Step>('welcome')
-  const [answers, setAnswers] = useState<Answers>(() => viewer?.draft?.answers ?? {})
-  const [submissionId, setSubmissionId] = useState<string | null>(viewer?.draft?.id ?? null)
+  // ABS defect (data loss): a signed-in submitter with an existing draft used
+  // to have it silently loaded here and reused by the next autosave, which
+  // meant "start a new submission" quietly overwrote an unrelated draft under
+  // the same code. Neither `answers` nor `submissionId` seed from the draft
+  // any more — the Account step below makes the submitter choose Resume or
+  // Start new first, and only that choice (resumeDraft/startNewDraft) applies
+  // draft state.
+  const [answers, setAnswers] = useState<Answers>({})
+  const [submissionId, setSubmissionId] = useState<string | null>(null)
+  // null = undecided (only meaningful while viewer.draft exists); the Account
+  // step blocks progress until this resolves to 'resume' or 'new'.
+  const [draftChoice, setDraftChoice] = useState<'resume' | 'new' | null>(null)
+  const [draftChoiceError, setDraftChoiceError] = useState<string | null>(null)
+  const [startingNew, setStartingNew] = useState(false)
   const participantQuestions = useMemo(
     () => data.questions.filter((q) => q.section === 'participant').sort((a, b) => a.position - b.position),
     [data.questions],
@@ -198,8 +213,57 @@ export function SubmitPage({ data }: { data: SubmitBootstrap }) {
     setAnswers((prev) => ({ ...prev, [qid]: value }))
   }, [])
 
+  // Account step: an authenticated submitter with an existing draft chooses
+  // explicitly rather than being dropped into it. "Resume" just adopts the
+  // bootstrap-supplied draft id/answers (already loaded, no round trip
+  // needed). "Start new" asks the server for a genuinely fresh draft up
+  // front — via `force_new`, which skips the reuse-most-recent-draft lookup
+  // the autosave endpoint otherwise applies — so the limit can be checked
+  // and reported immediately instead of failing silently on the next
+  // autosave tick.
+  const resumeDraft = useCallback(() => {
+    if (!viewer?.draft) return
+    setSubmissionId(viewer.draft.id)
+    setAnswers(viewer.draft.answers)
+    setDraftChoiceError(null)
+    setDraftChoice('resume')
+  }, [viewer])
+
+  const startNewDraft = useCallback(async () => {
+    setDraftChoiceError(null)
+    setStartingNew(true)
+    try {
+      const res = await fetch(`${data.base_path}/draft`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ submission_id: null, answers: {}, force_new: true }),
+      })
+      const body = (await res.json().catch(() => ({}))) as { submission_id?: string; error?: string }
+      if (!res.ok) {
+        setDraftChoiceError(
+          body.error === 'limit_reached'
+            ? `You have reached your submission limit${limit !== null ? ` (${limit})` : ''}. Manage your existing submissions in the speaker portal instead.`
+            : 'Could not start a new submission — please try again.',
+        )
+        return
+      }
+      setSubmissionId(body.submission_id ?? null)
+      setAnswers({})
+      setParticipants([{ role: 'speaker', is_primary_contact: true, answers: primaryParticipantAnswers }])
+      setDraftChoice('new')
+    } catch {
+      setDraftChoiceError('Could not start a new submission — please check your connection and try again.')
+    } finally {
+      setStartingNew(false)
+    }
+  }, [data.base_path, limit, primaryParticipantAnswers])
+
   useEffect(() => {
     if (!viewer || done || data.closed || overLimit) return
+    // Autosave stays paused while the resume-vs-new choice is pending: there
+    // is no submissionId to save against yet, and applying either choice
+    // resets `answers` anyway.
+    if (viewer.draft && draftChoice === null) return
     const interval = setInterval(() => {
       if (!dirtyRef.current) return
       dirtyRef.current = false
@@ -219,7 +283,7 @@ export function SubmitPage({ data }: { data: SubmitBootstrap }) {
         })
     }, AUTOSAVE_MS)
     return () => clearInterval(interval)
-  }, [viewer, done, data.closed, overLimit, data.base_path])
+  }, [viewer, done, data.closed, overLimit, data.base_path, draftChoice])
 
   // ------------------------------------------------------------------
   // Success-page countdown redirect (10 s, with a manual button).
@@ -322,11 +386,12 @@ export function SubmitPage({ data }: { data: SubmitBootstrap }) {
   const goNext = useCallback(() => {
     setStepError(null)
     if (step === 'account' && !viewer) return
+    if (step === 'account' && viewer?.draft && draftChoice === null) return
     if (step === 'submission' && !validateSubmissionStep()) return
     if (step === 'participant' && !validateParticipantStep()) return
     const next = steps[stepIndex + 1]
     if (next) setStep(next.key)
-  }, [step, steps, stepIndex, viewer, validateSubmissionStep, validateParticipantStep])
+  }, [step, steps, stepIndex, viewer, draftChoice, validateSubmissionStep, validateParticipantStep])
 
   const goBack = useCallback(() => {
     setStepError(null)
@@ -464,10 +529,39 @@ export function SubmitPage({ data }: { data: SubmitBootstrap }) {
                   You have reached the limit of {limit} submissions for this form. Manage your
                   existing submissions in the <a href={`/portal/${event.slug}`}>speaker portal</a>.
                 </div>
+              ) : viewer.draft && draftChoice === null ? (
+                <div className="sb-card">
+                  <p>
+                    You have a saved draft, <strong>{viewer.draft.title}</strong>. Resume it, or start a
+                    new submission — starting new never changes your existing draft.
+                  </p>
+                  {draftChoiceError && <div className="sb-error" role="alert">{draftChoiceError}</div>}
+                  <div className="sb-nav" style={{ justifyContent: 'flex-start', gap: '.75rem' }}>
+                    <button type="button" className="sb-button sb-primary" onClick={resumeDraft}>
+                      Resume draft “{viewer.draft.title}”
+                    </button>
+                    <button
+                      type="button"
+                      className="sb-button"
+                      disabled={startingNew}
+                      onClick={() => void startNewDraft()}
+                    >
+                      {startingNew ? 'Starting…' : 'Start a new submission'}
+                    </button>
+                  </div>
+                </div>
               ) : (
-                viewer.draft && <p className="sb-muted">Resuming your saved draft.</p>
+                viewer.draft &&
+                draftChoice && (
+                  <p className="sb-muted">
+                    {draftChoice === 'resume' ? 'Resuming your saved draft.' : 'Starting a new submission.'}
+                  </p>
+                )
               )}
-              <Nav onBack={goBack} onNext={overLimit ? undefined : goNext} />
+              <Nav
+                onBack={goBack}
+                onNext={overLimit || (viewer.draft && draftChoice === null) ? undefined : goNext}
+              />
             </>
           ) : (
             <>

@@ -227,12 +227,12 @@ submitRoutes.get('/:slug/:formId', async (c) => {
       const [count, draft] = await Promise.all([
         countForLimit(c.env.DB, form.id, session.contactId),
         c.env.DB.prepare(
-          `SELECT id FROM submissions
+          `SELECT id, title FROM submissions
            WHERE form_id = ? AND submitter_contact_id = ? AND status = 'draft'
            ORDER BY updated_at DESC LIMIT 1`,
         )
           .bind(form.id, session.contactId)
-          .first<{ id: string }>(),
+          .first<{ id: string; title: string | null }>(),
       ]);
       let draftAnswers: Answers | null = null;
       if (draft) {
@@ -249,7 +249,9 @@ submitRoutes.get('/:slug/:formId', async (c) => {
       viewer = {
         ...contact,
         submission_count: count,
-        draft: draft && draftAnswers ? { id: draft.id, answers: draftAnswers } : null,
+        // title falls back the same way the draft endpoint's own default does,
+        // so the resume-vs-new prompt never shows a blank title.
+        draft: draft && draftAnswers ? { id: draft.id, title: draft.title || 'Untitled draft', answers: draftAnswers } : null,
       };
     }
   }
@@ -410,6 +412,16 @@ submitRoutes.post('/:slug/:formId/draft', async (c) => {
   const answers = discardHiddenAnswers(abstractQuestions, parseAnswers(body.answers));
   const ts = new Date().toISOString();
 
+  // ABS defect (data loss): the wizard used to resume the submitter's most
+  // recent draft with no say from them, so starting a genuinely new
+  // submission silently overwrote an unrelated one under the same code.
+  // `force_new` is the explicit "Start a new submission" choice on the
+  // Account step — it skips the reuse-the-existing-draft lookup below even
+  // when the form only allows a single open draft; the submission-limit
+  // check further down (shared with every other create path) still applies,
+  // so a submitter cannot use it to evade their quota.
+  const forceNew = body.force_new === true;
+
   let submissionId = typeof body.submission_id === 'string' ? body.submission_id : null;
   if (submissionId) {
     const owned = await db
@@ -420,7 +432,7 @@ submitRoutes.post('/:slug/:formId/draft', async (c) => {
       .first();
     if (!owned) submissionId = null;
   }
-  if (!submissionId) {
+  if (!submissionId && !forceNew) {
     // Without multiple-drafts, an existing open draft is reused, not duplicated.
     if (ctx.form.allow_multiple_drafts !== 1) {
       const existing = await db

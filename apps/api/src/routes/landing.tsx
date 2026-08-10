@@ -147,6 +147,11 @@ ${resetBlock}
         ? `<li><a href="/submit/${esc(logins.eventSlug)}/${esc(logins.openFormId)}">Public call for speakers</a></li>`
         : ''
     }
+    <li><a href="/e/${esc(logins.eventSlug)}/sessions">Public sessions list</a></li>
+    <li><a href="/e/${esc(logins.eventSlug)}/speakers">Public speaker directory</a></li>
+    <li><a href="/e/${esc(logins.eventSlug)}/agenda">Public agenda</a></li>
+    <li><a href="/e/${esc(logins.eventSlug)}/schedule">Public schedule / itinerary</a></li>
+    <li><a href="/e/${esc(logins.eventSlug)}/gallery">Public speaker gallery</a></li>
     <li><a href="/docs">REST API docs</a></li>
   </ul>
 </section>`,
@@ -191,6 +196,9 @@ interface PublicEventRow {
   slug: string;
   timezone: string;
   agenda_published: number;
+  /** Additive (EMB-07): event date range, so widgets can derive the full day-tab list. */
+  starts_at: string;
+  ends_at: string;
 }
 
 interface PublicSessionRow {
@@ -224,7 +232,7 @@ function dayKey(iso: string, timezone: string): string {
 landingRoutes.get('/e/:slug/agenda.json', async (c) => {
   const db = c.env.DB;
   const event = await db
-    .prepare('SELECT id, name, slug, timezone, agenda_published FROM events WHERE slug = ?')
+    .prepare('SELECT id, name, slug, timezone, agenda_published, starts_at, ends_at FROM events WHERE slug = ?')
     .bind(c.req.param('slug'))
     .first<PublicEventRow>();
   if (!event || event.agenda_published !== 1) return c.json({ error: 'not_found' }, 404);
@@ -297,7 +305,7 @@ landingRoutes.get('/e/:slug/agenda.json', async (c) => {
 
   return c.json(
     {
-      event: redactInternal({ name: event.name, slug: event.slug, timezone: event.timezone }),
+      event: redactInternal({ name: event.name, slug: event.slug, timezone: event.timezone, starts_at: event.starts_at, ends_at: event.ends_at }),
       days,
       rooms: redactInternalAll(rooms),
       tracks: redactInternalAll(tracks),
@@ -333,12 +341,16 @@ interface PublicSpeakerRow {
   headshot_asset_id: string | null;
   submission_id: string;
   submission_title: string;
+  /** EMB-05/EMB-13: so the speaker detail page and gallery modal can show when/where each session is. */
+  submission_starts_at: string;
+  submission_ends_at: string;
+  room_name: string | null;
 }
 
 landingRoutes.get('/e/:slug/speakers.json', async (c) => {
   const db = c.env.DB;
   const event = await db
-    .prepare('SELECT id, name, slug, timezone, agenda_published FROM events WHERE slug = ?')
+    .prepare('SELECT id, name, slug, timezone, agenda_published, starts_at, ends_at FROM events WHERE slug = ?')
     .bind(c.req.param('slug'))
     .first<PublicEventRow>();
   if (!event || event.agenda_published !== 1) return c.json({ error: 'not_found' }, 404);
@@ -350,10 +362,12 @@ landingRoutes.get('/e/:slug/speakers.json', async (c) => {
   const { results } = await db
     .prepare(
       `SELECT c.id AS contact_id, c.first_name, c.last_name, c.biography, c.company, c.job_title,
-              c.headshot_asset_id, s.id AS submission_id, s.title AS submission_title
+              c.headshot_asset_id, s.id AS submission_id, s.title AS submission_title,
+              s.starts_at AS submission_starts_at, s.ends_at AS submission_ends_at, r.name AS room_name
        FROM submission_participants sp
        JOIN contacts c ON c.id = sp.contact_id
        JOIN submissions s ON s.id = sp.submission_id
+       LEFT JOIN rooms r ON r.id = s.room_id
        WHERE s.event_id = ? AND s.status = 'accepted' AND s.content_approved = 1
          AND s.starts_at IS NOT NULL AND s.ends_at IS NOT NULL
        ORDER BY sp.position`,
@@ -368,7 +382,7 @@ landingRoutes.get('/e/:slug/speakers.json', async (c) => {
     company: string | null;
     bio: string | null;
     headshot_url: string | null;
-    sessions: { id: string; title: string }[];
+    sessions: { id: string; title: string; starts_at: string; ends_at: string; day: string; room: string | null }[];
   }
 
   const bySpeaker = new Map<string, SpeakerAgg>();
@@ -390,7 +404,14 @@ landingRoutes.get('/e/:slug/speakers.json', async (c) => {
       };
       bySpeaker.set(row.contact_id, agg);
     }
-    agg.sessions.push({ id: row.submission_id, title: row.submission_title });
+    agg.sessions.push({
+      id: row.submission_id,
+      title: row.submission_title,
+      starts_at: row.submission_starts_at,
+      ends_at: row.submission_ends_at,
+      day: dayKey(row.submission_starts_at, event.timezone),
+      room: row.room_name,
+    });
   }
 
   const speakers = [...bySpeaker.values()].sort((a, b) => {
@@ -400,7 +421,7 @@ landingRoutes.get('/e/:slug/speakers.json', async (c) => {
 
   return c.json(
     {
-      event: redactInternal({ name: event.name, slug: event.slug, timezone: event.timezone }),
+      event: redactInternal({ name: event.name, slug: event.slug, timezone: event.timezone, starts_at: event.starts_at, ends_at: event.ends_at }),
       speakers: redactInternalAll(speakers),
     },
     200,
@@ -452,7 +473,7 @@ function icsDate(iso: string): string {
 landingRoutes.get('/e/:slug/agenda.ics', async (c) => {
   const db = c.env.DB;
   const event = await db
-    .prepare('SELECT id, name, slug, timezone, agenda_published FROM events WHERE slug = ?')
+    .prepare('SELECT id, name, slug, timezone, agenda_published, starts_at, ends_at FROM events WHERE slug = ?')
     .bind(c.req.param('slug'))
     .first<PublicEventRow>();
   if (!event || event.agenda_published !== 1) return c.json({ error: 'not_found' }, 404);

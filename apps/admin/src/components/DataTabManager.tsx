@@ -198,6 +198,10 @@ export interface TabConfig<T = any> {
    * Optional field name used to display the selected record title for global-filter labels.
    * When omitted, DataTabManager falls back to getItemTitle(), then common title/name fields,
    * then getItemId().
+   *
+   * Doubles as the column DataList renders as the row's clickable title link
+   * (see `openDetailOnClick`); DataList falls back to the first non-editable
+   * column when this is unset.
    */
   titleField?: keyof T | string;
   /**
@@ -323,6 +327,16 @@ export interface TabConfig<T = any> {
    * Defaults to true.
    */
   openDetailOnDoubleClick?: boolean;
+  /**
+   * Whether a plain single click on a row opens this tab's read-only detail
+   * tab (and renders the title column as a link). Requires `detailComponent`.
+   *
+   * Defaults to true *unless* the config binds its own meaning to a row
+   * selection via `onSelectionChange` — the Events tab, where a click already
+   * moves the workspace's event scope, would otherwise also spawn a detail tab
+   * on every click. Set explicitly to override either way.
+   */
+  openDetailOnClick?: boolean;
   /**
    * Optional inline fast-add configuration forwarded to DataList (quick-add
    * draft row pinned above the list).
@@ -1368,6 +1382,21 @@ export const DataTabManager: React.FC<DataTabManagerProps> = ({
   }, [onActiveTabChange, state.activeTabIndex, state.tabs, activeTabRequest]);
 
   /**
+   * Keep the active tab label in view. A detail tab opened from a deep link or
+   * a row click is appended after its parent, which on a full tab strip can
+   * land off-screen — the tab was "open" but the user (and the browser agent)
+   * saw no change at all.
+   */
+  useEffect(() => {
+    const activeTab = state.tabs[state.activeTabIndex];
+    if (!activeTab || typeof document === 'undefined') {
+      return;
+    }
+    const label = document.getElementById(`data-tab-${activeTab.id}`);
+    label?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
+  }, [state.activeTabIndex, state.tabs]);
+
+  /**
    * Handle tab click
    */
   const handleTabClick = useCallback((index: number) => {
@@ -1553,6 +1582,36 @@ export const DataTabManager: React.FC<DataTabManagerProps> = ({
       }
     };
   }, []);
+
+  /**
+   * Primary row activation: a single left click (or Enter/Space, or the title
+   * link) opens the tab's read-only detail tab and makes it the active tab.
+   *
+   * Returns undefined for tabs that have no detail view, or that already own
+   * the click (see `TabConfig.openDetailOnClick`) — DataList then renders no
+   * title link and behaves exactly as it did before.
+   */
+  const handleItemActivate = useCallback((tabId: string, configKey: string) => {
+    const tabConfig = config[configKey];
+    if (!tabConfig?.detailComponent) {
+      return undefined;
+    }
+    if ((tabConfig.openDetailOnClick ?? !tabConfig.onSelectionChange) === false) {
+      return undefined;
+    }
+    return (item: any) => {
+      dispatch({
+        type: 'OPEN_DETAIL_TAB',
+        payload: {
+          item,
+          configKey,
+          parentTabId: tabId,
+          replace: true,
+          title: `Detail: ${resolveItemTitle(item, tabConfig)}`
+        }
+      });
+    };
+  }, [config, resolveItemTitle]);
 
   /**
    * Handle item double-click in a list.
@@ -2512,6 +2571,8 @@ export const DataTabManager: React.FC<DataTabManagerProps> = ({
           dataSource={effectiveDataSource}
           columns={tabConfig.columns}
           getItemId={tabConfig.getItemId}
+          onItemActivate={handleItemActivate(tab.id, tab.configKey)}
+          titleField={tabConfig.titleField !== undefined ? String(tabConfig.titleField) : undefined}
           onItemDoubleClick={handleItemDoubleClick(tab.id, tab.configKey)}
           onItemContextMenu={handleListContextMenu(tab.id, tab.configKey)}
           onShiftClick={handleShiftClick(tab.id)}
@@ -2760,7 +2821,8 @@ export const DataTabManager: React.FC<DataTabManagerProps> = ({
     state.tabSelections,
     tabListQueries,
     committedSearch,
-    wrapDataSourceWithSearch
+    wrapDataSourceWithSearch,
+    handleItemActivate
   ]);
 
   if (state.tabs.length === 0) {

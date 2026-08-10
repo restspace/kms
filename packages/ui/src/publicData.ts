@@ -14,6 +14,14 @@ export interface PublicEvent {
   name: string;
   slug: string;
   timezone: string;
+  /**
+   * Event date range (UTC instants), additive (landing.tsx, EMB-07): lets a
+   * widget derive the full list of event days — including days with no
+   * sessions yet — instead of only the days a session happens to land on.
+   * Null on a feed from before this field existed / an event with no dates.
+   */
+  starts_at?: string | null;
+  ends_at?: string | null;
 }
 
 export interface PublicRoom {
@@ -71,6 +79,16 @@ export interface AgendaFeed {
 export interface PublicSpeakerSession {
   id: string;
   title: string;
+  /**
+   * Additive (EMB-05/EMB-13): lets the speaker detail page and gallery modal
+   * show each session's event-local date/time and room instead of just a
+   * bare title. Optional/nullable so an older cached feed still parses.
+   */
+  starts_at?: string;
+  ends_at?: string;
+  /** YYYY-MM-DD in the event's own timezone, same convention as PublicSession.day. */
+  day?: string;
+  room?: string | null;
 }
 
 export interface PublicSpeaker {

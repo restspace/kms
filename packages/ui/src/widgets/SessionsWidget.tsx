@@ -9,6 +9,10 @@ import {
 // Session descriptions come through as organiser-authored rich text (HTML);
 // the shared helper strips tags so the card shows plain, truncatable text.
 import { stripHtml } from './richText'
+// EMB-16: times must render in the EVENT's own timezone, matching the agenda
+// grid — not `toLocaleTimeString`'s viewer-local rendering, which is what a
+// raw/unconverted-looking "18:00 – 18:30" turned out to be.
+import { fmtTimeRange } from './time'
 
 export interface SessionsWidgetProps {
   eventSlug: string
@@ -22,21 +26,16 @@ export interface SessionsWidgetProps {
 
 const ALL = '__all__'
 
-function formatTimeRange(startsAt: string, endsAt: string): string {
-  const opts: Intl.DateTimeFormatOptions = { hour: 'numeric', minute: '2-digit' }
-  const start = new Date(startsAt).toLocaleTimeString(undefined, opts)
-  const end = new Date(endsAt).toLocaleTimeString(undefined, opts)
-  return `${start} – ${end}`
-}
-
 function SessionCard({
   session,
   roomName,
   trackName,
+  tz,
 }: {
   session: PublicSession
   roomName: string | null
   trackName: string | null
+  tz: string
 }) {
   const [expanded, setExpanded] = useState(false)
   const description = stripHtml(session.description ?? '')
@@ -53,7 +52,7 @@ function SessionCard({
         </div>
       </div>
       <div className="muted sessions-card-meta">
-        {session.day} · {formatTimeRange(session.starts_at, session.ends_at)}
+        {session.day} · {fmtTimeRange(session.starts_at, session.ends_at, tz)}
         {roomName ? ` · ${roomName}` : ''}
       </div>
       {description && (
@@ -135,7 +134,13 @@ export function SessionsWidget({ eventSlug, filter }: SessionsWidgetProps) {
       if (room !== ALL && s.room_id !== room) return false
       if (!q) return true
       const inTitle = s.title.toLowerCase().includes(q)
-      const inSpeakers = s.speakers.some((name) => name.toLowerCase().includes(q))
+      // EMB-02: match on both the plain `speakers` name list and the richer
+      // `speaker_details` (id/name/title/company) — the two should agree,
+      // but a widget that only reads one loses a match if a feed ever has
+      // them diverge (e.g. an older cached payload with one field stale).
+      const inSpeakers =
+        s.speakers.some((name) => name.toLowerCase().includes(q)) ||
+        s.speaker_details.some((sp) => sp.name.toLowerCase().includes(q))
       return inTitle || inSpeakers
     })
   }, [feed, query, track, format, room])
@@ -214,6 +219,7 @@ export function SessionsWidget({ eventSlug, filter }: SessionsWidgetProps) {
               session={s}
               roomName={s.room_id ? roomsById.get(s.room_id)?.name ?? null : null}
               trackName={s.track_id ? tracksById.get(s.track_id)?.name ?? null : null}
+              tz={feed.event.timezone}
             />
           ))}
         </ul>

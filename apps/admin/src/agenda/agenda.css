@@ -333,8 +333,19 @@
 .tg-block-flag { position: absolute; top: 2px; right: 5px; }
 .tg-block.conflict-error .tg-block-flag { color: var(--danger); }
 .tg-block.conflict-warning .tg-block-flag { color: var(--notice-text); }
-.tg-block-time { color: var(--text-muted); }
-.tg-block-title { font-weight: 600; font-size: var(--text-grid); line-height: 1.25; color: var(--text); }
+.tg-block-time { color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tg-block-title {
+  font-weight: 600;
+  font-size: var(--text-grid);
+  line-height: 1.25;
+  color: var(--text);
+  /* Keep the title to one line so a short slot's fixed height can never
+     clip it mid-glyph — it ellipsizes instead (paired with TimeGrid's
+     36px card floor for the height half of the fix). */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .tg-block-speakers { color: var(--text-secondary); }
 .tg-resize {
   position: absolute;
