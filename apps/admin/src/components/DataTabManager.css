@@ -656,10 +656,6 @@
     display: none;
   }
 
-  .data-tab-header-trailing {
-    display: none;
-  }
-
   .data-tab-header {
     position: relative;
     width: 100%;
@@ -785,6 +781,16 @@
   padding: 0 var(--space-2);
   border-left: 1px solid var(--border);
   white-space: nowrap;
+}
+
+/* Medium (768): the event chip and global-filter read-out are chrome for
+   arranging many records, and the header has no room for them beside the tab
+   dropdown. Must sit *after* the default rule above — the two have equal
+   specificity, so source order decides. */
+@media (max-width: 768px) {
+  .data-tab-header-trailing {
+    display: none;
+  }
 }
 
 /* Workspace search input (deferred-gap item): debounced text filter merged
