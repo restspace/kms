@@ -147,8 +147,11 @@ function ImportWizard({ request, onClose }: { request: ImportRequest; onClose: (
             <button onClick={onClose} disabled={busy}>Cancel</button>
             {plan && (
               <>
-                <button onClick={() => setPlan(null)} disabled={busy}>Choose another file</button>
-                <button className="primary" onClick={commit} disabled={busy || writable === 0}>
+                {/* Below compact the mapping and its dry run are refused, so
+                    committing would be committing blind — Cancel is the only
+                    action the panel offers and the only one left here. */}
+                <button className="kms-wide-only" onClick={() => setPlan(null)} disabled={busy}>Choose another file</button>
+                <button className="primary kms-wide-only" onClick={commit} disabled={busy || writable === 0}>
                   {writable === 0 ? 'Nothing to import' : `Import ${writable} row${writable === 1 ? '' : 's'}`}
                 </button>
               </>
