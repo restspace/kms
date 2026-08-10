@@ -63,4 +63,9 @@ button { font:inherit; padding:.4rem .9rem; border-radius:var(--radius); border:
 button:hover { border-color: var(--accent); color: var(--accent); }
 code { font-family: var(--font-mono); font-size:.9em;
   background:color-mix(in srgb, var(--text) 8%, transparent); padding:.1em .35em; border-radius:var(--radius); }
+
+/* Compact (640): phone layout, appended so the desktop rules above stand. */
+@media (max-width: 640px) {
+  main { padding: 2rem 1rem 3rem; }
+}
 `
