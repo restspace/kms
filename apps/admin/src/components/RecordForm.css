@@ -203,3 +203,13 @@
 .record-form-delete:hover:not(:disabled) {
   background: var(--danger-soft) !important;
 }
+
+/* Inline explanation under a control whose value the form cannot represent —
+   currently the Track picker when the submitted answer matches no event
+   track (see SubmissionEditForm's `unmatchedTrackAnswer`). */
+.record-form-note {
+  margin: 0.35rem 0 0;
+  font-size: 0.8rem;
+  line-height: 1.4;
+  color: var(--text-muted);
+}

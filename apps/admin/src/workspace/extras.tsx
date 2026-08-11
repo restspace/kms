@@ -712,6 +712,12 @@ export function SubmissionEditForm({ initialValues, onSubmit, onCancel, onDelete
   const [loadError, setLoadError] = useState<string | null>(null)
   const [tracks, setTracks] = useState<TrackRow[]>([])
   const [rooms, setRooms] = useState<RoomRow[]>([])
+  // The `track_id` the record actually holds, kept apart from the picker's
+  // value so Save can tell "the organiser chose a different track" from "the
+  // picker never had an option for what was stored". See `handleSubmit`.
+  const [loadedTrackId, setLoadedTrackId] = useState(
+    typeof initialValues?.track_id === 'string' ? initialValues.track_id : '',
+  )
 
   const [fields, setFields] = useState({
     title: typeof initialValues?.title === 'string' ? initialValues.title : '',
@@ -758,6 +764,12 @@ export function SubmissionEditForm({ initialValues, onSubmit, onCancel, onDelete
         if (cancelled) return
         setDetail(d)
         const roomId = typeof d.submission.room_id === 'string' ? d.submission.room_id : ''
+        // Baseline the Track picker off the record itself, not just the grid
+        // row that opened the form — the row is the only source `initialValues`
+        // has, and any path that opens the form without one would otherwise
+        // start from '' and look like a deliberate "no track".
+        const storedTrackId = typeof d.submission.track_id === 'string' ? d.submission.track_id : ''
+        setLoadedTrackId(storedTrackId)
         setFields((prev) => {
           // Manual-review item: "Level" is blank in this form for some
           // submitted records even though the submitter answered it on the
@@ -773,10 +785,11 @@ export function SubmissionEditForm({ initialValues, onSubmit, onCancel, onDelete
           // answer here — only when the column itself came back empty — means
           // the field is populated instead of appearing to have lost data,
           // and saving now backfills the proper column going forward.
-          if (prev.level) return { ...prev, room_id: roomId }
+          const trackId = prev.track_id || storedTrackId
+          if (prev.level) return { ...prev, room_id: roomId, track_id: trackId }
           const levelAnswer = d.answers.find((a) => a.label.trim().toLowerCase().includes('level'))
           const fallbackLevel = levelAnswer ? answerText(levelAnswer.value_json) : ''
-          return { ...prev, room_id: roomId, level: fallbackLevel === '—' ? '' : fallbackLevel }
+          return { ...prev, room_id: roomId, track_id: trackId, level: fallbackLevel === '—' ? '' : fallbackLevel }
         })
       })
       .catch((e: unknown) => { if (!cancelled) setLoadError(e instanceof Error ? e.message : 'Failed to load') })
@@ -809,6 +822,18 @@ export function SubmissionEditForm({ initialValues, onSubmit, onCancel, onDelete
     })
   }, [detail, tracks])
 
+  // The submitted Track answer when it matches none of the event's tracks, so
+  // the picker has no option for it. Surfacing the text beats a bare "— No
+  // track —", which reads as though the submitter chose nothing.
+  const unmatchedTrackAnswer = (() => {
+    if (fields.track_id || !detail || tracks.length === 0) return ''
+    const answer = detail.answers.find((a) => a.label.trim().toLowerCase().includes('track'))
+    const text = answer ? answerText(answer.value_json) : ''
+    if (!text || text === '—') return ''
+    const first = text.split(',')[0]!.trim().toLowerCase()
+    return tracks.some((t) => t.name.trim().toLowerCase() === first) ? '' : text
+  })()
+
   const setField = (key: keyof typeof fields, value: string) => {
     setFields((prev) => ({ ...prev, [key]: value }))
     onDirtyChange?.(true)
@@ -829,7 +854,16 @@ export function SubmissionEditForm({ initialValues, onSubmit, onCancel, onDelete
         format: fields.format.trim() || null,
         level: fields.level.trim() || null,
         language: fields.language.trim() || null,
-        track_id: fields.track_id || null,
+        // Only send Track when it actually changed. The picker can only offer
+        // the *event's* tracks, so a submission whose stored track isn't one
+        // of them (e.g. a CFP form whose Track question lists names the event
+        // has no matching track for) renders as "— No track —" through no
+        // choice of the organiser's — and an unconditional `track_id` would
+        // then silently overwrite the stored value with NULL on any unrelated
+        // edit. PUT /submissions/:id updates per key present (`'track_id' in
+        // body`), so omitting it leaves the column alone. A real change —
+        // including the answer-backfill effect above — still writes.
+        ...(fields.track_id !== loadedTrackId ? { track_id: fields.track_id || null } : {}),
         room_id: fields.room_id || null,
         content_approved: contentApproved,
         // Only sent on create — see `fields.status`'s doc comment. Reading
@@ -885,6 +919,12 @@ export function SubmissionEditForm({ initialValues, onSubmit, onCancel, onDelete
             <option value="">— No track —</option>
             {tracks.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
           </select>
+          {unmatchedTrackAnswer && (
+            <p className="record-form-note">
+              Submitted as “{unmatchedTrackAnswer}”, which is not one of this event’s tracks.
+              Pick a track to map it, or leave this blank — saving will not clear the submitted answer.
+            </p>
+          )}
         </div>
         {isCreate && (
           <div className="record-form-field">
