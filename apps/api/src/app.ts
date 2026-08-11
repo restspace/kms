@@ -57,5 +57,33 @@ export function createApp() {
   // Embed loader (/embed.js) + XML agenda feed (lane W3-A): public, no auth.
   app.route('/', embedRoutes);
 
+  // Unknown paths previously fell through to the runtime's bare-text 404,
+  // which reads like a broken deployment when someone guesses organizer-style
+  // URLs (/admin, /organizer, /workspace/…). Answer JSON on API-ish paths and
+  // a small styled page everywhere else, pointing at the real front doors.
+  app.notFound((c) => {
+    const path = new URL(c.req.url).pathname;
+    if (path.startsWith('/app/api') || path.startsWith('/api/')) {
+      return c.json({ error: 'not_found' }, 404);
+    }
+    return c.html(
+      `<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Page not found</title>
+<style>
+  body{font-family:system-ui,sans-serif;margin:0;display:grid;place-items:center;min-height:100vh;background:#f6f5f2;color:#1f2430}
+  main{text-align:center;padding:2rem;max-width:28rem}
+  h1{font-size:1.4rem;margin:0 0 .5rem}
+  p{margin:.4rem 0;color:#555c6e}
+  a{color:#3d5a99}
+</style></head><body><main>
+<h1>Page not found</h1>
+<p>There's nothing at <code>${path.replace(/[&<>"']/g, '')}</code>. If it's an organiser page it may also require signing in.</p>
+<p><a href="/">Event site</a> · <a href="/app">Organiser workspace</a> · <a href="/portal">Speaker portal</a></p>
+</main></body></html>`,
+      404,
+    );
+  });
+
   return app;
 }

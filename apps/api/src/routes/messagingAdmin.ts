@@ -17,6 +17,7 @@ import type { Actor } from '@kms/core';
 import type { AccessEnv } from '../access';
 import { getRevalidatedPrivilegedSession } from '../session';
 import { sendTemplated } from '../mailer';
+import { sweepBulkJobs } from '../jobs/bulkJobs';
 import { mintToken, sha256hex } from '../tokens';
 
 export const messagingAdminRoutes = new Hono<AccessEnv>();
@@ -266,6 +267,15 @@ messagingAdminRoutes.post('/compose', async (c) => {
       ts,
     )
     .run();
+
+  // Same dead-minute fix as dashboard /remind and send-decisions: expand the
+  // job now via waitUntil so the compose progress toast sees real counts
+  // instead of "0/N queued" until the next cron tick.
+  try {
+    c.executionCtx.waitUntil(sweepBulkJobs(c.env));
+  } catch {
+    await sweepBulkJobs(c.env); // environments without an execution context (tests)
+  }
 
   return c.json({ ok: true, job_id: jobId, total: recipients.length, audience }, 202);
 });
