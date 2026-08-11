@@ -33,6 +33,7 @@ import {
   type FileLibraryRow,
   getEvents,
   type EventListRow,
+  type BulkJobStatus,
 } from './api'
 import { buildExportUrl, downloadFilesBundle } from './api'
 import { appAlert, appConfirm } from './components/dialogs'
@@ -62,7 +63,6 @@ import {
   PortalInviteButton,
   describeSettledJob,
   pollBulkJob,
-  type BulkJobPollHandle,
 } from './workspace/messaging'
 import { openImportWizard } from './workspace/ImportWizard'
 import { HeadshotUploadControl } from './workspace/headshotUpload'
@@ -93,6 +93,68 @@ import './shell.css'
  *  - every addressable piece of state lives in the URL via router.ts, so the
  *    shell derives its view from the route and reports changes back into it.
  */
+
+// Client-side ceiling on the "Send decision emails" progress poll — see
+// pollDecisionJob below. deliverNow (jobs/bulkJobs.ts) delivers inline during
+// the same tick that flips the job to 'done', so a healthy run settles well
+// inside this window; it exists purely so a stuck job can't hang the toast
+// forever.
+const DECISION_POLL_TIMEOUT_MS = 90_000
+
+/**
+ * `pollBulkJob` (workspace/messaging.tsx) polls a bulk_jobs row to a settled
+ * state with no ceiling of its own — by design, since a compose/remind job
+ * can legitimately take a while and those callers show an open-ended
+ * "in progress" state. The decision-email toast is different: it promises
+ * delivery "within a minute" (see the note it sets right after POSTing), so
+ * if the job is ever stuck 'running' past that — a tick that threw partway,
+ * or a dev/demo deployment with no cron trigger actually firing — the toast
+ * should say so instead of polling forever at "0/2 processed". This wraps
+ * pollBulkJob with exactly that ceiling: cancels the underlying poll and
+ * calls `onTimeout` once `timeoutMs` elapses without a settle. Exported
+ * (rather than inlined in runBulk) so the regression test can drive it with
+ * fake timers without standing up the whole shell.
+ */
+export function pollDecisionJob(
+  jobId: string,
+  handlers: {
+    onProgress?: (job: BulkJobStatus) => void
+    onSettled: (job: BulkJobStatus) => void
+    onError: (message: string) => void
+    onTimeout: () => void
+  },
+  timeoutMs: number = DECISION_POLL_TIMEOUT_MS,
+): { cancel: () => void } {
+  let timeoutId: number | null = null
+  const clearOwnTimeout = () => {
+    if (timeoutId !== null) {
+      window.clearTimeout(timeoutId)
+      timeoutId = null
+    }
+  }
+  const handle = pollBulkJob(jobId, {
+    onProgress: handlers.onProgress,
+    onSettled: (job) => {
+      clearOwnTimeout()
+      handlers.onSettled(job)
+    },
+    onError: (message) => {
+      clearOwnTimeout()
+      handlers.onError(message)
+    },
+  })
+  timeoutId = window.setTimeout(() => {
+    timeoutId = null
+    handle.cancel()
+    handlers.onTimeout()
+  }, timeoutMs)
+  return {
+    cancel: () => {
+      clearOwnTimeout()
+      handle.cancel()
+    },
+  }
+}
 
 const NAV_ITEMS: ReadonlyArray<{ key: ViewKey; label: string; soon: string | null }> = [
   { key: 'dashboard', label: 'Dashboard', soon: null },
@@ -1132,7 +1194,12 @@ export function buildWorkspaceConfig(
     },
     columns: [
       { field: 'task_title', header: 'Task', width: '1.6fr', sortable: true },
-      { field: 'assignee_name', header: 'Assignee', sortable: true },
+      {
+        field: 'assignee_name',
+        header: 'Assignee',
+        sortable: true,
+        render: (value: string | null, item) => value ?? item.assignee_email,
+      },
       { field: 'submission_code', header: 'For', width: '80px', mobileHidden: true },
       {
         field: 'status',
@@ -1773,7 +1840,7 @@ export default function App() {
    * decided in-request (rows outside a queue / already notified) and the job
    * knows nothing about them.
    */
-  const decisionPollRef = useRef<BulkJobPollHandle | null>(null)
+  const decisionPollRef = useRef<{ cancel: () => void } | null>(null)
   useEffect(() => () => decisionPollRef.current?.cancel(), [])
 
   const runBulk = useCallback(
@@ -1792,9 +1859,17 @@ export default function App() {
           // flipped by the expander, they just have no address to mail. Call
           // that out explicitly so "queued" copy never implies every queued
           // decision will actually reach an inbox.
+          // FR-REV-2: decisions only fire from a queue state (Accept Queue /
+          // Decline Queue) by design — a row already Accepted/Declined is
+          // refused, not silently resent. That gate is correct, but "not in a
+          // queue" alone left the organiser with no idea what to do about it;
+          // spell out the remedy (the bulk bar's own "→ Accept/Decline Queue"
+          // buttons, right next to this one, re-stage a selection for resend).
           const skippedNote =
             (r.skipped_notified > 0 ? `; ${r.skipped_notified} skipped (already notified)` : '') +
-            (other > 0 ? `; ${other} skipped (not in a queue)` : '') +
+            (other > 0
+              ? `; ${other} skipped (already decided — move back to Accept/Decline Queue to resend)`
+              : '') +
             ((r.skipped_no_submitter ?? 0) > 0 ? `; ${r.skipped_no_submitter} skipped — no submitter email` : '')
           const plan = `${r.accepted} accepted, ${r.declined} declined`
           if (!r.job_id) {
@@ -1803,7 +1878,7 @@ export default function App() {
           } else {
             polling = true
             setBulkNote(`Queued decision emails for ${planned} ${planned === 1 ? 'submission' : 'submissions'} (${plan})${skippedNote} — delivery completes within a minute…`)
-            decisionPollRef.current = pollBulkJob(r.job_id, {
+            decisionPollRef.current = pollDecisionJob(r.job_id, {
               onProgress: (job) =>
                 setBulkNote(`Sending decisions… ${job.enqueued}/${job.total ?? planned} processed (${plan})`),
               onSettled: (job) => {
@@ -1820,6 +1895,21 @@ export default function App() {
               onError: (message) => {
                 setBulkNote(message)
                 setBulkBusy(false)
+              },
+              // Belt-and-braces: a job stuck 'running' (a tick that threw
+              // partway, or no cron trigger firing at all in a dev/demo
+              // deployment) would otherwise leave this toast reading
+              // "Sending decisions… 0/2 processed" forever with no way out.
+              // Stop polling and hand the organiser back the grid instead of
+              // a permanently-stuck spinner; the refresh means any decisions
+              // that did land are still visible.
+              onTimeout: () => {
+                setBulkNote(
+                  `Still sending decision emails (${plan})${skippedNote} — this is taking longer than expected. ` +
+                    `Refresh the Submissions list in a moment to see what went through.`,
+                )
+                setBulkBusy(false)
+                setChecklistResetKey((k) => k + 1)
               },
             })
           }

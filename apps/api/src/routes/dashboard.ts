@@ -111,7 +111,20 @@ async function dashboardPayload(c: Context<ApiEnv>) {
              JOIN submissions s ON s.id = sp.submission_id
              WHERE s.event_id = ?1 AND s.status = 'accepted') acc ON acc.contact_id = c.id
        LEFT JOIN (SELECT ta.contact_id,
-                         SUM(CASE WHEN ta.status != 'complete' AND t.action_type = 'file_upload' THEN 1 ELSE 0 END) AS missing_slides,
+                         -- A contact can carry more than one file_upload
+                         -- assignment (e.g. co-presenting a second accepted
+                         -- talk, or an unrelated upload task an organiser
+                         -- added). Counting *any* incomplete one flagged
+                         -- "missing slides" even after the presentation
+                         -- upload itself was done, contradicting the Tasks
+                         -- tab where that assignment showed complete with
+                         -- uploaded versions. A completed file_upload
+                         -- assignment now counts as "slides present" outright;
+                         -- only contacts with file_upload assignments and
+                         -- none of them complete are still flagged.
+                         CASE WHEN SUM(CASE WHEN t.action_type = 'file_upload' AND ta.status = 'complete' THEN 1 ELSE 0 END) > 0 THEN 0
+                              WHEN SUM(CASE WHEN t.action_type = 'file_upload' THEN 1 ELSE 0 END) > 0 THEN 1
+                              ELSE 0 END AS missing_slides,
                          SUM(CASE WHEN ta.status != 'complete' THEN 1 ELSE 0 END) AS outstanding,
                          SUM(CASE WHEN ta.status != 'complete' AND t.due_at IS NOT NULL AND t.due_at < ?2 THEN 1 ELSE 0 END) AS overdue
                   FROM task_assignments ta
