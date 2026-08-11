@@ -25,14 +25,16 @@ import { getRevalidatedPrivilegedSession } from '../session';
 import { bumpEventRevision } from '../revision';
 import {
   ImportParseError,
-  TARGET_FIELDS,
   autoMap,
   commitStatements,
+  fieldsFor,
   isImportTarget,
   parseUpload,
   planImport,
   type ImportTarget,
 } from '../importer';
+import { isImportSource, type ImportSource } from '../sourceProfiles';
+import { toCsv } from '../export';
 
 export const importRoutes = new Hono<AccessEnv>();
 export const exportRoutes = new Hono<AccessEnv>();
@@ -77,11 +79,23 @@ async function targetEvent(
   return { eventId: id };
 }
 
-/** GET /app/api/import/fields?target=sessions — the mapping step's catalogue. */
+/** Optional source field ('generic' when absent); undefined = invalid. */
+const resolveSource = (raw: unknown): ImportSource | undefined => {
+  if (raw === undefined || raw === null || raw === '') return 'generic';
+  return isImportSource(raw) ? raw : undefined;
+};
+
+/**
+ * GET /app/api/import/fields?target=sessions&source=sessionboard — the mapping
+ * step's catalogue for a (target, source) pair. Source defaults to 'generic',
+ * which returns exactly the pre-sessionboard catalogue.
+ */
 importRoutes.get('/fields', (c) => {
   const target = c.req.query('target');
   if (!isImportTarget(target)) return c.json({ error: 'unknown_target' }, 400);
-  return c.json({ target, fields: TARGET_FIELDS[target] });
+  const source = resolveSource(c.req.query('source'));
+  if (!source) return c.json({ error: 'unknown_source' }, 400);
+  return c.json({ target, source, fields: fieldsFor(target, source) });
 });
 
 const asGrid = (value: unknown): string[][] =>
@@ -100,6 +114,7 @@ importRoutes.post('/preview', async (c) => {
   const contentType = c.req.header('content-type') ?? '';
   let target: unknown;
   let eventId: unknown;
+  let rawSource: unknown;
   let headers: string[] = [];
   let rows: string[][] = [];
   let mapping: string[] | null = null;
@@ -108,6 +123,7 @@ importRoutes.post('/preview', async (c) => {
     const form = await c.req.formData();
     target = form.get('target');
     eventId = form.get('event_id');
+    rawSource = form.get('source');
     const file = form.get('file');
     if (!(file instanceof File)) return c.json({ error: 'file_required' }, 400);
     if (file.size === 0) return c.json({ error: 'empty_file' }, 400);
@@ -133,27 +149,49 @@ importRoutes.post('/preview', async (c) => {
     const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
     target = body.target;
     eventId = body.event_id;
+    rawSource = body.source;
     headers = Array.isArray(body.headers) ? body.headers.map((h) => String(h ?? '').trim()) : [];
     rows = asGrid(body.rows);
     if (Array.isArray(body.mapping)) mapping = body.mapping.map((v) => (typeof v === 'string' ? v : ''));
   }
 
   if (!isImportTarget(target)) return c.json({ error: 'unknown_target' }, 400);
+  const source = resolveSource(rawSource);
+  if (!source) return c.json({ error: 'unknown_source' }, 400);
   const scope = await targetEvent(c, eventId);
   if ('error' in scope) return c.json({ error: scope.error }, scope.status);
   if (headers.length === 0) return c.json({ error: 'no_header_row' }, 400);
   if (rows.length === 0) return c.json({ error: 'no_data_rows' }, 400);
   if (rows.length > MAX_IMPORT_ROWS) return c.json({ error: 'too_many_rows', limit: MAX_IMPORT_ROWS }, 400);
 
-  const resolved = normaliseMapping(mapping, headers, target);
-  const plan = await planImport({ db: c.env.DB, eventId: scope.eventId }, target, headers, rows, resolved);
-  return c.json({ ...plan, event_id: scope.eventId, rows_raw: rows, fields: TARGET_FIELDS[target] });
+  const resolved = normaliseMapping(mapping, headers, target, source);
+  const timezone = await eventTimezone(c, scope.eventId, source);
+  const plan = await planImport({ db: c.env.DB, eventId: scope.eventId, source, timezone }, target, headers, rows, resolved);
+  return c.json({ ...plan, event_id: scope.eventId, rows_raw: rows, fields: fieldsFor(target, source) });
 });
 
+/**
+ * The event's IANA timezone, for the sessionboard datetime parsers. Only
+ * fetched when a profile actually needs it, so the generic path issues exactly
+ * the queries it did before this feature.
+ */
+async function eventTimezone(c: Context<AccessEnv>, eventId: string, source: ImportSource): Promise<string> {
+  if (source === 'generic') return 'UTC';
+  const row = await c.env.DB.prepare('SELECT timezone FROM events WHERE id = ?')
+    .bind(eventId)
+    .first<{ timezone: string }>();
+  return row?.timezone ?? 'UTC';
+}
+
 /** User mapping wins where it is valid; anything else is auto-mapped. */
-function normaliseMapping(mapping: string[] | null, headers: string[], target: ImportTarget): string[] {
-  if (!mapping) return autoMap(headers, target);
-  const known = new Set(TARGET_FIELDS[target].map((f) => f.key));
+function normaliseMapping(
+  mapping: string[] | null,
+  headers: string[],
+  target: ImportTarget,
+  source: ImportSource,
+): string[] {
+  if (!mapping) return autoMap(headers, target, source);
+  const known = new Set(fieldsFor(target, source).map((f) => f.key));
   const used = new Set<string>();
   return headers.map((_h, i) => {
     const key = mapping[i] ?? '';
@@ -173,6 +211,8 @@ importRoutes.post('/commit', async (c) => {
   const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
   const target = body.target;
   if (!isImportTarget(target)) return c.json({ error: 'unknown_target' }, 400);
+  const source = resolveSource(body.source);
+  if (!source) return c.json({ error: 'unknown_source' }, 400);
   const scope = await targetEvent(c, body.event_id);
   if ('error' in scope) return c.json({ error: scope.error }, scope.status);
 
@@ -186,10 +226,36 @@ importRoutes.post('/commit', async (c) => {
     Array.isArray(body.mapping) ? body.mapping.map((v) => (typeof v === 'string' ? v : '')) : null,
     headers,
     target,
+    source,
   );
-  const plan = await planImport({ db: c.env.DB, eventId: scope.eventId }, target, headers, rows, mapping);
-  const { statements, applied } = commitStatements(c.env.DB, scope.eventId, plan);
+  const timezone = await eventTimezone(c, scope.eventId, source);
+  const plan = await planImport({ db: c.env.DB, eventId: scope.eventId, source, timezone }, target, headers, rows, mapping);
+
+  // Sessionboard commits are recorded as an undoable batch (§5.5); generic
+  // commits keep today's exact behaviour (no batch row, batchId: null).
+  const batchId = source === 'sessionboard' ? crypto.randomUUID() : null;
+  const { statements, applied, createdContactIds } = commitStatements(c.env.DB, scope.eventId, plan, batchId);
+  let committedBatchId: string | null = null;
   if (statements.length > 0) {
+    if (batchId) {
+      // Same db.batch() as the plan statements, so the batch record and the
+      // rows it stamps land (or fail) together. summary_json carries the
+      // per-row report for report.csv and the created-contact ids for undo.
+      const summaryJson = JSON.stringify({
+        applied,
+        rows: plan.rows.map((r) => ({ row: r.row, action: r.action, message: r.message, label: r.label })),
+        createdContactIds,
+        undone_at: null,
+      });
+      const filename = typeof body.filename === 'string' && body.filename ? body.filename.slice(0, 200) : null;
+      statements.unshift(
+        c.env.DB.prepare(
+          `INSERT INTO import_batches (id, event_id, target, source, filename, created_by, created_at, summary_json)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        ).bind(batchId, scope.eventId, target, source, filename, c.get('session').contactId, new Date().toISOString(), summaryJson),
+      );
+      committedBatchId = batchId;
+    }
     try {
       await c.env.DB.batch(statements);
     } catch (err) {
@@ -198,7 +264,187 @@ importRoutes.post('/commit', async (c) => {
     }
     await bumpEventRevision(c.env, scope.eventId);
   }
-  return c.json({ ok: true, target, event_id: scope.eventId, summary: plan.summary, applied, plan_rows: plan.rows });
+  return c.json({
+    ok: true,
+    target,
+    event_id: scope.eventId,
+    summary: plan.summary,
+    applied,
+    plan_rows: plan.rows,
+    batchId: committedBatchId,
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Import batches: history, undo, report (workplan-11 §5.5)
+// ---------------------------------------------------------------------------
+
+interface BatchSummary {
+  applied?: Record<string, number>;
+  rows?: { row: number; action: string; message: string | null; label: string }[];
+  createdContactIds?: string[];
+  undone_at?: string | null;
+}
+
+const parseSummary = (raw: string | null): BatchSummary => {
+  if (!raw) return {};
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? (parsed as BatchSummary) : {};
+  } catch {
+    return {};
+  }
+};
+
+interface BatchRow {
+  id: string;
+  event_id: string;
+  target: string;
+  source: string;
+  filename: string | null;
+  created_at: string;
+  summary_json: string | null;
+}
+
+/** GET /app/api/import/batches?event_id=X — newest first, capped at 50. */
+importRoutes.get('/batches', async (c) => {
+  const scope = await targetEvent(c, c.req.query('event_id'));
+  if ('error' in scope) return c.json({ error: scope.error }, scope.status);
+  const { results } = await c.env.DB.prepare(
+    `SELECT id, event_id, target, source, filename, created_at, summary_json
+       FROM import_batches WHERE event_id = ? ORDER BY created_at DESC, id LIMIT 50`,
+  )
+    .bind(scope.eventId)
+    .all<BatchRow>();
+  return c.json({
+    batches: results.map((b) => {
+      const summary = parseSummary(b.summary_json);
+      return {
+        id: b.id,
+        target: b.target,
+        source: b.source,
+        filename: b.filename,
+        created_at: b.created_at,
+        summary: summary.applied ?? null,
+        undone_at: summary.undone_at ?? null,
+      };
+    }),
+  });
+});
+
+const chunk = <T,>(items: T[], size: number): T[][] => {
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
+  return out;
+};
+
+/**
+ * POST /app/api/import/batches/:id/undo { event_id }
+ *
+ * Deletes exactly what the batch CREATED, in FK-safe order:
+ *   1. submission_participants stamped with the batch (deleted first so their
+ *      count is reported — the submissions cascade would otherwise eat them),
+ *   2. submissions stamped with the batch (cascades cover answers, tags,
+ *      uploads, any remaining participants),
+ *   3. event_contacts memberships stamped with the batch (a contact `create`'s
+ *      membership and an `attach`'s membership alike — undoing an attach
+ *      removes the membership but leaves the org contact, which is correct:
+ *      the person existed before the import),
+ *   4. org `contacts` rows the batch minted (ids recorded in summary_json at
+ *      commit time — contacts has no import_batch_id column), orphan-guarded:
+ *      only when no event_contacts membership and no submission_participants
+ *      row references them any more, and only inside the event's org.
+ *
+ * What undo does NOT touch: rows the import merely UPDATED or merged (v1
+ * stores no per-column before-values; the fill-blanks-only merge policy
+ * bounds the damage to "a blank became a value"), and pre-existing contacts.
+ */
+importRoutes.post('/batches/:id/undo', async (c) => {
+  const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+  const scope = await targetEvent(c, body.event_id);
+  if ('error' in scope) return c.json({ error: scope.error }, scope.status);
+  const id = c.req.param('id');
+
+  const batch = await c.env.DB.prepare(
+    'SELECT id, event_id, target, source, filename, created_at, summary_json FROM import_batches WHERE id = ? AND event_id = ?',
+  )
+    .bind(id, scope.eventId)
+    .first<BatchRow>();
+  if (!batch) return c.json({ error: 'not_found' }, 404);
+  const summary = parseSummary(batch.summary_json);
+  if (summary.undone_at) return c.json({ error: 'already_undone' }, 409);
+
+  const db = c.env.DB;
+  const statements = [
+    db.prepare('DELETE FROM submission_participants WHERE import_batch_id = ?').bind(id),
+    db.prepare('DELETE FROM submissions WHERE import_batch_id = ? AND event_id = ?').bind(id, scope.eventId),
+    db.prepare('DELETE FROM event_contacts WHERE import_batch_id = ? AND event_id = ?').bind(id, scope.eventId),
+  ];
+  const createdContactIds = (summary.createdContactIds ?? []).filter(
+    (v): v is string => typeof v === 'string' && v !== '',
+  );
+  for (const group of chunk(createdContactIds, 80)) {
+    statements.push(
+      db
+        .prepare(
+          `DELETE FROM contacts
+            WHERE id IN (${group.map(() => '?').join(', ')})
+              AND org_id = (SELECT org_id FROM events WHERE id = ?)
+              AND NOT EXISTS (SELECT 1 FROM event_contacts ec WHERE ec.contact_id = contacts.id)
+              AND NOT EXISTS (SELECT 1 FROM submission_participants sp WHERE sp.contact_id = contacts.id)`,
+        )
+        .bind(...group, scope.eventId),
+    );
+  }
+  const undoneAt = new Date().toISOString();
+  statements.push(
+    db
+      .prepare('UPDATE import_batches SET summary_json = ? WHERE id = ?')
+      .bind(JSON.stringify({ ...summary, undone_at: undoneAt }), id),
+  );
+
+  let results: D1Result[];
+  try {
+    results = await db.batch(statements);
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    return c.json({ error: 'undo_failed', detail }, 409);
+  }
+  await bumpEventRevision(c.env, scope.eventId);
+  return c.json({
+    undone: {
+      submission_participants: results[0]?.meta.changes ?? 0,
+      submissions: results[1]?.meta.changes ?? 0,
+      event_contacts: results[2]?.meta.changes ?? 0,
+    },
+  });
+});
+
+/** GET /app/api/import/batches/:id/report.csv?event_id=X — per-row report. */
+importRoutes.get('/batches/:id/report.csv', async (c) => {
+  const scope = await targetEvent(c, c.req.query('event_id'));
+  if ('error' in scope) return c.json({ error: scope.error }, scope.status);
+  const id = c.req.param('id');
+  const batch = await c.env.DB.prepare(
+    'SELECT summary_json FROM import_batches WHERE id = ? AND event_id = ?',
+  )
+    .bind(id, scope.eventId)
+    .first<{ summary_json: string | null }>();
+  if (!batch) return c.json({ error: 'not_found' }, 404);
+  const summary = parseSummary(batch.summary_json);
+  // Key order fixes the CSV column order (row,action,label,message) — toCsv
+  // derives its header from first-seen key order, same escaping as export.ts.
+  const rows = (summary.rows ?? []).map((r) => ({
+    row: r.row,
+    action: r.action,
+    label: r.label,
+    message: r.message ?? '',
+  }));
+  return c.body(toCsv(rows), 200, {
+    'content-type': 'text/csv; charset=utf-8',
+    'content-disposition': `attachment; filename="import-report-${id}.csv"`,
+    'cache-control': 'private, no-store',
+  });
 });
 
 // ---------------------------------------------------------------------------

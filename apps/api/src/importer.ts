@@ -15,6 +15,16 @@
 
 import { unzipSync, strFromU8 } from 'fflate';
 import { nextSessionCodeSql } from './sessionCode';
+import {
+  SESSIONBOARD_CONTACT_ALIASES,
+  SESSIONBOARD_SESSION_ALIASES,
+  excelSerialToIso,
+  parseSpeakerCell,
+  sessionboardDateToIso,
+  sessionboardStatus,
+  splitMulti,
+  type ImportSource,
+} from './sourceProfiles';
 
 // ---------------------------------------------------------------------------
 // Parsing
@@ -227,6 +237,42 @@ export const TARGET_FIELDS: Record<ImportTarget, ImportField[]> = {
 export const isImportTarget = (value: unknown): value is ImportTarget =>
   value === 'sessions' || value === 'contacts';
 
+// Sessionboard-only session fields (workplan-11 G2/G9). Deliberately NOT added
+// to the generic catalogue: backward compatibility for the generic source is
+// byte-for-byte — a generic sheet with a "Speakers" column must keep mapping it
+// to nothing, exactly as today.
+const SESSIONBOARD_EXTRA_SESSION_FIELDS: ImportField[] = [
+  {
+    key: 'speakers',
+    label: 'Speakers',
+    aliases: SESSIONBOARD_SESSION_ALIASES.speakers,
+    hint: 'Emails or exact full names, pipe-separated; matched against the contact pool — unmatched values import unlinked with a warning',
+  },
+  {
+    key: 'tags',
+    label: 'Tags',
+    aliases: SESSIONBOARD_SESSION_ALIASES.tags,
+    hint: 'Matched by name; unknown names create the tag',
+  },
+];
+
+/**
+ * The field catalogue for a (target, source) pair (workplan-11 §5.1 G1).
+ * Generic returns the base catalogue untouched; sessionboard merges the
+ * profile's extra header aliases onto the base fields and, for sessions,
+ * appends the `speakers` and `tags` link fields.
+ */
+export function fieldsFor(target: ImportTarget, source: ImportSource = 'generic'): ImportField[] {
+  if (source !== 'sessionboard') return TARGET_FIELDS[target];
+  const aliasMap = target === 'sessions' ? SESSIONBOARD_SESSION_ALIASES : SESSIONBOARD_CONTACT_ALIASES;
+  const merged = TARGET_FIELDS[target].map((field) => {
+    const extra = aliasMap[field.key];
+    return extra ? { ...field, aliases: [...(field.aliases ?? []), ...extra] } : field;
+  });
+  if (target === 'sessions') merged.push(...SESSIONBOARD_EXTRA_SESSION_FIELDS);
+  return merged;
+}
+
 const normalise = (text: string): string => text.toLowerCase().replace(/[^a-z0-9]+/g, '');
 
 /**
@@ -236,8 +282,8 @@ const normalise = (text: string): string => text.toLowerCase().replace(/[^a-z0-9
  * it. Remaining columns fall back to a containment match. Every field is used
  * at most once; unmatched columns map to '' and are ignored on import.
  */
-export function autoMap(headers: string[], target: ImportTarget): string[] {
-  const fields = TARGET_FIELDS[target];
+export function autoMap(headers: string[], target: ImportTarget, source: ImportSource = 'generic'): string[] {
+  const fields = fieldsFor(target, source);
   const mapping = headers.map(() => '');
   const taken = new Set<string>();
   const tokensFor = (field: ImportField): string[] =>
@@ -308,10 +354,25 @@ export interface PlannedRow {
   targetId: string | null;
   /** for `merge`/`attach`: exactly the blank columns this row fills (never a clobber) */
   mergeFields: string[] | null;
+  /**
+   * Resolved speaker↔session links (workplan-11 §5.2) — commit inserts one
+   * submission_participants row per entry. Null when the `speakers` field is
+   * unmapped (always, for the generic source). `label` is the original cell
+   * fragment, kept for the report.
+   */
+  speakerLinks: { contactId: string; label: string }[] | null;
+  /**
+   * Unmapped columns preserved as {original header: value} (workplan-11 §5.4)
+   * — sessionboard source only; null means "write nothing", keeping the
+   * generic path byte-for-byte.
+   */
+  extra: Record<string, string> | null;
 }
 
 export interface ImportPlan {
   target: ImportTarget;
+  /** which source profile produced this plan ('generic' when none was named) */
+  source: ImportSource;
   headers: string[];
   mapping: string[];
   rows: PlannedRow[];
@@ -319,8 +380,15 @@ export interface ImportPlan {
   /** track/room names that do not exist yet and will be created on commit */
   newTracks: string[];
   newRooms: string[];
+  /** tag names that do not exist yet and will be created on commit (G9) */
+  newTags: string[];
   /** mapped fields the target does not know about are simply absent here */
   unmapped: string[];
+  /**
+   * Plan-level warnings (missing upsert key, unresolved speakers…). Absent
+   * when there are none, so the generic preview payload gains no key.
+   */
+  warnings?: string[];
 }
 
 const emptySummary = (): Record<RowAction | 'total', number> => ({
@@ -378,6 +446,43 @@ const isoOrNull = (value: string | undefined): string | null | undefined => {
 export interface PlanContext {
   db: D1Database;
   eventId: string;
+  /** source profile driving aliases + value normalisation; defaults to 'generic' */
+  source?: ImportSource;
+  /** the event's IANA timezone — needed by the sessionboard datetime parsers */
+  timezone?: string;
+}
+
+/** Unmapped columns of one raw row as {header: trimmed value}, empties dropped. */
+function collectExtra(headers: string[], row: string[], mapping: string[]): Record<string, string> | null {
+  const out: Record<string, string> = {};
+  let any = false;
+  headers.forEach((header, i) => {
+    if (mapping[i]) return;
+    const value = (row[i] ?? '').trim();
+    if (header.trim() === '' || value === '') return;
+    out[header] = value;
+    any = true;
+  });
+  return any ? out : null;
+}
+
+/**
+ * Sessionboard datetime cell → UTC instant. `sessionboardDateToIso` goes
+ * first, NOT `isoOrNull`: `new Date('2026-09-14 09:00')` parses fine inside
+ * Workers but reads the wall-clock as UTC, which is exactly the G5 bug this
+ * exists to fix — the profile parser owns both the documented wall-clock
+ * spelling and true ISO-with-offset values. A bare finite number is an Excel
+ * serial date (parseXlsx's documented gap, G6). Anything else falls back to
+ * the generic Date parse; null means all three failed and the row errors.
+ */
+function sessionboardWhen(value: string, timezone: string): string | null {
+  const iso = sessionboardDateToIso(value, timezone);
+  if (iso) return iso;
+  const trimmed = value.trim();
+  if (trimmed !== '' && Number.isFinite(Number(trimmed))) {
+    return excelSerialToIso(Number(trimmed), timezone);
+  }
+  return isoOrNull(value) ?? null;
 }
 
 /**
@@ -394,7 +499,34 @@ export async function planSessions(
   dataRows: string[][],
   mapping: string[],
 ): Promise<ImportPlan> {
+  const source = ctx.source ?? 'generic';
+  const timezone = ctx.timezone ?? 'UTC';
   const records = dataRows.map((row) => applyMapping(headers, row, mapping));
+  const warnings: string[] = [];
+  /** per-row informational notes (status degraded etc.) — never errors */
+  const notes: string[][] = records.map(() => []);
+
+  if (source === 'sessionboard') {
+    records.forEach((values, i) => {
+      // Status: translate through the profile map; the mapped value replaces
+      // the raw one so preview and commit (which re-plans) agree. Unknown
+      // statuses degrade to pending with a note, never an error (§5.3).
+      if (values.status !== undefined) {
+        const { status, note } = sessionboardStatus(values.status);
+        values.status = status;
+        if (note) notes[i]?.push(note);
+      }
+      // Datetimes: normalised to the UTC instant at plan time. A cell no
+      // parser understands is left raw so the existing validation below
+      // reports it as a row error, same as the generic path.
+      for (const field of ['starts_at', 'ends_at'] as const) {
+        const raw = values[field];
+        if (raw === undefined) continue;
+        const iso = sessionboardWhen(raw, timezone);
+        if (iso) values[field] = iso;
+      }
+    });
+  }
 
   const clientIds = records.map((r) => r.client_session_id).filter(Boolean) as string[];
   const codes = records.map((r) => r.code).filter(Boolean) as string[];
@@ -428,6 +560,60 @@ export async function planSessions(
   const trackByName = new Map(trackRows.map((t) => [t.name.toLowerCase(), t.id]));
   const roomByName = new Map(roomRows.map((r) => [r.name.toLowerCase(), r.id]));
 
+  // Speaker linking (§5.2) — any source, whenever the `speakers` field is
+  // mapped (the generic catalogue has no such field, so generic mappings never
+  // bind it). Lookups are batched across the whole file: emails resolve by
+  // lower(email) in the event's ORG (same pool planContacts matches against),
+  // names by exact case-insensitive whitespace-collapsed full-name match,
+  // accepted only when exactly one org contact matches. Never a fuzzy guess.
+  const speakerCells = records.map((r) => (r.speakers !== undefined ? parseSpeakerCell(r.speakers) : null));
+  const emailToContact = new Map<string, string>();
+  const nameToContact = new Map<string, { id: string; count: number }>();
+  {
+    const wantedEmails = new Set<string>();
+    const wantedNames = new Set<string>();
+    for (const cell of speakerCells) {
+      for (const entry of cell ?? []) {
+        if (entry.kind === 'email') wantedEmails.add(entry.value);
+        else wantedNames.add(entry.value.toLowerCase());
+      }
+    }
+    for (const row of await lookupBy<{ id: string; email: string }>(
+      ctx.db,
+      (p) => `SELECT id, lower(email) AS email FROM contacts
+               WHERE org_id = (SELECT org_id FROM events WHERE id = ?) AND lower(email) IN (${p})`,
+      [ctx.eventId],
+      [...wantedEmails],
+    )) {
+      emailToContact.set(row.email, row.id);
+    }
+    for (const row of await lookupBy<{ id: string; full_name: string; n: number }>(
+      ctx.db,
+      (p) => `SELECT MIN(id) AS id, COUNT(*) AS n,
+                     lower(trim(COALESCE(first_name, '') || ' ' || COALESCE(last_name, ''))) AS full_name
+                FROM contacts
+               WHERE org_id = (SELECT org_id FROM events WHERE id = ?)
+                 AND lower(trim(COALESCE(first_name, '') || ' ' || COALESCE(last_name, ''))) IN (${p})
+               GROUP BY full_name`,
+      [ctx.eventId],
+      [...wantedNames],
+    )) {
+      nameToContact.set(row.full_name, { id: row.id, count: row.n });
+    }
+  }
+
+  // Tags (G9): matched by name against the event's tag library; unknown names
+  // are reported in `newTags` and created on commit, mirroring tracks/rooms.
+  const tagByName = new Map<string, string>();
+  const newTags: string[] = [];
+  if (records.some((r) => r.tags !== undefined)) {
+    const { results: tagRows } = await ctx.db
+      .prepare('SELECT id, name FROM tags WHERE event_id = ?')
+      .bind(ctx.eventId)
+      .all<{ id: string; name: string }>();
+    for (const t of tagRows) tagByName.set(t.name.toLowerCase(), t.id);
+  }
+
   const newTracks: string[] = [];
   const newRooms: string[] = [];
   const summary = emptySummary();
@@ -435,6 +621,7 @@ export async function planSessions(
 
   const rows: PlannedRow[] = records.map((values, index) => {
     const errors: string[] = [];
+    const rowNotes = notes[index] ?? [];
     const title = values.title ?? '';
     if (!title) errors.push('Title is required');
     if (values.status && !SUBMISSION_STATUSES.has(values.status)) {
@@ -456,6 +643,7 @@ export async function planSessions(
     let action: RowAction;
     let message: string | null = null;
     let targetId: string | null = null;
+    let speakerLinks: { contactId: string; label: string }[] | null = null;
 
     if (errors.length > 0) {
       action = 'error';
@@ -491,6 +679,50 @@ export async function planSessions(
             : `New room "${roomName}" will be created`;
         }
       }
+      // Tags: unknown names will be created on commit (mirrors tracks/rooms).
+      for (const tagName of values.tags !== undefined ? splitMulti(values.tags) : []) {
+        if (!tagByName.has(tagName.toLowerCase()) && !newTags.some((n) => n.toLowerCase() === tagName.toLowerCase())) {
+          newTags.push(tagName);
+        }
+      }
+      // Speakers: resolved links land on the row; unresolved or ambiguous
+      // fragments degrade to a warning — never an error, never a guess (§5.2).
+      const cell = speakerCells[index];
+      if (cell) {
+        speakerLinks = [];
+        for (const entry of cell) {
+          if (entry.kind === 'email') {
+            const id = emailToContact.get(entry.value);
+            if (id) {
+              speakerLinks.push({ contactId: id, label: entry.value });
+            } else {
+              rowNotes.push(`speaker '${entry.value}' not found`);
+              const line = `speaker '${entry.value}' not found`;
+              if (!warnings.includes(line)) warnings.push(line);
+            }
+          } else {
+            const match = nameToContact.get(entry.value.toLowerCase());
+            if (match && match.count === 1) {
+              speakerLinks.push({ contactId: match.id, label: entry.value });
+            } else if (match) {
+              rowNotes.push(`speaker '${entry.value}' matches multiple contacts — not linked`);
+              const line = `speaker '${entry.value}' matches multiple contacts — not linked`;
+              if (!warnings.includes(line)) warnings.push(line);
+            } else {
+              rowNotes.push(`speaker '${entry.value}' not found`);
+              const line = `speaker '${entry.value}' not found`;
+              if (!warnings.includes(line)) warnings.push(line);
+            }
+          }
+        }
+        if (speakerLinks.length === 0) speakerLinks = null;
+      }
+    }
+
+    // Informational notes (degraded status, unresolved speakers) join the row
+    // message — they are context, not errors, so error rows keep errors[0].
+    if (action !== 'error' && rowNotes.length > 0) {
+      message = [message, ...rowNotes].filter(Boolean).join('; ');
     }
 
     summary[action] += 1;
@@ -498,18 +730,30 @@ export async function planSessions(
     return {
       row: index + 1, action, message, errors,
       label: title || values.code || '(untitled)', values, targetId, mergeFields: null,
+      speakerLinks,
+      extra: source === 'sessionboard' ? collectExtra(headers, dataRows[index] ?? [], mapping) : null,
     };
   });
 
+  // Missing upsert key (§9.2): loud, and first in the list.
+  if (source === 'sessionboard' && !mapping.includes('client_session_id')) {
+    warnings.unshift(
+      'No Session ID column mapped — every row will create a new session; re-running this import will duplicate.',
+    );
+  }
+
   return {
     target: 'sessions',
+    source,
     headers,
     mapping,
     rows,
     summary,
     newTracks,
     newRooms,
+    newTags,
     unmapped: headers.filter((_h, i) => !mapping[i]),
+    ...(warnings.length > 0 ? { warnings } : {}),
   };
 }
 
@@ -561,6 +805,7 @@ export async function planContacts(
   dataRows: string[][],
   mapping: string[],
 ): Promise<ImportPlan> {
+  const source = ctx.source ?? 'generic';
   const records = dataRows.map((row) => applyMapping(headers, row, mapping));
   const emails = records
     .map((r) => (r.email ?? '').toLowerCase())
@@ -668,17 +913,23 @@ export async function planContacts(
 
     summary[action] += 1;
     summary.total += 1;
-    return { row: index + 1, action, message, errors, label, values, targetId, mergeFields };
+    return {
+      row: index + 1, action, message, errors, label, values, targetId, mergeFields,
+      speakerLinks: null,
+      extra: source === 'sessionboard' ? collectExtra(headers, dataRows[index] ?? [], mapping) : null,
+    };
   });
 
   return {
     target: 'contacts',
+    source,
     headers,
     mapping,
     rows,
     summary,
     newTracks: [],
     newRooms: [],
+    newTags: [],
     unmapped: headers.filter((_h, i) => !mapping[i]),
   };
 }
@@ -702,21 +953,40 @@ export function planImport(
 /** Sentinels meaning "resolve this id from the name, inside the statement". */
 const TRACK_LOOKUP = Symbol('track_lookup') as unknown as string;
 const ROOM_LOOKUP = Symbol('room_lookup') as unknown as string;
+/** Sentinel: merge the row's `extra` JSON over what is already stored. */
+const EXTRA_MERGE = Symbol('extra_merge') as unknown as string;
 
 /**
  * Statements for a plan, in the order they must run. Callers hand the whole
  * array to `db.batch()`, which D1 runs as one implicit transaction — so an
  * import either lands whole or not at all, and the rooms/tracks a row depends
  * on are inserted earlier in the same batch than the row referencing them.
+ *
+ * `batchId` (workplan-11 §5.5): null means "no batch" and produces exactly
+ * today's SQL. Non-null stamps `import_batch_id` on every row this commit
+ * CREATES — new submissions, new event_contacts memberships (a contact
+ * `create`'s membership AND an `attach`'s membership both count: undo removes
+ * the membership, which is what this batch added), and every
+ * submission_participants link. Updated/merged rows are never stamped —
+ * undo does not revert them (v1: no per-column before-values).
+ * `createdContactIds` lists the org-level contacts rows this commit minted
+ * (contacts has no import_batch_id column); the route stores them in the
+ * batch's summary_json so undo can delete exactly those, orphan-guarded.
  */
 export function commitStatements(
   db: D1Database,
   eventId: string,
   plan: ImportPlan,
-): { statements: D1PreparedStatement[]; applied: Record<RowAction | 'total', number> } {
+  batchId: string | null = null,
+): {
+  statements: D1PreparedStatement[];
+  applied: Record<RowAction | 'total', number>;
+  createdContactIds: string[];
+} {
   const now = new Date().toISOString();
   const statements: D1PreparedStatement[] = [];
   const applied = emptySummary();
+  const createdContactIds: string[] = [];
 
   if (plan.target === 'contacts') {
     const written = (row: PlannedRow, cols: readonly string[]): string[] =>
@@ -744,9 +1014,29 @@ export function commitStatements(
       );
     };
 
+    /**
+     * Columns appended to a membership INSERT beyond today's list: the `extra`
+     * JSON blob (§5.4) and the batch stamp (§5.5). Both empty on the generic
+     * path, so the generated SQL stays byte-for-byte what it was.
+     */
+    const membershipTail = (row: PlannedRow): { cols: string[]; binds: unknown[] } => {
+      const cols: string[] = [];
+      const binds: unknown[] = [];
+      if (row.extra) {
+        cols.push('extra');
+        binds.push(JSON.stringify(row.extra));
+      }
+      if (batchId) {
+        cols.push('import_batch_id');
+        binds.push(batchId);
+      }
+      return { cols, binds };
+    };
+
     for (const row of plan.rows) {
       if (row.action === 'create') {
         const contactId = crypto.randomUUID();
+        createdContactIds.push(contactId);
         const cols = ['email', ...identityOf(written(row, CONTACT_WRITABLE))];
         // The importer only ever knows an event, so org_id is derived in the
         // statement rather than read first.
@@ -762,17 +1052,23 @@ export function commitStatements(
         // so the insert and the attach are always a pair. Nothing to seed from:
         // this person is new to the whole org.
         const profile = profileOf(written(row, CONTACT_WRITABLE));
+        const tail = membershipTail(row);
+        const allCols = [...profile, ...tail.cols];
         statements.push(
           db
             .prepare(
-              `INSERT INTO event_contacts (event_id, contact_id, added_at, source${profile.length ? ', ' + profile.join(', ') : ''})
-               VALUES (?, ?, ?, 'import'${', ?'.repeat(profile.length)})`,
+              `INSERT INTO event_contacts (event_id, contact_id, added_at, source${allCols.length ? ', ' + allCols.join(', ') : ''})
+               VALUES (?, ?, ?, 'import'${', ?'.repeat(allCols.length)})`,
             )
-            .bind(eventId, contactId, now, ...profile.map((c) => row.values[c] ?? null)),
+            .bind(eventId, contactId, now, ...profile.map((c) => row.values[c] ?? null), ...tail.binds),
         );
       } else if (row.action === 'attach' && row.targetId) {
         const fills = row.mergeFields ?? [];
         const fill = (c: string): string | null => (fills.includes(c) ? row.values[c] ?? null : null);
+        const tail = membershipTail(row);
+        const tailColSql = tail.cols.length ? ', ' + tail.cols.join(', ') : '';
+        // Numbered placeholders continue after today's ?1..?7.
+        const tailExprSql = tail.cols.map((_c, i) => `, ?${8 + i}`).join('');
         // Mirrors db.contacts.attachToEvent — seed biography/company/job_title
         // from the contact's most recent event in the SAME org, never the
         // headshot (an event-scoped asset) and never notes (one team's private
@@ -784,9 +1080,9 @@ export function commitStatements(
             .prepare(
               `INSERT INTO event_contacts
                  (event_id, contact_id, biography, headshot_asset_id, company,
-                  job_title, notes, added_at, source)
+                  job_title, notes, added_at, source${tailColSql})
                SELECT ?1, ?2, COALESCE(prev.biography, ?4), NULL, COALESCE(prev.company, ?5),
-                      COALESCE(prev.job_title, ?6), ?7, ?3, 'import'
+                      COALESCE(prev.job_title, ?6), ?7, ?3, 'import'${tailExprSql}
                  FROM (SELECT ec.biography, ec.company, ec.job_title
                          FROM event_contacts ec
                          JOIN events e ON e.id = ec.event_id
@@ -799,7 +1095,7 @@ export function commitStatements(
                WHERE true
                ON CONFLICT (event_id, contact_id) DO NOTHING`,
             )
-            .bind(eventId, row.targetId, now, fill('biography'), fill('company'), fill('job_title'), fill('notes')),
+            .bind(eventId, row.targetId, now, fill('biography'), fill('company'), fill('job_title'), fill('notes'), ...tail.binds),
         );
         // No prior event to seed from (or the person was attached between the
         // preview and now): the INSERT…SELECT above produced no row, so this
@@ -809,26 +1105,34 @@ export function commitStatements(
           db
             .prepare(
               `INSERT INTO event_contacts
-                 (event_id, contact_id, biography, company, job_title, notes, added_at, source)
-               VALUES (?, ?, ?, ?, ?, ?, ?, 'import')
+                 (event_id, contact_id, biography, company, job_title, notes, added_at, source${tailColSql})
+               VALUES (?, ?, ?, ?, ?, ?, ?, 'import'${', ?'.repeat(tail.cols.length)})
                ON CONFLICT (event_id, contact_id) DO NOTHING`,
             )
-            .bind(eventId, row.targetId, fill('biography'), fill('company'), fill('job_title'), fill('notes'), now),
+            .bind(eventId, row.targetId, fill('biography'), fill('company'), fill('job_title'), fill('notes'), now, ...tail.binds),
         );
         pushIdentityFills(row, identityOf(fills));
       } else if (row.action === 'merge' && row.targetId && row.mergeFields?.length) {
         const profile = profileOf(row.mergeFields);
-        if (profile.length > 0) {
+        const sets = profile.map((c) => `${c} = ?`);
+        const binds: unknown[] = profile.map((c) => row.values[c] ?? null);
+        if (row.extra) {
+          // Merge-over on update: new keys win, old keys survive (json_patch
+          // is RFC-7396 — our values are always strings, never null).
+          sets.push(`extra = json_patch(COALESCE(extra, '{}'), ?)`);
+          binds.push(JSON.stringify(row.extra));
+        }
+        if (sets.length > 0) {
           // The planner read this event's event_contacts row, so it exists and
           // a plain UPDATE lands the profile fills. event_id here is both the
           // membership filter and the tenancy guard.
           statements.push(
             db
               .prepare(
-                `UPDATE event_contacts SET ${profile.map((c) => `${c} = ?`).join(', ')}
+                `UPDATE event_contacts SET ${sets.join(', ')}
                  WHERE event_id = ? AND contact_id = ?`,
               )
-              .bind(...profile.map((c) => row.values[c] ?? null), eventId, row.targetId),
+              .bind(...binds, eventId, row.targetId),
           );
         }
         pushIdentityFills(row, identityOf(row.mergeFields));
@@ -840,7 +1144,7 @@ export function commitStatements(
       applied[row.action] += 1;
       applied.total += 1;
     }
-    return { statements, applied };
+    return { statements, applied, createdContactIds };
   }
 
   // Sessions: the library rows first, so a row that names a brand-new track or
@@ -871,6 +1175,13 @@ export function commitStatements(
         .bind(id, eventId, name, now),
     );
   }
+  // Tags a row named that do not exist yet (G9). The link statements below
+  // resolve tag ids by name inside the same batch, so these must run first.
+  for (const name of plan.newTags) {
+    statements.push(
+      db.prepare('INSERT INTO tags (id, event_id, name) VALUES (?, ?, ?)').bind(crypto.randomUUID(), eventId, name),
+    );
+  }
 
   /** Column → bound value for the submission columns a session row writes. */
   const sessionColumns = (values: Record<string, string>): Record<string, unknown> => {
@@ -894,23 +1205,34 @@ export function commitStatements(
       continue;
     }
     const cols = sessionColumns(row.values);
+    // `extra` (§5.4): stored whole on create, merged over what is already
+    // there on update — new keys win, old keys survive (json_patch).
+    if (row.extra) cols.extra = row.action === 'update' ? EXTRA_MERGE : JSON.stringify(row.extra);
     // A track/room that already existed is resolved by a correlated subquery
     // rather than a pre-read: `?n` still binds the *name*, so the mapping from
     // name to id happens inside the same transaction as the write.
     const expr = (col: string, index: number): string => {
       if (cols[col] === TRACK_LOOKUP) return `(SELECT id FROM tracks WHERE event_id = ?1 AND lower(name) = lower(?${index}))`;
       if (cols[col] === ROOM_LOOKUP) return `(SELECT id FROM rooms WHERE event_id = ?1 AND lower(name) = lower(?${index}))`;
+      if (cols[col] === EXTRA_MERGE) return `json_patch(COALESCE(extra, '{}'), ?${index})`;
       return `?${index}`;
     };
     const bindFor = (col: string): unknown => {
       if (cols[col] === TRACK_LOOKUP) return row.values.track;
       if (cols[col] === ROOM_LOOKUP) return row.values.room;
+      if (cols[col] === EXTRA_MERGE) return JSON.stringify(row.extra);
       return cols[col];
     };
     const keys = Object.keys(cols);
 
+    // The submission id every dependent statement (participants, tag links)
+    // hangs off: known for updates, generated up front for creates.
+    const submissionId = row.action === 'update' && row.targetId ? row.targetId : crypto.randomUUID();
+
     if (row.action === 'update' && row.targetId) {
       // ?1 = event id, ?2 = target id, ?3 = updated_at, then the columns.
+      // Deliberately NOT stamped with the batch id: only created rows belong
+      // to a batch — undo never reverts an update.
       const sets = keys.map((col, i) => `${col} = ${expr(col, i + 4)}`);
       sets.push('updated_at = ?3');
       statements.push(
@@ -926,17 +1248,55 @@ export function commitStatements(
       // D1 rejects a bind list longer than the highest placeholder used.
       const codeExpr = `COALESCE(?5, ${nextSessionCodeSql('?1')})`;
       const valueExprs = keys.map((col, i) => expr(col, i + 6));
+      // Batch stamp appended after the value columns so the ?1..?5 layout —
+      // and, with batchId null, the whole statement — is unchanged.
+      const stampCol = batchId ? ', import_batch_id' : '';
+      const stampExpr = batchId ? `, ?${6 + keys.length}` : '';
       statements.push(
         db
           .prepare(
-            `INSERT INTO submissions (id, event_id, code, kind, status, source, created_at, updated_at${keys.length ? ', ' + keys.join(', ') : ''})
-             VALUES (?2, ?1, ${codeExpr}, 'session', ?4, 'import', ?3, ?3${valueExprs.length ? ', ' + valueExprs.join(', ') : ''})`,
+            `INSERT INTO submissions (id, event_id, code, kind, status, source, created_at, updated_at${keys.length ? ', ' + keys.join(', ') : ''}${stampCol})
+             VALUES (?2, ?1, ${codeExpr}, 'session', ?4, 'import', ?3, ?3${valueExprs.length ? ', ' + valueExprs.join(', ') : ''}${stampExpr})`,
           )
-          .bind(eventId, crypto.randomUUID(), now, status, row.values.code ?? null, ...keys.map(bindFor)),
+          .bind(eventId, submissionId, now, status, row.values.code ?? null, ...keys.map(bindFor), ...(batchId ? [batchId] : [])),
       );
     }
+
+    // Speaker links (§5.2): one participants row per resolved contact, in cell
+    // order. ON CONFLICT on the existing (submission_id, contact_id, role)
+    // uniqueness keeps re-imports single-linked.
+    for (const [position, link] of (row.speakerLinks ?? []).entries()) {
+      statements.push(
+        db
+          .prepare(
+            `INSERT INTO submission_participants (id, submission_id, contact_id, role, position${batchId ? ', import_batch_id' : ''})
+             VALUES (?, ?, ?, 'speaker', ?${batchId ? ', ?' : ''})
+             ON CONFLICT (submission_id, contact_id, role) DO NOTHING`,
+          )
+          .bind(crypto.randomUUID(), submissionId, link.contactId, position, ...(batchId ? [batchId] : [])),
+      );
+    }
+
+    // Tag links (G9): resolved by name inside the batch (the new tag rows were
+    // inserted above). INSERT OR IGNORE on the (submission_id, tag_id) primary
+    // key makes re-imports idempotent; LIMIT 1 guards against duplicate names
+    // in the library (tags has no uniqueness on name).
+    if (row.values.tags !== undefined) {
+      for (const tagName of splitMulti(row.values.tags)) {
+        statements.push(
+          db
+            .prepare(
+              `INSERT OR IGNORE INTO submission_tags (submission_id, tag_id)
+               SELECT ?1, id FROM tags WHERE event_id = ?2 AND lower(name) = lower(?3)
+               ORDER BY rowid LIMIT 1`,
+            )
+            .bind(submissionId, eventId, tagName),
+        );
+      }
+    }
+
     applied[row.action] += 1;
     applied.total += 1;
   }
-  return { statements, applied };
+  return { statements, applied, createdContactIds };
 }

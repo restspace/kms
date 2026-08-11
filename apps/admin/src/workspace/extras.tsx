@@ -199,6 +199,27 @@ const answerText = (json: string | null): string => {
 }
 
 /**
+ * Workplan 11 (G7/§5.4): `extra` is a nullable JSON-text column
+ * (`{original header: value}`) holding whatever columns an import left
+ * unmapped — "never discard data" without a queryable custom-fields system.
+ * Pure so it's cheaply unit-testable without mounting the panel; exported for
+ * that reason.
+ */
+export function parseExtraFields(extra: unknown): Array<[string, string]> {
+  if (typeof extra !== 'string' || extra.trim() === '') return []
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(extra)
+  } catch {
+    return []
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return []
+  return Object.entries(parsed as Record<string, unknown>)
+    .filter(([, v]) => v !== null && v !== undefined && v !== '')
+    .map(([k, v]) => [k, String(v)])
+}
+
+/**
  * One `<dt>`/`<dd>` pair. A `<dl>`'s valid children are `dt`/`dd` (optionally
  * grouped) *or* one or more `<div>` each holding `dt`s followed by `dd`s — the
  * previous `<span style="display:contents">` wrapper wasn't valid `<dl>`
@@ -525,6 +546,8 @@ export function SubmissionDetailPanel({ id, onEdit, onItemSaved }: {
   if (!detail) return <div className="detail-panel"><p style={{ color: 'var(--text-muted)' }}>Loading…</p></div>
 
   const s = detail.submission
+  // Workplan 11 (G7/§5.4): unmapped import columns, preserved read-only.
+  const extraFields = parseExtraFields(s.extra)
   const rating = detail.reviews.filter((r) => r.weighted_total !== null)
   const mean =
     rating.length > 0
@@ -622,6 +645,19 @@ export function SubmissionDetailPanel({ id, onEdit, onItemSaved }: {
             <DetailPair key={i} term={a.label}>{answerText(a.value_json)}</DetailPair>
           ))}
       </dl>
+
+      {extraFields.length > 0 && (
+        <>
+          {/* Workplan 11 (G7/§5.4): columns left unmapped on import, kept
+              read-only rather than silently discarded. */}
+          <h2 style={{ fontSize: 14 }}>Imported fields</h2>
+          <dl>
+            {extraFields.map(([k, v]) => (
+              <DetailPair key={k} term={k}>{v}</DetailPair>
+            ))}
+          </dl>
+        </>
+      )}
 
       <h2 style={{ fontSize: 14 }}>Internal notes</h2>
       <textarea

@@ -1131,6 +1131,10 @@ export const addAssignmentComment = (assignmentId: string, body: string) =>
 
 export type ImportTarget = 'sessions' | 'contacts'
 export type ImportRowAction = 'create' | 'update' | 'merge' | 'attach' | 'skip' | 'error'
+/** Workplan 11: chooses the source profile (header aliases, value normalisers,
+ *  speaker-link semantics) applied inside `planSessions`/`planContacts`.
+ *  Omitted on the wire = 'generic'. */
+export type ImportSource = 'generic' | 'sessionboard'
 
 export interface ImportField {
   key: string
@@ -1164,6 +1168,11 @@ export interface ImportPlan {
   rows_raw: string[][]
   fields: ImportField[]
   event_id: string
+  /** Workplan 11: top-level, plan-wide notes (e.g. "no Session ID column
+   *  mapped — re-running this import will duplicate sessions"), distinct from
+   *  the per-row `message`/`errors` already on `ImportPlanRow`. Absent on a
+   *  plan with nothing to flag. */
+  warnings?: string[]
 }
 
 /** First pass: upload the file, auto-map its headers and dry-run the result. */
@@ -1171,11 +1180,13 @@ export async function importPreviewFile(
   target: ImportTarget,
   eventId: string,
   file: File,
+  source?: ImportSource,
 ): Promise<ImportPlan> {
   const form = new FormData()
   form.set('target', target)
   form.set('event_id', eventId)
   form.set('file', file)
+  if (source) form.set('source', source)
   return request<ImportPlan>('/app/api/import/preview', { method: 'POST', body: form })
 }
 
@@ -1186,10 +1197,11 @@ export const importPreviewMapping = (
   headers: string[],
   rows: string[][],
   mapping: string[],
+  source?: ImportSource,
 ) =>
   request<ImportPlan>('/app/api/import/preview', {
     method: 'POST',
-    body: JSON.stringify({ target, event_id: eventId, headers, rows, mapping }),
+    body: JSON.stringify({ target, event_id: eventId, headers, rows, mapping, source }),
   })
 
 export const importCommit = (
@@ -1198,14 +1210,42 @@ export const importCommit = (
   headers: string[],
   rows: string[][],
   mapping: string[],
+  source?: ImportSource,
 ) =>
-  request<{ ok: boolean; summary: Record<string, number>; applied: Record<string, number> }>(
+  request<{ ok: boolean; summary: Record<string, number>; applied: Record<string, number>; batchId: string }>(
     '/app/api/import/commit',
     {
       method: 'POST',
-      body: JSON.stringify({ target, event_id: eventId, headers, rows, mapping }),
+      body: JSON.stringify({ target, event_id: eventId, headers, rows, mapping, source }),
     },
   )
+
+/** Workplan 11 (G8): the event's import history for an "undo"/"report" affordance. */
+export interface ImportBatch {
+  id: string
+  target: ImportTarget
+  source: ImportSource
+  filename: string | null
+  created_at: string
+  summary: Record<string, number>
+  undone_at: string | null
+}
+
+export const listImportBatches = (eventId: string) =>
+  request<{ batches: ImportBatch[] }>(`/app/api/import/batches?event_id=${encodeURIComponent(eventId)}`)
+
+/** Deletes only the rows this batch *created*; updated/merged rows are left as-is
+ *  (the confirm dialog at the call site must say so verbatim). */
+export const undoImportBatch = (batchId: string, eventId: string) =>
+  request<{ undone: { submissions: number; event_contacts: number; submission_participants: number } }>(
+    `/app/api/import/batches/${batchId}/undo`,
+    { method: 'POST', body: JSON.stringify({ event_id: eventId }) },
+  )
+
+/** CSV download of the batch's per-row action/message; plain link, not `request`
+ *  (browser-navigated download, same reasoning as the `/files/<id>` links elsewhere). */
+export const importBatchReportUrl = (batchId: string, eventId: string) =>
+  `/app/api/import/batches/${batchId}/report.csv?event_id=${encodeURIComponent(eventId)}`
 
 /**
  * ZIP of the current version of every file attached to the selected

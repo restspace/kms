@@ -185,11 +185,20 @@ The decisions a reviewer will most likely ask about, with the reasoning:
 - **Decision emails never leave via the API.** The status endpoint moves pipeline state only;
   batch notification stays an explicit admin action, so an automated status change can never
   email a speaker by surprise.
+- **Import from Sessionboard, scoped honestly.** The spreadsheet importer has a named
+  Sessionboard mode: their header spellings auto-map, statuses translate (unknown ones degrade
+  to pending with a note, never an error), `YYYY-MM-DD HH:mm` times are read in the event's
+  timezone, and a Speakers column links sessions to people — by email, or by exact-unique name
+  match only, because a false link is worse than a missing one. The promise is deliberately
+  narrow: people and sessions import cleanly; schedule and files are best-effort; everything
+  unmapped is preserved on the record ("Imported fields"), and every import can be undone in
+  one click (created records only — merges fill blanks and are left in place). Tasks and
+  evaluations do not import, because Sessionboard does not export them.
 
 ## Deliberately out of scope
 
 Dashboard builder/custom widgets, embeds and webhooks (specced in
-[docs/10](docs/10-api.md), cut for time), import, month-view agenda, and per-user record
+[docs/10](docs/10-api.md), cut for time), month-view agenda, and per-user record
 permissions. The cut list with ordering is in [docs/12 §1](docs/12-build-plan.md). The
 Airtable mirror, originally on that cut list, has since been built (one-way D1 → Airtable,
 off by default — see `tests/workplan-9-airtable-mirror.md` and docs/03 §2).

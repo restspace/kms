@@ -223,7 +223,7 @@ const RESOURCE_SPECS: Record<string, Omit<ResourceDef, 'fromSql'>> = {
     // participant at all (never invited to confirm — distinct from awaiting).
     selectSql: `SELECT c.*, ev.name AS event_name,
         ec.event_id, ec.biography, ec.headshot_asset_id, ec.company, ec.job_title,
-        ec.notes, ec.added_at, ec.source,
+        ec.notes, ec.added_at, ec.source, ec.extra,
         (SELECT json_group_object(d.key, v.value) FROM contact_field_values v
          JOIN contact_field_definitions d ON d.id = v.field_id
          WHERE v.contact_id = c.id AND d.event_id = ec.event_id) AS custom_fields_json,
@@ -2171,7 +2171,7 @@ async function contactWithCustomFields(
   return db
     .prepare(
       `SELECT c.*, ec.event_id, ec.biography, ec.headshot_asset_id, ec.company,
-              ec.job_title, ec.notes, ec.added_at, ec.source,
+              ec.job_title, ec.notes, ec.added_at, ec.source, ec.extra,
         (SELECT json_group_object(d.key, v.value) FROM contact_field_values v
          JOIN contact_field_definitions d ON d.id = v.field_id
          WHERE v.contact_id = c.id AND d.event_id = ec.event_id) AS custom_fields_json

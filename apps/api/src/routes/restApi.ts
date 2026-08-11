@@ -361,7 +361,7 @@ restApiRoutes.get('/events/:event_id/submissions/:id', async (c) => {
 const CONTACT_SELECT = `SELECT c.id, ec.event_id, c.email, c.first_name, c.last_name,
           c.salutation, c.honorific, c.pronouns, c.gender, c.mobile_phone, c.links,
           ec.biography, ec.headshot_asset_id, ec.company, ec.job_title, ec.notes,
-          ec.added_at, ec.source, c.created_at, c.updated_at
+          ec.extra, ec.added_at, ec.source, c.created_at, c.updated_at
      FROM contacts c
      JOIN event_contacts ec ON ec.contact_id = c.id AND ec.event_id = ?
     WHERE c.id = ?`;

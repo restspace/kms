@@ -137,3 +137,55 @@
   .import-compact-summary dt { color: var(--text-muted); }
   .import-compact-summary dd { margin: 0; overflow-wrap: anywhere; }
 }
+
+/* Workplan 11: source choice (generic vs Sessionboard), shown before the file input. */
+.import-source-choice {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px 12px;
+  margin: 0 0 12px;
+  display: flex;
+  gap: 16px;
+  align-items: center;
+}
+
+.import-source-choice legend {
+  padding: 0 4px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-label);
+  color: var(--text-muted);
+}
+
+.import-source-choice label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+}
+
+/* Plan-wide notes (e.g. no Session ID column mapped), distinct from the
+   per-row action/message already in the preview table. */
+.import-warnings {
+  border: 1px solid var(--danger);
+  border-radius: var(--radius);
+  padding: 8px 10px 8px 24px;
+  margin: 8px 0;
+  color: var(--danger);
+  font-size: 12px;
+}
+
+.import-warnings li {
+  margin: 2px 0;
+}
+
+.import-batch-outcome {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 8px;
+}
+
+.import-report-link {
+  font-size: 13px;
+}

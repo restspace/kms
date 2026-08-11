@@ -1,12 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { DesktopOnlyNotice } from '@kms/ui/desktop-only'
-import { ModalDialog } from '../components/dialogs'
+import { ModalDialog, appConfirm } from '../components/dialogs'
 import {
+  importBatchReportUrl,
   importCommit,
   importPreviewFile,
   importPreviewMapping,
+  undoImportBatch,
   type ImportPlan,
   type ImportRowAction,
+  type ImportSource,
   type ImportTarget,
 } from '../api'
 import './import.css'
@@ -39,6 +42,16 @@ const TARGET_LABEL: Record<ImportTarget, string> = {
   sessions: 'sessions',
   contacts: 'speakers',
 }
+
+/** Workplan 11 §5.1/6: the wizard's first choice, shown before a file is picked. */
+const SOURCE_GUIDANCE =
+  'Export from Sessionboard via Options → Export in each module. Import People first, then Sessions, ' +
+  'so speaker links resolve. Files without a Session ID column can be imported once, but re-running ' +
+  'them will duplicate sessions.'
+
+/** Exact text required at the undo confirm (§5.5): what undo does and does not revert. */
+const UNDO_CONFIRM_TEXT =
+  'Created records will be deleted; records that were updated or merged are not reverted.'
 
 const ACTION_LABEL: Record<ImportRowAction, string> = {
   create: 'Create',
@@ -77,6 +90,15 @@ function ImportWizard({ request, onClose }: { request: ImportRequest; onClose: (
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [result, setResult] = useState<Record<string, number> | null>(null)
+  /** Workplan 11: source profile, chosen before the file step and carried on
+   *  every subsequent preview/commit call. */
+  const [source, setSource] = useState<ImportSource>('generic')
+  /** Workplan 11 (G8): the commit's batch id, once known — drives the report
+   *  link and undo affordance shown alongside `result`. */
+  const [batchId, setBatchId] = useState<string | null>(null)
+  const [undoBusy, setUndoBusy] = useState(false)
+  const [undoError, setUndoError] = useState<string | null>(null)
+  const [undone, setUndone] = useState<{ submissions: number; event_contacts: number; submission_participants: number } | null>(null)
   const fileRef = useRef<HTMLInputElement | null>(null)
   const label = TARGET_LABEL[request.target]
 
@@ -98,7 +120,7 @@ function ImportWizard({ request, onClose }: { request: ImportRequest; onClose: (
   const onFile = (file: File | null) => {
     if (!file) return
     void run(async () => {
-      setPlan(await importPreviewFile(request.target, request.eventId, file))
+      setPlan(await importPreviewFile(request.target, request.eventId, file, source))
     })
   }
 
@@ -111,7 +133,7 @@ function ImportWizard({ request, onClose }: { request: ImportRequest; onClose: (
     })
     void run(async () => {
       setPlan(
-        await importPreviewMapping(request.target, request.eventId, plan.headers, plan.rows_raw, mapping),
+        await importPreviewMapping(request.target, request.eventId, plan.headers, plan.rows_raw, mapping, source),
       )
     })
   }
@@ -125,12 +147,33 @@ function ImportWizard({ request, onClose }: { request: ImportRequest; onClose: (
         plan.headers,
         plan.rows_raw,
         plan.mapping,
+        source,
       )
       setResult(res.applied)
+      setBatchId(res.batchId)
       if ((res.applied.total ?? 0) - (res.applied.error ?? 0) - (res.applied.skip ?? 0) > 0) {
         request.onImported?.()
       }
     })
+  }
+
+  const undo = () => {
+    if (!batchId) return
+    void (async () => {
+      const confirmed = await appConfirm(UNDO_CONFIRM_TEXT, { title: 'Undo import', confirmLabel: 'Undo', danger: true })
+      if (!confirmed) return
+      setUndoBusy(true)
+      setUndoError(null)
+      try {
+        const res = await undoImportBatch(batchId, request.eventId)
+        setUndone(res.undone)
+        request.onImported?.()
+      } catch (err) {
+        setUndoError(err instanceof Error ? err.message : 'The undo failed.')
+      } finally {
+        setUndoBusy(false)
+      }
+    })()
   }
 
   const writable = plan ? (plan.summary.create ?? 0) + (plan.summary.update ?? 0) + (plan.summary.merge ?? 0) : 0
@@ -172,6 +215,30 @@ function ImportWizard({ request, onClose }: { request: ImportRequest; onClose: (
             {result.update ?? 0} updated, {result.merge ?? 0} merged, {result.skip ?? 0} skipped,{' '}
             {result.error ?? 0} with errors.
           </p>
+          {batchId && (
+            <div className="import-batch-outcome">
+              <a
+                href={importBatchReportUrl(batchId, request.eventId)}
+                target="_blank"
+                rel="noopener"
+                className="import-report-link"
+              >
+                Download report (CSV)
+              </a>
+              {undone ? (
+                <p className="import-note">
+                  Undone: {undone.submissions} submission{undone.submissions === 1 ? '' : 's'},{' '}
+                  {undone.event_contacts} contact{undone.event_contacts === 1 ? '' : 's'},{' '}
+                  {undone.submission_participants} participant link{undone.submission_participants === 1 ? '' : 's'} removed.
+                </p>
+              ) : (
+                <button type="button" onClick={undo} disabled={undoBusy}>
+                  {undoBusy ? 'Undoing…' : 'Undo this import'}
+                </button>
+              )}
+              {undoError && <div className="import-error" role="alert">{undoError}</div>}
+            </div>
+          )}
         </div>
       ) : !plan ? (
         <div className="import-file-step">
@@ -183,6 +250,30 @@ function ImportWizard({ request, onClose }: { request: ImportRequest; onClose: (
           <p className="import-scope">
             Target event: <strong>{request.eventName}</strong>
           </p>
+          <fieldset className="import-source-choice" disabled={busy}>
+            <legend>Source</legend>
+            <label>
+              <input
+                type="radio"
+                name="import-source"
+                value="generic"
+                checked={source === 'generic'}
+                onChange={() => setSource('generic')}
+              />
+              Spreadsheet (generic)
+            </label>
+            <label>
+              <input
+                type="radio"
+                name="import-source"
+                value="sessionboard"
+                checked={source === 'sessionboard'}
+                onChange={() => setSource('sessionboard')}
+              />
+              Import from Sessionboard
+            </label>
+          </fieldset>
+          {source === 'sessionboard' && <p className="import-note">{SOURCE_GUIDANCE}</p>}
           <input
             ref={fileRef}
             type="file"
@@ -247,6 +338,13 @@ function ImportWizard({ request, onClose }: { request: ImportRequest; onClose: (
               Names not already in this event will be created:{' '}
               {[...plan.newTracks.map((t) => `track “${t}”`), ...plan.newRooms.map((r) => `room “${r}”`)].join(', ')}.
             </p>
+          )}
+          {plan.warnings && plan.warnings.length > 0 && (
+            <ul className="import-warnings" role="alert">
+              {plan.warnings.map((w, i) => (
+                <li key={i}>{w}</li>
+              ))}
+            </ul>
           )}
           <div className="import-preview" role="region" aria-label="Dry-run preview">
             <table>
