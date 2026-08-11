@@ -32,7 +32,9 @@ describe('Idempotency-Key', () => {
     const secondBody = await second.json() as { id: string; email: string };
     expect(secondBody).toEqual(firstBody);
 
-    const count = await env.DB.prepare('SELECT COUNT(*) AS n FROM contacts WHERE event_id = ?')
+    // Since 0015 event membership lives on event_contacts; the contact row it
+    // points at is org-level, so the per-event count is the one to assert.
+    const count = await env.DB.prepare('SELECT COUNT(*) AS n FROM event_contacts WHERE event_id = ?')
       .bind(eventId)
       .first<{ n: number }>();
     expect(count?.n).toBe(1);
@@ -58,7 +60,9 @@ describe('Idempotency-Key', () => {
     const body = await second.json() as { error: { code: string } };
     expect(body.error.code).toBe('idempotency_mismatch');
 
-    const count = await env.DB.prepare('SELECT COUNT(*) AS n FROM contacts WHERE event_id = ?')
+    // Since 0015 event membership lives on event_contacts; the contact row it
+    // points at is org-level, so the per-event count is the one to assert.
+    const count = await env.DB.prepare('SELECT COUNT(*) AS n FROM event_contacts WHERE event_id = ?')
       .bind(eventId)
       .first<{ n: number }>();
     expect(count?.n).toBe(1);

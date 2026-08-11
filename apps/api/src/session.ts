@@ -138,7 +138,8 @@ export async function getRevalidatedPrivilegedSession<E extends AppEnv>(
   if (!session || session.role === 'speaker') return session;
   const current = await c.env.DB.prepare(
     `SELECT eu.role FROM event_users eu
-     JOIN contacts ct ON ct.id = eu.contact_id AND ct.event_id = eu.event_id
+     JOIN contacts ct ON ct.id = eu.contact_id
+     JOIN event_contacts ec ON ec.contact_id = ct.id AND ec.event_id = eu.event_id
      WHERE eu.event_id = ? AND eu.contact_id = ?`,
   )
     .bind(session.eventId, session.contactId)

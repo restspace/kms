@@ -43,6 +43,9 @@ const ACTION_LABEL: Record<ImportRowAction, string> = {
   create: 'Create',
   update: 'Update',
   merge: 'Merge',
+  // Already in the organisation from another event: no contact is created, the
+  // person joins this event's roster (0015).
+  attach: 'Add to event',
   skip: 'Skip',
   error: 'Error',
 }
@@ -61,7 +64,7 @@ export function openImportWizard(request: ImportRequest): void {
 
 function summaryLine(plan: ImportPlan): string {
   const parts: string[] = []
-  for (const action of ['create', 'update', 'merge', 'skip', 'error'] as const) {
+  for (const action of ['create', 'update', 'merge', 'attach', 'skip', 'error'] as const) {
     const n = plan.summary[action] ?? 0
     if (n > 0) parts.push(`${n} ${action === 'error' ? (n === 1 ? 'error' : 'errors') : action}`)
   }

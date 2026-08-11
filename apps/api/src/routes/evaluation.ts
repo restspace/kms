@@ -6,6 +6,7 @@
 import { Hono } from 'hono';
 import type { Context } from 'hono';
 import { ALL_PARTICIPANT_ROLES } from '@kms/core';
+import { createDb } from '@kms/db';
 import type { AppEnv, Env } from '../env';
 import type { SendTemplatedArgs } from '../mailer';
 import { sendTemplated } from '../mailer';
@@ -498,8 +499,15 @@ evaluationRoutes.post('/submissions/:id/participants', async (c) => {
     .bind(submissionId, session.eventId)
     .first();
   if (!submission) return c.json({ error: 'not_found' }, 404);
-  const contact = await c.env.DB.prepare('SELECT id FROM contacts WHERE id = ? AND event_id = ?')
-    .bind(contactId, session.eventId)
+  // 0015: the join to event_contacts is the tenancy guard the old
+  // `contacts.event_id = ?` was — a contact from a sibling event in the same
+  // org must not be seatable on this event's submission.
+  const contact = await c.env.DB.prepare(
+    `SELECT c.id FROM contacts c
+     JOIN event_contacts ec ON ec.contact_id = c.id AND ec.event_id = ?
+     WHERE c.id = ?`,
+  )
+    .bind(session.eventId, contactId)
     .first();
   if (!contact) return c.json({ error: 'contact_not_found' }, 404);
 
@@ -625,12 +633,19 @@ evaluationRoutes.get('/submissions/:id/detail', async (c) => {
     db.prepare(
       `SELECT sp.id AS participant_id, sp.role, sp.position, sp.is_primary_contact, sp.confirmed_at, c.id AS contact_id,
               c.first_name, c.last_name, c.email,
-              CASE WHEN c.biography IS NOT NULL AND c.biography != '' THEN 1 ELSE 0 END AS has_bio,
-              CASE WHEN c.headshot_asset_id IS NOT NULL THEN 1 ELSE 0 END AS has_headshot,
-              c.headshot_asset_id AS headshot_asset_id
-       FROM submission_participants sp JOIN contacts c ON c.id = sp.contact_id
-       WHERE sp.submission_id = ? ORDER BY sp.position`,
-    ).bind(id).all(),
+              CASE WHEN ec.biography IS NOT NULL AND ec.biography != '' THEN 1 ELSE 0 END AS has_bio,
+              CASE WHEN ec.headshot_asset_id IS NOT NULL THEN 1 ELSE 0 END AS has_headshot,
+              ec.headshot_asset_id AS headshot_asset_id
+       FROM submission_participants sp
+       JOIN contacts c ON c.id = sp.contact_id
+       -- 0015: bio/headshot live on the event_contacts row for THIS event, so a
+       -- speaker who filled them in on another event in the org still reads as
+       -- incomplete here. LEFT so a participant with no membership row (which
+       -- should not happen) is still listed, just with both flags clear, rather
+       -- than silently dropping off the submission.
+       LEFT JOIN event_contacts ec ON ec.contact_id = c.id AND ec.event_id = ?2
+       WHERE sp.submission_id = ?1 ORDER BY sp.position`,
+    ).bind(id, session.eventId).all(),
     // Every review recorded against this submission in *any* round of this
     // event. It used to filter on `submissions.evaluation_plan_id`, which
     // since 0012 is only the legacy routing column: a submission routed to
@@ -1259,19 +1274,29 @@ evaluationRoutes.post('/evaluation/reviewers', async (c) => {
     : rawName.split(/\s+/).slice(1).join(' ');
 
   const ts = nowIso();
+  // 0015: dedupe scope is the ORG, not the event. A reviewer already known to
+  // a sibling event is the same person — reuse that identity and attach it to
+  // this event below, rather than minting a second contact the unique index on
+  // (org_id, lower(email)) would reject anyway.
+  const org = await db
+    .prepare('SELECT org_id FROM events WHERE id = ?')
+    .bind(session.eventId)
+    .first<{ org_id: string }>();
+  if (!org) return c.json({ error: 'not_found' }, 404);
+
   let contact = await db
-    .prepare('SELECT id, email, first_name, last_name FROM contacts WHERE event_id = ? AND lower(email) = ?')
-    .bind(session.eventId, email)
+    .prepare('SELECT id, email, first_name, last_name FROM contacts WHERE org_id = ? AND lower(email) = ?')
+    .bind(org.org_id, email)
     .first<{ id: string; email: string; first_name: string | null; last_name: string | null }>();
   const created = !contact;
   if (!contact) {
     const id = crypto.randomUUID();
     await db
       .prepare(
-        `INSERT INTO contacts (id, event_id, email, first_name, last_name, created_at, updated_at)
+        `INSERT INTO contacts (id, org_id, email, first_name, last_name, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?)`,
       )
-      .bind(id, session.eventId, email, first || null, last || null, ts, ts)
+      .bind(id, org.org_id, email, first || null, last || null, ts, ts)
       .run();
     contact = { id, email, first_name: first || null, last_name: last || null };
   } else if (first || last) {
@@ -1285,6 +1310,11 @@ evaluationRoutes.post('/evaluation/reviewers', async (c) => {
       .bind(first || null, last || null, ts, contact.id)
       .run();
   }
+
+  // Membership is its own row now: a contact with no event_contacts row exists
+  // in the org but appears on no roster at all. attachToEvent is idempotent and
+  // seeds this event's profile from their most recent event in the same org.
+  await createDb(c.env.DB).contacts.attachToEvent(session.eventId, contact.id, 'admin');
 
   await db
     .prepare(
@@ -1336,10 +1366,10 @@ evaluationRoutes.post('/evaluation/reviewers/:contactId/signin-link', async (c) 
     .prepare(
       `SELECT c.id, c.email, NULLIF(TRIM(COALESCE(c.first_name, '') || ' ' || COALESCE(c.last_name, '')), '') AS name
        FROM contacts c
-       JOIN event_users eu ON eu.contact_id = c.id AND eu.event_id = c.event_id
-       WHERE c.id = ? AND c.event_id = ?`,
+       JOIN event_users eu ON eu.contact_id = c.id AND eu.event_id = ?
+       WHERE c.id = ?`,
     )
-    .bind(c.req.param('contactId'), session.eventId)
+    .bind(session.eventId, c.req.param('contactId'))
     .first<{ id: string; email: string; name: string | null }>();
   if (!contact) return c.json({ error: 'not_found' }, 404);
 
@@ -1376,6 +1406,9 @@ evaluationRoutes.post('/evaluation/reviewers/:contactId/signin-link', async (c) 
     email: contact.email.toLowerCase(),
     event: { id: event.id, name: event.name },
     redirectTo: '/app',
+    // A reviewer invited from the evaluation screen was added by staff, not by
+    // the CFP — only matters when this call is the one that creates the roster row.
+    attachSource: 'admin',
   });
   return c.json({ ok: true, ...identity, dev_link: devLink, emailed: true });
 });

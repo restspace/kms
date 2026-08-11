@@ -150,9 +150,19 @@ describe('contacts custom-field values', () => {
     expect(res.status).toBe(400);
     expect(await res.json()).toEqual({ error: 'unknown_field', field: 'not_a_real_field' });
 
-    const row = await env.DB.prepare('SELECT id FROM contacts WHERE event_id = ? AND email = ?')
-      .bind(eventId, 'nope@example.com').first();
+    // A create would have written both halves of a 0015 contact: the org-level
+    // identity and this event's event_contacts row. Neither may exist.
+    const row = await env.DB.prepare(
+      `SELECT id FROM contacts
+        WHERE org_id = (SELECT org_id FROM events WHERE id = ?) AND email = ?`,
+    ).bind(eventId, 'nope@example.com').first();
     expect(row).toBeNull();
+    const roster = await env.DB.prepare(
+      `SELECT COUNT(*) AS n FROM event_contacts ec
+         JOIN contacts c ON c.id = ec.contact_id
+        WHERE ec.event_id = ? AND c.email = ?`,
+    ).bind(eventId, 'nope@example.com').first<{ n: number }>();
+    expect(roster?.n).toBe(0);
   });
 
   it('rejects a value outside a select field\'s options', async () => {

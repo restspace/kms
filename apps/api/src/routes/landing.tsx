@@ -57,13 +57,23 @@ export async function demoLogins(db: D1Database): Promise<DemoLogins | null> {
   // (there is no one to greet as). Requiring a real name pins the advertised
   // login to an actual person, so the emailed/displayed identity here always
   // matches the contact the session and its portal display name resolve to.
+  //
+  // Post-0015 the contact row itself is org-wide, so all three conditions are
+  // pinned to this event explicitly: `event_contacts` is the membership filter
+  // `contacts.event_id` used to be, and the two subqueries would otherwise see
+  // submissions and roles the person holds at OTHER events in the same org —
+  // which could advertise a login for someone who is not a speaker here, or
+  // hide the real one because they happen to be an organiser elsewhere.
   const speaker = await db
     .prepare(
-      `SELECT c.email FROM contacts c
-       WHERE c.event_id = ?
+      `SELECT c.email FROM event_contacts ec
+       JOIN contacts c ON c.id = ec.contact_id
+       WHERE ec.event_id = ?1
          AND TRIM(COALESCE(c.first_name, '') || COALESCE(c.last_name, '')) != ''
-         AND EXISTS (SELECT 1 FROM submissions s WHERE s.submitter_contact_id = c.id)
-         AND NOT EXISTS (SELECT 1 FROM event_users eu WHERE eu.contact_id = c.id)
+         AND EXISTS (SELECT 1 FROM submissions s
+                     WHERE s.submitter_contact_id = c.id AND s.event_id = ?1)
+         AND NOT EXISTS (SELECT 1 FROM event_users eu
+                         WHERE eu.contact_id = c.id AND eu.event_id = ?1)
        ORDER BY c.created_at, c.email LIMIT 1`,
     )
     .bind(event.id)
@@ -280,13 +290,19 @@ async function loadAgendaFeed(db: D1Database, slug: string) {
       .then((r) => r.results),
     db
       .prepare(
+        // ec carries the per-event profile (0015): title/company are whatever
+        // this speaker published for THIS event, never another event's copy.
+        // LEFT JOIN because the tenancy guard here is s.event_id — a
+        // participant with no roster row should still be listed, just without
+        // a title/company.
         `SELECT sp.submission_id, c.id AS contact_id,
                 TRIM(COALESCE(c.first_name, '') || ' ' || COALESCE(c.last_name, '')) AS name,
-                c.job_title, c.company
+                ec.job_title, ec.company
          FROM submission_participants sp
          JOIN contacts c ON c.id = sp.contact_id
          JOIN submissions s ON s.id = sp.submission_id
-         WHERE s.event_id = ? AND s.status = 'accepted' AND s.content_approved = 1
+         LEFT JOIN event_contacts ec ON ec.contact_id = c.id AND ec.event_id = ?1
+         WHERE s.event_id = ?1 AND s.status = 'accepted' AND s.content_approved = 1
            AND s.starts_at IS NOT NULL AND s.ends_at IS NOT NULL
          ORDER BY sp.position`,
       )
@@ -403,14 +419,21 @@ landingRoutes.get('/e/:slug/speakers.json', async (c) => {
   // never exposed — only the URL, and only when the contact actually has one.
   const { results } = await db
     .prepare(
-      `SELECT c.id AS contact_id, c.first_name, c.last_name, c.biography, c.company, c.job_title,
-              c.headshot_asset_id, s.id AS submission_id, s.title AS submission_title,
+      // bio/company/job_title/headshot come from event_contacts pinned to this
+      // event (0015): the same person can speak at several events in the org
+      // with a different profile at each, and this feed must publish only the
+      // one they wrote for the event being rendered. LEFT JOIN because
+      // s.event_id is the tenancy guard — a participant missing a roster row
+      // still appears, with an empty profile.
+      `SELECT c.id AS contact_id, c.first_name, c.last_name, ec.biography, ec.company, ec.job_title,
+              ec.headshot_asset_id, s.id AS submission_id, s.title AS submission_title,
               s.starts_at AS submission_starts_at, s.ends_at AS submission_ends_at, r.name AS room_name
        FROM submission_participants sp
        JOIN contacts c ON c.id = sp.contact_id
        JOIN submissions s ON s.id = sp.submission_id
+       LEFT JOIN event_contacts ec ON ec.contact_id = c.id AND ec.event_id = ?1
        LEFT JOIN rooms r ON r.id = s.room_id
-       WHERE s.event_id = ? AND s.status = 'accepted' AND s.content_approved = 1
+       WHERE s.event_id = ?1 AND s.status = 'accepted' AND s.content_approved = 1
          AND s.starts_at IS NOT NULL AND s.ends_at IS NOT NULL
        ORDER BY sp.position`,
     )

@@ -36,11 +36,17 @@ export async function resolveFileAccess(
   if (actor.role === 'reviewer') {
     const row = await db
       .prepare(
+        // The headshot pointer is per-event (event_contacts), which is exactly
+        // the scoping this guard wants: a reviewer sees a participant's headshot
+        // for THIS event only. The submissions join pins the participation to
+        // the same event — without it a contact's participation in another event
+        // in the org would satisfy the check.
         `SELECT 1 AS ok
-         FROM contacts ct
-         JOIN submission_participants sp ON sp.contact_id = ct.id
+         FROM event_contacts ec
+         JOIN submission_participants sp ON sp.contact_id = ec.contact_id
+         JOIN submissions s ON s.id = sp.submission_id AND s.event_id = ?2
          JOIN review_assignments ra ON ra.submission_id = sp.submission_id
-         WHERE ct.headshot_asset_id = ?1 AND ct.event_id = ?2 AND ra.reviewer_contact_id = ?3
+         WHERE ec.headshot_asset_id = ?1 AND ec.event_id = ?2 AND ra.reviewer_contact_id = ?3
          LIMIT 1`,
       )
       .bind(assetId, actor.eventId, actor.contactId)
@@ -49,10 +55,17 @@ export async function resolveFileAccess(
   }
 
   // Speaker: any of the four ownership relations grants access.
+  //
+  // All four key on contactId, which since 0015 is an ORG-level id rather than
+  // an event-level one. What keeps them event-safe is files.ts calling
+  // loadFile(env, id, session.eventId) first, so ?1 is already known to belong
+  // to the actor's event. That is an implicit coupling between two files, so the
+  // headshot relation — the only one that reads a contact-owned pointer rather
+  // than the asset itself — now carries its own event predicate as well.
   const row = await db
     .prepare(
       `SELECT 1 AS ok FROM (
-         SELECT 1 FROM contacts WHERE id = ?2 AND headshot_asset_id = ?1
+         SELECT 1 FROM event_contacts WHERE contact_id = ?2 AND headshot_asset_id = ?1 AND event_id = ?3
          UNION ALL
          SELECT 1 FROM file_assets WHERE id = ?1 AND uploaded_by_contact_id = ?2
          UNION ALL
@@ -61,7 +74,7 @@ export async function resolveFileAccess(
          SELECT 1 FROM task_assignments WHERE response_id = ?1 AND contact_id = ?2
        ) LIMIT 1`,
     )
-    .bind(assetId, actor.contactId)
+    .bind(assetId, actor.contactId, actor.eventId)
     .first<{ ok: number }>();
   return row !== null;
 }

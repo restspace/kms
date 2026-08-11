@@ -22,7 +22,9 @@ export async function seedEvent(
   }> = {},
 ): Promise<string> {
   const id = overrides.id ?? uid('evt');
-  const orgId = await createOrg(overrides.org_id ?? 'org-test-1');
+  // Own org per event unless the caller names one — see the note in fixtures.ts:
+  // contacts are unique per (org, email) and storage persists across it() blocks.
+  const orgId = await createOrg(overrides.org_id ?? uid('org'));
   await env.DB.prepare(
     `INSERT INTO events (id, org_id, name, slug, type, timezone, starts_at, ends_at,
                          default_submission_limit, agenda_published, created_at, updated_at)
@@ -43,19 +45,37 @@ export async function seedEvent(
 
 export async function seedContact(
   eventId: string,
-  overrides: Partial<{ id: string; email: string; first_name: string; last_name: string }> = {},
+  overrides: Partial<{
+    id: string; email: string; first_name: string; last_name: string;
+    biography: string; company: string; job_title: string; notes: string; headshot_asset_id: string;
+  }> = {},
 ): Promise<string> {
   const id = overrides.id ?? uid('con');
+  const event = await env.DB.prepare('SELECT org_id FROM events WHERE id = ?').bind(eventId).first<{ org_id: string }>();
+  if (!event) throw new Error(`seedContact: no event ${eventId}`);
   await env.DB.prepare(
-    `INSERT INTO contacts (id, event_id, email, first_name, last_name, created_at, updated_at)
+    `INSERT INTO contacts (id, org_id, email, first_name, last_name, created_at, updated_at)
      VALUES (?, ?, ?, ?, ?, ?, ?)`,
   ).bind(
     id,
-    eventId,
+    event.org_id,
     overrides.email ?? `${id}@example.com`,
     overrides.first_name ?? 'Test',
     overrides.last_name ?? 'Person',
     ts,
+    ts,
+  ).run();
+  await env.DB.prepare(
+    `INSERT INTO event_contacts (event_id, contact_id, biography, headshot_asset_id, company, job_title, notes, added_at, source)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'admin')`,
+  ).bind(
+    eventId,
+    id,
+    overrides.biography ?? null,
+    overrides.headshot_asset_id ?? null,
+    overrides.company ?? null,
+    overrides.job_title ?? null,
+    overrides.notes ?? null,
     ts,
   ).run();
   return id;

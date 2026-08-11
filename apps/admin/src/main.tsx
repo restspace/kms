@@ -5,6 +5,7 @@ import './theme.css'
 import App from './App'
 import { DialogHost } from './components/dialogs'
 import { ImportWizardHost } from './workspace/ImportWizard'
+import { ContactPickerHost } from './workspace/contactOrg'
 
 // DataTabManager uses React Query for tab-count caching, so the provider must
 // wrap any screen that renders it.
@@ -16,6 +17,7 @@ createRoot(document.getElementById('root')!).render(
       <App />
       <DialogHost />
       <ImportWizardHost />
+      <ContactPickerHost />
     </QueryClientProvider>
   </StrictMode>,
 )

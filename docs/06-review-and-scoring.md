@@ -190,7 +190,8 @@ Decisions worth knowing:
   `source = 'import'`; a row carrying a start time lands `accepted`, one without lands `pending`.
 - **Rooms and tracks** arrive as *names*, matched case-insensitively against the event's library.
   Unknown names are **created** — listed up front in the preview so the dry run never hides a write.
-- **Speaker dedupe** is by lower-cased email within the event: a new email creates, a known email
+- **Speaker dedupe** is by lower-cased email within the **organisation** (contacts are org-scoped
+  identity as of migration `0015`, not event-scoped) — a new email creates, a known email
   **merges fill-blanks only** (an existing non-empty value is never overwritten) and is reported as
   merged, or skipped when there is nothing blank to fill. Duplicate emails inside one file skip
   after the first.

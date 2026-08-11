@@ -16,6 +16,10 @@ Base URL: `/portal/<event-slug>` — reference screenshots 17, 18, 25–31.
   **Back to Admin Mode**, **Logout**.
 - Admins reach the portal through **View Portal** in the admin header; an impersonation banner
   is shown while active.
+- Contact identity is org-scoped (`docs/02` §2, migration `0015`): the same person is one record
+  across every event in the org. Portal *access* has not followed — the session still gates on a
+  single `eventId`, so a contact with rows on two events needs a separate login per event. Cross-
+  event portal access is unbuilt (see [15](15-winning-moves.md), Tier-2 item 5).
 
 ---
 

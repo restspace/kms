@@ -27,6 +27,7 @@ import {
   type RoutingConfig,
   type RoutingOutcome,
 } from '@kms/core';
+import { createDb } from '@kms/db';
 import { Page, SubmitPage, type SubmitBootstrap, type SubmitViewer } from '@kms/ui';
 import type { AppEnv } from '../env';
 import { attemptImmediate, prepareTemplated, sendTemplated, type PreparedEmail } from '../mailer';
@@ -324,10 +325,17 @@ submitRoutes.get('/:slug/:formId', async (c) => {
   let viewer: SubmitViewer | null = null;
   const session = await getSession(c);
   if (session && session.eventId === event.id) {
+    // Identity from contacts, biography from this event's profile row (0015).
+    // LEFT JOIN, not JOIN: the contact id comes from a verified session, so a
+    // person who has no membership row here yet still gets their name
+    // prefilled — they simply have no bio *for this event* to prefill with.
     const contact = await c.env.DB.prepare(
-      'SELECT email, first_name, last_name, mobile_phone, biography FROM contacts WHERE id = ?',
+      `SELECT c.email, c.first_name, c.last_name, c.mobile_phone, ec.biography
+         FROM contacts c
+         LEFT JOIN event_contacts ec ON ec.contact_id = c.id AND ec.event_id = ?
+        WHERE c.id = ?`,
     )
-      .bind(session.contactId)
+      .bind(event.id, session.contactId)
       .first<{ email: string; first_name: string | null; last_name: string | null; mobile_phone: string | null; biography: string | null }>();
     if (contact) {
       const [count, draft] = await Promise.all([
@@ -443,25 +451,35 @@ submitRoutes.post('/:slug/:formId/account', async (c) => {
   const ts = new Date().toISOString();
   const redirectTo = `/submit/${ctx.event.slug}/${ctx.form.id}`;
 
+  // Dedupe scope is the ORGANISATION as of 0015, so "already registered" now
+  // includes a person known from another event in the same org. The org id is
+  // derived rather than carried on EventRow (contract: never assume one org).
   const inserted = await db
     .prepare(
-      `INSERT INTO contacts (id, event_id, email, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?)
-       ON CONFLICT (event_id, email) DO NOTHING
+      `INSERT INTO contacts (id, org_id, email, created_at, updated_at)
+       VALUES (?1, (SELECT org_id FROM events WHERE id = ?2), ?3, ?4, ?4)
+       ON CONFLICT (org_id, lower(email)) DO NOTHING
        RETURNING id`,
     )
-    .bind(crypto.randomUUID(), ctx.event.id, email, ts, ts)
+    .bind(crypto.randomUUID(), ctx.event.id, email, ts)
     .first<{ id: string }>();
 
   if (!inserted) {
     // A contact already exists for this email (self-registered before, added
-    // as a co-speaker by someone else, seeded demo data — the reason is
-    // deliberately not distinguished). Offer the normal sign-in path instead
-    // of auto-authenticating into a record that might not belong to whoever
-    // is typing.
+    // as a co-speaker by someone else, another event in this org, seeded demo
+    // data — the reason is deliberately not distinguished). Offer the normal
+    // sign-in path instead of auto-authenticating into a record that might not
+    // belong to whoever is typing. Deliberately NOT attached to this event
+    // either: an unauthenticated caller must not be able to add an org
+    // sibling to this event's roster by typing their address.
     const { devLink } = await requestMagicLink(c, { email, event: ctx.event, redirectTo });
     return c.json({ ok: true, status: 'existing', dev_link: devLink });
   }
+
+  // A contact that belongs to no event is a person who appears on no roster,
+  // so creation and attachment are always one unit (contract). 'cfp' records
+  // how they arrived; seeding is a no-op for an identity this new.
+  await createDb(db).contacts.attachToEvent(ctx.event.id, inserted.id, 'cfp');
 
   // Brand-new contact: no event_users row exists yet, so the session's role
   // resolves to the same 'speaker' default the portal already applies.
@@ -783,7 +801,9 @@ interface Recipient {
 
 /** Notification recipients must be *this event's* people (item 14): configured
  *  admin notifies additionally need a staff role, routing notifies only need a
- *  contact row with an address. Cross-event ids are silently dropped. */
+ *  contact row with an address. Cross-event ids are silently dropped — since
+ *  0015 that scoping comes from the join (event_users for staff, event_contacts
+ *  for the roster) rather than from a column on `contacts`. */
 async function resolveRecipients(
   db: D1Database,
   eventId: string,
@@ -797,8 +817,8 @@ async function resolveRecipients(
     const { results } = await db
       .prepare(
         `SELECT c.id, c.email, ${nameExpr} AS name FROM contacts c
-         JOIN event_users eu ON eu.contact_id = c.id AND eu.event_id = c.event_id
-         WHERE c.event_id = ? AND c.id IN (${placeholders})
+         JOIN event_users eu ON eu.contact_id = c.id AND eu.event_id = ?
+         WHERE c.id IN (${placeholders})
            AND eu.role IN ('owner', 'admin', 'reviewer')
            AND c.email IS NOT NULL AND c.email != ''`,
       )
@@ -811,7 +831,8 @@ async function resolveRecipients(
     const { results } = await db
       .prepare(
         `SELECT c.id, c.email, ${nameExpr} AS name FROM contacts c
-         WHERE c.event_id = ? AND c.id IN (${placeholders}) AND c.email IS NOT NULL AND c.email != ''`,
+         JOIN event_contacts ec ON ec.contact_id = c.id AND ec.event_id = ?
+         WHERE c.id IN (${placeholders}) AND c.email IS NOT NULL AND c.email != ''`,
       )
       .bind(eventId, ...routingIds)
       .all<Recipient>();
@@ -847,9 +868,17 @@ submitRoutes.post('/:slug/:formId/submit', async (c) => {
     return c.json({ error: 'validation_failed', errors: validation }, 400);
   }
 
+  // Same shape as the wizard prefill: identity org-wide, biography from this
+  // event's profile row, LEFT JOIN so a missing membership row is a missing
+  // bio rather than a failed authentication.
   const submitterContact = await db
-    .prepare('SELECT email, first_name, last_name, mobile_phone, biography FROM contacts WHERE id = ?')
-    .bind(session.contactId)
+    .prepare(
+      `SELECT c.email, c.first_name, c.last_name, c.mobile_phone, ec.biography
+         FROM contacts c
+         LEFT JOIN event_contacts ec ON ec.contact_id = c.id AND ec.event_id = ?
+        WHERE c.id = ?`,
+    )
+    .bind(ctx.event.id, session.contactId)
     .first<{ email: string; first_name: string | null; last_name: string | null; mobile_phone: string | null; biography: string | null }>();
   if (!submitterContact) return c.json({ error: 'unauthenticated' }, 401);
 
@@ -1270,22 +1299,27 @@ submitRoutes.post('/:slug/:formId/submit', async (c) => {
       const orNull = (v: string) => (v === '' ? null : v);
       // A submitter may initialise a new co-speaker record, but must not
       // overwrite another existing speaker's self-managed profile by knowing
-      // only their email address — hence the two COALESCE orders.
-      const merge = own
+      // only their email address — hence the two COALESCE orders. Since 0015
+      // the same rule has to hold across two tables: identity on `contacts`,
+      // biography on this event's `event_contacts` row.
+      const identityMerge = own
         ? `first_name = COALESCE(excluded.first_name, contacts.first_name),
            last_name = COALESCE(excluded.last_name, contacts.last_name),
-           mobile_phone = COALESCE(excluded.mobile_phone, contacts.mobile_phone),
-           biography = COALESCE(excluded.biography, contacts.biography)`
+           mobile_phone = COALESCE(excluded.mobile_phone, contacts.mobile_phone)`
         : `first_name = COALESCE(contacts.first_name, excluded.first_name),
            last_name = COALESCE(contacts.last_name, excluded.last_name),
-           mobile_phone = COALESCE(contacts.mobile_phone, excluded.mobile_phone),
-           biography = COALESCE(contacts.biography, excluded.biography)`;
+           mobile_phone = COALESCE(contacts.mobile_phone, excluded.mobile_phone)`;
+      // Same rule, applied twice: `seedBio` orders the typed biography against
+      // the profile carried over from another event in the org, `bioMerge`
+      // orders it against the one already stored for THIS event.
+      const seedBio = own ? 'COALESCE(?3, prev.biography)' : 'COALESCE(prev.biography, ?3)';
+      const bioMerge = own ? 'COALESCE(?3, biography)' : 'COALESCE(biography, ?3)';
       statements.push(
         db
           .prepare(
-            `INSERT INTO contacts (id, event_id, email, first_name, last_name, mobile_phone, biography, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)
-             ON CONFLICT (event_id, email) DO UPDATE SET ${merge}, updated_at = ?8`,
+            `INSERT INTO contacts (id, org_id, email, first_name, last_name, mobile_phone, created_at, updated_at)
+             VALUES (?1, (SELECT org_id FROM events WHERE id = ?2), ?3, ?4, ?5, ?6, ?7, ?7)
+             ON CONFLICT (org_id, lower(email)) DO UPDATE SET ${identityMerge}, updated_at = ?7`,
           )
           .bind(
             crypto.randomUUID(),
@@ -1294,9 +1328,54 @@ submitRoutes.post('/:slug/:formId/submit', async (c) => {
             orNull(p.identity.first_name),
             orNull(p.identity.last_name),
             orNull(p.identity.mobile_phone),
-            orNull(p.identity.biography),
             ts,
           ),
+      );
+      // Attach-and-seed, the SQL twin of db.contacts.attachToEvent (the helper
+      // itself cannot be called here — every write in this endpoint is one
+      // batch). A speaker returning from another event in the org is matched
+      // by the statement above and picks their newest profile up here rather
+      // than starting blank; the headshot is never seeded, it is an
+      // event-scoped asset. `prev` excludes this event so the seed can never
+      // read back the row being written.
+      //
+      // DO NOTHING, not DO UPDATE: the merge below has to compare the typed
+      // biography against the stored one, and a seeded `excluded` would let
+      // another event's bio win that comparison.
+      statements.push(
+        db
+          .prepare(
+            `INSERT INTO event_contacts
+               (event_id, contact_id, biography, company, job_title, added_at, source)
+             SELECT ?1, c.id, ${seedBio}, prev.company, prev.job_title, ?4, 'cfp'
+               FROM contacts c
+               JOIN events ev ON ev.id = ?1
+               LEFT JOIN event_contacts prev
+                 ON prev.contact_id = c.id
+                AND prev.event_id = (SELECT p2.event_id FROM event_contacts p2
+                                       JOIN events pe ON pe.id = p2.event_id
+                                      WHERE p2.contact_id = c.id
+                                        AND p2.event_id <> ?1
+                                        AND pe.org_id = ev.org_id
+                                      ORDER BY p2.added_at DESC LIMIT 1)
+              WHERE c.org_id = ev.org_id AND lower(c.email) = ?2
+             ON CONFLICT (event_id, contact_id) DO NOTHING`,
+          )
+          .bind(ctx.event.id, p.identity.email, orNull(p.identity.biography), ts),
+      );
+      // The profile half of the same two-COALESCE rule. The row is guaranteed
+      // to exist by the statement above, so this is an UPDATE rather than a
+      // second upsert.
+      statements.push(
+        db
+          .prepare(
+            `UPDATE event_contacts SET biography = ${bioMerge}
+              WHERE event_id = ?1
+                AND contact_id = (SELECT c.id FROM contacts c
+                                   WHERE c.org_id = (SELECT org_id FROM events WHERE id = ?1)
+                                     AND lower(c.email) = ?2)`,
+          )
+          .bind(ctx.event.id, p.identity.email, orNull(p.identity.biography)),
       );
       statements.push(
         db
@@ -1304,7 +1383,9 @@ submitRoutes.post('/:slug/:formId/submit', async (c) => {
             `INSERT INTO submission_participants
                (id, submission_id, contact_id, role, position, is_primary_contact, confirmed_at, answers_json)
              SELECT ?1, ?2, c.id, ?3, ?4, ?5, ?6, ?7 FROM contacts c
-             WHERE c.event_id = ?8 AND c.email = ?9
+             JOIN event_contacts ec ON ec.contact_id = c.id AND ec.event_id = ?8
+             WHERE c.org_id = (SELECT org_id FROM events WHERE id = ?8)
+               AND lower(c.email) = ?9
                AND EXISTS (SELECT 1 FROM submissions s WHERE s.id = ?2)`,
           )
           .bind(
@@ -1322,6 +1403,19 @@ submitRoutes.post('/:slug/:formId/submit', async (c) => {
       position += 1;
     }
     if (ctx.form.collect_participants !== 1) {
+      // No participant list to attach anyone from, so the submitter's own
+      // membership is asserted here: submitting to an event is exactly what
+      // puts you on its roster, and a submission whose speaker has no
+      // event_contacts row would be invisible to every roster-shaped query.
+      statements.push(
+        db
+          .prepare(
+            `INSERT INTO event_contacts (event_id, contact_id, added_at, source)
+             VALUES (?1, ?2, ?3, 'cfp')
+             ON CONFLICT (event_id, contact_id) DO NOTHING`,
+          )
+          .bind(ctx.event.id, session.contactId, ts),
+      );
       // Still record the submitter as the speaker so the anchor filter works.
       statements.push(
         db

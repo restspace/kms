@@ -200,13 +200,18 @@ embedRoutes.get('/e/:slug/agenda.xml', async (c) => {
       .then((r) => r.results),
     db
       .prepare(
+        // title/company live on event_contacts since 0015 — pinned to this
+        // event so an embed of one event never shows a speaker's profile from
+        // another event in the same org. LEFT JOIN: s.event_id is the tenancy
+        // guard, so a participant without a roster row still gets listed.
         `SELECT sp.submission_id,
                 TRIM(COALESCE(c.first_name, '') || ' ' || COALESCE(c.last_name, '')) AS name,
-                c.job_title, c.company
+                ec.job_title, ec.company
          FROM submission_participants sp
          JOIN contacts c ON c.id = sp.contact_id
          JOIN submissions s ON s.id = sp.submission_id
-         WHERE s.event_id = ? AND s.status = 'accepted' AND s.content_approved = 1
+         LEFT JOIN event_contacts ec ON ec.contact_id = c.id AND ec.event_id = ?1
+         WHERE s.event_id = ?1 AND s.status = 'accepted' AND s.content_approved = 1
            AND s.starts_at IS NOT NULL AND s.ends_at IS NOT NULL
          ORDER BY sp.position`,
       )

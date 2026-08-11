@@ -16,6 +16,7 @@ import { sha256Hex } from '../hashing';
 import { decodeCursor, encodeCursor, keysetWhere, type CursorPayload } from '../cursor';
 import { bumpEventRevision } from '../revision';
 import { isValidEmailShape } from '@kms/core';
+import { createDb } from '@kms/db';
 
 interface RestAuth {
   via: 'token' | 'session';
@@ -348,13 +349,27 @@ restApiRoutes.get('/events/:event_id/submissions/:id', async (c) => {
   });
 });
 
+// Every contact read in this file goes through this: since 0015 the join to
+// event_contacts is BOTH the tenancy guard and the source of the profile
+// columns, so a query that drops it loses the columns it came for rather than
+// silently widening from event to org. Columns are listed explicitly because
+// the two tables read alike at a glance. Binds (event_id, contact_id).
+//
+// `event_id` stays on the response — it now comes from event_contacts — so the
+// public shape is unchanged.
+const CONTACT_SELECT = `SELECT c.id, ec.event_id, c.email, c.first_name, c.last_name,
+          c.salutation, c.honorific, c.pronouns, c.gender, c.mobile_phone, c.links,
+          ec.biography, ec.headshot_asset_id, ec.company, ec.job_title, ec.notes,
+          ec.added_at, ec.source, c.created_at, c.updated_at
+     FROM contacts c
+     JOIN event_contacts ec ON ec.contact_id = c.id AND ec.event_id = ?
+    WHERE c.id = ?`;
+
 // GET /events/:event_id/contacts/:id
 restApiRoutes.get('/events/:event_id/contacts/:id', async (c) => {
   const id = c.req.param('id');
   if (id === 'export') return handleExport(c, 'contacts');
-  const contact = await c.env.DB.prepare('SELECT * FROM contacts WHERE id = ? AND event_id = ?')
-    .bind(id, c.get('event').id)
-    .first();
+  const contact = await c.env.DB.prepare(CONTACT_SELECT).bind(c.get('event').id, id).first();
   if (!contact) return apiError(c, 404, 'not_found', 'No contact with this id in this event.');
   return c.json(contact);
 });
@@ -387,10 +402,18 @@ restApiRoutes.post('/events/:event_id/submissions/:id/status', async (c) => {
 // adminApi.ts's CONTACT_FIELDS, which is under concurrent edit elsewhere.
 // ---------------------------------------------------------------------------
 
-const CONTACT_FIELDS = [
-  'email', 'first_name', 'last_name', 'company', 'job_title',
-  'mobile_phone', 'biography', 'pronouns',
-] as const;
+// 0015 split these over two tables: identity on the org-level `contacts` row,
+// profile on the per-event `event_contacts` row. The request body keeps one
+// flat shape — the split is a write-side concern only.
+const CONTACT_IDENTITY_FIELDS = ['email', 'first_name', 'last_name', 'mobile_phone', 'pronouns'] as const;
+const CONTACT_PROFILE_FIELDS = ['company', 'job_title', 'biography'] as const;
+const CONTACT_FIELDS = [...CONTACT_IDENTITY_FIELDS, ...CONTACT_PROFILE_FIELDS] as const;
+
+/** The provided fields belonging to one of the two tables, in whitelist order. */
+const columnsFor = (
+  fields: Record<string, string | null>,
+  whitelist: readonly string[],
+): string[] => whitelist.filter((f) => f in fields);
 
 function pickContactFields(raw: unknown): { fields: Record<string, string | null>; errors: FieldError[] } {
   const body = (raw ?? {}) as Record<string, unknown>;
@@ -412,29 +435,65 @@ function pickContactFields(raw: unknown): { fields: Record<string, string | null
 
 // POST /events/:event_id/contacts
 restApiRoutes.post('/events/:event_id/contacts', async (c) => {
-  const eventId = c.get('event').id;
+  const event = c.get('event');
+  const eventId = event.id;
   const { fields, errors } = pickContactFields(await readBody(c));
   if (!fields.email) errors.unshift({ field: 'email', message: 'email is required.' });
   if (errors.length > 0) return validationError(c, errors);
 
-  const id = crypto.randomUUID();
   const ts = new Date().toISOString();
-  const cols = Object.keys(fields);
+  const db = createDb(c.env.DB);
   try {
-    await c.env.DB.prepare(
-      `INSERT INTO contacts (id, event_id, created_at, updated_at, ${cols.join(', ')})
-       VALUES (?, ?, ?, ?${', ?'.repeat(cols.length)})`,
+    // Dedupe scope moved from UNIQUE (event_id, email) to (org_id, lower(email))
+    // in 0015, so the person may already exist through a sibling event. The
+    // upsert is a no-op in that case, and 409 stays reserved for exactly what it
+    // meant before — this email is already on THIS event's roster. An org
+    // sibling is attached here rather than rejected.
+    const contact = await db.contacts.upsertByEmail(event.org_id, fields.email!);
+    const onRoster = await c.env.DB.prepare(
+      'SELECT 1 FROM event_contacts WHERE event_id = ? AND contact_id = ?',
     )
-      .bind(id, eventId, ts, ts, ...cols.map((k) => fields[k]))
-      .run();
+      .bind(eventId, contact.id)
+      .first();
+    if (onRoster) {
+      return apiError(c, 409, 'email_exists', 'A contact with this email already exists in this event.');
+    }
+
+    // Identity is org-level and shared across the org's events; the supplied
+    // values are still written so the response echoes what the client sent.
+    const identityCols = columnsFor(fields, CONTACT_IDENTITY_FIELDS);
+    if (identityCols.length > 0) {
+      await c.env.DB.prepare(
+        `UPDATE contacts SET ${identityCols.map((k) => `${k} = ?`).join(', ')}, updated_at = ?
+         WHERE id = ?`,
+      )
+        .bind(...identityCols.map((k) => fields[k]), ts, contact.id)
+        .run();
+    }
+
+    // Create and attach are one operation: a contact with no event_contacts row
+    // is a person who exists but appears on no roster. attachToEvent seeds the
+    // profile from their most recent event in this org; the explicit fields
+    // below overwrite that seed wherever the request supplied them.
+    await db.contacts.attachToEvent(eventId, contact.id, 'admin');
+    const profileCols = columnsFor(fields, CONTACT_PROFILE_FIELDS);
+    if (profileCols.length > 0) {
+      await c.env.DB.prepare(
+        `UPDATE event_contacts SET ${profileCols.map((k) => `${k} = ?`).join(', ')}
+         WHERE event_id = ? AND contact_id = ?`,
+      )
+        .bind(...profileCols.map((k) => fields[k]), eventId, contact.id)
+        .run();
+    }
+
+    await bumpEventRevision(c.env, eventId);
+    const row = await c.env.DB.prepare(CONTACT_SELECT).bind(eventId, contact.id).first();
+    return c.json(row, 201);
   } catch (err) {
     const message = err instanceof Error ? err.message : '';
     if (message.includes('UNIQUE')) return apiError(c, 409, 'email_exists', 'A contact with this email already exists in this event.');
     throw err;
   }
-  await bumpEventRevision(c.env, eventId);
-  const row = await c.env.DB.prepare('SELECT * FROM contacts WHERE id = ?').bind(id).first();
-  return c.json(row, 201);
 });
 
 // PUT /events/:event_id/contacts/:cid
@@ -445,42 +504,78 @@ restApiRoutes.put('/events/:event_id/contacts/:cid', async (c) => {
   if ('email' in fields && !fields.email) errors.push({ field: 'email', message: 'email cannot be cleared.' });
   if (errors.length > 0) return validationError(c, errors);
 
-  const cols = Object.keys(fields);
-  if (cols.length > 0) {
-    try {
-      const result = await c.env.DB.prepare(
-        `UPDATE contacts SET ${cols.map((k) => `${k} = ?`).join(', ')}, updated_at = ?
-         WHERE id = ? AND event_id = ?`,
+  // The membership row is the tenancy guard: without one for this event the
+  // contact is an org sibling and not ours to edit through this route.
+  const onRoster = await c.env.DB.prepare(
+    'SELECT 1 FROM event_contacts WHERE event_id = ? AND contact_id = ?',
+  )
+    .bind(eventId, id)
+    .first();
+  if (!onRoster) return apiError(c, 404, 'not_found', 'No contact with this id in this event.');
+
+  const identityCols = columnsFor(fields, CONTACT_IDENTITY_FIELDS);
+  const profileCols = columnsFor(fields, CONTACT_PROFILE_FIELDS);
+  try {
+    // Identity columns go to the org-level row (authorised by the membership
+    // check above), profile columns to this event's row only.
+    if (identityCols.length > 0) {
+      await c.env.DB.prepare(
+        `UPDATE contacts SET ${identityCols.map((k) => `${k} = ?`).join(', ')}, updated_at = ?
+         WHERE id = ?`,
       )
-        .bind(...cols.map((k) => fields[k]), new Date().toISOString(), id, eventId)
+        .bind(...identityCols.map((k) => fields[k]), new Date().toISOString(), id)
         .run();
-      if (result.meta.changes === 0) return apiError(c, 404, 'not_found', 'No contact with this id in this event.');
-    } catch (err) {
-      const message = err instanceof Error ? err.message : '';
-      if (message.includes('UNIQUE')) return apiError(c, 409, 'email_exists', 'A contact with this email already exists in this event.');
-      throw err;
     }
+    if (profileCols.length > 0) {
+      await c.env.DB.prepare(
+        `UPDATE event_contacts SET ${profileCols.map((k) => `${k} = ?`).join(', ')}
+         WHERE event_id = ? AND contact_id = ?`,
+      )
+        .bind(...profileCols.map((k) => fields[k]), eventId, id)
+        .run();
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : '';
+    if (message.includes('UNIQUE')) return apiError(c, 409, 'email_exists', 'A contact with this email already exists in this event.');
+    throw err;
   }
   await bumpEventRevision(c.env, eventId);
-  const row = await c.env.DB.prepare('SELECT * FROM contacts WHERE id = ? AND event_id = ?').bind(id, eventId).first();
+  const row = await c.env.DB.prepare(CONTACT_SELECT).bind(eventId, id).first();
   if (!row) return apiError(c, 404, 'not_found', 'No contact with this id in this event.');
   return c.json(row);
 });
 
-// DELETE /events/:event_id/contacts/:cid — contacts.headshot_asset_id and
-// file_assets.uploaded_by_contact_id are mutually referential; null the
-// headshot ref first in the same batch (same fix as the admin speaker-delete
-// bug), then delete. A remaining FK violation (e.g. a reviewer assignment
-// with no ON DELETE clause) surfaces as 409, not a 500.
+// DELETE /events/:event_id/contacts/:cid — DETACH, not destroy. Since 0015 the
+// contact is an org-level person while this route is event-scoped, so the
+// correct REST semantic is removing the event_contacts row: this event's
+// membership and profile (biography, company, job title, notes, headshot) go,
+// the person's identity and their history at the org's other events stay.
+//
+// If that was their last event they belong to no roster at all, so the contact
+// row goes too rather than accumulating orphans; the NOT EXISTS makes that a
+// no-op while any other event still holds them.
+//
+// event_contacts.headshot_asset_id and file_assets.uploaded_by_contact_id are
+// mutually referential; null the headshot ref first in the same batch (same fix
+// as the admin speaker-delete bug). A remaining FK violation (e.g. a reviewer
+// assignment with no ON DELETE clause) surfaces as 409, not a 500.
 restApiRoutes.delete('/events/:event_id/contacts/:cid', async (c) => {
   const eventId = c.get('event').id;
   const id = c.req.param('cid');
-  const exists = await c.env.DB.prepare('SELECT id FROM contacts WHERE id = ? AND event_id = ?').bind(id, eventId).first();
+  const exists = await c.env.DB.prepare(
+    'SELECT 1 FROM event_contacts WHERE event_id = ? AND contact_id = ?',
+  )
+    .bind(eventId, id)
+    .first();
   if (!exists) return apiError(c, 404, 'not_found', 'No contact with this id in this event.');
   try {
     await c.env.DB.batch([
-      c.env.DB.prepare('UPDATE contacts SET headshot_asset_id = NULL WHERE id = ?').bind(id),
-      c.env.DB.prepare('DELETE FROM contacts WHERE id = ? AND event_id = ?').bind(id, eventId),
+      c.env.DB.prepare('UPDATE event_contacts SET headshot_asset_id = NULL WHERE event_id = ? AND contact_id = ?').bind(eventId, id),
+      c.env.DB.prepare('DELETE FROM event_contacts WHERE event_id = ? AND contact_id = ?').bind(eventId, id),
+      c.env.DB.prepare(
+        `DELETE FROM contacts WHERE id = ?1
+           AND NOT EXISTS (SELECT 1 FROM event_contacts ec WHERE ec.contact_id = ?1)`,
+      ).bind(id),
     ]);
   } catch (err) {
     const message = err instanceof Error ? err.message : '';

@@ -10,7 +10,7 @@
 
 import { env } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
-import { seedContact, seedEvent, seedSubmission } from './fixtures-admin';
+import { seedContact, seedEvent, seedEventUser, seedSubmission } from './fixtures-admin';
 import { demoLogins } from '../src/routes/landing';
 
 describe('demoLogins speaker candidate (item 5)', () => {
@@ -21,17 +21,37 @@ describe('demoLogins speaker candidate (item 5)', () => {
     // exactly the ordering that used to let it win the
     // `ORDER BY created_at, email LIMIT 1` race and get advertised as the
     // demo speaker login with no one to actually sign in as.
+    //
+    // Seeded through seedContact so it is a full member of this event's roster
+    // (contact + event_contacts). Inserting a bare org-level contact would make
+    // the stub fail demoLogins' event_contacts join instead of its name check,
+    // and the test would pass without exercising item 5 at all.
+    await seedContact(eventId, {
+      id: 'con-stub-early',
+      email: 'aaa-stub@example.com',
+      first_name: '',
+      last_name: '',
+    });
     await env.DB.prepare(
-      `INSERT INTO contacts (id, event_id, email, first_name, last_name, created_at, updated_at)
-       VALUES (?, ?, ?, '', '', '2020-01-01T00:00:00Z', '2020-01-01T00:00:00Z')`,
-    ).bind('con-stub-early', eventId, 'aaa-stub@example.com').run();
+      `UPDATE contacts SET created_at = '2020-01-01T00:00:00Z', updated_at = '2020-01-01T00:00:00Z' WHERE id = ?`,
+    ).bind('con-stub-early').run();
     await seedSubmission(eventId, { submitter_contact_id: 'con-stub-early', created_at: '2020-01-01T00:00:00Z' });
 
     const named = await seedContact(eventId, { email: 'zzz-named@example.com', first_name: 'Priya', last_name: 'Raman' });
     await seedSubmission(eventId, { submitter_contact_id: named });
 
+    // An organiser, so the assertion below proves BOTH advertised demo logins
+    // resolve against the org-scoped schema, not just the speaker one.
+    const organiser = await seedContact(eventId, {
+      email: 'organiser@example.com',
+      first_name: 'Owen',
+      last_name: 'Ner',
+    });
+    await seedEventUser(eventId, organiser, 'owner');
+
     const logins = await demoLogins(env.DB);
     expect(logins?.eventSlug).toBeDefined();
     expect(logins?.speakerEmail).toBe('zzz-named@example.com');
+    expect(logins?.adminEmail).toBe('organiser@example.com');
   });
 });

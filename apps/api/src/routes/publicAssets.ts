@@ -4,8 +4,8 @@
 // load in a plain <img> tag with no cookie, so this route re-derives its own
 // narrow visibility rule instead of reusing fileAuth's session-actor logic:
 //
-//   contact -> headshot_asset_id -> file_assets row (same KV read as
-//   loadFile in filestore.ts)
+//   contact -> event_contacts.headshot_asset_id -> file_assets row (same KV
+//   read as loadFile in filestore.ts)
 //
 // gated on the exact chain speakers.json already exposes the contact through:
 //   event.agenda_published = 1 AND the contact participates in an accepted,
@@ -48,11 +48,27 @@ publicAssetRoutes.get('/e/:slug/speakers/:speakerId/headshot', async (c) => {
   // a participant on an accepted, scheduled submission of this event counts
   // as a "published speaker" — anyone else's headshot stays unreachable even
   // if they happen to have one on file (a rejected co-author, a reviewer).
+  //
+  // Post-0015 the contact row is org-wide and the headshot is not: it hangs
+  // off event_contacts, one row per (event, contact). That makes the guard
+  // three conditions, all pinned to THIS event:
+  //   1. `event_contacts ec ... ec.event_id = ?2` — membership. This replaces
+  //      the old `c.event_id = ?2` tenancy check and is also the fetch: the
+  //      asset id we read is the headshot this person published for this
+  //      event, so an image uploaded for a different event in the same org is
+  //      simply not selected here, never mind served.
+  //   2. `c.id = ?1` — the requested speaker.
+  //   3. the EXISTS, whose `s.event_id = ?2` is now load-bearing rather than
+  //      belt-and-braces: without it the subquery would range over every
+  //      submission the person has ever made anywhere in the org, so being an
+  //      accepted speaker at ANY event would publish their headshot at THIS
+  //      one.
   const contact = await db
     .prepare(
-      `SELECT c.headshot_asset_id
-       FROM contacts c
-       WHERE c.id = ?1 AND c.event_id = ?2
+      `SELECT ec.headshot_asset_id
+       FROM event_contacts ec
+       JOIN contacts c ON c.id = ec.contact_id
+       WHERE c.id = ?1 AND ec.event_id = ?2
          AND EXISTS (
            SELECT 1 FROM submission_participants sp
            JOIN submissions s ON s.id = sp.submission_id

@@ -60,8 +60,17 @@ messagingAdminRoutes.post('/invite-portal', async (c) => {
   const [event, contact] = await Promise.all([
     db.prepare('SELECT id, name FROM events WHERE id = ?').bind(session.eventId).first<{ id: string; name: string }>(),
     db
-      .prepare('SELECT id, email FROM contacts WHERE id = ? AND event_id = ?')
-      .bind(contactId, session.eventId)
+      // 0015: the join to event_contacts is the tenancy guard the old
+      // `contacts.event_id` was — a contact who exists in the org but is not
+      // on this event yields no row, so the invite 404s rather than minting a
+      // portal-login token for another event's speaker.
+      .prepare(
+        `SELECT c.id, c.email
+           FROM contacts c
+           JOIN event_contacts ec ON ec.contact_id = c.id AND ec.event_id = ?
+          WHERE c.id = ?`,
+      )
+      .bind(session.eventId, contactId)
       .first<ContactRow>(),
   ]);
   if (!event) return c.json({ error: 'not_found' }, 404);
@@ -151,20 +160,28 @@ export async function resolveAudience(
   audience: ComposeAudience,
   contactIds: string[],
 ): Promise<ComposeRecipient[]> {
-  const select = 'SELECT id, email, first_name, last_name, company, job_title FROM contacts';
-  const hasEmail = "email IS NOT NULL AND TRIM(email) != ''";
+  // 0015: `contacts` is org-level identity, `event_contacts` is membership AND
+  // the per-event profile. The join therefore does both jobs every audience
+  // here needs — it is the "on this event" filter that `contacts.event_id`
+  // used to be, and it is where company/job_title come from, so the merge
+  // fields carry the recipient's title at THIS event rather than another
+  // event's in the same org.
+  const select = `SELECT c.id, c.email, c.first_name, c.last_name, ec.company, ec.job_title
+       FROM event_contacts ec
+       JOIN contacts c ON c.id = ec.contact_id`;
+  const hasEmail = "c.email IS NOT NULL AND TRIM(c.email) != ''";
   if (audience === 'selected') {
     if (contactIds.length === 0) return [];
     const placeholders = contactIds.map(() => '?').join(', ');
     const { results } = await db
-      .prepare(`${select} WHERE event_id = ? AND id IN (${placeholders}) AND ${hasEmail} ORDER BY id`)
+      .prepare(`${select} WHERE ec.event_id = ? AND c.id IN (${placeholders}) AND ${hasEmail} ORDER BY c.id`)
       .bind(eventId, ...contactIds)
       .all<ComposeRecipient>();
     return results;
   }
   if (audience === 'all_contacts') {
     const { results } = await db
-      .prepare(`${select} WHERE event_id = ? AND ${hasEmail} ORDER BY id`)
+      .prepare(`${select} WHERE ec.event_id = ? AND ${hasEmail} ORDER BY c.id`)
       .bind(eventId)
       .all<ComposeRecipient>();
     return results;
@@ -176,17 +193,17 @@ export async function resolveAudience(
   // submission with a blank name on both columns. That stub is not someone
   // to message; excluded here the same way the Speakers grid's default view
   // excludes it (App.tsx's isPlaceholderContact).
-  const hasName = "TRIM(COALESCE(first_name, '') || COALESCE(last_name, '')) != ''";
+  const hasName = "TRIM(COALESCE(c.first_name, '') || COALESCE(c.last_name, '')) != ''";
   const { results } = await db
     .prepare(
-      `${select} WHERE event_id = ?1 AND ${hasEmail} AND ${hasName} AND id IN (
+      `${select} WHERE ec.event_id = ?1 AND ${hasEmail} AND ${hasName} AND c.id IN (
          SELECT s.submitter_contact_id FROM submissions s
           WHERE s.event_id = ?1 AND s.submitter_contact_id IS NOT NULL ${statusClause}
          UNION
          SELECT p.contact_id FROM submission_participants p
            JOIN submissions s ON s.id = p.submission_id
           WHERE s.event_id = ?1 ${statusClause}
-       ) ORDER BY id`,
+       ) ORDER BY c.id`,
     )
     .bind(eventId)
     .all<ComposeRecipient>();

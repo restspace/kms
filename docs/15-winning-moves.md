@@ -58,6 +58,11 @@ event with forms, tasks, email templates and evaluation plans carried over, plus
 persisting across events ("spoke at WF 2024"). A1 says the schema already supports it. Turns a
 one-shot into a platform.
 
+*Speaker identity persisting across events — delivered.* Migration `0015` made `Contact`
+org-scoped (`docs/02` §2): one person is a single record across every event in the org, and a
+returning speaker's profile seeds forward via `EventContact` instead of retyping. The rest of
+this move — cloning an event's forms, tasks, templates and evaluation plans — is still unbuilt.
+
 **6. Run-of-show / green room view.**
 The last 48 hours before a conference is peak pain and Sessionboard is weak there: who has checked
 in, who is on stage next, slides received y/n, swap a speaker into a slot and auto-notify everyone

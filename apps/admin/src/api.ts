@@ -122,6 +122,9 @@ const ERROR_MESSAGES: Record<string, string> = {
   not_found: 'The record no longer exists.',
   conflict: 'This record changed in another session — reload to pick up the latest version before saving again.',
   invite_notify_required: 'This session has live calendar invites — choose whether to notify speakers before moving it.',
+  already_on_event: 'They are already on this event.',
+  other_events_not_accessible:
+    'They also belong to events you do not administer, so they can only be removed from this one.',
 }
 
 function readableError(code: string): string {
@@ -367,6 +370,73 @@ export const uploadContactHeadshot = (id: string, file: File) => {
     body: form,
   })
 }
+
+// ---------------------------------------------------------------------------
+// Cross-event contact identity (workplan 5 §4). A contact is one person per
+// ORGANISATION since 0015, with a per-event membership row carrying their
+// profile — these three endpoints are the surfaces that model makes possible.
+// ---------------------------------------------------------------------------
+
+/** A picker row: org-level identity plus the profile the attach will seed. */
+export interface OrgContactRow {
+  id: string
+  email: string
+  first_name: string | null
+  last_name: string | null
+  /** From their most recent event in the org, not from this one — they have no
+   * row for this one yet, which is the whole point of the search. */
+  company: string | null
+  job_title: string | null
+}
+
+/** People the organisation knows who are NOT already on the current event. */
+export const searchOrgContacts = (q: string) =>
+  request<{ items: OrgContactRow[] }>(`/app/api/contacts/org-search?q=${encodeURIComponent(q)}`)
+
+/** Put an existing org contact on the current event, seeding their profile
+ * from their most recent event in the same org. */
+export const attachOrgContact = (id: string) =>
+  request<ContactRow>(`/app/api/contacts/${id}/attach`, { method: 'POST' })
+
+export interface ContactHistorySubmission {
+  id: string
+  event_id: string
+  code: string
+  title: string
+  status: string
+  starts_at: string | null
+  room_name: string | null
+  /** Their participant role, falling back to 'submitter'. */
+  role: string | null
+}
+
+export interface ContactHistoryEvent {
+  event_id: string
+  event_name: string
+  event_starts_at: string | null
+  added_at: string | null
+  source: string | null
+  company: string | null
+  job_title: string | null
+  submissions: ContactHistorySubmission[]
+}
+
+/** The contact's history across the events this staff session can reach. The
+ * server clips it to those — events the caller holds no seat on are absent
+ * entirely, not summarised, so nothing here can disclose that they exist. */
+export const getContactHistory = (id: string) =>
+  request<{ events: ContactHistoryEvent[]; current_event_id: string }>(
+    `/app/api/contacts/${id}/history`,
+  )
+
+/** Destroy the person org-wide, as distinct from `deleteContact`, which
+ * detaches them from the current event. Answers 409 `confirm_required` with
+ * the events that go with them until `confirm` is passed. */
+export const deleteContactFromOrg = (id: string, confirm = false) =>
+  request<{ ok: boolean; events_affected: number }>(
+    `/app/api/contacts/${id}/org${confirm ? '?confirm=1' : ''}`,
+    { method: 'DELETE' },
+  )
 
 // ---------------------------------------------------------------------------
 // Form builder (docs/04)
@@ -934,7 +1004,7 @@ export const saveReview = (assignmentId: string, body: Record<string, unknown>) 
 // ---------------------------------------------------------------------------
 
 export type ImportTarget = 'sessions' | 'contacts'
-export type ImportRowAction = 'create' | 'update' | 'merge' | 'skip' | 'error'
+export type ImportRowAction = 'create' | 'update' | 'merge' | 'attach' | 'skip' | 'error'
 
 export interface ImportField {
   key: string

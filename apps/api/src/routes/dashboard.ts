@@ -100,13 +100,18 @@ async function dashboardPayload(c: Context<ApiEnv>) {
       `SELECT c.id AS contact_id,
               NULLIF(TRIM(COALESCE(c.first_name,'') || ' ' || COALESCE(c.last_name,'')), '') AS name,
               c.email,
-              CASE WHEN c.biography IS NULL OR c.biography = '' THEN 1 ELSE 0 END AS missing_bio,
-              CASE WHEN c.headshot_asset_id IS NULL THEN 1 ELSE 0 END AS missing_headshot,
+              CASE WHEN ec.biography IS NULL OR ec.biography = '' THEN 1 ELSE 0 END AS missing_bio,
+              CASE WHEN ec.headshot_asset_id IS NULL THEN 1 ELSE 0 END AS missing_headshot,
               COALESCE(tg.missing_slides, 0) AS missing_slides,
               COALESCE(tg.outstanding, 0) AS outstanding,
               COALESCE(tg.overdue, 0) AS overdue,
               CASE WHEN cf.contact_id IS NULL THEN 0 ELSE 1 END AS confirmed
        FROM contacts c
+       -- 0015: membership guard AND the source of the profile columns. Bio and
+       -- headshot are per-event, so a speaker who wrote a bio at another event
+       -- in the org still reads as missing one here — the panel is about what
+       -- THIS event has on file.
+       JOIN event_contacts ec ON ec.contact_id = c.id AND ec.event_id = ?1
        JOIN (SELECT DISTINCT sp.contact_id
              FROM submission_participants sp
              JOIN submissions s ON s.id = sp.submission_id
@@ -137,7 +142,6 @@ async function dashboardPayload(c: Context<ApiEnv>) {
                   JOIN submissions s2 ON s2.id = sp2.submission_id
                   WHERE s2.event_id = ?1 AND s2.status = 'accepted'
                     AND sp2.confirmed_at IS NOT NULL) cf ON cf.contact_id = c.id
-       WHERE c.event_id = ?1
        ORDER BY outstanding DESC, overdue DESC, name`,
     ).bind(eventId, now).all<SpeakerAggRow>(),
     db.prepare(

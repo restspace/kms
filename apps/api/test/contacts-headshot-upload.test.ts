@@ -43,8 +43,9 @@ describe('POST /app/api/contacts/:id/headshot', () => {
     expect(body.ok).toBe(true);
     expect(body.headshot_asset_id).toBeTruthy();
 
-    const row = await env.DB.prepare('SELECT headshot_asset_id FROM contacts WHERE id = ?')
-      .bind(speaker)
+    // Since 0015 the headshot pointer is per-event, on event_contacts.
+    const row = await env.DB.prepare('SELECT headshot_asset_id FROM event_contacts WHERE event_id = ? AND contact_id = ?')
+      .bind(eventId, speaker)
       .first<{ headshot_asset_id: string | null }>();
     expect(row?.headshot_asset_id).toBe(body.headshot_asset_id);
 
@@ -66,8 +67,8 @@ describe('POST /app/api/contacts/:id/headshot', () => {
     const secondId = ((await second.json()) as { headshot_asset_id: string }).headshot_asset_id;
     expect(secondId).not.toBe(firstId);
 
-    const row = await env.DB.prepare('SELECT headshot_asset_id FROM contacts WHERE id = ?')
-      .bind(speaker)
+    const row = await env.DB.prepare('SELECT headshot_asset_id FROM event_contacts WHERE event_id = ? AND contact_id = ?')
+      .bind(eventId, speaker)
       .first<{ headshot_asset_id: string | null }>();
     expect(row?.headshot_asset_id).toBe(secondId);
   });
@@ -83,8 +84,8 @@ describe('POST /app/api/contacts/:id/headshot', () => {
     const body = (await res.json()) as { error: string };
     expect(body.error).toContain('too large');
 
-    const row = await env.DB.prepare('SELECT headshot_asset_id FROM contacts WHERE id = ?')
-      .bind(speaker)
+    const row = await env.DB.prepare('SELECT headshot_asset_id FROM event_contacts WHERE event_id = ? AND contact_id = ?')
+      .bind(eventId, speaker)
       .first<{ headshot_asset_id: string | null }>();
     expect(row?.headshot_asset_id).toBeNull();
   });

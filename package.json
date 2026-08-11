@@ -23,6 +23,7 @@
     "migrate:remote": "wrangler d1 migrations apply kms --remote",
     "seed:local": "wrangler d1 execute kms --local --file packages/db/seed/seed.sql",
     "seed:remote": "wrangler d1 execute kms --remote --file packages/db/seed/seed.sql",
+    "verify:contacts": "node scripts/verify-org-contacts.mjs",
     "deploy": "npm run build && wrangler deploy"
   },
   "dependencies": {

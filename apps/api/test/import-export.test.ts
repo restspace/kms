@@ -6,7 +6,7 @@
 import { SELF, env } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
 import { unzipSync, strFromU8 } from 'fflate';
-import { jsonReq, seedEvent, seedStaff, seedSubmission } from './fixtures-admin';
+import { jsonReq, seedContact, seedEvent, seedStaff, seedSubmission } from './fixtures-admin';
 import { autoMap, parseCsv, parseXlsx } from '../src/importer';
 import { toXlsx } from '../src/export';
 
@@ -240,22 +240,27 @@ describe('speaker import', () => {
     'Dana,Kowalski,dana@example.com,Kowalski Labs,Principal Researcher',
   ].join('\n');
 
+  // Since 0015 the identity (name, email) and the per-event profile (company,
+  // job title) are two rows, so the fixture that writes both is the only way to
+  // seed a speaker who is really on this event's roster.
   const seedRoster = async () => {
     const eventId = await seedEvent();
     const admin = await seedStaff(eventId, 'admin');
-    const ts = '2026-08-01T00:00:00Z';
-    await env.DB.batch([
-      // Ada already has a company on file (must not be clobbered) but no job title.
-      env.DB.prepare(
-        `INSERT INTO contacts (id, event_id, email, first_name, last_name, company, created_at, updated_at)
-         VALUES (?, ?, 'ada@example.com', 'Ada', 'Lovelace', 'Babbage & Co', ?, ?)`,
-      ).bind(crypto.randomUUID(), eventId, ts, ts),
-      // Grace is complete — nothing for the import to fill.
-      env.DB.prepare(
-        `INSERT INTO contacts (id, event_id, email, first_name, last_name, company, job_title, created_at, updated_at)
-         VALUES (?, ?, 'grace@example.com', 'Grace', 'Hopper', 'US Navy', 'Rear Admiral', ?, ?)`,
-      ).bind(crypto.randomUUID(), eventId, ts, ts),
-    ]);
+    // Ada already has a company on file (must not be clobbered) but no job title.
+    await seedContact(eventId, {
+      email: 'ada@example.com',
+      first_name: 'Ada',
+      last_name: 'Lovelace',
+      company: 'Babbage & Co',
+    });
+    // Grace is complete — nothing for the import to fill.
+    await seedContact(eventId, {
+      email: 'grace@example.com',
+      first_name: 'Grace',
+      last_name: 'Hopper',
+      company: 'US Navy',
+      job_title: 'Rear Admiral',
+    });
     return { eventId, admin };
   };
 
@@ -284,9 +289,13 @@ describe('speaker import', () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ ok: true, applied: { create: 1, merge: 1, skip: 1 } });
 
+    // Roster listing shape: membership drives the rows, identity joins on.
     const { results } = await env.DB.prepare(
-      `SELECT email, first_name, last_name, company, job_title FROM contacts
-       WHERE event_id = ? AND email LIKE '%@example.com' AND email NOT LIKE 'admin-%' ORDER BY email`,
+      `SELECT c.email, c.first_name, c.last_name, ec.company, ec.job_title
+       FROM event_contacts ec
+       JOIN contacts c ON c.id = ec.contact_id
+       WHERE ec.event_id = ? AND c.email LIKE '%@example.com' AND c.email NOT LIKE 'admin-%'
+       ORDER BY c.email`,
     )
       .bind(eventId)
       .all<Record<string, string | null>>();
@@ -320,9 +329,75 @@ describe('speaker import', () => {
       mapping: plan.mapping,
     });
     const { results } = await env.DB.prepare(
-      "SELECT email FROM contacts WHERE event_id = ? AND email NOT LIKE 'admin-%'",
+      `SELECT c.email FROM event_contacts ec
+       JOIN contacts c ON c.id = ec.contact_id
+       WHERE ec.event_id = ? AND c.email NOT LIKE 'admin-%'`,
     ).bind(eventId).all<{ email: string }>();
     expect(results.map((r) => r.email)).toEqual(['dup@example.com']);
+  });
+
+  it('attaches a speaker who already exists elsewhere in the org, seeding the profile but not the notes', async () => {
+    // One org, two events — the whole reason `attach` exists. seedEvent mints a
+    // fresh org per event unless it is told otherwise, so name it explicitly.
+    const orgId = `org-${crypto.randomUUID()}`;
+    const eventA = await seedEvent({ org_id: orgId });
+    const eventB = await seedEvent({ org_id: orgId });
+    const admin = await seedStaff(eventB, 'admin');
+    await seedContact(eventA, {
+      email: 'ada@example.com',
+      first_name: 'Ada',
+      last_name: 'Lovelace',
+      biography: 'Wrote the first published algorithm.',
+      company: 'Analytical Engines',
+      job_title: 'Chief Engineer',
+      notes: "Event A's private note — must not travel.",
+    });
+
+    // Identity columns only: the profile must arrive from event A, not the sheet.
+    const sheet = ['First Name,Last Name,Email', 'Ada,Lovelace,ada@example.com'].join('\n');
+    const plan = (await (await upload(admin.cookie, 'contacts', eventB, 'speakers.csv', sheet)).json()) as PlanBody;
+    expect(plan.rows.map((r) => r.action)).toEqual(['attach']);
+    expect(plan.rows[0].message).toContain('Already in this organisation');
+    expect(plan.summary).toMatchObject({ attach: 1, create: 0, merge: 0, skip: 0, total: 1 });
+
+    const res = await post('/import/commit', admin.cookie, {
+      target: 'contacts',
+      event_id: eventB,
+      headers: plan.headers,
+      rows: plan.rows_raw,
+      mapping: plan.mapping,
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ ok: true, applied: { attach: 1, create: 0, total: 1 } });
+
+    // One person in the org, not two: the import matched rather than minted.
+    const identities = await env.DB.prepare(
+      'SELECT COUNT(*) AS n FROM contacts WHERE org_id = ? AND email = ?',
+    ).bind(orgId, 'ada@example.com').first<{ n: number }>();
+    expect(identities?.n).toBe(1);
+
+    const joined = await env.DB.prepare(
+      `SELECT ec.source, ec.biography, ec.company, ec.job_title, ec.notes
+       FROM event_contacts ec
+       JOIN contacts c ON c.id = ec.contact_id
+       WHERE ec.event_id = ? AND c.email = ?`,
+    ).bind(eventB, 'ada@example.com').first<Record<string, string | null>>();
+    expect(joined).toMatchObject({
+      source: 'import',
+      biography: 'Wrote the first published algorithm.',
+      company: 'Analytical Engines',
+      job_title: 'Chief Engineer',
+    });
+    // notes is one event team's private remark and never follows the person.
+    expect(joined?.notes).toBeNull();
+
+    // Event A keeps its own row untouched — attach adds membership, never moves it.
+    const stillOnA = await env.DB.prepare(
+      `SELECT ec.notes FROM event_contacts ec
+       JOIN contacts c ON c.id = ec.contact_id
+       WHERE ec.event_id = ? AND c.email = ?`,
+    ).bind(eventA, 'ada@example.com').first<{ notes: string | null }>();
+    expect(stillOnA?.notes).toBe("Event A's private note — must not travel.");
   });
 });
 

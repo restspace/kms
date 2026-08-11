@@ -439,9 +439,16 @@ async function expandCompose(env: Env, job: BulkJobRow, limit: number): Promise<
   if (slice.length > 0) {
     const placeholders = slice.map(() => '?').join(', ');
     const { results: contacts } = await db
+      // 0015: mirrors resolveAudience's shape. The event_contacts join re-pins
+      // the frozen ids to this job's event — a contact removed from the roster
+      // between compose and expansion drops out, exactly as the deleted-contact
+      // case below does — and supplies company/job_title, which are per-event
+      // profile now: the merge fields must render the title this event holds.
       .prepare(
-        `SELECT id, email, first_name, last_name, company, job_title
-         FROM contacts WHERE event_id = ? AND id IN (${placeholders})`,
+        `SELECT c.id, c.email, c.first_name, c.last_name, ec.company, ec.job_title
+         FROM event_contacts ec
+         JOIN contacts c ON c.id = ec.contact_id
+         WHERE ec.event_id = ? AND c.id IN (${placeholders})`,
       )
       .bind(job.event_id, ...slice)
       .all<{

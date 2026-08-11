@@ -74,7 +74,13 @@ describe('contact social links (item 2)', () => {
     const { id } = (await created.json()) as { id: string };
 
     await api(`/contacts/${id}`, admin.cookie, { company: 'New Co' }, 'PUT');
-    const row = await env.DB.prepare('SELECT links, company FROM contacts WHERE id = ?').bind(id).first<{ links: string; company: string }>();
+    // `links` stayed on the org-level identity; `company` moved to the
+    // event_contacts profile in 0015, so read each from where it now lives.
+    const row = await env.DB.prepare(
+      `SELECT c.links, ec.company FROM contacts c
+         JOIN event_contacts ec ON ec.contact_id = c.id AND ec.event_id = ?
+        WHERE c.id = ?`,
+    ).bind(eventId, id).first<{ links: string; company: string }>();
     expect(row?.company).toBe('New Co');
     expect(JSON.parse(row!.links)).toEqual({ website: 'https://untouched.example.com' });
   });

@@ -1,0 +1,96 @@
+/* Cross-event contact surfaces (workplan 5 §4): the org-wide picker, which
+   lives inside the shared ModalDialog shell, and the contact detail's
+   cross-event history panel, which lives inside .detail-body. Only their own
+   internals are styled here. */
+
+.contact-picker-search {
+  display: block;
+  margin: 12px 0;
+  font-size: 13px;
+}
+
+.contact-picker-search span {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--text-muted);
+}
+
+.contact-picker-search input {
+  width: 100%;
+  height: var(--control-height);
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+}
+
+.contact-picker-results {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 320px;
+  overflow-y: auto;
+  font-size: 13px;
+}
+
+.contact-picker-results li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: 8px 0;
+  border-top: 1px solid var(--border);
+}
+
+.contact-picker-results li:first-child {
+  border-top: none;
+}
+
+.contact-picker-name {
+  font-weight: 600;
+}
+
+/* The result row's secondary line reuses .detail-sub, which carries a bottom
+   margin meant for the detail panel's header block. */
+.contact-picker-results .detail-sub,
+.contact-history .detail-sub {
+  margin-bottom: 0;
+}
+
+.contact-history {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.contact-history > li {
+  padding: var(--space-2) 0;
+  border-top: 1px solid var(--border);
+}
+
+.contact-history > li:first-child {
+  border-top: none;
+  padding-top: 0;
+}
+
+.contact-history > li > ul {
+  margin: var(--space-1) 0 0;
+  padding-left: 1.2em;
+}
+
+.contact-history-event {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+}
+
+/* The destructive counterpart to the detail panel's other actions: same
+   button shape (shell.css styles .detail-actions button), danger colouring
+   only, since it is not the primary thing to do from this panel. */
+.detail-panel .detail-actions button.contact-delete-org {
+  color: var(--danger);
+  border-color: var(--danger);
+}

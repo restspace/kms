@@ -47,8 +47,9 @@ describe('portal redaction', () => {
   });
 
   it('keeps the notes in the database — this is a read boundary, not a delete', async () => {
-    const contact = await env.DB.prepare('SELECT notes FROM contacts WHERE id = ?')
-      .bind(contactId)
+    // `notes` is a per-event profile column on event_contacts since 0015.
+    const contact = await env.DB.prepare('SELECT notes FROM event_contacts WHERE event_id = ? AND contact_id = ?')
+      .bind(eventId, contactId)
       .first<{ notes: string | null }>();
     const submission = await env.DB.prepare('SELECT notes FROM submissions WHERE id = ?')
       .bind(submissionId)

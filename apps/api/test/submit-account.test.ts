@@ -7,6 +7,7 @@
 import { env, SELF } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
 import { verifySessionToken } from '../src/session';
+import { createContact, createEvent } from './fixtures';
 import { countRows, seedForm, type SeededForm } from './fixtures-submission';
 
 const account = (form: SeededForm, body: unknown) =>
@@ -17,6 +18,18 @@ const account = (form: SeededForm, body: unknown) =>
   });
 
 const cookieOf = (res: Response): string | null => res.headers.get('set-cookie');
+
+// Since 0015 a contact is org-scoped and its membership of THIS event lives on
+// event_contacts, so "is this address on the event's roster" is a join, not a
+// `contacts.event_id` filter.
+const rosterRows = (eventId: string, email: string) =>
+  countRows(
+    `SELECT COUNT(*) AS n FROM event_contacts ec
+       JOIN contacts c ON c.id = ec.contact_id
+      WHERE ec.event_id = ? AND c.email = ?`,
+    eventId,
+    email,
+  );
 
 describe('POST /submit/:slug/:formId/account', () => {
   it('creates a contact and signs the caller in for a brand-new email', async () => {
@@ -35,12 +48,17 @@ describe('POST /submit/:slug/:formId/account', () => {
     expect(session?.eventId).toBe(form.eventId);
     expect(session?.role).toBe('speaker');
 
-    expect(
-      await countRows(
-        `SELECT COUNT(*) AS n FROM contacts WHERE event_id = ? AND email = 'new.speaker@example.com'`,
-        form.eventId,
-      ),
-    ).toBe(1);
+    // Exactly one roster row, and it records how they arrived: creating a
+    // contact without attaching it would leave a person on no event's roster.
+    const membership = await env.DB.prepare(
+      `SELECT ec.source FROM event_contacts ec
+       JOIN contacts c ON c.id = ec.contact_id
+       WHERE ec.event_id = ? AND c.email = 'new.speaker@example.com'`,
+    )
+      .bind(form.eventId)
+      .all<{ source: string }>();
+    expect(membership.results).toHaveLength(1);
+    expect(membership.results[0]!.source).toBe('cfp');
   });
 
   it('queues a best-effort magic-link email for the new contact without blocking the response', async () => {
@@ -95,12 +113,7 @@ describe('POST /submit/:slug/:formId/account', () => {
 
     expect(cookieOf(res)).toBeNull();
     // No duplicate contact row was created for the existing address.
-    expect(
-      await countRows(
-        `SELECT COUNT(*) AS n FROM contacts WHERE event_id = ? AND email = 'submitter@example.com'`,
-        form.eventId,
-      ),
-    ).toBe(1);
+    expect(await rosterRows(form.eventId, 'submitter@example.com')).toBe(1);
   });
 
   it('is case-insensitive when matching an existing email', async () => {
@@ -138,11 +151,41 @@ describe('POST /submit/:slug/:formId/account', () => {
     expect(created).toHaveLength(1);
     expect(existing).toHaveLength(1);
 
+    expect(await rosterRows(form.eventId, 'racer@example.com')).toBe(1);
+  });
+
+  // 0015 widened the dedupe scope from the event to the ORGANISATION, so an
+  // address known only from a sibling event now takes the 'existing' branch.
+  // That branch deliberately does NOT attach: the caller is unauthenticated, so
+  // attaching would let anyone put an org sibling on this event's roster just by
+  // typing their address.
+  it('treats an org sibling from another event as existing, and does not add them to this roster', async () => {
+    const form = await seedForm();
+    const orgId = (await env.DB.prepare('SELECT org_id FROM events WHERE id = ?')
+      .bind(form.eventId)
+      .first<{ org_id: string }>())!.org_id;
+
+    // Same org, different event — the only place this person is known.
+    const siblingEventId = await createEvent({ org_id: orgId });
+    const siblingContactId = await createContact(siblingEventId, { email: 'sibling@example.com' });
+
+    const res = await account(form, { email: 'sibling@example.com' });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { ok: boolean; status: string; dev_link?: string | null };
+    expect(body).toMatchObject({ ok: true, status: 'existing' });
+    expect(cookieOf(res)).toBeNull();
+
+    // Still exactly one identity org-wide (no second contact row)...
     expect(
       await countRows(
-        `SELECT COUNT(*) AS n FROM contacts WHERE event_id = ? AND email = 'racer@example.com'`,
-        form.eventId,
+        `SELECT COUNT(*) AS n FROM contacts WHERE org_id = ? AND email = 'sibling@example.com'`,
+        orgId,
       ),
+    ).toBe(1);
+    // ...and it gained no membership of the event whose form was posted to.
+    expect(await rosterRows(form.eventId, 'sibling@example.com')).toBe(0);
+    expect(
+      await countRows('SELECT COUNT(*) AS n FROM event_contacts WHERE contact_id = ?', siblingContactId),
     ).toBe(1);
   });
 });

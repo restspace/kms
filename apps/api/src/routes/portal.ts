@@ -32,6 +32,7 @@ import { bumpEventRevision } from '../revision';
 import { loadQuestions } from './formsAdmin';
 import { isFormClosed } from './submit';
 import { clearSessionCookie, getSession, type SessionPayload } from '../session';
+import { getPortalEvents, type PortalEvent } from '../access';
 import {
   addComment,
   appendUploadVersion,
@@ -119,6 +120,8 @@ dl.detail dd{margin:0;overflow-wrap:anywhere}
 .cmt .chead{font-size:.8rem;color:var(--text-muted)}
 .cmt .chead strong{color:var(--text)}
 .cmt .cbody{white-space:pre-wrap;overflow-wrap:anywhere}
+.p-switch{font-size:.82rem;color:var(--text-muted);margin:-.25rem 0 .75rem}
+.p-switch a{margin-right:.6rem}
 `;
 
 type PortalSection = 'home' | 'submissions' | 'profile' | 'tasks';
@@ -126,7 +129,13 @@ type PortalSection = 'home' | 'submissions' | 'profile' | 'tasks';
 interface PortalCtx {
   event: Event;
   session: SessionPayload;
+  /** The contact resolved for THIS event, never `session.contactId` — see
+   *  loadPortalCtx. Every ownership check on the portal keys on it. */
+  contactId: string;
   contact: ContactRow;
+  /** Other portals in this org this speaker may open (access.ts §5 predicate);
+   *  includes the current event. Rendered as a switcher only when > 1. */
+  portalEvents: PortalEvent[];
 }
 
 interface ContactRow {
@@ -176,6 +185,16 @@ function portalPage(ctx: PortalCtx, section: PortalSection, body: string, flash?
   const impersonation = ctx.session.impersonatedBy
     ? '<div class="banner">Admin impersonation — you are viewing this portal as this speaker. <a href="/app">Back to Admin</a></div>'
     : '';
+  // Cross-event switcher (§5). Rendered only when this speaker really has a
+  // second portal in the org — the list is relationship-gated in access.ts, so
+  // its mere presence is not a disclosure, but a one-item switcher is noise.
+  const others = ctx.portalEvents.filter((e) => e.event_id !== ctx.event.id);
+  const switcher =
+    others.length === 0
+      ? ''
+      : `<nav class="p-switch" aria-label="Your other events"><span>Your other events:</span> ${others
+          .map((e) => `<a href="/portal/${esc(e.event_slug)}">${esc(e.event_name)}</a>`)
+          .join(' ')}</nav>`;
   const flashHtml = flash
     ? flash.startsWith('!')
       ? `<div class="flash err">${esc(flash.slice(1))}</div>`
@@ -197,6 +216,7 @@ ${impersonation}
   <span class="p-user">${avatar} ${esc(displayName(ctx.contact))} · <a href="${base}/logout">Logout</a></span>
 </header>
 <nav class="pills">${nav}</nav>
+${switcher}
 ${flashHtml}
 ${body}
 </div>
@@ -279,16 +299,47 @@ async function loadPortalCtx(c: Context<AppEnv>): Promise<PortalCtx | Response> 
   const event = await db.events.getBySlug(slug);
   if (!event) return c.html('<h1>Event not found</h1>', 404);
   const session = await getSession(c);
-  if (!session || session.eventId !== event.id) return c.html(loginPage(event), 401);
-  // Whole-row read: organiser-only columns are stripped at the query boundary
-  // so no portal template can leak them (manual-review-1 item 3).
+  if (!session) return c.html(loginPage(event), 401);
+  // The URL's event decides which contact this is (§5), not the cookie. The old
+  // guard was `session.eventId !== event.id`, which pinned a speaker to the one
+  // event their cookie was minted against; a person who speaks at two events in
+  // the org had to sign in again to cross between them.
+  //
+  // Email is the key, not `session.contactId`. Contacts are ORG-scoped since
+  // 0015, so the same person is a different contact row in a different org, and
+  // the event in the URL is what determines the org. Matching on the cookie's
+  // contact id would therefore resolve nothing at all across an org boundary,
+  // and inside one org it would only ever agree with the email anyway.
+  //
+  // Identity comes from `contacts`, profile from this event's `event_contacts`
+  // row. Columns are listed explicitly rather than `SELECT *` because the join
+  // makes a star ambiguous, and because `notes` — the one organiser-only profile
+  // column — must never be selected on a speaker-facing surface. The
+  // redactInternal boundary stays in place behind that (manual-review-1 item 3).
+  //
+  // The event_contacts join is the membership guard AND the fetch: a contact who
+  // belongs to the org but not to this event has no profile row here, so the
+  // query returns nothing and they get the login page rather than a portal. The
+  // org predicate is the tenancy guard on top of it — (org_id, lower(email)) is
+  // unique, so at most one contact can match.
   const contact = redactInternal(
-    await c.env.DB.prepare('SELECT * FROM contacts WHERE id = ?')
-      .bind(session.contactId)
+    await c.env.DB.prepare(
+      `SELECT c.id, c.email, c.first_name, c.last_name, c.salutation, c.honorific,
+              c.pronouns, c.gender, c.mobile_phone, c.links,
+              ec.biography, ec.headshot_asset_id, ec.company, ec.job_title
+         FROM contacts c
+         JOIN event_contacts ec ON ec.contact_id = c.id AND ec.event_id = ?1
+        WHERE c.org_id = (SELECT org_id FROM events WHERE id = ?1)
+          AND lower(c.email) = lower(?2)`,
+    )
+      .bind(event.id, session.email ?? '')
       .first<ContactRow>(),
   );
   if (!contact) return c.html(loginPage(event), 401);
-  return { event, session, contact };
+  // One extra query per portal render, for the header switcher. Gated on a real
+  // relationship rather than roster membership — see getPortalEvents.
+  const portalEvents = await getPortalEvents(c.env.DB, { email: contact.email, eventId: event.id });
+  return { event, session, contactId: contact.id, contact, portalEvents };
 }
 
 const flashOf = (c: Context<AppEnv>): string | null => c.req.query('m') ?? null;
@@ -314,7 +365,15 @@ interface TaskAssignmentRow {
   required: number;
 }
 
-async function loadAssignments(c: Context<AppEnv>, contactId: string): Promise<TaskAssignmentRow[]> {
+// `t.event_id` is the event filter this list always meant: before 0015 a
+// contact belonged to exactly one event, so ta.contact_id alone could not reach
+// another event's tasks. Now that one contact spans the org it can, and the
+// single-assignment read below already scopes the same way.
+async function loadAssignments(
+  c: Context<AppEnv>,
+  eventId: string,
+  contactId: string,
+): Promise<TaskAssignmentRow[]> {
   const { results } = await c.env.DB.prepare(
     `SELECT ta.id AS assignment_id, ta.status, ta.completed_at, ta.submission_id,
             s.code AS submission_code, s.title AS submission_title,
@@ -323,10 +382,10 @@ async function loadAssignments(c: Context<AppEnv>, contactId: string): Promise<T
      FROM task_assignments ta
      JOIN tasks t ON t.id = ta.task_id
      LEFT JOIN submissions s ON s.id = ta.submission_id
-     WHERE ta.contact_id = ?
+     WHERE ta.contact_id = ? AND t.event_id = ?
      ORDER BY CASE ta.status WHEN 'complete' THEN 1 ELSE 0 END, t.due_at`,
   )
-    .bind(contactId)
+    .bind(contactId, eventId)
     .all<TaskAssignmentRow>();
   return results;
 }
@@ -345,8 +404,8 @@ portalRoutes.get('/:slug', async (c) => {
 
   const db = createDb(c.env.DB);
   const [submissions, assignments] = await Promise.all([
-    db.submissions.listByContact(ctx.event.id, ctx.session.contactId),
-    loadAssignments(c, ctx.session.contactId),
+    db.submissions.listByContact(ctx.event.id, ctx.contactId),
+    loadAssignments(c, ctx.event.id, ctx.contactId),
   ]);
 
   const subCards =
@@ -419,7 +478,7 @@ portalRoutes.get('/:slug/submissions', async (c) => {
        OR EXISTS (SELECT 1 FROM submission_participants sp WHERE sp.submission_id = s.id AND sp.contact_id = ?))
      ORDER BY s.created_at DESC`,
   )
-    .bind(ctx.event.id, ctx.session.contactId, ctx.session.contactId)
+    .bind(ctx.event.id, ctx.contactId, ctx.contactId)
     .all<{ id: string; code: string; title: string; status: string; format: string | null; created_at: string; updated_at: string; form_name: string | null }>();
 
   const rows =
@@ -450,7 +509,7 @@ portalRoutes.get('/:slug/submissions/:id', async (c) => {
        WHERE s.id = ? AND s.event_id = ? AND (s.submitter_contact_id = ?
          OR EXISTS (SELECT 1 FROM submission_participants sp WHERE sp.submission_id = s.id AND sp.contact_id = ?))`,
     )
-      .bind(id, ctx.event.id, ctx.session.contactId, ctx.session.contactId)
+      .bind(id, ctx.event.id, ctx.contactId, ctx.contactId)
       .first<Record<string, unknown>>(),
   );
   if (!submission) return c.redirect(`${base}/submissions`);
@@ -495,7 +554,7 @@ portalRoutes.get('/:slug/submissions/:id', async (c) => {
 
   const canWithdraw =
     submission.status !== 'withdrawn' && submission.status !== 'declined' &&
-    submission.submitter_contact_id === ctx.session.contactId;
+    submission.submitter_contact_id === ctx.contactId;
   // Editing stays open for every participant until the submission is
   // withdrawn or declined (docs/05 §4); organisers are notified afterwards.
   // It also closes when the form's own submission window closes, same as
@@ -572,7 +631,7 @@ portalRoutes.post('/:slug/submissions/:id/withdraw', async (c) => {
     `UPDATE submissions SET status = 'withdrawn', updated_at = ?
      WHERE id = ? AND event_id = ? AND submitter_contact_id = ? AND status NOT IN ('withdrawn', 'declined')`,
   )
-    .bind(new Date().toISOString(), id, ctx.event.id, ctx.session.contactId)
+    .bind(new Date().toISOString(), id, ctx.event.id, ctx.contactId)
     .run();
   return c.redirect(`${base}/submissions/${id}?m=${encodeURIComponent('Submission withdrawn.')}`);
 });
@@ -740,7 +799,7 @@ portalRoutes.post('/:slug/profile', async (c) => {
   if (upload instanceof File && upload.size > 0) {
     const saved = await saveFile(c.env, {
       eventId: ctx.event.id,
-      uploadedByContactId: ctx.session.contactId,
+      uploadedByContactId: ctx.contactId,
       file: upload,
       maxBytes: MAX_HEADSHOT_BYTES,
       allowedTypes: IMAGE_TYPES,
@@ -752,7 +811,7 @@ portalRoutes.post('/:slug/profile', async (c) => {
     const fileRequestId = await ensureHeadshotFileRequestId(c.env.DB, ctx.event.id);
     await appendUploadVersion(
       c.env.DB,
-      { fileRequestId, contactId: ctx.session.contactId, submissionId: null },
+      { fileRequestId, contactId: ctx.contactId, submissionId: null },
       { assetId: saved.id, uploadedAt: new Date().toISOString() },
     );
   }
@@ -767,24 +826,38 @@ portalRoutes.post('/:slug/profile', async (c) => {
   const linksUnchanged = LINK_FIELDS.every(([, key]) => (current[key] ?? '') === posted[key]);
   const writeLinks = linksPresent && !linksUnchanged;
 
+  // One form, two tables since 0015: the name/pronoun/links half is who the
+  // person is across the org, the bio/company/job-title/headshot half is how
+  // they present AT this event. Batched so a save can never land half of a
+  // profile. The event_contacts UPDATE needs no upsert — loadPortalCtx only
+  // returns a ctx when the membership row exists.
   const now = new Date().toISOString();
-  const sql = `UPDATE contacts SET biography = ?, salutation = ?, first_name = ?, last_name = ?, honorific = ?,
-       pronouns = ?, company = ?, job_title = ?, headshot_asset_id = ?${writeLinks ? ', links = ?' : ''}, updated_at = ?
+  const identitySql = `UPDATE contacts SET salutation = ?, first_name = ?, last_name = ?, honorific = ?,
+       pronouns = ?${writeLinks ? ', links = ?' : ''}, updated_at = ?
      WHERE id = ?`;
-  const binds: unknown[] = [
-    nullable('biography'),
+  const identityBinds: unknown[] = [
     nullable('salutation'),
     values.first_name,
     values.last_name,
     nullable('honorific'),
     nullable('pronouns'),
-    nullable('company'),
-    nullable('job_title'),
-    headshotId,
   ];
-  if (writeLinks) binds.push(JSON.stringify(posted));
-  binds.push(now, ctx.session.contactId);
-  await c.env.DB.prepare(sql).bind(...binds).run();
+  if (writeLinks) identityBinds.push(JSON.stringify(posted));
+  identityBinds.push(now, ctx.contactId);
+  await c.env.DB.batch([
+    c.env.DB.prepare(identitySql).bind(...identityBinds),
+    c.env.DB.prepare(
+      `UPDATE event_contacts SET biography = ?, company = ?, job_title = ?, headshot_asset_id = ?
+       WHERE event_id = ? AND contact_id = ?`,
+    ).bind(
+      nullable('biography'),
+      nullable('company'),
+      nullable('job_title'),
+      headshotId,
+      ctx.event.id,
+      ctx.contactId,
+    ),
+  ]);
   return c.redirect(`${base}/profile?m=${encodeURIComponent('Profile saved.')}`);
 });
 
@@ -1076,7 +1149,7 @@ interface TasksPageOpts {
 
 async function tasksPageHtml(c: Context<AppEnv>, ctx: PortalCtx, opts: TasksPageOpts = {}): Promise<string> {
   const base = `/portal/${esc(ctx.event.slug)}`;
-  const assignments = await loadAssignments(c, ctx.session.contactId);
+  const assignments = await loadAssignments(c, ctx.event.id, ctx.contactId);
   const errors = opts.errors ?? [];
   const posted = opts.posted ?? {};
 
@@ -1106,7 +1179,7 @@ async function tasksPageHtml(c: Context<AppEnv>, ctx: PortalCtx, opts: TasksPage
     if (t.action_type !== 'file_upload' || !t.file_request_id) continue;
     const versions = await loadChainVersions(c.env.DB, {
       fileRequestId: t.file_request_id,
-      contactId: ctx.session.contactId,
+      contactId: ctx.contactId,
       submissionId: t.submission_id,
     });
     if (versions.length === 0) continue;
@@ -1174,7 +1247,7 @@ portalRoutes.post('/:slug/tasks/:assignmentId/complete', async (c) => {
      FROM task_assignments ta JOIN tasks t ON t.id = ta.task_id
      WHERE ta.id = ? AND ta.contact_id = ? AND t.event_id = ?`,
   )
-    .bind(assignmentId, ctx.session.contactId, ctx.event.id)
+    .bind(assignmentId, ctx.contactId, ctx.event.id)
     .first<TaskAssignmentRow>();
   if (!row) return back('!Task not found.');
   // A completed file-upload task stays open for new versions (lane W2-C);
@@ -1197,7 +1270,7 @@ portalRoutes.post('/:slug/tasks/:assignmentId/complete', async (c) => {
     const policy = uploadPolicyFor(request);
     const saved = await saveFile(c.env, {
       eventId: ctx.event.id,
-      uploadedByContactId: ctx.session.contactId,
+      uploadedByContactId: ctx.contactId,
       file: upload,
       maxBytes: policy.maxBytes,
       allowedTypes: policy.allowedTypes,
@@ -1210,7 +1283,7 @@ portalRoutes.post('/:slug/tasks/:assignmentId/complete', async (c) => {
         c.env.DB,
         {
           fileRequestId: row.file_request_id,
-          contactId: ctx.session.contactId,
+          contactId: ctx.contactId,
           submissionId: row.submission_id,
         },
         { assetId: saved.id, uploadedAt: ts },
@@ -1251,13 +1324,13 @@ portalRoutes.post('/:slug/tasks/:assignmentId/complete', async (c) => {
       `INSERT INTO portal_form_responses (id, portal_form_id, contact_id, submission_id, answers, submitted_at)
        VALUES (?, ?, ?, ?, ?, ?)`,
     )
-      .bind(responseId, form.id, ctx.session.contactId, row.submission_id, JSON.stringify(answers), ts)
+      .bind(responseId, form.id, ctx.contactId, row.submission_id, JSON.stringify(answers), ts)
       .run();
     if (form.send_confirmation_email === 1) {
       await sendTemplated(c, {
         templateKey: 'portal_form_confirmation',
         eventId: ctx.event.id,
-        contactId: ctx.session.contactId,
+        contactId: ctx.contactId,
         toEmail: ctx.contact.email,
         entityId: responseId,
         context: {
@@ -1302,7 +1375,7 @@ portalRoutes.post('/:slug/files/:uploadId/comments', async (c) => {
      JOIN file_assets fa ON fa.id = u.file_asset_id
      WHERE u.id = ? AND u.contact_id = ?`,
   )
-    .bind(uploadId, ctx.session.contactId)
+    .bind(uploadId, ctx.contactId)
     .first<{ id: string; file_asset_id: string; event_id: string }>();
   if (!upload || upload.event_id !== ctx.event.id) return back('!File not found.');
 
@@ -1312,7 +1385,7 @@ portalRoutes.post('/:slug/files/:uploadId/comments', async (c) => {
     eventId: ctx.event.id,
     uploadId: upload.id,
     assetId: upload.file_asset_id,
-    authorContactId: ctx.session.contactId,
+    authorContactId: ctx.contactId,
     authorRole: 'speaker',
     authorName: displayName(ctx.contact),
     body: text,
@@ -1376,7 +1449,7 @@ async function loadOwnSubmission(
        WHERE s.id = ? AND s.event_id = ? AND (s.submitter_contact_id = ?
          OR EXISTS (SELECT 1 FROM submission_participants sp WHERE sp.submission_id = s.id AND sp.contact_id = ?))`,
     )
-      .bind(id, ctx.event.id, ctx.session.contactId, ctx.session.contactId)
+      .bind(id, ctx.event.id, ctx.contactId, ctx.contactId)
       .first<EditableSubmissionRow>(),
   );
 }
@@ -1705,7 +1778,9 @@ async function prepareAdminUpdateEmails(
   // Recipients must be contacts of this event — configuration can go stale.
   const placeholders = ids.map(() => '?').join(', ');
   const { results } = await c.env.DB.prepare(
-    `SELECT id, email FROM contacts WHERE event_id = ? AND id IN (${placeholders})`,
+    `SELECT c.id, c.email FROM contacts c
+      JOIN event_contacts ec ON ec.contact_id = c.id AND ec.event_id = ?
+     WHERE c.id IN (${placeholders})`,
   )
     .bind(ctx.event.id, ...ids)
     .all<{ id: string; email: string }>();

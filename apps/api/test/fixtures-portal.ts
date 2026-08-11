@@ -46,8 +46,24 @@ export async function createFileAsset(
   return id;
 }
 
+// Profile columns (headshot, notes, ...) now live on event_contacts, keyed by
+// (event_id, contact_id). Callers here only ever pass a contactId, so the
+// event is derived from that contact's event_contacts row rather than
+// widening every call site's signature; ORDER BY keeps it deterministic on
+// the rare contact that already spans two events.
+async function soleEventFor(contactId: string): Promise<string> {
+  const row = await env.DB.prepare(
+    'SELECT event_id FROM event_contacts WHERE contact_id = ? ORDER BY added_at ASC LIMIT 1',
+  ).bind(contactId).first<{ event_id: string }>();
+  if (!row) throw new Error(`no event_contacts row for contact ${contactId}`);
+  return row.event_id;
+}
+
 export async function setHeadshot(contactId: string, assetId: string): Promise<void> {
-  await env.DB.prepare('UPDATE contacts SET headshot_asset_id = ? WHERE id = ?').bind(assetId, contactId).run();
+  const eventId = await soleEventFor(contactId);
+  await env.DB.prepare('UPDATE event_contacts SET headshot_asset_id = ? WHERE event_id = ? AND contact_id = ?')
+    .bind(assetId, eventId, contactId)
+    .run();
 }
 
 export async function setEventLogo(eventId: string, assetId: string): Promise<void> {
@@ -55,7 +71,10 @@ export async function setEventLogo(eventId: string, assetId: string): Promise<vo
 }
 
 export async function setContactNotes(contactId: string, notes: string): Promise<void> {
-  await env.DB.prepare('UPDATE contacts SET notes = ? WHERE id = ?').bind(notes, contactId).run();
+  const eventId = await soleEventFor(contactId);
+  await env.DB.prepare('UPDATE event_contacts SET notes = ? WHERE event_id = ? AND contact_id = ?')
+    .bind(notes, eventId, contactId)
+    .run();
 }
 
 export async function createSubmissionForm(
