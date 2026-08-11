@@ -3,6 +3,7 @@
   "private": true,
   "type": "module",
   "dependencies": {
+    "@kms/airtable": "*",
     "@kms/core": "*",
     "@kms/db": "*",
     "@kms/email": "*",

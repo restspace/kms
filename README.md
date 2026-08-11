@@ -188,9 +188,11 @@ The decisions a reviewer will most likely ask about, with the reasoning:
 
 ## Deliberately out of scope
 
-Dashboard builder/custom widgets, embeds, webhooks and the Airtable mirror (both specced in
+Dashboard builder/custom widgets, embeds and webhooks (specced in
 [docs/10](docs/10-api.md), cut for time), import, month-view agenda, and per-user record
-permissions. The cut list with ordering is in [docs/12 §1](docs/12-build-plan.md).
+permissions. The cut list with ordering is in [docs/12 §1](docs/12-build-plan.md). The
+Airtable mirror, originally on that cut list, has since been built (one-way D1 → Airtable,
+off by default — see `tests/workplan-9-airtable-mirror.md` and docs/03 §2).
 
 ## Repo layout
 

@@ -70,7 +70,7 @@ export interface Db {
 }
 
 export interface OutboxJob {
-  kind: 'email' | 'airtable_sync';
+  kind: 'email';
   /** unique idempotency key (NFR-11) — enqueue is a no-op if it already exists */
   idempotencyKey: string;
   payload: unknown;

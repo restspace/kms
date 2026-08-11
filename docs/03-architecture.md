@@ -49,7 +49,7 @@ interface Repository<T> {
 | Mode | Config | Behaviour |
 |---|---|---|
 | **`sql`** (default) | `AIRTABLE_SYNC=off` | D1 only. Fast, transactional. |
-| **`airtable-mirror`** (recommended for the demo) | `AIRTABLE_SYNC=on` | Outbox jobs mirror Submissions, Contacts, Sessions and Tasks into Airtable within seconds — **one-way, D1 → Airtable**. Gives the AIE team the Airtable view they actually want without the latency penalty. |
+| **`airtable-mirror`** | `AIRTABLE_SYNC=on` + `AIRTABLE_API_KEY`/`AIRTABLE_BASE_ID` secrets | A cron-driven watermark sweep (`jobs/airtableSync.ts`) mirrors Events, Submissions, Contacts, Tasks, Reviews, Tracks, Rooms and Tags into one Airtable base within a cron tick (~1 min) — **one-way, D1 → Airtable**. Single global base: a single-tenant-deployment feature (workplan-9 §5b). |
 
 **Cut from scope:** Airtable as primary store (`PERSISTENCE=airtable`). It doubled the adapter
 work to support a mode nobody should run at the target scale (NFR-2), and the rate-limit
@@ -60,14 +60,19 @@ reversible post-deadline.
 `updated_at`). Bidirectional sync is where deletes, schema drift and conflict edge cases live;
 it is deliberately off the critical path.
 
-**Airtable base schema** (tables mirror [02](02-domain-model.md)): `Events`, `Forms`,
-`Submissions`, `Contacts`, `Sessions`, `Tasks`, `Reviews`, `Tracks`, `Rooms`, `Tags`.
-Record IDs are stored back on the D1 row (`airtable_record_id`) to make the mirror idempotent.
+**Airtable base schema** (tables mirror [02](02-domain-model.md)): `Events`, `Submissions`,
+`Contacts`, `Tasks`, `Reviews`, `Tracks`, `Rooms`, `Tags`. `Forms` is config, not content, and
+is not mirrored; "Sessions" is not a table anywhere (a session is a scheduled submission) — the
+schedule columns ride on `Submissions` and a filtered "Sessions" view is built once in the base
+UI. Record IDs are stored back on the D1 row (`airtable_record_id`) to make the mirror
+idempotent; hard deletes are staged into `airtable_pending_deletes` and drained by the sweep.
 
 ### 2a. Background jobs — outbox, not Queues
 
-Only two things need asynchronous work: **outbound email** and the **Airtable mirror**. Both
-run off a D1 `outbox` table:
+Asynchronous work is **outbound email** (per-event jobs off a D1 `outbox` table) and the
+**Airtable mirror** (a watermark sweep in `jobs/airtableSync.ts`, *not* outbox jobs — write
+sites are spread across too many files to instrument each one; see
+tests/workplan-9-airtable-mirror.md §4). The outbox works like this:
 
 1. The request handler inserts a job row (with an idempotency key, per NFR-11) and attempts it
    immediately via `ctx.waitUntil` — the happy path is near-instant.
@@ -95,7 +100,7 @@ without it.
   /email        templates, renderer, ICS builder, provider clients
   /ui           shared React components — used by BOTH the SSR pages and the SPA
 /workers
-  /jobs         outbox consumer: email + Airtable sync (waitUntil + cron retry sweep)
+  /jobs         outbox consumer: email (waitUntil + cron retry sweep); Airtable watermark sweep
   /cron         reminder sweeps, outbox retry sweep, dashboard aggregate refresh
 ```
 

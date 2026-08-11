@@ -20,6 +20,7 @@ import { appendUploadVersion } from '../fileVersions';
 import { formsAdminRoutes } from './formsAdmin';
 import { evaluationRoutes } from './evaluation';
 import { agendaRoutes } from './agenda';
+import { stageAirtableDeletes } from '../airtableStage';
 import { dashboardRoutes } from './dashboard';
 
 type ApiEnv = AccessEnv;
@@ -998,6 +999,20 @@ adminApiRoutes.delete('/contacts/:id', async (c) => {
       // Runs after the detach above (batch statements are sequential and share
       // one transaction), so the NOT EXISTS is what makes this a no-op for a
       // contact who still belongs to another event in the org.
+      stageAirtableDeletes(
+        db,
+        'reviews',
+        'reviewer_contact_id = ? AND NOT EXISTS (SELECT 1 FROM event_contacts ec WHERE ec.contact_id = ?)',
+        id,
+        id,
+      ),
+      stageAirtableDeletes(
+        db,
+        'contacts',
+        'id = ? AND NOT EXISTS (SELECT 1 FROM event_contacts ec WHERE ec.contact_id = ?)',
+        id,
+        id,
+      ),
       db.prepare(
         `DELETE FROM contacts
           WHERE id = ?1 AND NOT EXISTS (SELECT 1 FROM event_contacts WHERE contact_id = ?1)`,
@@ -1310,6 +1325,8 @@ adminApiRoutes.delete('/contacts/:id/org', async (c) => {
       // roster join made. The cascade fan-out (memberships, participants,
       // assignments, invites, …) fires exactly as on the detach route's
       // last-membership path.
+      stageAirtableDeletes(db, 'reviews', 'reviewer_contact_id = ?', id),
+      stageAirtableDeletes(db, 'contacts', 'id = ? AND org_id = ?', id, orgId),
       db.prepare('DELETE FROM contacts WHERE id = ? AND org_id = ?').bind(id, orgId),
     ]);
   } catch (err) {
@@ -1648,11 +1665,12 @@ adminApiRoutes.post('/tasks', async (c) => {
 
   const id = crypto.randomUUID();
   const cols = Object.keys(values);
+  const now = new Date().toISOString();
   await c.env.DB.prepare(
-    `INSERT INTO tasks (id, event_id, created_at${cols.map((k) => `, "${k}"`).join('')})
-     VALUES (?, ?, ?${', ?'.repeat(cols.length)})`,
+    `INSERT INTO tasks (id, event_id, created_at, updated_at${cols.map((k) => `, "${k}"`).join('')})
+     VALUES (?, ?, ?, ?${', ?'.repeat(cols.length)})`,
   )
-    .bind(id, session.eventId, new Date().toISOString(), ...cols.map((k) => values[k]))
+    .bind(id, session.eventId, now, now, ...cols.map((k) => values[k]))
     .run();
 
   // OR IGNORE: 0005_integrity added a unique logical index over
@@ -1691,9 +1709,9 @@ adminApiRoutes.put('/tasks/:id', async (c) => {
   const cols = Object.keys(values);
   if (cols.length > 0) {
     const result = await c.env.DB.prepare(
-      `UPDATE tasks SET ${cols.map((k) => `"${k}" = ?`).join(', ')} WHERE id = ? AND event_id = ?`,
+      `UPDATE tasks SET ${cols.map((k) => `"${k}" = ?`).join(', ')}, updated_at = ? WHERE id = ? AND event_id = ?`,
     )
-      .bind(...cols.map((k) => values[k]), id, session.eventId)
+      .bind(...cols.map((k) => values[k]), new Date().toISOString(), id, session.eventId)
       .run();
     if (result.meta.changes === 0) return c.json({ error: 'not_found' }, 404);
     await bumpEventRevision(c.env, session.eventId);
@@ -1706,10 +1724,12 @@ adminApiRoutes.put('/tasks/:id', async (c) => {
 adminApiRoutes.delete('/tasks/:id', async (c) => {
   const session = c.get('session');
   if (!isWriter(session.role)) return c.json({ error: 'forbidden' }, 403);
-  const result = await c.env.DB.prepare('DELETE FROM tasks WHERE id = ? AND event_id = ?')
-    .bind(c.req.param('id'), session.eventId)
-    .run();
-  if (result.meta.changes === 0) return c.json({ error: 'not_found' }, 404);
+  const id = c.req.param('id');
+  const results = await c.env.DB.batch([
+    stageAirtableDeletes(c.env.DB, 'tasks', 'id = ? AND event_id = ?', id, session.eventId),
+    c.env.DB.prepare('DELETE FROM tasks WHERE id = ? AND event_id = ?').bind(id, session.eventId),
+  ]);
+  if ((results[1]?.meta.changes ?? 0) === 0) return c.json({ error: 'not_found' }, 404);
   await bumpEventRevision(c.env, session.eventId);
   return c.json({ ok: true });
 });
@@ -1787,10 +1807,10 @@ adminApiRoutes.post('/rooms', async (c) => {
 
   const id = crypto.randomUUID();
   await c.env.DB.prepare(
-    `INSERT INTO rooms (id, event_id, name, capacity, notes, position)
-     SELECT ?1, ?2, ?3, ?4, ?5, COALESCE((SELECT MAX(position) + 1 FROM rooms WHERE event_id = ?2), 0)`,
+    `INSERT INTO rooms (id, event_id, name, capacity, notes, position, updated_at)
+     SELECT ?1, ?2, ?3, ?4, ?5, COALESCE((SELECT MAX(position) + 1 FROM rooms WHERE event_id = ?2), 0), ?6`,
   )
-    .bind(id, session.eventId, values.name, values.capacity ?? null, values.notes ?? null)
+    .bind(id, session.eventId, values.name, values.capacity ?? null, values.notes ?? null, new Date().toISOString())
     .run();
   await bumpEventRevision(c.env, session.eventId);
   return c.json(await roomRow(c.env.DB, id, session.eventId), 201);
@@ -1806,9 +1826,9 @@ adminApiRoutes.put('/rooms/:id', async (c) => {
   const cols = Object.keys(values);
   if (cols.length > 0) {
     const result = await c.env.DB.prepare(
-      `UPDATE rooms SET ${cols.map((k) => `${k} = ?`).join(', ')} WHERE id = ? AND event_id = ?`,
+      `UPDATE rooms SET ${cols.map((k) => `${k} = ?`).join(', ')}, updated_at = ? WHERE id = ? AND event_id = ?`,
     )
-      .bind(...cols.map((k) => values[k]), id, session.eventId)
+      .bind(...cols.map((k) => values[k]), new Date().toISOString(), id, session.eventId)
       .run();
     if (result.meta.changes === 0) return c.json({ error: 'not_found' }, 404);
     await bumpEventRevision(c.env, session.eventId);
@@ -1827,10 +1847,12 @@ adminApiRoutes.delete('/rooms/:id', async (c) => {
   const id = c.req.param('id');
   const db = c.env.DB;
   const results = await db.batch([
-    db.prepare('UPDATE submissions SET room_id = NULL WHERE room_id = ? AND event_id = ?').bind(id, session.eventId),
+    db.prepare('UPDATE submissions SET room_id = NULL, updated_at = ? WHERE room_id = ? AND event_id = ?')
+      .bind(new Date().toISOString(), id, session.eventId),
+    stageAirtableDeletes(db, 'rooms', 'id = ? AND event_id = ?', id, session.eventId),
     db.prepare('DELETE FROM rooms WHERE id = ? AND event_id = ?').bind(id, session.eventId),
   ]);
-  if ((results[1]?.meta.changes ?? 0) === 0) return c.json({ error: 'not_found' }, 404);
+  if ((results[2]?.meta.changes ?? 0) === 0) return c.json({ error: 'not_found' }, 404);
   await bumpEventRevision(c.env, session.eventId);
   return c.json({ ok: true });
 });
@@ -1883,10 +1905,10 @@ adminApiRoutes.post('/tracks', async (c) => {
 
   const id = crypto.randomUUID();
   await c.env.DB.prepare(
-    `INSERT INTO tracks (id, event_id, name, color, position)
-     SELECT ?1, ?2, ?3, ?4, COALESCE((SELECT MAX(position) + 1 FROM tracks WHERE event_id = ?2), 0)`,
+    `INSERT INTO tracks (id, event_id, name, color, position, updated_at)
+     SELECT ?1, ?2, ?3, ?4, COALESCE((SELECT MAX(position) + 1 FROM tracks WHERE event_id = ?2), 0), ?5`,
   )
-    .bind(id, session.eventId, values.name, values.color ?? null)
+    .bind(id, session.eventId, values.name, values.color ?? null, new Date().toISOString())
     .run();
   await bumpEventRevision(c.env, session.eventId);
   return c.json(await trackRow(c.env.DB, id, session.eventId), 201);
@@ -1902,9 +1924,9 @@ adminApiRoutes.put('/tracks/:id', async (c) => {
   const cols = Object.keys(values);
   if (cols.length > 0) {
     const result = await c.env.DB.prepare(
-      `UPDATE tracks SET ${cols.map((k) => `${k} = ?`).join(', ')} WHERE id = ? AND event_id = ?`,
+      `UPDATE tracks SET ${cols.map((k) => `${k} = ?`).join(', ')}, updated_at = ? WHERE id = ? AND event_id = ?`,
     )
-      .bind(...cols.map((k) => values[k]), id, session.eventId)
+      .bind(...cols.map((k) => values[k]), new Date().toISOString(), id, session.eventId)
       .run();
     if (result.meta.changes === 0) return c.json({ error: 'not_found' }, 404);
     await bumpEventRevision(c.env, session.eventId);
@@ -1923,14 +1945,16 @@ adminApiRoutes.delete('/tracks/:id', async (c) => {
   const id = c.req.param('id');
   const db = c.env.DB;
   const results = await db.batch([
-    db.prepare('UPDATE submissions SET track_id = NULL WHERE track_id = ? AND event_id = ?').bind(id, session.eventId),
+    db.prepare('UPDATE submissions SET track_id = NULL, updated_at = ? WHERE track_id = ? AND event_id = ?')
+      .bind(new Date().toISOString(), id, session.eventId),
     db.prepare(
       `DELETE FROM submission_tracks WHERE track_id = ?
        AND submission_id IN (SELECT id FROM submissions WHERE event_id = ?)`,
     ).bind(id, session.eventId),
+    stageAirtableDeletes(db, 'tracks', 'id = ? AND event_id = ?', id, session.eventId),
     db.prepare('DELETE FROM tracks WHERE id = ? AND event_id = ?').bind(id, session.eventId),
   ]);
-  if ((results[2]?.meta.changes ?? 0) === 0) return c.json({ error: 'not_found' }, 404);
+  if ((results[3]?.meta.changes ?? 0) === 0) return c.json({ error: 'not_found' }, 404);
   await bumpEventRevision(c.env, session.eventId);
   return c.json({ ok: true });
 });
@@ -2421,12 +2445,12 @@ adminApiRoutes.post('/events', async (c) => {
          VALUES (?, ?, 'owner', ?, ?)`,
       ).bind(id, contactId, ts, ts),
       ...rooms.map((r, i) =>
-        db.prepare('INSERT INTO rooms (id, event_id, name, capacity, position) VALUES (?, ?, ?, ?, ?)')
-          .bind(crypto.randomUUID(), id, r.name, r.extra, i),
+        db.prepare('INSERT INTO rooms (id, event_id, name, capacity, position, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
+          .bind(crypto.randomUUID(), id, r.name, r.extra, i, ts),
       ),
       ...tracks.map((t, i) =>
-        db.prepare('INSERT INTO tracks (id, event_id, name, color, position) VALUES (?, ?, ?, ?, ?)')
-          .bind(crypto.randomUUID(), id, t.name, t.extra, i),
+        db.prepare('INSERT INTO tracks (id, event_id, name, color, position, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
+          .bind(crypto.randomUUID(), id, t.name, t.extra, i, ts),
       ),
     ]);
   } catch (err) {

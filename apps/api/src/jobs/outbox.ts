@@ -34,11 +34,9 @@ export async function sweepOutbox(db: Db, env: Env, d1: D1Database): Promise<voi
           }
           break;
         }
-        case 'airtable_sync': {
-          // Airtable mirror lands in M6; acknowledge so the job does not retry.
-          console.log(`[outbox] airtable_sync ${job.idempotencyKey}: mirror not built yet (M6), marking done`);
-          break;
-        }
+        // The Airtable mirror is a watermark sweep (jobs/airtableSync.ts), not
+        // an outbox kind — workplan-9 §4.2 superseded D3 for that feature. Any
+        // legacy 'airtable_sync' row falls through and is acked below.
       }
       await db.outbox.markDone(job.id);
     } catch (err) {

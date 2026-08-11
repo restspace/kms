@@ -853,10 +853,10 @@ export function commitStatements(
     statements.push(
       db
         .prepare(
-          `INSERT INTO tracks (id, event_id, name, position)
-           SELECT ?1, ?2, ?3, COALESCE((SELECT MAX(position) + 1 FROM tracks WHERE event_id = ?2), 0)`,
+          `INSERT INTO tracks (id, event_id, name, position, updated_at)
+           SELECT ?1, ?2, ?3, COALESCE((SELECT MAX(position) + 1 FROM tracks WHERE event_id = ?2), 0), ?4`,
         )
-        .bind(id, eventId, name),
+        .bind(id, eventId, name, now),
     );
   }
   for (const name of plan.newRooms) {
@@ -865,10 +865,10 @@ export function commitStatements(
     statements.push(
       db
         .prepare(
-          `INSERT INTO rooms (id, event_id, name, position)
-           SELECT ?1, ?2, ?3, COALESCE((SELECT MAX(position) + 1 FROM rooms WHERE event_id = ?2), 0)`,
+          `INSERT INTO rooms (id, event_id, name, position, updated_at)
+           SELECT ?1, ?2, ?3, COALESCE((SELECT MAX(position) + 1 FROM rooms WHERE event_id = ?2), 0), ?4`,
         )
-        .bind(id, eventId, name),
+        .bind(id, eventId, name, now),
     );
   }
 

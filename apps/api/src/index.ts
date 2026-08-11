@@ -25,9 +25,11 @@ export default {
     const { sweepOutbox } = await import('./jobs/outbox');
     const { sweepReminders } = await import('./jobs/reminders');
     const { sweepBulkJobs } = await import('./jobs/bulkJobs');
+    const { sweepAirtableSync } = await import('./jobs/airtableSync');
     const db = createDb(env.DB);
     await sweepReminders(env);
     await sweepOutbox(db, env, env.DB);
     await sweepBulkJobs(env);
+    await sweepAirtableSync(env);
   },
 } satisfies ExportedHandler<Env>;

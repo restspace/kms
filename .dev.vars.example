@@ -1,0 +1,18 @@
+# Copy to .dev.vars for local dev (git-ignored). Production sets these via
+# `wrangler secret put`.
+
+SESSION_SECRET = "dev-only-secret"
+
+# Email delivery (optional locally — DEV_MODE=on skips real sends)
+# RESEND_API_KEY = ""
+# SENDGRID_API_KEY = ""
+# EMAIL_FROM = "Events <no-reply@example.com>"
+
+# Airtable mirror (workplan-9) — pair with AIRTABLE_SYNC = "on"
+# AIRTABLE_API_KEY = ""   # personal access token, scopes: data.records:read/write
+# AIRTABLE_BASE_ID = ""   # appXXXXXXXXXXXXXX
+
+# Local overrides
+# APP_URL = "http://localhost:8787"
+# DEV_MODE = "on"
+# DEMO_RESET = "off"

@@ -15,6 +15,7 @@ import { toCsv, toXlsx } from '../export';
 import { sha256Hex } from '../hashing';
 import { decodeCursor, encodeCursor, keysetWhere, type CursorPayload } from '../cursor';
 import { bumpEventRevision } from '../revision';
+import { stageAirtableDeletes } from '../airtableStage';
 import { isValidEmailShape } from '@kms/core';
 import { createDb } from '@kms/db';
 
@@ -572,6 +573,20 @@ restApiRoutes.delete('/events/:event_id/contacts/:cid', async (c) => {
     await c.env.DB.batch([
       c.env.DB.prepare('UPDATE event_contacts SET headshot_asset_id = NULL WHERE event_id = ? AND contact_id = ?').bind(eventId, id),
       c.env.DB.prepare('DELETE FROM event_contacts WHERE event_id = ? AND contact_id = ?').bind(eventId, id),
+      stageAirtableDeletes(
+        c.env.DB,
+        'reviews',
+        'reviewer_contact_id = ? AND NOT EXISTS (SELECT 1 FROM event_contacts ec WHERE ec.contact_id = ?)',
+        id,
+        id,
+      ),
+      stageAirtableDeletes(
+        c.env.DB,
+        'contacts',
+        'id = ? AND NOT EXISTS (SELECT 1 FROM event_contacts ec WHERE ec.contact_id = ?)',
+        id,
+        id,
+      ),
       c.env.DB.prepare(
         `DELETE FROM contacts WHERE id = ?1
            AND NOT EXISTS (SELECT 1 FROM event_contacts ec WHERE ec.contact_id = ?1)`,
@@ -717,10 +732,13 @@ restApiRoutes.put('/events/:event_id/submissions/:sid', async (c) => {
 // delete is safe; no batch/FK workaround needed here.
 restApiRoutes.delete('/events/:event_id/submissions/:sid', async (c) => {
   const eventId = c.get('event').id;
-  const result = await c.env.DB.prepare('DELETE FROM submissions WHERE id = ? AND event_id = ?')
-    .bind(c.req.param('sid'), eventId)
-    .run();
-  if (result.meta.changes === 0) return apiError(c, 404, 'not_found', 'No submission with this id in this event.');
+  const sid = c.req.param('sid');
+  const results = await c.env.DB.batch([
+    stageAirtableDeletes(c.env.DB, 'reviews', 'submission_id = ?', sid),
+    stageAirtableDeletes(c.env.DB, 'submissions', 'id = ? AND event_id = ?', sid, eventId),
+    c.env.DB.prepare('DELETE FROM submissions WHERE id = ? AND event_id = ?').bind(sid, eventId),
+  ]);
+  if ((results[2]?.meta.changes ?? 0) === 0) return apiError(c, 404, 'not_found', 'No submission with this id in this event.');
   await bumpEventRevision(c.env, eventId);
   return c.json({ ok: true });
 });
@@ -829,10 +847,10 @@ restApiRoutes.post('/events/:event_id/tasks', async (c) => {
   const keys = Object.keys(cols);
   const quoted = keys.map((k) => (k === 'trigger' ? '"trigger"' : k));
   await c.env.DB.prepare(
-    `INSERT INTO tasks (id, event_id, created_at, ${quoted.join(', ')})
-     VALUES (?, ?, ?${', ?'.repeat(keys.length)})`,
+    `INSERT INTO tasks (id, event_id, created_at, updated_at, ${quoted.join(', ')})
+     VALUES (?, ?, ?, ?${', ?'.repeat(keys.length)})`,
   )
-    .bind(id, eventId, ts, ...keys.map((k) => cols[k]))
+    .bind(id, eventId, ts, ts, ...keys.map((k) => cols[k]))
     .run();
   await bumpEventRevision(c.env, eventId);
   const row = await c.env.DB.prepare('SELECT * FROM tasks WHERE id = ?').bind(id).first();
@@ -850,9 +868,9 @@ restApiRoutes.put('/events/:event_id/tasks/:tid', async (c) => {
   if (keys.length > 0) {
     const quoted = keys.map((k) => (k === 'trigger' ? '"trigger"' : k));
     const result = await c.env.DB.prepare(
-      `UPDATE tasks SET ${quoted.map((k) => `${k} = ?`).join(', ')} WHERE id = ? AND event_id = ?`,
+      `UPDATE tasks SET ${quoted.map((k) => `${k} = ?`).join(', ')}, updated_at = ? WHERE id = ? AND event_id = ?`,
     )
-      .bind(...keys.map((k) => cols[k]), id, eventId)
+      .bind(...keys.map((k) => cols[k]), new Date().toISOString(), id, eventId)
       .run();
     if (result.meta.changes === 0) return apiError(c, 404, 'not_found', 'No task with this id in this event.');
   }
@@ -865,10 +883,12 @@ restApiRoutes.put('/events/:event_id/tasks/:tid', async (c) => {
 // DELETE /events/:event_id/tasks/:tid — assignments cascade via task_id.
 restApiRoutes.delete('/events/:event_id/tasks/:tid', async (c) => {
   const eventId = c.get('event').id;
-  const result = await c.env.DB.prepare('DELETE FROM tasks WHERE id = ? AND event_id = ?')
-    .bind(c.req.param('tid'), eventId)
-    .run();
-  if (result.meta.changes === 0) return apiError(c, 404, 'not_found', 'No task with this id in this event.');
+  const tid = c.req.param('tid');
+  const results = await c.env.DB.batch([
+    stageAirtableDeletes(c.env.DB, 'tasks', 'id = ? AND event_id = ?', tid, eventId),
+    c.env.DB.prepare('DELETE FROM tasks WHERE id = ? AND event_id = ?').bind(tid, eventId),
+  ]);
+  if ((results[1]?.meta.changes ?? 0) === 0) return apiError(c, 404, 'not_found', 'No task with this id in this event.');
   await bumpEventRevision(c.env, eventId);
   return c.json({ ok: true });
 });
