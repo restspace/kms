@@ -104,7 +104,7 @@ async function loadContext(db: D1Database, slug: string, formId: string): Promis
     .bind(formId, event.id)
     .first<FormRow>();
   if (!form) return null;
-  const questions = (await loadQuestions(db, form.id)) as unknown as QuestionDef[];
+  const questions = (await loadQuestions(db, form.id, event.id)) as unknown as QuestionDef[];
   const closed = isFormClosed(form);
   return {
     event,
@@ -204,6 +204,63 @@ function trackAnswers(questions: QuestionDef[], answers: Answers): string[] {
     if (typeof v === 'string' && v !== '') return [resolveLabel(v)];
   }
   return [];
+}
+
+/** The canonical Track question, whose options are derived from the event's
+ *  tracks (`loadQuestions`) rather than stored on the question. Its submitted
+ *  values are therefore track ids. */
+function trackBoundQuestion(questions: QuestionDef[]): QuestionDef | undefined {
+  return questions.find((x) => x.field_key === 'track');
+}
+
+/** Raw submitted values for the track-bound question — track ids, resolved by
+ *  identity in the submit handler before the (still supported) name match. */
+function trackAnswerValues(questions: QuestionDef[], answers: Answers): string[] {
+  const q = trackBoundQuestion(questions);
+  if (!q) return [];
+  const v = answers[q.id];
+  if (Array.isArray(v)) return v.map(String).filter((s) => s !== '');
+  return typeof v === 'string' && v !== '' ? [v] : [];
+}
+
+/** Incoming answers with any track picked *by name* swapped for its track id.
+ *
+ *  The derived Track options are keyed by id, and `validateAnswers` checks a
+ *  choice answer against the option values — so a submission that still sends
+ *  a track name would be rejected. Names arrive from two real places: a draft
+ *  saved before the options were derived, and any client posting the API
+ *  directly against the older shape. Accepting both keeps those working while
+ *  the id remains what the pipeline resolves against. */
+function normaliseTrackAnswers(questions: QuestionDef[], answers: Answers): Answers {
+  const q = trackBoundQuestion(questions);
+  const options = q?.options;
+  if (!q || !options || answers[q.id] === undefined) return answers;
+  const byLabel = new Map(options.map((o) => [o.label.trim().toLowerCase(), o.value]));
+  const toId = (raw: unknown) =>
+    typeof raw === 'string' && !options.some((o) => o.value === raw)
+      ? byLabel.get(raw.trim().toLowerCase()) ?? raw
+      : raw;
+  const v = answers[q.id];
+  return { ...answers, [q.id]: Array.isArray(v) ? v.map(toId) : toId(v) } as Answers;
+}
+
+/** Answers as they should be stored. A track-bound question submits a track
+ *  id, but `submission_answers` is read straight back out as display text by
+ *  the portal, the organiser detail panel and the exports — so the id is
+ *  swapped for the track name it stands for. Storing the name also keeps every
+ *  answer row readable if the track is later deleted, and keeps existing rows
+ *  (which always held names) the same shape. Nothing else is rewritten. */
+function storableAnswers(questions: QuestionDef[], answers: Answers): Answers {
+  const q = trackBoundQuestion(questions);
+  if (!q || !q.options || answers[q.id] === undefined) return answers;
+  const label = (raw: string) => q.options?.find((o) => o.value === raw)?.label ?? raw;
+  const v = answers[q.id];
+  const swapped = Array.isArray(v)
+    ? v.map((entry) => (typeof entry === 'string' ? label(entry) : entry))
+    : typeof v === 'string'
+      ? label(v)
+      : v;
+  return { ...answers, [q.id]: swapped };
 }
 
 function tagAnswers(questions: QuestionDef[], answers: Answers): string[] {
@@ -458,7 +515,10 @@ submitRoutes.post('/:slug/:formId/draft', async (c) => {
   const db = c.env.DB;
   const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
   const abstractQuestions = ctx.questions.filter((q) => q.section === 'abstract');
-  const answers = discardHiddenAnswers(abstractQuestions, parseAnswers(body.answers));
+  const answers = discardHiddenAnswers(
+    abstractQuestions,
+    normaliseTrackAnswers(abstractQuestions, parseAnswers(body.answers)),
+  );
   const ts = new Date().toISOString();
 
   // ABS defect (data loss): the wizard used to resume the submitter's most
@@ -553,7 +613,7 @@ submitRoutes.post('/:slug/:formId/draft', async (c) => {
           submissionId,
         );
 
-  const results = await db.batch([head, ...answerStatements(db, submissionId, answers)]);
+  const results = await db.batch([head, ...answerStatements(db, submissionId, storableAnswers(abstractQuestions, answers))]);
   if (isCreate && results[0]?.meta.changes === 0) {
     return c.json(limitReachedBody(), 409);
   }
@@ -778,7 +838,10 @@ submitRoutes.post('/:slug/:formId/submit', async (c) => {
   // -------------------------------------------------------------------------
 
   // Authoritative pass: hidden answers discarded, then required/max validated.
-  const answers = discardHiddenAnswers(abstractQuestions, parseAnswers(body.answers));
+  const answers = discardHiddenAnswers(
+    abstractQuestions,
+    normaliseTrackAnswers(abstractQuestions, parseAnswers(body.answers)),
+  );
   const validation = validateAnswers(abstractQuestions, answers);
   if (validation.length > 0) {
     return c.json({ error: 'validation_failed', errors: validation }, 400);
@@ -926,7 +989,13 @@ submitRoutes.post('/:slug/:formId/submit', async (c) => {
   } catch {
     routingConfig = null;
   }
-  const routing = applyRouting(routingConfig, answers);
+  // Routing (and the visibility rules the builder writes alongside it) compares
+  // against what a submitter *saw*, not the wire value: a derived Track option
+  // submits a track id, but every rule — including those authored before the
+  // options were derived — names the track. `storableAnswers` is the same
+  // label view the answers are persisted as, so a rule matches the same text
+  // the organiser will later read on the submission.
+  const routing = applyRouting(routingConfig, storableAnswers(abstractQuestions, answers));
 
   // A replay resolves to the row that already exists — same code, same portal
   // link, no second email (the confirmation is keyed on the submission id, so
@@ -969,7 +1038,13 @@ submitRoutes.post('/:slug/:formId/submit', async (c) => {
   }
   // A multiselect track question resolves EVERY selected value, not just one.
   const trackNames = trackAnswers(abstractQuestions, answers);
-  if (trackNames.length > 0) {
+  // The canonical Track question's options are the event's tracks keyed by id
+  // (loadQuestions), so its submitted values resolve by identity — no string
+  // comparison, and immune to a rename between render and submit. The name
+  // match below still runs for label-built "Track" questions and for answers
+  // captured before options were derived.
+  const trackPicks = trackAnswerValues(abstractQuestions, answers);
+  if (trackNames.length > 0 || trackPicks.length > 0) {
     // Matched loosely (trimmed, case-insensitive) rather than by exact SQL
     // equality: the name a submitter picked can carry incidental whitespace
     // (a trailing space on an organizer-typed option) or case drift from the
@@ -985,6 +1060,10 @@ submitRoutes.post('/:slug/:formId/submit', async (c) => {
       .all<{ id: string; name: string }>();
     const normalize = (s: string) => s.trim().toLowerCase();
     const byName = new Map(results.map((r) => [normalize(r.name), r.id]));
+    const byId = new Set(results.map((r) => r.id));
+    for (const raw of trackPicks) {
+      if (byId.has(raw) && !resolvedTrackIds.includes(raw)) resolvedTrackIds.push(raw);
+    }
     for (const name of trackNames) {
       const id = byName.get(normalize(name));
       if (id && !resolvedTrackIds.includes(id)) resolvedTrackIds.push(id);
@@ -1153,7 +1232,7 @@ submitRoutes.post('/:slug/:formId/submit', async (c) => {
       );
     }
 
-    statements.push(...answerStatements(db, newId, answers));
+    statements.push(...answerStatements(db, newId, storableAnswers(abstractQuestions, answers)));
 
     // Tags
     statements.push(db.prepare('DELETE FROM submission_tags WHERE submission_id = ?').bind(newId));

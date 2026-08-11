@@ -70,8 +70,12 @@ INSERT INTO field_definitions (id, event_id, key, label, type, scope, options, m
     '[{"value":"Keynote","label":"Keynote"},{"value":"Featured Keynote","label":"Featured Keynote"},{"value":"Talk","label":"Talk"},{"value":"Workshop","label":"Workshop"},{"value":"Panel","label":"Panel"},{"value":"Lightning Talk","label":"Lightning Talk"}]', NULL, 0),
   ('fld00000-0000-4000-8000-000000000004', 'evt00000-0000-4000-8000-000000000001', 'tags',              'Tags',              'multiselect', 'submission',
     '[{"value":"Open Source","label":"Open Source"},{"value":"Research","label":"Research"},{"value":"Production","label":"Production"},{"value":"Sponsor","label":"Sponsor"}]', NULL, 0),
+  -- The canonical `track` field carries no stored options: loadQuestions
+  -- derives them from this event's `tracks` rows on every load, so renaming or
+  -- deleting a track cannot leave a form offering a name that resolves to
+  -- nothing. See formsAdmin.ts's TRACK_FIELD_KEY.
   ('fld00000-0000-4000-8000-000000000005', 'evt00000-0000-4000-8000-000000000001', 'track',             'Track',             'dropdown',    'submission',
-    '[{"value":"Agents","label":"Agents"},{"value":"Evals","label":"Evals"},{"value":"RAG & Retrieval","label":"RAG & Retrieval"},{"value":"Infra & Serving","label":"Infra & Serving"},{"value":"AI in Production","label":"AI in Production"}]', NULL, 0),
+    NULL, NULL, 0),
   ('fld00000-0000-4000-8000-000000000006', 'evt00000-0000-4000-8000-000000000001', 'level',             'Level',             'dropdown',    'submission',
     '[{"value":"Beginner","label":"Beginner"},{"value":"Intermediate","label":"Intermediate"},{"value":"Advanced","label":"Advanced"}]', NULL, 0),
   ('fld00000-0000-4000-8000-000000000007', 'evt00000-0000-4000-8000-000000000001', 'language',          'Language',          'dropdown',    'submission',

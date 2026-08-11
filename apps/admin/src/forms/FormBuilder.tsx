@@ -45,6 +45,20 @@ interface RoleRow {
   max: number | null
 }
 
+/** The value a visibility/routing rule should compare against for one option.
+ *
+ *  A canonical Track question's options are derived from the event's tracks and
+ *  keyed by track id (formsAdmin.ts), but rules are authored, read and stored
+ *  in terms of what a submitter sees — and existing forms already hold
+ *  name-based track rules. Matching therefore stays on the label; only the
+ *  submission pipeline's track *resolution* uses the id. */
+function ruleValueOf(
+  question: { field_key?: string } | null | undefined,
+  option: { value: string; label: string },
+): string {
+  return question?.field_key === 'track' ? option.label : option.value
+}
+
 interface RuleDraft {
   id: string
   question_id: string
@@ -762,7 +776,12 @@ function QuestionEditModal({ question, onSave, onClose }: {
   const [label, setLabel] = useState(question.label)
   const [help, setHelp] = useState(question.help_text ?? '')
   const [maxChars, setMaxChars] = useState(question.max_chars?.toString() ?? '')
-  const hasOptions = ['dropdown', 'multiselect', 'radio'].includes(question.type)
+  // The canonical Track question does not own its options — the event's tracks
+  // are the option list, derived server-side on every load (formsAdmin.ts's
+  // `loadQuestions`). Editing them here would write a copy that goes stale the
+  // moment a track is renamed, which is the bug this replaced.
+  const isTrackBound = question.field_key === 'track'
+  const hasOptions = !isTrackBound && ['dropdown', 'multiselect', 'radio'].includes(question.type)
   const [optionsText, setOptionsText] = useState(
     (question.options ?? []).map((o) => o.label).join('\n'),
   )
@@ -814,6 +833,18 @@ function QuestionEditModal({ question, onSave, onClose }: {
           <label>Options (one per line)</label>
           <textarea rows={6} value={optionsText} onChange={(e) => setOptionsText(e.target.value)} />
           {question.locked && <p className="bhelp">System field — options edits apply to this form only.</p>}
+        </div>
+      )}
+      {isTrackBound && (
+        <div className="bfield">
+          <label>Options</label>
+          <p className="bhelp">
+            This question offers the event’s tracks
+            {(question.options ?? []).length > 0
+              ? ` — ${(question.options ?? []).map((o) => o.label).join(', ')}.`
+              : '.'}{' '}
+            Add or rename tracks in Settings and every form follows automatically.
+          </p>
         </div>
       )}
     </ModalDialog>
@@ -939,12 +970,12 @@ function LogicModal({ question, earlier, onSave, onClose }: {
                               setCond(i, { value: Array.from(e.target.selectedOptions).map((o) => o.value) })
                             }
                           >
-                            {valueChoices.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+                            {valueChoices.map((o) => <option key={o.value} value={ruleValueOf(target, o)}>{o.label}</option>)}
                           </select>
                         ) : (
                           <select value={cond.value[0] ?? ''} onChange={(e) => setCond(i, { value: [e.target.value] })}>
                             <option value="">Value…</option>
-                            {valueChoices.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+                            {valueChoices.map((o) => <option key={o.value} value={ruleValueOf(target, o)}>{o.label}</option>)}
                           </select>
                         )
                       ) : (
@@ -1068,12 +1099,12 @@ function RoutingPanel({ form, patch, meta, questions }: {
                     value={rule.value}
                     onChange={(e) => setRule({ value: Array.from(e.target.selectedOptions).map((o) => o.value) })}
                   >
-                    {(target.options ?? []).map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+                    {(target.options ?? []).map((o) => <option key={o.value} value={ruleValueOf(target, o)}>{o.label}</option>)}
                   </select>
                 ) : (
                   <select value={rule.value[0] ?? ''} onChange={(e) => setRule({ value: [e.target.value] })}>
                     <option value="">Value…</option>
-                    {(target.options ?? []).map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+                    {(target.options ?? []).map((o) => <option key={o.value} value={ruleValueOf(target, o)}>{o.label}</option>)}
                   </select>
                 )
               )}

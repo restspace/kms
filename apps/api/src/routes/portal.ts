@@ -1381,9 +1381,13 @@ async function loadOwnSubmission(
   );
 }
 
-async function loadAbstractQuestions(c: Context<AppEnv>, formId: string | null): Promise<QuestionDef[]> {
+async function loadAbstractQuestions(
+  c: Context<AppEnv>,
+  formId: string | null,
+  eventId?: string,
+): Promise<QuestionDef[]> {
   if (!formId) return [];
-  const all = (await loadQuestions(c.env.DB, formId)) as unknown as QuestionDef[];
+  const all = (await loadQuestions(c.env.DB, formId, eventId)) as unknown as QuestionDef[];
   return all.filter((q) => q.section === 'abstract');
 }
 
@@ -1767,7 +1771,7 @@ async function resolveEditTarget(
       403,
     );
   }
-  const questions = await loadAbstractQuestions(c, submission.form_id);
+  const questions = await loadAbstractQuestions(c, submission.form_id, ctx.event.id);
   if (questions.length === 0) {
     return c.html(
       portalPage(

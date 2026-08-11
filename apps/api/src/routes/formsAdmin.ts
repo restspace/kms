@@ -250,12 +250,48 @@ function shapeQuestion(row: QuestionRow) {
   };
 }
 
-export async function loadQuestions(db: D1Database, formId: string) {
+/** A canonical Track question does not own its option list — the event's
+ *  `tracks` rows are the option list, keyed by track id.
+ *
+ *  Storing track *names* as free-text options (which is what the form builder
+ *  used to do) duplicates the tracks table into every form, so renaming or
+ *  deleting a track left each form offering a name that no longer resolved —
+ *  submissions then landed with no `track_id`, and the organiser's edit form,
+ *  which can only offer real tracks, had no option to show for what the
+ *  submitter picked. Deriving here means a rename propagates to every form on
+ *  the next render and a submitted value is a track id, so resolution is an
+ *  identity check rather than a string match.
+ *
+ *  Only the canonical `field_key === 'track'` binds. A question merely
+ *  *labelled* "Track" (the form builder's "Create Field" flow mints a
+ *  `custom_*` key) keeps its own options and the name-matching fallback in
+ *  submit.tsx's `trackAnswers`. */
+export const TRACK_FIELD_KEY = 'track';
+
+async function trackOptions(db: D1Database, eventId: string) {
+  const { results } = await db
+    .prepare('SELECT id, name FROM tracks WHERE event_id = ? ORDER BY position')
+    .bind(eventId)
+    .all<{ id: string; name: string }>();
+  return results.map((t) => ({ value: t.id, label: t.name }));
+}
+
+export async function loadQuestions(db: D1Database, formId: string, eventId?: string) {
   const { results } = await db
     .prepare(`${QUESTION_SELECT} WHERE q.form_id = ? ORDER BY q.section, q.position`)
     .bind(formId)
     .all<QuestionRow>();
-  return results.map(shapeQuestion);
+  const questions = results.map(shapeQuestion);
+  // Derived only when the question carries no option list of its own. A form
+  // that deliberately authored track options — an import, or the id/slug-style
+  // values submit-track-option-value.test.ts reproduces from the live CFP form
+  // — keeps them and the name-matching path. Migration 0013 clears the stored
+  // options on canonical track fields so existing forms adopt derivation.
+  const derivable = (q: { field_key: string; options: unknown }) =>
+    q.field_key === TRACK_FIELD_KEY && (q.options === null || (Array.isArray(q.options) && q.options.length === 0));
+  if (!eventId || !questions.some(derivable)) return questions;
+  const options = await trackOptions(db, eventId);
+  return questions.map((q) => (derivable(q) ? { ...q, options } : q));
 }
 
 async function getForm(db: D1Database, eventId: string, id: string) {
@@ -344,7 +380,7 @@ formsAdminRoutes.post('/', async (c) => {
       const existing = await getForm(c.env.DB, session.eventId, existingId);
       if (existing) {
         return c.json(
-          { form: shapeForm(existing), questions: await loadQuestions(c.env.DB, existingId), replayed: true },
+          { form: shapeForm(existing), questions: await loadQuestions(c.env.DB, existingId, session.eventId), replayed: true },
           200,
         );
       }
@@ -409,7 +445,7 @@ formsAdminRoutes.post('/', async (c) => {
   }
 
   const form = await getForm(c.env.DB, session.eventId, id);
-  return c.json({ form: form ? shapeForm(form) : null, questions: await loadQuestions(c.env.DB, id) }, 201);
+  return c.json({ form: form ? shapeForm(form) : null, questions: await loadQuestions(c.env.DB, id, session.eventId) }, 201);
 });
 
 // GET /:id — full form + questions for the builder and the workspace.
@@ -417,7 +453,7 @@ formsAdminRoutes.get('/:id', async (c) => {
   const session = c.get('session');
   const form = await getForm(c.env.DB, session.eventId, c.req.param('id'));
   if (!form) return c.json({ error: 'not_found' }, 404);
-  return c.json({ form: shapeForm(form), questions: await loadQuestions(c.env.DB, form.id as string) });
+  return c.json({ form: shapeForm(form), questions: await loadQuestions(c.env.DB, form.id as string, session.eventId) });
 });
 
 // PUT /:id — update builder-editable columns. Optimistic concurrency: when
@@ -562,7 +598,7 @@ formsAdminRoutes.post('/:id/duplicate', async (c) => {
     );
   }
   const form = await getForm(c.env.DB, session.eventId, id);
-  return c.json({ form: form ? shapeForm(form) : null, questions: await loadQuestions(c.env.DB, id) }, 201);
+  return c.json({ form: form ? shapeForm(form) : null, questions: await loadQuestions(c.env.DB, id, session.eventId) }, 201);
 });
 
 // ---------------------------------------------------------------------------
@@ -645,7 +681,7 @@ formsAdminRoutes.post('/:id/questions', async (c) => {
     )
     .run();
 
-  return c.json({ questions: await loadQuestions(c.env.DB, formId) }, 201);
+  return c.json({ questions: await loadQuestions(c.env.DB, formId, session.eventId) }, 201);
 });
 
 // PUT /:id/questions/:qid
@@ -673,7 +709,7 @@ formsAdminRoutes.put('/:id/questions/:qid', async (c) => {
       .run();
     if (result.meta.changes === 0) return c.json({ error: 'not_found' }, 404);
   }
-  return c.json({ questions: await loadQuestions(c.env.DB, formId) });
+  return c.json({ questions: await loadQuestions(c.env.DB, formId, session.eventId) });
 });
 
 // DELETE /:id/questions/:qid — locked system questions cannot be removed.
@@ -687,7 +723,7 @@ formsAdminRoutes.delete('/:id/questions/:qid', async (c) => {
     .bind(c.req.param('qid'), formId)
     .run();
   if (result.meta.changes === 0) return c.json({ error: 'locked_or_missing' }, 400);
-  return c.json({ questions: await loadQuestions(c.env.DB, formId) });
+  return c.json({ questions: await loadQuestions(c.env.DB, formId, session.eventId) });
 });
 
 // POST /:id/questions/reorder {section, ids} — positions follow the given order.
@@ -708,5 +744,5 @@ formsAdminRoutes.post('/:id/questions/reorder', async (c) => {
         .bind(index + 1, qid, formId, section),
     ),
   );
-  return c.json({ questions: await loadQuestions(c.env.DB, formId) });
+  return c.json({ questions: await loadQuestions(c.env.DB, formId, session.eventId) });
 });
