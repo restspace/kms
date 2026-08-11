@@ -1075,4 +1075,17 @@ const wizardCss = `
 .sb-rich p, .sb-rich ul, .sb-rich ol { margin: 0 0 .8rem; }
 .sb-rich img { max-width: 100%; }
 .sb-success-head { margin-top: 0; }
+
+/* Compact (640): phone layout, appended so the desktop rules above stand.
+   .sb-main is needed alongside Page's element-level main rule — it wins
+   on specificity, so both files need the change. */
+@media (max-width: 640px) {
+  .sb-main { padding: 1.5rem 1rem 3rem; }
+  .sb-stepper { position: sticky; top: 0; z-index: 2; background: var(--bg);
+    padding: .5rem 0; margin: 0 0 1rem; }
+  .sb-choices label, .sb-check { min-height: 36px; }
+  .sb-nav { gap: .75rem; }
+  .sb-button { min-height: 44px; }
+  .sb-review > div { grid-template-columns: 1fr; gap: .15rem; }
+}
 `

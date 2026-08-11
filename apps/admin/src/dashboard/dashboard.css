@@ -243,7 +243,12 @@
 .db-span2 { grid-column: span 2; }
 .db-span3 { grid-column: span 3; }
 
-@media (max-width: 900px) {
+@media (max-width: 1080px) {
+  .db-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .db-span3 { grid-column: span 2; }
+}
+
+@media (max-width: 768px) {
   .db-grid { grid-template-columns: 1fr; }
   .db-span2, .db-span3 { grid-column: span 1; }
 }
@@ -524,4 +529,18 @@
   cursor: pointer;
   text-decoration: underline;
   text-underline-offset: 2px;
+}
+
+/* Compact (640): the cards already stack at medium; this is the padding and
+   the two rows whose fixed label column squeezes the bar to nothing. */
+@media (max-width: 640px) {
+  .db-shell { padding: 0.75rem 0.75rem 2rem; }
+
+  .db-bar-row,
+  .db-funnel-row { grid-template-columns: minmax(70px, 1fr) 1fr 3rem; }
+
+  .db-switcher {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+  }
 }

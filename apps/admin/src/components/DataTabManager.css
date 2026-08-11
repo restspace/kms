@@ -783,6 +783,16 @@
   white-space: nowrap;
 }
 
+/* Medium (768): the event chip and global-filter read-out are chrome for
+   arranging many records, and the header has no room for them beside the tab
+   dropdown. Must sit *after* the default rule above — the two have equal
+   specificity, so source order decides. */
+@media (max-width: 768px) {
+  .data-tab-header-trailing {
+    display: none;
+  }
+}
+
 /* Workspace search input (deferred-gap item): debounced text filter merged
    into the active tab's query, synced to the URL by the host. */
 .data-tab-search {
@@ -843,12 +853,6 @@
   opacity: 1;
 }
 
-@media (max-width: 720px) {
-  .data-tab-header-trailing {
-    display: none;
-  }
-}
-
 /* Export status feedback (CNT-14: bulk ZIP export feedback) */
 .data-tab-export-status {
   position: relative;
@@ -881,5 +885,14 @@
   to {
     opacity: 1;
     transform: translateY(0);
+  }
+}
+
+/* Compact (640): the global-anchor chip belongs to the "arrange many records"
+   half of docs/15 §6 — and anchors are only ever set by shift/right-click, so
+   nothing on a phone can produce one (docs/16 decision 3). */
+@media (max-width: 640px) {
+  .data-tab-global-filter-chip {
+    display: none;
   }
 }

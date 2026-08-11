@@ -74,6 +74,23 @@
   line-gap-override: 0%;
 }
 
+/**
+ * Breakpoints. Three named widths, used as CSS literals everywhere:
+ *
+ *   compact  640px  phone. One column; chrome sheds "arrange many records"
+ *                   affordances; tap targets grow to 44px.
+ *   medium   768px  tablet. Structural chrome collapses — the admin sidebar
+ *                   becomes a drawer, the workspace tab strip a dropdown.
+ *   wide    1080px  narrow desktop. Multi-column grids relax a step rather
+ *                   than collapsing.
+ *
+ * These are NOT custom properties, deliberately: a custom property is invalid
+ * in a @media prelude and there is no PostCSS / @custom-media step in either
+ * Vite config. This comment is the CSS-side source of truth and
+ * `breakpoints` in src/index.ts is the JS-side one; both must stay in step.
+ * Comments are stripped by build.mjs, so generated.ts is unaffected.
+ */
+
 :root {
   /**
    * Type has three roles and they are not interchangeable.

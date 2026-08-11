@@ -1617,6 +1617,25 @@ export default function App() {
   const [switching, setSwitching] = useState(false)
   // Create Event dialog (FR-EVT-1/2), reachable next to the event dropdown.
   const [createEventOpen, setCreateEventOpen] = useState(false)
+  // Below medium the sidebar is a slide-over drawer behind the top bar's
+  // hamburger; above it the drawer state is inert and the sidebar is the
+  // fixed rail it has always been. Same open/Escape idiom as the workspace
+  // tab dropdown in DataTabManager.
+  const [navOpen, setNavOpen] = useState(false)
+  const navToggleRef = useRef<HTMLButtonElement | null>(null)
+  const closeNav = useCallback(() => {
+    setNavOpen(false)
+    navToggleRef.current?.focus()
+  }, [])
+
+  useEffect(() => {
+    if (!navOpen) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') closeNav()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [navOpen, closeNav])
 
   // Dashboard deep-link state (M5 stretch): seeded workspace filters + which
   // tab to land on. The tab itself now travels in the URL.
@@ -2118,10 +2137,30 @@ export default function App() {
 
   return (
     <EventScopeProvider value={scope}>
-    {/* .shell--greenroom scopes the green room's compact-width sidebar
-        override (greenroom.css); every other view renders exactly as before. */}
-    <div className={view === 'greenroom' ? 'shell shell--greenroom' : 'shell'}>
-      <aside className="shell-sidebar">
+    <div className="shell">
+      {/*
+        * Compact chrome (docs/16 item 9). Rendered unconditionally and hidden
+        * above medium by the media query — no viewport detection in JS, so a
+        * resize can never leave the shell in a state the CSS disagrees with.
+        * This drawer supersedes the green room's interim scoped sidebar
+        * override (workplan 12), which was removed in this merge.
+        */}
+      <div className="shell-topbar">
+        <button
+          type="button"
+          ref={navToggleRef}
+          className="shell-topbar-toggle"
+          aria-label={navOpen ? 'Close the menu' : 'Open the menu'}
+          aria-expanded={navOpen}
+          onClick={() => setNavOpen((open) => !open)}
+        >
+          ☰
+        </button>
+        <span className="shell-topbar-brand">KMS</span>
+        <span className="shell-topbar-event">{me.event.name}</span>
+      </div>
+      {navOpen && <div className="shell-scrim" onClick={() => closeNav()} />}
+      <aside className={`shell-sidebar${navOpen ? ' is-open' : ''}`}>
         <div className="shell-brand">
           KMS <span className="shell-brand-sub">{isReviewer ? 'review' : 'admin'}</span>
         </div>
@@ -2163,7 +2202,10 @@ export default function App() {
                 disabled={item.soon !== null}
                 title={item.soon ? `Arrives with ${item.soon}` : undefined}
                 aria-current={view === item.key && !(item.key === 'workspace' && route.tab) ? 'page' : undefined}
-                onClick={() => navigate({ v: item.key })}
+                onClick={() => {
+                  setNavOpen(false)
+                  navigate({ v: item.key })
+                }}
               >
                 {item.label}
                 {item.soon && <span className="shell-nav-soon">{item.soon}</span>}
@@ -2177,7 +2219,10 @@ export default function App() {
                         key={tab.key}
                         className={`shell-nav-child ${active ? 'active' : ''}`}
                         aria-current={active ? 'page' : undefined}
-                        onClick={() => navigate({ v: 'workspace', tab: tab.key })}
+                        onClick={() => {
+                          setNavOpen(false)
+                          navigate({ v: 'workspace', tab: tab.key })
+                        }}
                       >
                         {tab.label}
                       </button>

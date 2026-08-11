@@ -519,5 +519,8 @@ const agendaCss = `
 
 @media (max-width: 640px) {
   .ag-grid { --ag-col: 150px; --ag-gutter: 54px; }
+  .ag-scroll { -webkit-overflow-scrolling: touch; }
+  /* The grid scrolls inside .ag-scroll, which is not obvious on a phone. */
+  .ag-toolbar::after { content: "Scroll sideways for more rooms"; flex: 1 0 100%; color: var(--text-muted); font-size: .78rem; }
 }
 `

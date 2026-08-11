@@ -3,6 +3,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { FixedSizeList as List, ListChildComponentProps, ListOnItemsRenderedProps, ListOnScrollProps } from 'react-window';
 // @ts-expect-error dynamically imported library
 import InfiniteLoader from 'react-window-infinite-loader';
+import { breakpoints } from '@kms/theme';
 import useElementSize from '../hooks/useElementSize';
 import PlusIcon from '../assets/plus-icon.svg';
 import { stableSerialize } from '../utils/stableSerialize';
@@ -517,7 +518,7 @@ export interface DataListProps<T = any, TFilters extends Record<string, any> = R
 // KMS skin pass: compact 32px rows per docs/11 §4 (atelyr default was 52).
 const DEFAULT_ROW_HEIGHT = 32;
 const DEFAULT_BATCH_SIZE = 50;
-const DEFAULT_MOBILE_BREAKPOINT_WIDTH = 640;
+const DEFAULT_MOBILE_BREAKPOINT_WIDTH = breakpoints.compact;
 /**
  * How many times a list will fetch its first page without a single successful
  * response before it gives up and shows the error banner (D1). Counts both hard
@@ -601,7 +602,7 @@ const isViewportMobile = (breakpointWidth: number): boolean => {
   if (typeof window === 'undefined') {
     return false;
   }
-  return window.innerWidth < breakpointWidth;
+  return window.innerWidth <= breakpointWidth;
 };
 
 interface DataListRowData<T> {

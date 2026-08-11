@@ -1,6 +1,14 @@
 export { tokensCss } from './generated'
 
 /**
+ * Breakpoints, mirroring the comment block in tokens.css. CSS keeps literals
+ * (custom properties are invalid in a @media prelude); these exist for the two
+ * JS consumers that must agree with those literals — DataList's card-row
+ * switch at compact and DataTabManager's tab-strip dropdown at medium.
+ */
+export const breakpoints = { compact: 640, medium: 768, wide: 1080 } as const
+
+/**
  * Status chips for the Worker-rendered surfaces (`<span class="chip st-…">`).
  * The admin SPA has its own markup convention (`.status-chip.status-…`, in
  * apps/admin/src/theme.css) but both read the same --status-* tokens, so the

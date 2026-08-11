@@ -1,30 +1,9 @@
 /* Green room / run-of-show (workplan 12). Mobile-first: this screen is read
    on a phone in a corridor, so every actionable control is ≥44px tall and the
    layout is a single column below medium (768). Tokens only — dark mode and
-   the Editorial Broadsheet ground come free.
-
-   Shell override, deliberately scoped: on `main` the admin sidebar is a fixed
-   184px column with no media query, which leaves ~200px of content at phone
-   widths. Only while the green room is the active view (App.tsx adds
-   .shell--greenroom) and only below medium, the sidebar is hidden and brought
-   back on demand as an overlay via .gr-nav-open. Every other view, and every
-   width ≥768px, renders exactly as before. */
-
-@media (max-width: 767px) {
-  .shell--greenroom .shell-sidebar {
-    display: none;
-  }
-  .shell--greenroom.gr-nav-open .shell-sidebar {
-    display: flex;
-    position: fixed;
-    left: 0;
-    top: 0;
-    bottom: 0;
-    width: min(260px, 80vw);
-    z-index: 60;
-    box-shadow: var(--shadow-overlay, 0 8px 32px rgba(0, 0, 0, 0.35));
-  }
-}
+   the Editorial Broadsheet ground come free. Compact-width navigation is the
+   shell's own topbar + drawer (docs/16 item 9, shell.css) — the green room
+   carries no shell overrides of its own. */
 
 .gr-shell {
   height: 100%;
@@ -66,40 +45,6 @@
   flex: 0 0 auto;
   color: var(--text-muted);
   font-size: var(--text-caption);
-}
-
-/* The Menu button only exists visually below medium, where the sidebar is
-   hidden; above it the regular sidebar is present and the button is noise. */
-.gr-menu {
-  display: none;
-  min-height: 44px;
-  padding: 0 var(--space-3);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-sm);
-  background: var(--surface);
-  color: var(--text);
-  font-size: var(--text-label);
-}
-
-@media (max-width: 767px) {
-  .gr-menu {
-    display: inline-flex;
-    align-items: center;
-  }
-}
-
-.gr-scrim {
-  display: none;
-}
-
-@media (max-width: 767px) {
-  .gr-scrim {
-    display: block;
-    position: fixed;
-    inset: 0;
-    background: var(--scrim, rgba(0, 0, 0, 0.4));
-    z-index: 50;
-  }
 }
 
 /* --- day chips, banners, notes --------------------------------------------- */

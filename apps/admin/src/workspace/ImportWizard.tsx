@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { DesktopOnlyNotice } from '@kms/ui/desktop-only'
 import { ModalDialog } from '../components/dialogs'
 import {
   importCommit,
@@ -149,8 +150,11 @@ function ImportWizard({ request, onClose }: { request: ImportRequest; onClose: (
             <button onClick={onClose} disabled={busy}>Cancel</button>
             {plan && (
               <>
-                <button onClick={() => setPlan(null)} disabled={busy}>Choose another file</button>
-                <button className="primary" onClick={commit} disabled={busy || writable === 0}>
+                {/* Below compact the mapping and its dry run are refused, so
+                    committing would be committing blind — Cancel is the only
+                    action the panel offers and the only one left here. */}
+                <button className="kms-wide-only" onClick={() => setPlan(null)} disabled={busy}>Choose another file</button>
+                <button className="primary kms-wide-only" onClick={commit} disabled={busy || writable === 0}>
                   {writable === 0 ? 'Nothing to import' : `Import ${writable} row${writable === 1 ? '' : 's'}`}
                 </button>
               </>
@@ -190,7 +194,29 @@ function ImportWizard({ request, onClose }: { request: ImportRequest; onClose: (
           {busy && <p className="import-busy">Reading the file…</p>}
         </div>
       ) : (
-        <div className="import-map-step">
+        <>
+        {/*
+          * Tier C refusal (docs/16 item 7): matching a spreadsheet's columns
+          * to fields is a two-column mapping over the whole file — the
+          * "arrange many records" side of the line. The file-pick and done
+          * steps are left alone. CSS-only gate.
+          */}
+        <div className="kms-compact-only">
+          <DesktopOnlyNotice
+            title="Column mapping needs a wider window."
+            message="Matching every column in your file to a field needs two columns side by side. Pick the file up again on a laptop."
+            summary={
+              <dl className="import-compact-summary">
+                <dt>Rows</dt>
+                <dd>{plan.rows.length === 1 ? '1 row' : `${plan.rows.length} rows`}</dd>
+                <dt>Columns detected</dt>
+                <dd>{plan.headers.join(', ')}</dd>
+              </dl>
+            }
+            action={{ label: 'Cancel import', onClick: onClose }}
+          />
+        </div>
+        <div className="import-map-step kms-wide-only">
           <h4>Columns</h4>
           <div className="import-mapping">
             {plan.headers.map((header, i) => (
@@ -243,6 +269,7 @@ function ImportWizard({ request, onClose }: { request: ImportRequest; onClose: (
             )}
           </div>
         </div>
+        </>
       )}
     </ModalDialog>
   )

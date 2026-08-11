@@ -7,6 +7,7 @@ import {
   type ApiTokenRow,
   type Me,
 } from '../api'
+import { DesktopOnlyNotice } from '@kms/ui/desktop-only'
 import { appAlert, appConfirm } from '../components/dialogs'
 import { RoomsTracksCard } from './RoomsTracksCard'
 import { ContactFieldsCard } from './ContactFieldsCard'
@@ -94,7 +95,30 @@ export function SettingsSection({ me }: { me: Me }) {
   const curlExample = `curl -H "Authorization: Bearer kms_…" \\\n  "${window.location.origin}/api/v1/events/${me.event.id}/submissions?status=pending&sort=-created_at"`
 
   return (
-    <div className="settings-shell">
+    <>
+      {/*
+        * Tier C refusal (docs/16 item 7): the hub is configuration — token
+        * tables, room/track and field libraries, email template bodies — all
+        * of it "arrange many things". CSS-only gate, no viewport detection.
+        */}
+      <div className="kms-compact-only">
+        <DesktopOnlyNotice
+          title="Settings needs a wider window."
+          message="Token tables, the field library and email template bodies are all wider than a phone. Open this one on a laptop."
+          summary={
+            <dl className="settings-compact-summary">
+              <dt>Event</dt>
+              <dd>{me.event.name}</dd>
+              <dt>Timezone</dt>
+              <dd>{me.event.timezone}</dd>
+              <dt>Slug</dt>
+              <dd>{me.event.slug}</dd>
+            </dl>
+          }
+          action={{ label: 'Open the speaker portal', href: `/portal/${me.event.slug}` }}
+        />
+      </div>
+    <div className="settings-shell kms-wide-only">
       <h1>Settings</h1>
 
       <section className="settings-card">
@@ -216,5 +240,6 @@ export function SettingsSection({ me }: { me: Me }) {
         </div>
       </section>
     </div>
+    </>
   )
 }

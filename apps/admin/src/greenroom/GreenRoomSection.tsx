@@ -174,12 +174,10 @@ export function GreenRoomSection() {
   const [busyIds, setBusyIds] = useState<ReadonlySet<string>>(new Set())
   const [nudgeNotes, setNudgeNotes] = useState<Record<string, string>>({})
   const [note, setNote] = useState<string | null>(null)
-  const [navOpen, setNavOpen] = useState(false)
   const etagRef = useRef<string | null>(null)
   // Bumped by every write; a poll that resolves across a write is stale and
   // must not clobber the write's optimistic (or adopted) state.
   const writeSeqRef = useRef(0)
-  const rootRef = useRef<HTMLDivElement | null>(null)
 
   const load = useCallback(async (force = false) => {
     const seq = writeSeqRef.current
@@ -236,24 +234,6 @@ export function GreenRoomSection() {
     const t = window.setInterval(() => setNowMs(Date.now()), NOW_TICK_MS)
     return () => window.clearInterval(t)
   }, [])
-
-  // Compact-width nav: the green room hides the shell sidebar below 768px
-  // (greenroom.css, scoped under .shell--greenroom); this class brings it back
-  // as an overlay so navigation and event switching stay reachable on a phone.
-  useEffect(() => {
-    const shell = rootRef.current?.closest('.shell')
-    if (!shell) return
-    shell.classList.toggle('gr-nav-open', navOpen)
-    return () => shell.classList.remove('gr-nav-open')
-  }, [navOpen])
-  useEffect(() => {
-    if (!navOpen) return
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setNavOpen(false)
-    }
-    document.addEventListener('keydown', onKey)
-    return () => document.removeEventListener('keydown', onKey)
-  }, [navOpen])
 
   const toggleArrived = useCallback((contactId: string, arrived: boolean) => {
     writeSeqRef.current += 1
@@ -330,7 +310,7 @@ export function GreenRoomSection() {
 
   if (error && !data) {
     return (
-      <div className="gr-shell" ref={rootRef}>
+      <div className="gr-shell">
         <div className="gr-state gr-state-error">
           <p>{error}</p>
           <button type="button" className="gr-action" onClick={() => void load(true)}>Try again</button>
@@ -340,7 +320,7 @@ export function GreenRoomSection() {
   }
   if (!data) {
     return (
-      <div className="gr-shell" ref={rootRef}>
+      <div className="gr-shell">
         <div className="gr-state">Loading the run of show…</div>
       </div>
     )
@@ -367,17 +347,8 @@ export function GreenRoomSection() {
   const orphaned = daySessions.filter((s) => !knownRoomIds.has(s.room_id))
 
   return (
-    <div className="gr-shell" ref={rootRef}>
+    <div className="gr-shell">
       <header className="gr-header">
-        <button
-          type="button"
-          className="gr-menu"
-          aria-label={navOpen ? 'Close the navigation menu' : 'Open the navigation menu'}
-          aria-expanded={navOpen}
-          onClick={() => setNavOpen((o) => !o)}
-        >
-          Menu
-        </button>
         <div className="gr-header-main">
           <h2>Green room</h2>
           <div className="gr-header-sub">
@@ -387,7 +358,6 @@ export function GreenRoomSection() {
         </div>
         <span className="gr-updated" role="status">{agoLabel(updatedAt)}</span>
       </header>
-      {navOpen && <div className="gr-scrim" onClick={() => setNavOpen(false)} aria-hidden="true" />}
 
       {days.length > 1 && (
         <div className="gr-days" role="tablist" aria-label="Event days">

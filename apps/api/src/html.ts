@@ -47,6 +47,17 @@ ul.list{list-style:none;margin:.5rem 0 0;padding:0}
 ul.list li{display:flex;align-items:baseline;gap:.6rem;padding:.55rem 0;border-bottom:1px solid var(--border)}
 .code{white-space:nowrap}
 .devlink{background:var(--accent-soft);border:1px solid var(--accent-border);border-radius:var(--radius);padding:.6rem .8rem;font-size:.85rem;word-break:break-all;margin-top:1rem}
+
+/* Compact (640): phone layout. Appended so the desktop rules above stand.
+   The table rule matters for the listing pages that reuse page() — they
+   scroll their own table rather than the document. */
+@media (max-width:640px){
+body{padding:1.5rem .75rem}
+main.card{padding:1.25rem}
+h1{font-size:1.3rem}
+button{min-height:44px;width:100%}
+table{display:block;overflow-x:auto;white-space:nowrap}
+}
 `.trim();
 
 /** Complete HTML5 document wrapping `body` in the shared card layout. */

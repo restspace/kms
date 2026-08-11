@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { breakpoints } from '@kms/theme'
 import {
   buildConflictIndexes,
   computeConflicts,
@@ -20,6 +21,7 @@ import {
   type AgendaSessionRow,
   type SchedulePatch,
 } from '../api'
+import { DesktopOnlyNotice } from '@kms/ui/desktop-only'
 import { appConfirm } from '../components/dialogs'
 import { createMutationQueue } from './mutationQueue'
 import { ConflictsView } from './ConflictsView'
@@ -59,6 +61,18 @@ const VIEWS: Array<{ key: AgendaView; label: string }> = [
 
 const DAY_START_MIN = 6 * 60
 const DAY_END_MIN = 20 * 60
+
+/**
+ * The one Tier C screen that gates in JS rather than with display:none.
+ * TimeGrid/RoomsBoard measure themselves through useElementSize, and a
+ * zero-width mount produces a grid laid out against a 0px column — so the
+ * compact branch must not mount them at all. Same matchMedia idiom as
+ * DataTabManager's tab-strip dropdown.
+ */
+const COMPACT_MEDIA_QUERY = `(max-width: ${breakpoints.compact}px)`
+
+/** Grid modes; `list` and `conflicts` stay usable at every width. */
+const GRID_VIEWS: AgendaView[] = ['day', 'week', 'month', 'rooms']
 
 /** Default block length by format (docs/07 §3 "session's default duration"). */
 const FORMAT_DURATION: Record<string, number> = {
@@ -143,6 +157,9 @@ export function AgendaSection({
   const [jobNote, setJobNote] = useState<string | null>(null)
   const [jobActive, setJobActive] = useState(false)
   const [toast, setToast] = useState<Toast | null>(null)
+  const [isCompact, setIsCompact] = useState(() =>
+    typeof window !== 'undefined' ? window.matchMedia(COMPACT_MEDIA_QUERY).matches : false
+  )
   const undoStack = useRef<UndoEntry[]>([])
   const toastTimer = useRef<number | null>(null)
   const jobTimer = useRef<number | null>(null)
@@ -153,6 +170,13 @@ export function AgendaSection({
   // the `data` its closure captured (sweep item P2-9).
   const dataRef = useRef<AgendaPayload | null>(null)
   dataRef.current = data
+
+  useEffect(() => {
+    const mq = window.matchMedia(COMPACT_MEDIA_QUERY)
+    const handler = (e: MediaQueryListEvent) => setIsCompact(e.matches)
+    mq.addEventListener('change', handler)
+    return () => mq.removeEventListener('change', handler)
+  }, [])
 
   const showToast = useCallback((t: Toast) => {
     setToast(t)
@@ -473,6 +497,8 @@ export function AgendaSection({
 
   const moveSession = moveId !== null ? sessionById.get(moveId) ?? null : null
   const dayIndex = days.indexOf(curDay)
+  // The view strip stays live, so List and Conflicts are one tap away.
+  const refuseGrid = isCompact && GRID_VIEWS.includes(view)
 
   const dayColumns: GridColumn[] =
     groupBy === 'room'
@@ -687,6 +713,24 @@ export function AgendaSection({
       </nav>
 
       <div className="agenda-body">
+        {refuseGrid ? (
+          <DesktopOnlyNotice
+            title="The agenda builder needs a wider window."
+            message="Dragging sessions across a rooms-by-time grid is the one thing a phone cannot do well. Here is the same day, read-only — every row still has Move."
+            summary={
+              <ListView
+                sessions={filteredSessions}
+                timezone={tz}
+                trackById={trackById}
+                rooms={data.rooms}
+                conflictLevel={conflictLevel}
+                onOpenMove={setMoveId}
+              />
+            }
+            action={{ label: 'Switch to the list view', onClick: () => setView('list') }}
+          />
+        ) : (
+        <>
         {view !== 'conflicts' && view !== 'list' && view !== 'month' && (
           <Tray
             sessions={unscheduled}
@@ -811,6 +855,8 @@ export function AgendaSection({
             />
           )}
         </div>
+        </>
+        )}
       </div>
 
       {moveSession && (

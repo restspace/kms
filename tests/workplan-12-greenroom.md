@@ -67,6 +67,10 @@ Files: `GreenRoomSection.tsx`, `logic.ts`, `greenroom.css`, `greenroom.logic.tes
 **Empty states:** no scheduled sessions → panel pointing at the Agenda; nothing today → "Nothing scheduled today — next: <day>" with jump chip; day finished → "Done for today" + tomorrow chip.
 
 **Mobile treatment (scoped, other views pixel-identical):**
+*(Post-merge note: after `feat/mobile-responsive` was merged into `main`, the
+scoped `.shell--greenroom` sidebar override and the section's own Menu overlay
+described below were retired — the shell's topbar + drawer from docs/16 item 9
+now provides compact-width navigation for every view, the green room included.)*
 - `App.tsx:2119`: `<div className={'shell' + (view === 'greenroom' ? ' shell--greenroom' : '')}>` — the only shell-adjacent change; `shell.css` untouched.
 - `greenroom.css`: `@media (max-width: 767px) { .shell--greenroom .shell-sidebar { display:none } .shell--greenroom .shell-main { padding:0 } }`; header Menu button toggles a `.gr-nav-open` class re-showing the sidebar as a fixed overlay (~15 lines, still scoped).
 - Breakpoints 640/768/1080 (repo canon): single column <768, two-column room grid 768–1079, wide grid ≥1080 (backstage laptop). Tap targets ≥44px at every width. Tokens only → dark mode free.
