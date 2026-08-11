@@ -65,8 +65,15 @@ describe('POST /portal/:slug/profile validation', () => {
 
   it('does not write anything when validation fails', async () => {
     await postProfile({ first_name: '', last_name: '', company: 'Nope' });
-    const row = await env.DB.prepare('SELECT first_name, company FROM contacts WHERE id = ?')
-      .bind(contactId)
+    // The save is two statements since 0015 — identity to contacts, profile to
+    // event_contacts — so "nothing was written" has to be read across both.
+    const row = await env.DB.prepare(
+      `SELECT c.first_name, ec.company
+         FROM contacts c
+         JOIN event_contacts ec ON ec.contact_id = c.id AND ec.event_id = ?
+        WHERE c.id = ?`,
+    )
+      .bind(eventId, contactId)
       .first<{ first_name: string | null; company: string | null }>();
     expect(row?.first_name).toBe('Ada');
     expect(row?.company).toBeNull();

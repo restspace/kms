@@ -104,8 +104,17 @@ async function rejectForeignIds(
   const unique = [...new Set(ids.filter((id) => typeof id === 'string' && id !== ''))];
   if (unique.length === 0) return;
   const placeholders = unique.map(() => '?').join(', ');
+  // `contacts` lost its event_id in 0015: membership of an event now lives on
+  // event_contacts. The question this guard asks is unchanged - "is this id on
+  // THIS event's roster?" - so only the table it asks it of moves. Every other
+  // table here is still plainly event-scoped.
+  const sql =
+    table === 'contacts'
+      ? `SELECT contact_id AS id FROM event_contacts
+          WHERE event_id = ? AND contact_id IN (${placeholders})`
+      : `SELECT id FROM ${table} WHERE event_id = ? AND id IN (${placeholders})`;
   const { results } = await db
-    .prepare(`SELECT id FROM ${table} WHERE event_id = ? AND id IN (${placeholders})`)
+    .prepare(sql)
     .bind(eventId, ...unique)
     .all<{ id: string }>();
   const known = new Set(results.map((r) => r.id));

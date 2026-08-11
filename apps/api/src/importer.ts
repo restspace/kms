@@ -205,7 +205,7 @@ export const SESSION_FIELDS: ImportField[] = [
 ];
 
 export const CONTACT_IMPORT_FIELDS: ImportField[] = [
-  { key: 'email', label: 'Email', aliases: ['e-mail', 'email address', 'speaker email'], required: true, hint: 'The dedupe key within the event' },
+  { key: 'email', label: 'Email', aliases: ['e-mail', 'email address', 'speaker email'], required: true, hint: 'The dedupe key within the organisation' },
   { key: 'first_name', label: 'First name', aliases: ['first', 'given name', 'forename'] },
   { key: 'last_name', label: 'Last name', aliases: ['last', 'surname', 'family name'] },
   { key: 'company', label: 'Company', aliases: ['organisation', 'organization', 'employer', 'affiliation'] },
@@ -286,7 +286,13 @@ export function applyMapping(headers: string[], row: string[], mapping: string[]
 // Dry-run plan
 // ---------------------------------------------------------------------------
 
-export type RowAction = 'create' | 'update' | 'merge' | 'skip' | 'error';
+// `attach` is contacts-only, and new with migration 0015: the person already
+// exists in the organisation but not on this event, so the commit adds them to
+// this roster (seeding their profile from their most recent event) instead of
+// minting a duplicate. It is neither a `create` — no new contact row — nor a
+// `merge`, which writes to someone already on this event, and above all it is
+// not a `skip`, because it always writes.
+export type RowAction = 'create' | 'update' | 'merge' | 'attach' | 'skip' | 'error';
 
 export interface PlannedRow {
   /** 1-based data row number, header excluded — what the preview shows. */
@@ -300,7 +306,7 @@ export interface PlannedRow {
   values: Record<string, string>;
   /** existing row this will write to, when the action is update/merge */
   targetId: string | null;
-  /** for `merge`: exactly the blank columns this row fills (never a clobber) */
+  /** for `merge`/`attach`: exactly the blank columns this row fills (never a clobber) */
   mergeFields: string[] | null;
 }
 
@@ -321,6 +327,7 @@ const emptySummary = (): Record<RowAction | 'total', number> => ({
   create: 0,
   update: 0,
   merge: 0,
+  attach: 0,
   skip: 0,
   error: 0,
   total: 0,
@@ -334,11 +341,16 @@ const chunk = <T,>(items: T[], size: number): T[][] => {
   return out;
 };
 
-/** `IN (?, ?, …)` lookup over an arbitrary number of keys, chunked for D1. */
+/**
+ * `IN (?, ?, …)` lookup over an arbitrary number of keys, chunked for D1.
+ * `leading` is bound ahead of the keys — the contacts lookup needs the event id
+ * twice (once to derive the org, once for the membership join), which numbered
+ * placeholders cannot express alongside a generated `IN` list.
+ */
 async function lookupBy<T>(
   db: D1Database,
   sql: (placeholders: string) => string,
-  eventId: string,
+  leading: unknown[],
   keys: string[],
 ): Promise<T[]> {
   const out: T[] = [];
@@ -346,7 +358,7 @@ async function lookupBy<T>(
     if (group.length === 0) continue;
     const { results } = await db
       .prepare(sql(group.map(() => '?').join(', ')))
-      .bind(eventId, ...group)
+      .bind(...leading, ...group)
       .all<T>();
     out.push(...results);
   }
@@ -391,7 +403,7 @@ export async function planSessions(
   for (const row of await lookupBy<{ id: string; client_session_id: string }>(
     ctx.db,
     (p) => `SELECT id, client_session_id FROM submissions WHERE event_id = ? AND client_session_id IN (${p})`,
-    ctx.eventId,
+    [ctx.eventId],
     clientIds,
   )) {
     byClientId.set(row.client_session_id, row.id);
@@ -399,7 +411,7 @@ export async function planSessions(
   for (const row of await lookupBy<{ id: string; code: string }>(
     ctx.db,
     (p) => `SELECT id, code FROM submissions WHERE event_id = ? AND code IN (${p})`,
-    ctx.eventId,
+    [ctx.eventId],
     codes,
   )) {
     byCode.set(row.code, row.id);
@@ -501,21 +513,47 @@ export async function planSessions(
   };
 }
 
-/** Contact columns an import may write (schema columns, minus the derived ones). */
+/**
+ * Contact columns an import may write (schema columns, minus the derived ones),
+ * in the order the preview lists them. Migration 0015 split these across two
+ * tables — identity on the org-level `contacts`, profile on the per-event
+ * `event_contacts` — but the sheet knows nothing about that: the header names
+ * and aliases in CONTACT_IMPORT_FIELDS are a documented CSV contract.
+ */
 const CONTACT_WRITABLE = [
   'first_name', 'last_name', 'company', 'job_title', 'mobile_phone',
   'biography', 'pronouns', 'salutation', 'honorific', 'gender', 'notes',
 ] as const;
 
+/** Per-event profile columns — written to `event_contacts`. */
+const CONTACT_PROFILE_WRITABLE: readonly string[] = ['company', 'job_title', 'biography', 'notes'];
+
+/** Org-level identity columns — written to `contacts`. */
+const CONTACT_IDENTITY_WRITABLE = CONTACT_WRITABLE.filter((c) => !CONTACT_PROFILE_WRITABLE.includes(c));
+
 /**
- * Speakers dry run. Dedupe is by lower-cased email *within the event*
- * (`UNIQUE (event_id, email)` in the schema is the backstop):
- *  - unknown email  → `create`
- *  - known email with at least one blank column the file can fill → `merge`
- *    (fill-blanks only: an existing non-empty value is never clobbered)
- *  - known email with nothing to fill → `skip`
- * So the rubric fixture — two existing speakers plus one new person — reports
- * 2 merged/skipped and 1 created, and the new person lands in the roster.
+ * The subset `db.contacts.attachToEvent` copies forward when a contact joins a
+ * new event. `notes` is deliberately absent — one event team's private remarks
+ * about a person must not follow them across the org — and so is the headshot,
+ * which is an event-scoped asset.
+ */
+const CONTACT_SEEDED_PROFILE: readonly string[] = ['biography', 'company', 'job_title'];
+
+/**
+ * Speakers dry run. Dedupe is by lower-cased email *within the organisation* as
+ * of 0015 (`UNIQUE (org_id, lower(email))` is the backstop), so importing
+ * someone who already spoke at a sibling event matches them rather than minting
+ * a second person:
+ *  - email unknown to the org → `create` (new contact, attached to this event)
+ *  - email already on THIS event → `merge` when the file can fill at least one
+ *    blank column, else `skip` (fill-blanks only: an existing non-empty value
+ *    is never clobbered)
+ *  - email known to the org but NOT on this event → `attach`: they join this
+ *    roster and their profile is seeded from their most recent event in the
+ *    org. That is a write even when there is nothing left to fill, so it is
+ *    reported as its own action rather than folded into `create` or `skip`.
+ * The rubric fixture — two speakers already on this event plus one new person —
+ * still reports 2 merged/skipped and 1 created.
  */
 export async function planContacts(
   ctx: PlanContext,
@@ -528,14 +566,43 @@ export async function planContacts(
     .map((r) => (r.email ?? '').toLowerCase())
     .filter((e) => e !== '' && EMAIL_RE.test(e));
 
-  type ExistingContact = { id: string; email: string } & Record<string, string | null>;
+  type ExistingContact = {
+    id: string;
+    email: string;
+    /** 1 when the contact already has an event_contacts row for THIS event */
+    on_event: number;
+  } & Record<string, string | number | null>;
   const existing = new Map<string, ExistingContact>();
   for (const row of await lookupBy<ExistingContact>(
     ctx.db,
+    // Org-scoped on purpose (contract §"Org-wide lookup"): matching a person who
+    // already exists elsewhere in the org is the entire point of the change. The
+    // LEFT JOIN reports whether they are on THIS event — the merge/attach fork —
+    // rather than filtering them out. `seed_*` is the profile attachToEvent will
+    // copy over, so the fill-blanks list below only promises columns the commit
+    // really leaves for the sheet to supply.
     (p) =>
-      `SELECT id, email, ${CONTACT_WRITABLE.join(', ')} FROM contacts
-       WHERE event_id = ? AND lower(email) IN (${p})`,
-    ctx.eventId,
+      `SELECT c.id, c.email, ${CONTACT_IDENTITY_WRITABLE.map((col) => `c.${col}`).join(', ')},
+              ec.contact_id IS NOT NULL AS on_event,
+              ${CONTACT_PROFILE_WRITABLE.map((col) => `ec.${col}`).join(', ')},
+              ${CONTACT_SEEDED_PROFILE.map((col) => `prev.${col} AS seed_${col}`).join(', ')}
+         FROM contacts c
+         LEFT JOIN event_contacts ec ON ec.contact_id = c.id AND ec.event_id = ?
+         LEFT JOIN (
+           SELECT contact_id, ${CONTACT_SEEDED_PROFILE.join(', ')}
+             FROM (
+               SELECT pec.contact_id, ${CONTACT_SEEDED_PROFILE.map((col) => `pec.${col}`).join(', ')},
+                      ROW_NUMBER() OVER (PARTITION BY pec.contact_id ORDER BY pec.added_at DESC) AS rn
+                 FROM event_contacts pec
+                 JOIN events pe ON pe.id = pec.event_id
+                 -- The contact's own org: a seed must never cross an org boundary.
+                 JOIN contacts pc ON pc.id = pec.contact_id AND pc.org_id = pe.org_id
+             )
+            WHERE rn = 1
+         ) prev ON prev.contact_id = c.id
+        WHERE c.org_id = (SELECT org_id FROM events WHERE id = ?)
+          AND lower(c.email) IN (${p})`,
+    [ctx.eventId, ctx.eventId],
     emails,
   )) {
     existing.set(row.email.toLowerCase(), row);
@@ -570,15 +637,30 @@ export async function planContacts(
         action = 'create';
       } else {
         targetId = match.id;
+        const onEvent = match.on_event === 1;
+        // What this event will hold once the row lands. The event_contacts
+        // columns come back NULL for someone who is not on this event yet, so
+        // the value to compare against is the seed rather than nothing.
+        const current = (col: string): string | null => {
+          const raw = !onEvent && CONTACT_SEEDED_PROFILE.includes(col) ? match[`seed_${col}`] : match[col];
+          return typeof raw === 'string' ? raw : null;
+        };
         const fills = CONTACT_WRITABLE.filter(
-          (col) => values[col] !== undefined && (match[col] === null || match[col] === ''),
+          (col) => values[col] !== undefined && (current(col) ?? '') === '',
         );
-        if (fills.length > 0) {
+        mergeFields = [...fills];
+        if (!onEvent) {
+          action = 'attach';
+          message =
+            fills.length > 0
+              ? `Already in this organisation — joining this event, filling ${fills.join(', ')}`
+              : 'Already in this organisation — joining this event';
+        } else if (fills.length > 0) {
           action = 'merge';
-          mergeFields = [...fills];
           message = `Existing speaker — filling ${fills.join(', ')}`;
         } else {
           action = 'skip';
+          mergeFields = null;
           message = 'Existing speaker — nothing blank to fill';
         }
       }
@@ -637,27 +719,119 @@ export function commitStatements(
   const applied = emptySummary();
 
   if (plan.target === 'contacts') {
+    const written = (row: PlannedRow, cols: readonly string[]): string[] =>
+      cols.filter((c) => row.values[c] !== undefined);
+    const identityOf = (cols: readonly string[]): string[] =>
+      cols.filter((c) => !CONTACT_PROFILE_WRITABLE.includes(c));
+    const profileOf = (cols: readonly string[]): string[] =>
+      cols.filter((c) => CONTACT_PROFILE_WRITABLE.includes(c));
+
+    /**
+     * Identity fills land on the org-level `contacts` row, which has no
+     * event_id to guard by any more. The org subquery is the guard that
+     * replaces it — the planner matched this id inside this event's org, so an
+     * id from another org updates nothing.
+     */
+    const pushIdentityFills = (row: PlannedRow, cols: string[]) => {
+      if (cols.length === 0) return;
+      statements.push(
+        db
+          .prepare(
+            `UPDATE contacts SET ${cols.map((c) => `${c} = ?`).join(', ')}, updated_at = ?
+             WHERE id = ? AND org_id = (SELECT org_id FROM events WHERE id = ?)`,
+          )
+          .bind(...cols.map((c) => row.values[c] ?? null), now, row.targetId, eventId),
+      );
+    };
+
     for (const row of plan.rows) {
       if (row.action === 'create') {
-        const cols = ['email', ...CONTACT_WRITABLE.filter((c) => row.values[c] !== undefined)];
+        const contactId = crypto.randomUUID();
+        const cols = ['email', ...identityOf(written(row, CONTACT_WRITABLE))];
+        // The importer only ever knows an event, so org_id is derived in the
+        // statement rather than read first.
         statements.push(
           db
             .prepare(
-              `INSERT INTO contacts (id, event_id, created_at, updated_at, ${cols.join(', ')})
-               VALUES (?, ?, ?, ?${', ?'.repeat(cols.length)})`,
+              `INSERT INTO contacts (id, org_id, created_at, updated_at, ${cols.join(', ')})
+               VALUES (?, (SELECT org_id FROM events WHERE id = ?), ?, ?${', ?'.repeat(cols.length)})`,
             )
-            .bind(crypto.randomUUID(), eventId, now, now, ...cols.map((c) => row.values[c] ?? null)),
+            .bind(contactId, eventId, now, now, ...cols.map((c) => row.values[c] ?? null)),
         );
+        // A contact with no event_contacts row exists but appears in no roster,
+        // so the insert and the attach are always a pair. Nothing to seed from:
+        // this person is new to the whole org.
+        const profile = profileOf(written(row, CONTACT_WRITABLE));
+        statements.push(
+          db
+            .prepare(
+              `INSERT INTO event_contacts (event_id, contact_id, added_at, source${profile.length ? ', ' + profile.join(', ') : ''})
+               VALUES (?, ?, ?, 'import'${', ?'.repeat(profile.length)})`,
+            )
+            .bind(eventId, contactId, now, ...profile.map((c) => row.values[c] ?? null)),
+        );
+      } else if (row.action === 'attach' && row.targetId) {
+        const fills = row.mergeFields ?? [];
+        const fill = (c: string): string | null => (fills.includes(c) ? row.values[c] ?? null : null);
+        // Mirrors db.contacts.attachToEvent — seed biography/company/job_title
+        // from the contact's most recent event in the SAME org, never the
+        // headshot (an event-scoped asset) and never notes (one team's private
+        // remarks) — with the sheet's values overlaid where the seed is empty.
+        // COALESCE keeps the fill-blanks promise even though the row being
+        // filled is created by this very statement.
+        statements.push(
+          db
+            .prepare(
+              `INSERT INTO event_contacts
+                 (event_id, contact_id, biography, headshot_asset_id, company,
+                  job_title, notes, added_at, source)
+               SELECT ?1, ?2, COALESCE(prev.biography, ?4), NULL, COALESCE(prev.company, ?5),
+                      COALESCE(prev.job_title, ?6), ?7, ?3, 'import'
+                 FROM (SELECT ec.biography, ec.company, ec.job_title
+                         FROM event_contacts ec
+                         JOIN events e ON e.id = ec.event_id
+                        WHERE ec.contact_id = ?2
+                          AND e.org_id = (SELECT org_id FROM events WHERE id = ?1)
+                        ORDER BY ec.added_at DESC
+                        LIMIT 1) prev
+               -- WHERE is not optional: after a SELECT with a FROM clause
+               -- SQLite would otherwise read ON CONFLICT as a join constraint.
+               WHERE true
+               ON CONFLICT (event_id, contact_id) DO NOTHING`,
+            )
+            .bind(eventId, row.targetId, now, fill('biography'), fill('company'), fill('job_title'), fill('notes')),
+        );
+        // No prior event to seed from (or the person was attached between the
+        // preview and now): the INSERT…SELECT above produced no row, so this
+        // writes the bare membership plus whatever the sheet supplied. A no-op
+        // when the first statement fired.
+        statements.push(
+          db
+            .prepare(
+              `INSERT INTO event_contacts
+                 (event_id, contact_id, biography, company, job_title, notes, added_at, source)
+               VALUES (?, ?, ?, ?, ?, ?, ?, 'import')
+               ON CONFLICT (event_id, contact_id) DO NOTHING`,
+            )
+            .bind(eventId, row.targetId, fill('biography'), fill('company'), fill('job_title'), fill('notes'), now),
+        );
+        pushIdentityFills(row, identityOf(fills));
       } else if (row.action === 'merge' && row.targetId && row.mergeFields?.length) {
-        const cols = row.mergeFields;
-        statements.push(
-          db
-            .prepare(
-              `UPDATE contacts SET ${cols.map((c) => `${c} = ?`).join(', ')}, updated_at = ?
-               WHERE id = ? AND event_id = ?`,
-            )
-            .bind(...cols.map((c) => row.values[c] ?? null), now, row.targetId, eventId),
-        );
+        const profile = profileOf(row.mergeFields);
+        if (profile.length > 0) {
+          // The planner read this event's event_contacts row, so it exists and
+          // a plain UPDATE lands the profile fills. event_id here is both the
+          // membership filter and the tenancy guard.
+          statements.push(
+            db
+              .prepare(
+                `UPDATE event_contacts SET ${profile.map((c) => `${c} = ?`).join(', ')}
+                 WHERE event_id = ? AND contact_id = ?`,
+              )
+              .bind(...profile.map((c) => row.values[c] ?? null), eventId, row.targetId),
+          );
+        }
+        pushIdentityFills(row, identityOf(row.mergeFields));
       } else {
         applied[row.action] += 1;
         applied.total += 1;

@@ -27,8 +27,12 @@ SELECT 'survivors_all_exist' AS "check",
                         WHERE NOT EXISTS (SELECT 1 FROM contacts c WHERE c.id = m.new_id)) AS detail;
 
 -- 3. contacts now holds exactly the elected survivors — no more, no fewer.
+--    Skipped when there were no pre-0015 contacts to merge: on a fresh database
+--    the snapshot is legitimately empty and any rows in `contacts` were seeded
+--    after the migration, so there is nothing to compare against.
 SELECT 'contacts_equals_survivor_set' AS "check",
-       CASE WHEN (SELECT COUNT(*) FROM contacts)
+       CASE WHEN (SELECT COUNT(*) FROM _contacts_premerge) = 0 THEN 'SKIP'
+            WHEN (SELECT COUNT(*) FROM contacts)
                = (SELECT COUNT(DISTINCT new_id) FROM _contact_merge_map)
             THEN 'PASS' ELSE 'FAIL' END AS status,
        'contacts=' || (SELECT COUNT(*) FROM contacts) ||
@@ -36,7 +40,8 @@ SELECT 'contacts_equals_survivor_set' AS "check",
 
 -- 4. One event_contacts row per ORIGINAL premerge row — no per-event profile lost.
 SELECT 'event_contacts_preserves_every_row' AS "check",
-       CASE WHEN (SELECT COUNT(*) FROM event_contacts)
+       CASE WHEN (SELECT COUNT(*) FROM _contacts_premerge) = 0 THEN 'SKIP'
+            WHEN (SELECT COUNT(*) FROM event_contacts)
                = (SELECT COUNT(*) FROM _contacts_premerge)
             THEN 'PASS' ELSE 'FAIL' END AS status,
        'event_contacts=' || (SELECT COUNT(*) FROM event_contacts) ||

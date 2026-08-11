@@ -280,11 +280,23 @@ async function loadPortalCtx(c: Context<AppEnv>): Promise<PortalCtx | Response> 
   if (!event) return c.html('<h1>Event not found</h1>', 404);
   const session = await getSession(c);
   if (!session || session.eventId !== event.id) return c.html(loginPage(event), 401);
-  // Whole-row read: organiser-only columns are stripped at the query boundary
-  // so no portal template can leak them (manual-review-1 item 3).
+  // Identity from `contacts`, profile from this event's `event_contacts` row
+  // (0015). Columns are listed explicitly rather than `SELECT *` because the
+  // join makes a star ambiguous, and because `notes` — the one organiser-only
+  // profile column — must never be selected on a speaker-facing surface. The
+  // redactInternal boundary stays in place behind that (manual-review-1 item
+  // 3). The join is also the membership guard: a contact who belongs to the
+  // org but not to this event has no profile here and gets the login page.
   const contact = redactInternal(
-    await c.env.DB.prepare('SELECT * FROM contacts WHERE id = ?')
-      .bind(session.contactId)
+    await c.env.DB.prepare(
+      `SELECT c.id, c.email, c.first_name, c.last_name, c.salutation, c.honorific,
+              c.pronouns, c.gender, c.mobile_phone, c.links,
+              ec.biography, ec.headshot_asset_id, ec.company, ec.job_title
+         FROM contacts c
+         JOIN event_contacts ec ON ec.contact_id = c.id AND ec.event_id = ?
+        WHERE c.id = ?`,
+    )
+      .bind(event.id, session.contactId)
       .first<ContactRow>(),
   );
   if (!contact) return c.html(loginPage(event), 401);
@@ -314,7 +326,15 @@ interface TaskAssignmentRow {
   required: number;
 }
 
-async function loadAssignments(c: Context<AppEnv>, contactId: string): Promise<TaskAssignmentRow[]> {
+// `t.event_id` is the event filter this list always meant: before 0015 a
+// contact belonged to exactly one event, so ta.contact_id alone could not reach
+// another event's tasks. Now that one contact spans the org it can, and the
+// single-assignment read below already scopes the same way.
+async function loadAssignments(
+  c: Context<AppEnv>,
+  eventId: string,
+  contactId: string,
+): Promise<TaskAssignmentRow[]> {
   const { results } = await c.env.DB.prepare(
     `SELECT ta.id AS assignment_id, ta.status, ta.completed_at, ta.submission_id,
             s.code AS submission_code, s.title AS submission_title,
@@ -323,10 +343,10 @@ async function loadAssignments(c: Context<AppEnv>, contactId: string): Promise<T
      FROM task_assignments ta
      JOIN tasks t ON t.id = ta.task_id
      LEFT JOIN submissions s ON s.id = ta.submission_id
-     WHERE ta.contact_id = ?
+     WHERE ta.contact_id = ? AND t.event_id = ?
      ORDER BY CASE ta.status WHEN 'complete' THEN 1 ELSE 0 END, t.due_at`,
   )
-    .bind(contactId)
+    .bind(contactId, eventId)
     .all<TaskAssignmentRow>();
   return results;
 }
@@ -346,7 +366,7 @@ portalRoutes.get('/:slug', async (c) => {
   const db = createDb(c.env.DB);
   const [submissions, assignments] = await Promise.all([
     db.submissions.listByContact(ctx.event.id, ctx.session.contactId),
-    loadAssignments(c, ctx.session.contactId),
+    loadAssignments(c, ctx.event.id, ctx.session.contactId),
   ]);
 
   const subCards =
@@ -767,24 +787,38 @@ portalRoutes.post('/:slug/profile', async (c) => {
   const linksUnchanged = LINK_FIELDS.every(([, key]) => (current[key] ?? '') === posted[key]);
   const writeLinks = linksPresent && !linksUnchanged;
 
+  // One form, two tables since 0015: the name/pronoun/links half is who the
+  // person is across the org, the bio/company/job-title/headshot half is how
+  // they present AT this event. Batched so a save can never land half of a
+  // profile. The event_contacts UPDATE needs no upsert — loadPortalCtx only
+  // returns a ctx when the membership row exists.
   const now = new Date().toISOString();
-  const sql = `UPDATE contacts SET biography = ?, salutation = ?, first_name = ?, last_name = ?, honorific = ?,
-       pronouns = ?, company = ?, job_title = ?, headshot_asset_id = ?${writeLinks ? ', links = ?' : ''}, updated_at = ?
+  const identitySql = `UPDATE contacts SET salutation = ?, first_name = ?, last_name = ?, honorific = ?,
+       pronouns = ?${writeLinks ? ', links = ?' : ''}, updated_at = ?
      WHERE id = ?`;
-  const binds: unknown[] = [
-    nullable('biography'),
+  const identityBinds: unknown[] = [
     nullable('salutation'),
     values.first_name,
     values.last_name,
     nullable('honorific'),
     nullable('pronouns'),
-    nullable('company'),
-    nullable('job_title'),
-    headshotId,
   ];
-  if (writeLinks) binds.push(JSON.stringify(posted));
-  binds.push(now, ctx.session.contactId);
-  await c.env.DB.prepare(sql).bind(...binds).run();
+  if (writeLinks) identityBinds.push(JSON.stringify(posted));
+  identityBinds.push(now, ctx.session.contactId);
+  await c.env.DB.batch([
+    c.env.DB.prepare(identitySql).bind(...identityBinds),
+    c.env.DB.prepare(
+      `UPDATE event_contacts SET biography = ?, company = ?, job_title = ?, headshot_asset_id = ?
+       WHERE event_id = ? AND contact_id = ?`,
+    ).bind(
+      nullable('biography'),
+      nullable('company'),
+      nullable('job_title'),
+      headshotId,
+      ctx.event.id,
+      ctx.session.contactId,
+    ),
+  ]);
   return c.redirect(`${base}/profile?m=${encodeURIComponent('Profile saved.')}`);
 });
 
@@ -1076,7 +1110,7 @@ interface TasksPageOpts {
 
 async function tasksPageHtml(c: Context<AppEnv>, ctx: PortalCtx, opts: TasksPageOpts = {}): Promise<string> {
   const base = `/portal/${esc(ctx.event.slug)}`;
-  const assignments = await loadAssignments(c, ctx.session.contactId);
+  const assignments = await loadAssignments(c, ctx.event.id, ctx.session.contactId);
   const errors = opts.errors ?? [];
   const posted = opts.posted ?? {};
 
@@ -1705,7 +1739,9 @@ async function prepareAdminUpdateEmails(
   // Recipients must be contacts of this event — configuration can go stale.
   const placeholders = ids.map(() => '?').join(', ');
   const { results } = await c.env.DB.prepare(
-    `SELECT id, email FROM contacts WHERE event_id = ? AND id IN (${placeholders})`,
+    `SELECT c.id, c.email FROM contacts c
+      JOIN event_contacts ec ON ec.contact_id = c.id AND ec.event_id = ?
+     WHERE c.id IN (${placeholders})`,
   )
     .bind(ctx.event.id, ...ids)
     .all<{ id: string; email: string }>();

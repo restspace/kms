@@ -235,27 +235,27 @@ export function buildOpenApi(origin: string): Record<string, unknown> {
   const contactBody = {
     type: 'object',
     properties: {
-      email: { type: 'string', format: 'email', description: 'Required on create; lowercased. UNIQUE(event_id, email) — a conflict is 409 email_exists.' },
+      email: { type: 'string', format: 'email', description: 'Required on create; lowercased. Unique per ORGANISATION, not per event — a contact is one person across every event in the org. Creating with an email already on this event is 409 email_exists; an email known to the org but not this event attaches that existing person to the event instead.' },
       first_name: { type: 'string' },
       last_name: { type: 'string' },
-      company: { type: 'string' },
-      job_title: { type: 'string' },
+      company: { type: 'string', description: 'Per-event: recorded against this event, not shared with the org.' },
+      job_title: { type: 'string', description: 'Per-event: recorded against this event, not shared with the org.' },
       mobile_phone: { type: 'string' },
-      biography: { type: 'string' },
+      biography: { type: 'string', description: 'Per-event: recorded against this event, not shared with the org.' },
       pronouns: { type: 'string' },
     },
   };
 
   paths['/events/{event_id}/contacts'] = {
     post: {
-      summary: 'Create a contact',
+      summary: 'Create a contact, or add an existing one to this event',
       tags: ['Contacts'],
       parameters: [eventIdParam, idempotencyKeyHeader],
       requestBody: { required: true, content: { 'application/json': { schema: contactBody } } },
       responses: {
-        '201': { description: 'Created.', content: { 'application/json': { schema: { type: 'object' } } } },
+        '201': { description: 'Created, or an existing organisation contact added to this event. Identity fields only fill blanks on an existing person; their per-event profile is seeded from their most recent other event in the organisation.', content: { 'application/json': { schema: { type: 'object' } } } },
         '400': errorResponse('email is required or not a valid address.'),
-        '409': errorResponse('A contact with this email already exists in this event (email_exists).'),
+        '409': errorResponse('A contact with this email is already on this event (email_exists).'),
         ...idempotencyResponses,
       },
     },
@@ -269,15 +269,15 @@ export function buildOpenApi(origin: string): Record<string, unknown> {
     responses: {
       '200': { description: 'Updated.', content: { 'application/json': { schema: { type: 'object' } } } },
       '400': errorResponse('email cannot be cleared / invalid shape.'),
-      '404': errorResponse('No contact with this id in this event.'),
-      '409': errorResponse('A contact with this email already exists in this event (email_exists).'),
+      '404': errorResponse('No contact with this id on this event.'),
+      '409': errorResponse('Another contact in this organisation already uses this email (email_exists).'),
       ...idempotencyResponses,
     },
   };
 
   (paths['/events/{event_id}/contacts/{id}'] as Record<string, unknown>).delete = {
-    summary: 'Delete a contact',
-    description: 'Nulls the headshot reference then deletes in one batch (mutual FK with file_assets); a remaining constraint violation is 409, not a 500.',
+    summary: 'Remove a contact from this event',
+    description: 'Detaches the contact from this event, dropping their per-event profile with it. The person survives if they belong to any other event in the organisation, and is deleted outright only when this was their last one. A remaining constraint violation is 409, not a 500.',
     tags: ['Contacts'],
     parameters: [eventIdParam, idParam('contact'), idempotencyKeyHeader],
     responses: {

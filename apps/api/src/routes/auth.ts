@@ -6,6 +6,7 @@
 import { Hono } from 'hono';
 import type { Context } from 'hono';
 import { createDb } from '@kms/db';
+import type { AttachSource } from '@kms/db';
 import type { AppEnv } from '../env';
 import { esc, page } from '../html';
 import { demoLogins } from './landing';
@@ -60,10 +61,34 @@ export async function cleanupExpiredAuthTokens(db: D1Database): Promise<number> 
  */
 export async function requestMagicLink(
   c: Context<AppEnv>,
-  args: { email: string; event: { id: string; name: string }; redirectTo?: string | null },
+  args: {
+    email: string;
+    event: { id: string; name: string };
+    redirectTo?: string | null;
+    /**
+     * How to stamp event_contacts.source when this call is what first attaches
+     * the contact to the event. Defaults to 'cfp' because the public login form
+     * and the CFP wizard are the two paths that create people; the reviewer
+     * invite passes 'admin' so the roster records who really added them.
+     */
+    attachSource?: AttachSource;
+  },
 ): Promise<{ devLink: string | null }> {
   const db = createDb(c.env.DB);
-  const contact = await db.contacts.upsertByEmail(args.event.id, args.email);
+  // Contacts are org-scoped as of 0015, and callers only hand us the event, so
+  // the org is read off the event row. Attaching is not optional: a contact
+  // created without an event_contacts row sits in no roster, and the callback
+  // below (db.contacts.getById, join-guarded) would then refuse their own link.
+  const event = await db.events.getById(args.event.id);
+  if (!event) throw new Error(`requestMagicLink: unknown event ${args.event.id}`);
+  const contact = await db.contacts.upsertByEmail(event.org_id, args.email);
+  // Deliberately NOT attached here. This endpoint is unauthenticated: anyone can
+  // type any address against any event slug, so attaching at request time would
+  // let a stranger add an existing org contact to this event's roster — and,
+  // because attachToEvent seeds from their most recent event, copy another event
+  // team's biography/company/job_title across with them. The attach happens in
+  // /auth/callback instead, once possession of the mailbox has been proven.
+  // Until then getById's join guard means the contact cannot sign in here.
 
   // One request path serves both destinations (the role decides where the
   // callback lands), so the link is minted as 'portal-login'; the callback
@@ -169,11 +194,20 @@ authRoutes.get('/callback', async (c) => {
   if (!consumed) return expired();
 
   const db = createDb(c.env.DB);
-  const [contact, event] = await Promise.all([
-    db.contacts.getById(consumed.event_id, consumed.contact_id),
-    db.events.getById(consumed.event_id),
-  ]);
-  if (!contact || !event) return expired();
+  const event = await db.events.getById(consumed.event_id);
+  if (!event) return expired();
+
+  // Consuming the token proves the caller received mail at this contact's
+  // address, which is what earns them a place on the event's roster. Attaching
+  // here rather than at request time is what keeps requestMagicLink safe for
+  // unauthenticated callers; see the note there. Idempotent, so a returning
+  // speaker who is already on the roster keeps the profile they have.
+  // 'cfp' is the closest of the four sources for a self-service arrival: the
+  // person put their own address in, rather than staff or an import adding them.
+  await db.contacts.attachToEvent(event.id, consumed.contact_id, 'cfp');
+
+  const contact = await db.contacts.getById(consumed.event_id, consumed.contact_id);
+  if (!contact) return expired();
 
   const role = await db.eventUsers.getRole(event.id, contact.id);
   const sessionToken = await createSessionToken(

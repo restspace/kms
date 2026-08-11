@@ -8,6 +8,7 @@ import { Hono } from 'hono';
 import type { Context } from 'hono';
 import { can } from '@kms/core';
 import type { Actor, Role } from '@kms/core';
+import { createDb } from '@kms/db';
 import type { AppEnv, Env } from '../env';
 import { sha256Hex } from '../hashing';
 import { accessibleEventIds, accessibleEvents, isWriter, requireEventAccess, type AccessEnv } from '../access';
@@ -203,7 +204,11 @@ const SUBMISSION_STATUSES = new Set([
 // this same registry, so the public surface cannot drift from the SPA's.
 const RESOURCE_SPECS: Record<string, Omit<ResourceDef, 'fromSql'>> = {
   contacts: {
-    baseFrom: 'FROM contacts c JOIN events ev ON ev.id = c.event_id',
+    // The join to event_contacts is both the membership filter and the source of
+    // the profile columns, so a query that omits it loses the columns it came
+    // for rather than silently widening from event to org (0015 / workplan §1).
+    baseFrom:
+      'FROM contacts c JOIN event_contacts ec ON ec.contact_id = c.id JOIN events ev ON ev.id = ec.event_id',
     // custom_fields_json: `{ <definition key>: value }` for this contact's
     // event, NULL when it has none set (json_group_object over zero rows) —
     // same shape POST/PUT /contacts echo back via contactWithCustomFields.
@@ -212,22 +217,27 @@ const RESOURCE_SPECS: Record<string, Omit<ResourceDef, 'fromSql'>> = {
     // participant but none of its rows are confirmed, NULL when it is not a
     // participant at all (never invited to confirm — distinct from awaiting).
     selectSql: `SELECT c.*, ev.name AS event_name,
+        ec.event_id, ec.biography, ec.headshot_asset_id, ec.company, ec.job_title,
+        ec.notes, ec.added_at, ec.source,
         (SELECT json_group_object(d.key, v.value) FROM contact_field_values v
-         JOIN contact_field_definitions d ON d.id = v.field_id WHERE v.contact_id = c.id) AS custom_fields_json,
+         JOIN contact_field_definitions d ON d.id = v.field_id
+         WHERE v.contact_id = c.id AND d.event_id = ec.event_id) AS custom_fields_json,
         (CASE
-           WHEN EXISTS (SELECT 1 FROM submission_participants sp WHERE sp.contact_id = c.id AND sp.confirmed_at IS NOT NULL) THEN 'confirmed'
-           WHEN EXISTS (SELECT 1 FROM submission_participants sp WHERE sp.contact_id = c.id) THEN 'awaiting'
+           WHEN EXISTS (SELECT 1 FROM submission_participants sp JOIN submissions s ON s.id = sp.submission_id
+                         WHERE sp.contact_id = c.id AND s.event_id = ec.event_id AND sp.confirmed_at IS NOT NULL) THEN 'confirmed'
+           WHEN EXISTS (SELECT 1 FROM submission_participants sp JOIN submissions s ON s.id = sp.submission_id
+                         WHERE sp.contact_id = c.id AND s.event_id = ec.event_id) THEN 'awaiting'
            ELSE NULL
          END) AS confirmation`,
-    eventExpr: 'c.event_id',
+    eventExpr: 'ec.event_id',
     idExpr: 'c.id',
     defaultCursorSort: { field: 'last_name', direction: 'asc' },
     sortable: {
       first_name: 'c.first_name',
       last_name: 'c.last_name',
       email: 'c.email',
-      company: 'c.company',
-      job_title: 'c.job_title',
+      company: 'ec.company',
+      job_title: 'ec.job_title',
       created_at: 'c.created_at',
     },
     defaultSort: 'c.last_name ASC, c.first_name ASC',
@@ -237,7 +247,7 @@ const RESOURCE_SPECS: Record<string, Omit<ResourceDef, 'fromSql'>> = {
         if (v === null) return null;
         const like = `%${v}%`;
         return {
-          sql: '(c.first_name LIKE ? OR c.last_name LIKE ? OR c.email LIKE ? OR c.company LIKE ?)',
+          sql: '(c.first_name LIKE ? OR c.last_name LIKE ? OR c.email LIKE ? OR ec.company LIKE ?)',
           params: [like, like, like, like],
         };
       },
@@ -264,14 +274,17 @@ const RESOURCE_SPECS: Record<string, Omit<ResourceDef, 'fromSql'>> = {
         const v = asText(value);
         if (v === 'confirmed') {
           return {
-            sql: `EXISTS (SELECT 1 FROM submission_participants sp WHERE sp.contact_id = c.id AND sp.confirmed_at IS NOT NULL)`,
+            sql: `EXISTS (SELECT 1 FROM submission_participants sp JOIN submissions s ON s.id = sp.submission_id
+                           WHERE sp.contact_id = c.id AND s.event_id = ec.event_id AND sp.confirmed_at IS NOT NULL)`,
             params: [],
           };
         }
         if (v === 'awaiting') {
           return {
-            sql: `EXISTS (SELECT 1 FROM submission_participants sp WHERE sp.contact_id = c.id)
-                  AND NOT EXISTS (SELECT 1 FROM submission_participants sp WHERE sp.contact_id = c.id AND sp.confirmed_at IS NOT NULL)`,
+            sql: `EXISTS (SELECT 1 FROM submission_participants sp JOIN submissions s ON s.id = sp.submission_id
+                           WHERE sp.contact_id = c.id AND s.event_id = ec.event_id)
+                  AND NOT EXISTS (SELECT 1 FROM submission_participants sp JOIN submissions s ON s.id = sp.submission_id
+                                   WHERE sp.contact_id = c.id AND s.event_id = ec.event_id AND sp.confirmed_at IS NOT NULL)`,
             params: [],
           };
         }
@@ -282,10 +295,11 @@ const RESOURCE_SPECS: Record<string, Omit<ResourceDef, 'fromSql'>> = {
       missing_assets: (value) =>
         value === true || value === 'true'
           ? {
-              sql: `(c.biography IS NULL OR c.biography = '' OR c.headshot_asset_id IS NULL)
+              sql: `(ec.biography IS NULL OR ec.biography = '' OR ec.headshot_asset_id IS NULL)
                     AND EXISTS (SELECT 1 FROM submission_participants sp
                                 JOIN submissions s ON s.id = sp.submission_id
-                                WHERE sp.contact_id = c.id AND s.status = 'accepted')`,
+                                WHERE sp.contact_id = c.id AND s.event_id = ec.event_id
+                                  AND s.status = 'accepted')`,
               params: [],
             }
           : null,
@@ -714,6 +728,29 @@ const CONTACT_FIELDS = [
   'mobile_phone', 'biography', 'pronouns', 'notes',
 ] as const;
 
+// 0015 split the speaker form across two tables: identity (email, names,
+// pronouns, mobile, links) is org-level on `contacts` and shared by every event
+// the person appears in, while these five are this event's own answer and live
+// on its `event_contacts` row. Every write below routes its columns through
+// splitContactFields so neither table is handed a column it no longer has.
+const CONTACT_PROFILE_FIELDS: readonly string[] = [
+  'biography', 'headshot_asset_id', 'company', 'job_title', 'notes',
+];
+
+/** A pickContactFields() result split into the two tables' column maps. */
+function splitContactFields(fields: Record<string, string | null>): {
+  identity: Record<string, string | null>;
+  profile: Record<string, string | null>;
+} {
+  const identity: Record<string, string | null> = {};
+  const profile: Record<string, string | null> = {};
+  for (const [key, value] of Object.entries(fields)) {
+    if (CONTACT_PROFILE_FIELDS.includes(key)) profile[key] = value;
+    else identity[key] = value;
+  }
+  return { identity, profile };
+}
+
 // SPK contacts-hygiene item 2: the portal profile (portal.ts's LINK_FIELDS)
 // already writes these four into `contacts.links` (0001_init.sql:60, json
 // {linkedin, twitter, facebook, website}) — the organiser-side speaker form
@@ -751,16 +788,20 @@ function pickContactFields(raw: unknown): Record<string, string | null> {
 }
 
 /**
- * F13: the contacts UNIQUE (event_id, email) violation is caught by matching
- * the D1 error text, not a pre-check — so the offending row's id has to be
- * looked up after the fact. Returns null (never throws) if the lookup itself
- * fails; the client falls back to the plain error message with no recovery
- * button rather than a 500.
+ * F13: the contacts UNIQUE (org_id, lower(email)) violation is caught by
+ * matching the D1 error text, not a pre-check — so the offending row's id has
+ * to be looked up after the fact. That index is org-wide as of 0015, so the row
+ * this points the client at can belong to a sibling event. Returns null (never
+ * throws) if the lookup itself fails; the client falls back to the plain error
+ * message with no recovery button rather than a 500.
  */
 async function findContactIdByEmail(c: Context<ApiEnv>, email: string | null | undefined): Promise<string | null> {
   if (!email) return null;
   const session = c.get('session');
-  const row = await c.env.DB.prepare('SELECT id FROM contacts WHERE event_id = ? AND lower(email) = lower(?)')
+  const row = await c.env.DB.prepare(
+    `SELECT id FROM contacts
+      WHERE org_id = (SELECT org_id FROM events WHERE id = ?) AND lower(email) = lower(?)`,
+  )
     .bind(session.eventId, email)
     .first<{ id: string }>()
     .catch(() => null);
@@ -769,24 +810,54 @@ async function findContactIdByEmail(c: Context<ApiEnv>, email: string | null | u
 
 adminApiRoutes.post('/contacts', async (c) => {
   const session = c.get('session');
+  const db = c.env.DB;
   const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
   const fields = pickContactFields(body);
   if (!fields.email) return c.json({ error: 'email_required' }, 400);
+  const { identity, profile } = splitContactFields(fields);
 
-  const id = crypto.randomUUID();
+  const orgId = await sessionOrgId(c);
+  if (!orgId) return c.json({ error: 'not_found' }, 404);
+
+  // Identity is deduped org-wide as of 0015: an email the org already knows is
+  // the SAME person, so adding them here attaches that identity to this event
+  // rather than creating a second row (the unique index would reject one
+  // anyway). Already on THIS event's roster is still a duplicate, and keeps the
+  // 409 the grid turns into a "show me the existing record" recovery.
+  const existing = await createDb(db).contacts.getByEmail(orgId, fields.email);
+  if (existing) {
+    const onRoster = await db
+      .prepare('SELECT 1 AS ok FROM event_contacts WHERE event_id = ? AND contact_id = ?')
+      .bind(session.eventId, existing.id)
+      .first();
+    if (onRoster) return c.json({ error: 'email_exists', existing_id: existing.id }, 409);
+  }
+
+  const id = existing?.id ?? crypto.randomUUID();
   // Validated before the insert, not after: a bad custom-field value must
   // never leave a contact half-created.
-  const fieldOps = await prepareContactFieldValueOps(c.env.DB, session.eventId, id, body.custom_fields);
+  const fieldOps = await prepareContactFieldValueOps(db, session.eventId, id, body.custom_fields);
   if (fieldOps.error) return c.json({ error: fieldOps.error, field: fieldOps.field }, 400);
 
   const ts = new Date().toISOString();
-  const cols = Object.keys(fields);
+  const identityCols = Object.keys(identity);
   try {
-    await c.env.DB.batch([
-      c.env.DB.prepare(
-        `INSERT INTO contacts (id, event_id, created_at, updated_at, ${cols.join(', ')})
-         VALUES (?, ?, ?, ?${', ?'.repeat(cols.length)})`,
-      ).bind(id, session.eventId, ts, ts, ...cols.map((k) => fields[k])),
+    await db.batch([
+      existing
+        // The identity row is shared with every other event in the org, so
+        // attaching someone fills blanks only: this event's form must not
+        // overwrite a name another event already has on file. A deliberate
+        // rename is PUT /contacts/:id, which does overwrite.
+        ? db.prepare(
+            `UPDATE contacts
+                SET ${identityCols.map((k) => `${k} = COALESCE(NULLIF(${k}, ''), ?)`).join(', ')},
+                    updated_at = ?
+              WHERE id = ?`,
+          ).bind(...identityCols.map((k) => identity[k]), ts, id)
+        : db.prepare(
+            `INSERT INTO contacts (id, org_id, created_at, updated_at, ${identityCols.join(', ')})
+             VALUES (?, ?, ?, ?${', ?'.repeat(identityCols.length)})`,
+          ).bind(id, orgId, ts, ts, ...identityCols.map((k) => identity[k])),
       ...fieldOps.ops,
     ]);
   } catch (err) {
@@ -794,8 +865,25 @@ adminApiRoutes.post('/contacts', async (c) => {
     if (message.includes('UNIQUE')) return c.json({ error: 'email_exists', existing_id: await findContactIdByEmail(c, fields.email) }, 409);
     throw err;
   }
+
+  // Membership is its own row: creating the identity without attaching it would
+  // leave a person who exists in the org but appears on no roster at all.
+  // attachToEvent is idempotent and seeds the profile from their most recent
+  // event in the same org, which the submitted profile columns then override.
+  await createDb(db).contacts.attachToEvent(session.eventId, id, 'admin');
+  const profileCols = Object.keys(profile);
+  if (profileCols.length > 0) {
+    await db
+      .prepare(
+        `UPDATE event_contacts SET ${profileCols.map((k) => `${k} = ?`).join(', ')}
+          WHERE event_id = ? AND contact_id = ?`,
+      )
+      .bind(...profileCols.map((k) => profile[k]), session.eventId, id)
+      .run();
+  }
+
   await bumpEventRevision(c.env, session.eventId);
-  const row = await contactWithCustomFields(c.env.DB, id);
+  const row = await contactWithCustomFields(db, session.eventId, id);
   return c.json(row, 201);
 });
 
@@ -806,25 +894,50 @@ adminApiRoutes.put('/contacts/:id', async (c) => {
   const fields = pickContactFields(body);
   if ('email' in fields && !fields.email) return c.json({ error: 'email_required' }, 400);
 
-  // Custom-field writes need the contact to exist in this event even when no
-  // fixed field changed (the UPDATE below would otherwise be skipped, and
-  // with it the only check that the id belongs to this event).
-  const existing = await c.env.DB.prepare('SELECT id FROM contacts WHERE id = ? AND event_id = ?')
-    .bind(id, session.eventId)
+  // Custom-field writes need the contact to be on this event's roster even when
+  // no fixed field changed (the UPDATEs below would otherwise be skipped, and
+  // with them the only check that the id belongs to this event). The join to
+  // event_contacts is that check now that `contacts` is org-level.
+  const existing = await c.env.DB.prepare(
+    `SELECT c.id FROM contacts c
+       JOIN event_contacts ec ON ec.contact_id = c.id AND ec.event_id = ?
+      WHERE c.id = ?`,
+  )
+    .bind(session.eventId, id)
     .first();
   if (!existing) return c.json({ error: 'not_found' }, 404);
 
   const fieldOps = await prepareContactFieldValueOps(c.env.DB, session.eventId, id, body.custom_fields);
   if (fieldOps.error) return c.json({ error: fieldOps.error, field: fieldOps.field }, 400);
 
-  const cols = Object.keys(fields);
+  const { identity, profile } = splitContactFields(fields);
+  const identityCols = Object.keys(identity);
+  const profileCols = Object.keys(profile);
+  const ts = new Date().toISOString();
   const statements: D1PreparedStatement[] = [];
-  if (cols.length > 0) {
+  if (identityCols.length > 0) {
+    // Editing identity here edits it for every event in the org — that is what
+    // the merge means, not a leak. The EXISTS repeats the roster check as this
+    // statement's own tenancy guard.
     statements.push(
       c.env.DB.prepare(
-        `UPDATE contacts SET ${cols.map((k) => `${k} = ?`).join(', ')}, updated_at = ?
-         WHERE id = ? AND event_id = ?`,
-      ).bind(...cols.map((k) => fields[k]), new Date().toISOString(), id, session.eventId),
+        `UPDATE contacts SET ${identityCols.map((k) => `${k} = ?`).join(', ')}, updated_at = ?
+          WHERE id = ?
+            AND EXISTS (SELECT 1 FROM event_contacts ec
+                         WHERE ec.contact_id = contacts.id AND ec.event_id = ?)`,
+      ).bind(...identityCols.map((k) => identity[k]), ts, id, session.eventId),
+    );
+  } else if (profileCols.length > 0) {
+    // event_contacts carries no updated_at of its own, so a profile-only edit
+    // still touches the person's row to keep freshness reading the same.
+    statements.push(c.env.DB.prepare('UPDATE contacts SET updated_at = ? WHERE id = ?').bind(ts, id));
+  }
+  if (profileCols.length > 0) {
+    statements.push(
+      c.env.DB.prepare(
+        `UPDATE event_contacts SET ${profileCols.map((k) => `${k} = ?`).join(', ')}
+          WHERE event_id = ? AND contact_id = ?`,
+      ).bind(...profileCols.map((k) => profile[k]), session.eventId, id),
     );
   }
   statements.push(...fieldOps.ops);
@@ -838,18 +951,26 @@ adminApiRoutes.put('/contacts/:id', async (c) => {
     }
     await bumpEventRevision(c.env, session.eventId);
   }
-  const row = await contactWithCustomFields(c.env.DB, id);
+  const row = await contactWithCustomFields(c.env.DB, session.eventId, id);
   return c.json(row);
 });
 
-// DELETE /contacts/:id — every dependent row either cascades or nulls out at
-// the schema level, except the two references that point *at* an asset rather
-// than at the contact: contacts.headshot_asset_id and the event's branding
-// columns have no ON DELETE clause, so a contact whose own upload is still
-// referenced sits on a mutual reference with file_assets.uploaded_by_contact_id
-// (SET NULL). Clearing those pointers in the same batch as the delete removes
-// the only ordering that could fail, and a constraint error is reported rather
-// than surfacing as a 500 (manual review: "can't delete speaker").
+// DELETE /contacts/:id — DETACH from this event, not destroy the person. Since
+// 0015 a contact belongs to the organisation and can sit on several rosters, so
+// removing them from the Speakers tab drops this event's event_contacts row —
+// membership plus that event's own profile, headshot pointer included — and
+// leaves their other events untouched. Only when that was their LAST membership
+// does the identity row go too; nothing outside the org's events refers to it
+// then, and the whole cascade fan-out (participants, assignments, invites, …)
+// still fires exactly as before.
+//
+// The event's branding columns point *at* an asset rather than at the contact
+// and carry no ON DELETE clause, so they are cleared in the same batch as that
+// identity delete — the mutual reference with file_assets.uploaded_by_contact_id
+// (SET NULL) is the one ordering that could fail. They are conditioned on the
+// same last-membership test, because a plain detach must not blank a logo that
+// is still perfectly valid. A constraint error is reported rather than
+// surfacing as a 500 (manual review: "can't delete speaker").
 adminApiRoutes.delete('/contacts/:id', async (c) => {
   const session = c.get('session');
   const id = c.req.param('id');
@@ -858,24 +979,38 @@ adminApiRoutes.delete('/contacts/:id', async (c) => {
   let results;
   try {
     results = await db.batch([
-      db.prepare('UPDATE contacts SET headshot_asset_id = NULL WHERE id = ? AND event_id = ?')
-        .bind(id, session.eventId),
       db.prepare(
         `UPDATE events SET logo_asset_id = NULL
-         WHERE id = ? AND logo_asset_id IN (SELECT id FROM file_assets WHERE uploaded_by_contact_id = ?)`,
+          WHERE id = ?1
+            AND logo_asset_id IN (SELECT id FROM file_assets WHERE uploaded_by_contact_id = ?2)
+            AND NOT EXISTS (SELECT 1 FROM event_contacts
+                             WHERE contact_id = ?2 AND event_id <> ?1)`,
       ).bind(session.eventId, id),
       db.prepare(
         `UPDATE events SET background_asset_id = NULL
-         WHERE id = ? AND background_asset_id IN (SELECT id FROM file_assets WHERE uploaded_by_contact_id = ?)`,
+          WHERE id = ?1
+            AND background_asset_id IN (SELECT id FROM file_assets WHERE uploaded_by_contact_id = ?2)
+            AND NOT EXISTS (SELECT 1 FROM event_contacts
+                             WHERE contact_id = ?2 AND event_id <> ?1)`,
       ).bind(session.eventId, id),
-      db.prepare('DELETE FROM contacts WHERE id = ? AND event_id = ?').bind(id, session.eventId),
+      db.prepare('DELETE FROM event_contacts WHERE event_id = ? AND contact_id = ?')
+        .bind(session.eventId, id),
+      // Runs after the detach above (batch statements are sequential and share
+      // one transaction), so the NOT EXISTS is what makes this a no-op for a
+      // contact who still belongs to another event in the org.
+      db.prepare(
+        `DELETE FROM contacts
+          WHERE id = ?1 AND NOT EXISTS (SELECT 1 FROM event_contacts WHERE contact_id = ?1)`,
+      ).bind(id),
     ]);
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     return c.json({ error: 'delete_conflict', detail }, 409);
   }
 
-  if ((results[3]?.meta.changes ?? 0) === 0) return c.json({ error: 'not_found' }, 404);
+  // The detach, not the identity delete, is what "found" means: a contact in
+  // another event of the org is not on this roster and reads as absent.
+  if ((results[2]?.meta.changes ?? 0) === 0) return c.json({ error: 'not_found' }, 404);
   await bumpEventRevision(c.env, session.eventId);
   return c.json({ ok: true });
 });
@@ -929,9 +1064,15 @@ adminApiRoutes.post('/contacts/:id/headshot', async (c) => {
   const id = c.req.param('id');
   const db = c.env.DB;
 
+  // The join to event_contacts is the tenancy guard: a contact with no row for
+  // this event is not on its roster and must read as absent.
   const exists = await db
-    .prepare('SELECT id FROM contacts WHERE id = ? AND event_id = ?')
-    .bind(id, session.eventId)
+    .prepare(
+      `SELECT c.id FROM contacts c
+         JOIN event_contacts ec ON ec.contact_id = c.id AND ec.event_id = ?
+        WHERE c.id = ?`,
+    )
+    .bind(session.eventId, id)
     .first<{ id: string }>();
   if (!exists) return c.json({ error: 'not_found' }, 404);
 
@@ -955,10 +1096,14 @@ adminApiRoutes.post('/contacts/:id/headshot', async (c) => {
     { assetId: saved.id, uploadedAt: new Date().toISOString() },
   );
 
-  await db
-    .prepare('UPDATE contacts SET headshot_asset_id = ?, updated_at = ? WHERE id = ? AND event_id = ?')
-    .bind(saved.id, new Date().toISOString(), id, session.eventId)
-    .run();
+  // The headshot is an event-scoped asset, so its pointer lives on this event's
+  // event_contacts row; contacts.updated_at still moves so the grid re-reads.
+  await db.batch([
+    db.prepare('UPDATE event_contacts SET headshot_asset_id = ? WHERE event_id = ? AND contact_id = ?')
+      .bind(saved.id, session.eventId, id),
+    db.prepare('UPDATE contacts SET updated_at = ? WHERE id = ?')
+      .bind(new Date().toISOString(), id),
+  ]);
   await bumpEventRevision(c.env, session.eventId);
   return c.json({ ok: true, headshot_asset_id: saved.id });
 });
@@ -1113,7 +1258,13 @@ function pickTaskTargets(raw: unknown): TaskTargets {
   return { contactIds, submissionIds };
 }
 
-/** Every id in `ids` exists in `table` under `eventId` (tenant isolation). */
+/**
+ * Every id in `ids` exists in `table` under `eventId` (tenant isolation).
+ *
+ * `contacts` has no event_id since 0015 — belonging to an event means having an
+ * event_contacts row — so it checks membership on the join table instead. The
+ * other tables keep their own event_id column and the plain check.
+ */
 async function idsBelongToEvent(
   db: D1Database,
   table: 'contacts' | 'submissions',
@@ -1121,10 +1272,11 @@ async function idsBelongToEvent(
   eventId: string,
 ): Promise<boolean> {
   if (ids.length === 0) return true;
-  const row = await db
-    .prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE event_id = ? AND id IN (${ids.map(() => '?').join(',')})`)
-    .bind(eventId, ...ids)
-    .first<{ n: number }>();
+  const placeholders = ids.map(() => '?').join(',');
+  const sql = table === 'contacts'
+    ? `SELECT COUNT(*) AS n FROM event_contacts WHERE event_id = ? AND contact_id IN (${placeholders})`
+    : `SELECT COUNT(*) AS n FROM ${table} WHERE event_id = ? AND id IN (${placeholders})`;
+  const row = await db.prepare(sql).bind(eventId, ...ids).first<{ n: number }>();
   return (row?.n ?? 0) === ids.length;
 }
 
@@ -1676,16 +1828,24 @@ async function prepareContactFieldValueOps(
   return { ops };
 }
 
-/** Contact row plus its custom field values as `{ <key>: value }` json text — same shape (and same NULL-when-empty) as the contacts resource query's `custom_fields_json` column below, so POST/PUT responses match what a subsequent grid refetch would show. */
-async function contactWithCustomFields(db: D1Database, id: string): Promise<Record<string, unknown> | null> {
+/** Contact row plus its custom field values as `{ <key>: value }` json text — same shape (and same NULL-when-empty) as the contacts resource query's `custom_fields_json` column below, so POST/PUT responses match what a subsequent grid refetch would show. Everything is pinned to `eventId`: the join to event_contacts is both the tenancy guard and the source of the profile columns, and the field definitions are event-scoped too, so a contact who also appears in a sibling event never brings that event's custom values back with them. */
+async function contactWithCustomFields(
+  db: D1Database,
+  eventId: string,
+  id: string,
+): Promise<Record<string, unknown> | null> {
   return db
     .prepare(
-      `SELECT c.*,
+      `SELECT c.*, ec.event_id, ec.biography, ec.headshot_asset_id, ec.company,
+              ec.job_title, ec.notes, ec.added_at, ec.source,
         (SELECT json_group_object(d.key, v.value) FROM contact_field_values v
-         JOIN contact_field_definitions d ON d.id = v.field_id WHERE v.contact_id = c.id) AS custom_fields_json
-       FROM contacts c WHERE c.id = ?`,
+         JOIN contact_field_definitions d ON d.id = v.field_id
+         WHERE v.contact_id = c.id AND d.event_id = ec.event_id) AS custom_fields_json
+       FROM contacts c
+       JOIN event_contacts ec ON ec.contact_id = c.id AND ec.event_id = ?
+      WHERE c.id = ?`,
     )
-    .bind(id)
+    .bind(eventId, id)
     .first();
 }
 
@@ -1899,8 +2059,9 @@ function parseNamedRows(raw: unknown, extraKey: 'capacity' | 'color'): NamedRow[
 }
 
 // POST /app/api/events — a new event inside the creator's organisation. The
-// creator lands in it as an owner, which needs a contacts row too: contacts
-// are event-scoped, so the seat and its person are created with the event.
+// creator lands in it as an owner: contacts are org-level since 0015, so their
+// existing identity is attached to the new event rather than copied into a
+// second row, and the owner seat points at that same person.
 // Optional `rooms`/`tracks` arrays (repeatable fields in the create-event
 // dialog) are inserted in the same batch so the agenda builder's Add Session
 // dialog has real options from the first save, not just "No room"/"No track".
@@ -1926,11 +2087,14 @@ adminApiRoutes.post('/events', async (c) => {
   const taken = await db.prepare('SELECT 1 AS ok FROM events WHERE slug = ?').bind(slug).first();
   if (taken) return c.json({ error: 'slug_taken' }, 409);
 
-  const me = await db.prepare('SELECT first_name, last_name FROM contacts WHERE id = ?')
-    .bind(session.contactId).first<{ first_name: string | null; last_name: string | null }>();
+  // The creator already has an identity row in this org; the org check is the
+  // tenancy guard on reusing it.
+  const me = await db.prepare('SELECT id FROM contacts WHERE id = ? AND org_id = ?')
+    .bind(session.contactId, org.org_id).first<{ id: string }>();
+  if (!me) return c.json({ error: 'not_found' }, 404);
 
   const id = crypto.randomUUID();
-  const contactId = crypto.randomUUID();
+  const contactId = session.contactId;
   const ts = new Date().toISOString();
   const cols = Object.keys(values);
   try {
@@ -1946,10 +2110,6 @@ adminApiRoutes.post('/events', async (c) => {
         ts,
         ...cols.map((k) => values[k]),
       ),
-      db.prepare(
-        `INSERT INTO contacts (id, event_id, email, first_name, last_name, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      ).bind(contactId, id, session.email, me?.first_name ?? null, me?.last_name ?? null, ts, ts),
       db.prepare(
         `INSERT INTO event_users (event_id, contact_id, role, invited_at, accepted_at)
          VALUES (?, ?, 'owner', ?, ?)`,
@@ -1968,6 +2128,10 @@ adminApiRoutes.post('/events', async (c) => {
     if (message.includes('UNIQUE')) return c.json({ error: 'slug_taken' }, 409);
     throw err;
   }
+  // Membership after the batch: event_contacts.event_id references the event
+  // that batch creates. Without it the owner holds a seat but appears on no
+  // roster (and reads back through no event-scoped contact query).
+  await createDb(db).contacts.attachToEvent(id, contactId, 'admin');
   await bumpEventRevision(c.env, id);
   return c.json({ ok: true, id }, 201);
 });
@@ -2052,8 +2216,10 @@ adminApiRoutes.get('/events', async (c) => {
       )
       .bind(...ids)
       .all<{ id: string; name: string; slug: string; starts_at: string; ends_at: string; agenda_published: number }>(),
+    // Roster size, so it counts event_contacts rows: `contacts` is org-level
+    // since 0015 and one person can be counted by several events.
     db
-      .prepare(`SELECT event_id, COUNT(*) AS n FROM contacts WHERE event_id IN (${placeholders}) GROUP BY event_id`)
+      .prepare(`SELECT event_id, COUNT(*) AS n FROM event_contacts WHERE event_id IN (${placeholders}) GROUP BY event_id`)
       .bind(...ids)
       .all<{ event_id: string; n: number }>(),
     db

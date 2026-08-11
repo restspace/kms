@@ -213,15 +213,31 @@ INSERT INTO form_questions (id, form_id, section, field_id, label, help_text, po
 -- Contacts (admin + 7 speakers) and the owner event_user
 -- ---------------------------------------------------------------------------
 
-INSERT INTO contacts (id, event_id, email, first_name, last_name, company, job_title, created_at, updated_at) VALUES
-  ('con00000-0000-4000-8000-000000000001', 'evt00000-0000-4000-8000-000000000001', 'james@atelyr.com',              'James',    'Ellis-Jones', 'Atelyr',        'Founder',              '2026-08-08T12:00:00Z', '2026-08-08T12:00:00Z'),
-  ('con00000-0000-4000-8000-000000000002', 'evt00000-0000-4000-8000-000000000001', 'ada@example.com',               'Ada',      'Lovelace',    'Analytical Co', 'Principal Engineer',   '2026-08-08T12:00:00Z', '2026-08-08T12:00:00Z'),
-  ('con00000-0000-4000-8000-000000000003', 'evt00000-0000-4000-8000-000000000001', 'grace.hopper@example.com',      'Grace',    'Hopper',      'Flowmatic AI',  'VP Engineering',       '2026-08-08T12:00:00Z', '2026-08-08T12:00:00Z'),
-  ('con00000-0000-4000-8000-000000000004', 'evt00000-0000-4000-8000-000000000001', 'alan.turing@example.com',       'Alan',     'Turing',      'Enigma Labs',   'Research Scientist',   '2026-08-08T12:00:00Z', '2026-08-08T12:00:00Z'),
-  ('con00000-0000-4000-8000-000000000005', 'evt00000-0000-4000-8000-000000000001', 'margaret.hamilton@example.com', 'Margaret', 'Hamilton',    'Apollo Systems','Director of Software', '2026-08-08T12:00:00Z', '2026-08-08T12:00:00Z'),
-  ('con00000-0000-4000-8000-000000000006', 'evt00000-0000-4000-8000-000000000001', 'joan.clarke@example.com',       'Joan',     'Clarke',      'Cipher AI',     'Staff ML Engineer',    '2026-08-08T12:00:00Z', '2026-08-08T12:00:00Z'),
-  ('con00000-0000-4000-8000-000000000007', 'evt00000-0000-4000-8000-000000000001', 'claude.shannon@example.com',    'Claude',   'Shannon',     'Bitstream',     'CTO',                  '2026-08-08T12:00:00Z', '2026-08-08T12:00:00Z'),
-  ('con00000-0000-4000-8000-000000000008', 'evt00000-0000-4000-8000-000000000001', 'barbara.liskov@example.com',    'Barbara',  'Liskov',      'Substrate',     'Distinguished Eng',    '2026-08-08T12:00:00Z', '2026-08-08T12:00:00Z');
+-- 0015: contacts are org-scoped identity only; the profile fields that used to
+-- live here (company, job_title, biography, headshot_asset_id, notes) now live
+-- on event_contacts, one row per (event, contact) — see below.
+INSERT INTO contacts (id, org_id, email, first_name, last_name, created_at, updated_at) VALUES
+  ('con00000-0000-4000-8000-000000000001', 'org00000-0000-4000-8000-000000000001', 'james@atelyr.com',              'James',    'Ellis-Jones', '2026-08-08T12:00:00Z', '2026-08-08T12:00:00Z'),
+  ('con00000-0000-4000-8000-000000000002', 'org00000-0000-4000-8000-000000000001', 'ada@example.com',               'Ada',      'Lovelace',    '2026-08-08T12:00:00Z', '2026-08-08T12:00:00Z'),
+  ('con00000-0000-4000-8000-000000000003', 'org00000-0000-4000-8000-000000000001', 'grace.hopper@example.com',      'Grace',    'Hopper',      '2026-08-08T12:00:00Z', '2026-08-08T12:00:00Z'),
+  ('con00000-0000-4000-8000-000000000004', 'org00000-0000-4000-8000-000000000001', 'alan.turing@example.com',       'Alan',     'Turing',      '2026-08-08T12:00:00Z', '2026-08-08T12:00:00Z'),
+  ('con00000-0000-4000-8000-000000000005', 'org00000-0000-4000-8000-000000000001', 'margaret.hamilton@example.com', 'Margaret', 'Hamilton',    '2026-08-08T12:00:00Z', '2026-08-08T12:00:00Z'),
+  ('con00000-0000-4000-8000-000000000006', 'org00000-0000-4000-8000-000000000001', 'joan.clarke@example.com',       'Joan',     'Clarke',      '2026-08-08T12:00:00Z', '2026-08-08T12:00:00Z'),
+  ('con00000-0000-4000-8000-000000000007', 'org00000-0000-4000-8000-000000000001', 'claude.shannon@example.com',    'Claude',   'Shannon',     '2026-08-08T12:00:00Z', '2026-08-08T12:00:00Z'),
+  ('con00000-0000-4000-8000-000000000008', 'org00000-0000-4000-8000-000000000001', 'barbara.liskov@example.com',    'Barbara',  'Liskov',      '2026-08-08T12:00:00Z', '2026-08-08T12:00:00Z');
+
+-- Membership + per-event profile (company/job_title carried over from the old
+-- contacts row; biography/headshot_asset_id are added below where they used
+-- to be set via UPDATE contacts).
+INSERT INTO event_contacts (event_id, contact_id, company, job_title, added_at, source) VALUES
+  ('evt00000-0000-4000-8000-000000000001', 'con00000-0000-4000-8000-000000000001', 'Atelyr',        'Founder',              '2026-08-08T12:00:00Z', 'admin'),
+  ('evt00000-0000-4000-8000-000000000001', 'con00000-0000-4000-8000-000000000002', 'Analytical Co', 'Principal Engineer',   '2026-08-08T12:00:00Z', 'admin'),
+  ('evt00000-0000-4000-8000-000000000001', 'con00000-0000-4000-8000-000000000003', 'Flowmatic AI',  'VP Engineering',       '2026-08-08T12:00:00Z', 'admin'),
+  ('evt00000-0000-4000-8000-000000000001', 'con00000-0000-4000-8000-000000000004', 'Enigma Labs',   'Research Scientist',   '2026-08-08T12:00:00Z', 'admin'),
+  ('evt00000-0000-4000-8000-000000000001', 'con00000-0000-4000-8000-000000000005', 'Apollo Systems','Director of Software', '2026-08-08T12:00:00Z', 'admin'),
+  ('evt00000-0000-4000-8000-000000000001', 'con00000-0000-4000-8000-000000000006', 'Cipher AI',     'Staff ML Engineer',    '2026-08-08T12:00:00Z', 'admin'),
+  ('evt00000-0000-4000-8000-000000000001', 'con00000-0000-4000-8000-000000000007', 'Bitstream',     'CTO',                  '2026-08-08T12:00:00Z', 'admin'),
+  ('evt00000-0000-4000-8000-000000000001', 'con00000-0000-4000-8000-000000000008', 'Substrate',     'Distinguished Eng',    '2026-08-08T12:00:00Z', 'admin');
 
 INSERT INTO event_users (event_id, contact_id, role, invited_at, accepted_at) VALUES
   ('evt00000-0000-4000-8000-000000000001', 'con00000-0000-4000-8000-000000000001', 'owner', '2026-08-08T12:00:00Z', '2026-08-08T12:00:00Z');
@@ -247,20 +263,21 @@ INSERT INTO event_users (event_id, contact_id, role, invited_at, accepted_at) VA
 -- passthrough this relies on). Two speakers (Claude, Barbara) are left
 -- without one so the initials fallback still has coverage in the demo.
 
-UPDATE contacts SET biography = '<p>Ada is a principal engineer building tool-use guardrails for multi-agent systems, with a decade in developer platforms before that. She speaks regularly on reliability engineering for LLM-backed products.</p>'
-  WHERE id = 'con00000-0000-4000-8000-000000000002';
-UPDATE contacts SET biography = '<p>Grace leads engineering at Flowmatic AI, where she built the eval pipelines that now gate every model release. She previously ran platform infrastructure for two Series C startups.</p>'
-  WHERE id = 'con00000-0000-4000-8000-000000000003';
-UPDATE contacts SET biography = '<p>Alan is a research scientist at Enigma Labs working on hybrid retrieval and search ranking. His writing on evaluation methodology is widely cited in the applied-ML community.</p>'
-  WHERE id = 'con00000-0000-4000-8000-000000000004';
-UPDATE contacts SET biography = '<p>Margaret directs software engineering at Apollo Systems, where she champions rigorous tracing and replay tooling for production agent systems. She started her career writing mission-critical flight software.</p>'
-  WHERE id = 'con00000-0000-4000-8000-000000000005';
-UPDATE contacts SET biography = '<p>Joan is a staff ML engineer at Cipher AI, focused on guardrail benchmarking and CI-gated model evaluation. She mentors early-career engineers moving into applied ML.</p>'
-  WHERE id = 'con00000-0000-4000-8000-000000000006';
-UPDATE contacts SET biography = '<p>Claude is CTO of Bitstream, where he oversees the text-to-SQL platform serving enterprise analytics teams. He writes and speaks on grounding language models in structured data.</p>'
-  WHERE id = 'con00000-0000-4000-8000-000000000007';
-UPDATE contacts SET biography = '<p>Barbara is a distinguished engineer at Substrate working on prompt compression and serving efficiency for large language models. She previously led infrastructure teams at two cloud providers.</p>'
-  WHERE id = 'con00000-0000-4000-8000-000000000008';
+-- 0015: biography now lives on event_contacts (per-event profile), not contacts.
+UPDATE event_contacts SET biography = '<p>Ada is a principal engineer building tool-use guardrails for multi-agent systems, with a decade in developer platforms before that. She speaks regularly on reliability engineering for LLM-backed products.</p>'
+  WHERE event_id = 'evt00000-0000-4000-8000-000000000001' AND contact_id = 'con00000-0000-4000-8000-000000000002';
+UPDATE event_contacts SET biography = '<p>Grace leads engineering at Flowmatic AI, where she built the eval pipelines that now gate every model release. She previously ran platform infrastructure for two Series C startups.</p>'
+  WHERE event_id = 'evt00000-0000-4000-8000-000000000001' AND contact_id = 'con00000-0000-4000-8000-000000000003';
+UPDATE event_contacts SET biography = '<p>Alan is a research scientist at Enigma Labs working on hybrid retrieval and search ranking. His writing on evaluation methodology is widely cited in the applied-ML community.</p>'
+  WHERE event_id = 'evt00000-0000-4000-8000-000000000001' AND contact_id = 'con00000-0000-4000-8000-000000000004';
+UPDATE event_contacts SET biography = '<p>Margaret directs software engineering at Apollo Systems, where she champions rigorous tracing and replay tooling for production agent systems. She started her career writing mission-critical flight software.</p>'
+  WHERE event_id = 'evt00000-0000-4000-8000-000000000001' AND contact_id = 'con00000-0000-4000-8000-000000000005';
+UPDATE event_contacts SET biography = '<p>Joan is a staff ML engineer at Cipher AI, focused on guardrail benchmarking and CI-gated model evaluation. She mentors early-career engineers moving into applied ML.</p>'
+  WHERE event_id = 'evt00000-0000-4000-8000-000000000001' AND contact_id = 'con00000-0000-4000-8000-000000000006';
+UPDATE event_contacts SET biography = '<p>Claude is CTO of Bitstream, where he oversees the text-to-SQL platform serving enterprise analytics teams. He writes and speaks on grounding language models in structured data.</p>'
+  WHERE event_id = 'evt00000-0000-4000-8000-000000000001' AND contact_id = 'con00000-0000-4000-8000-000000000007';
+UPDATE event_contacts SET biography = '<p>Barbara is a distinguished engineer at Substrate working on prompt compression and serving efficiency for large language models. She previously led infrastructure teams at two cloud providers.</p>'
+  WHERE event_id = 'evt00000-0000-4000-8000-000000000001' AND contact_id = 'con00000-0000-4000-8000-000000000008';
 
 -- headshot_asset_id is a real FK (D1 enforces it), so each static path needs
 -- a backing file_assets row even though nothing ever reads its `key`/KV
@@ -273,11 +290,11 @@ INSERT INTO file_assets (id, event_id, key, filename, content_type, size_bytes, 
   ('/static/avatars/speaker-3.svg', 'evt00000-0000-4000-8000-000000000001', 'static:avatars/speaker-3.svg', 'speaker-3.svg', 'image/svg+xml', 420, NULL, '2026-08-08T12:00:00Z'),
   ('/static/avatars/speaker-4.svg', 'evt00000-0000-4000-8000-000000000001', 'static:avatars/speaker-4.svg', 'speaker-4.svg', 'image/svg+xml', 420, NULL, '2026-08-08T12:00:00Z');
 
-UPDATE contacts SET headshot_asset_id = '/static/avatars/speaker-1.svg' WHERE id = 'con00000-0000-4000-8000-000000000002'; -- Ada
-UPDATE contacts SET headshot_asset_id = '/static/avatars/speaker-2.svg' WHERE id = 'con00000-0000-4000-8000-000000000003'; -- Grace
-UPDATE contacts SET headshot_asset_id = '/static/avatars/speaker-3.svg' WHERE id = 'con00000-0000-4000-8000-000000000004'; -- Alan
-UPDATE contacts SET headshot_asset_id = '/static/avatars/speaker-4.svg' WHERE id = 'con00000-0000-4000-8000-000000000005'; -- Margaret
-UPDATE contacts SET headshot_asset_id = '/static/avatars/speaker-1.svg' WHERE id = 'con00000-0000-4000-8000-000000000006'; -- Joan
+UPDATE event_contacts SET headshot_asset_id = '/static/avatars/speaker-1.svg' WHERE event_id = 'evt00000-0000-4000-8000-000000000001' AND contact_id = 'con00000-0000-4000-8000-000000000002'; -- Ada
+UPDATE event_contacts SET headshot_asset_id = '/static/avatars/speaker-2.svg' WHERE event_id = 'evt00000-0000-4000-8000-000000000001' AND contact_id = 'con00000-0000-4000-8000-000000000003'; -- Grace
+UPDATE event_contacts SET headshot_asset_id = '/static/avatars/speaker-3.svg' WHERE event_id = 'evt00000-0000-4000-8000-000000000001' AND contact_id = 'con00000-0000-4000-8000-000000000004'; -- Alan
+UPDATE event_contacts SET headshot_asset_id = '/static/avatars/speaker-4.svg' WHERE event_id = 'evt00000-0000-4000-8000-000000000001' AND contact_id = 'con00000-0000-4000-8000-000000000005'; -- Margaret
+UPDATE event_contacts SET headshot_asset_id = '/static/avatars/speaker-1.svg' WHERE event_id = 'evt00000-0000-4000-8000-000000000001' AND contact_id = 'con00000-0000-4000-8000-000000000006'; -- Joan
 -- Claude (007) and Barbara (008) intentionally left without a headshot.
 
 -- ---------------------------------------------------------------------------
@@ -453,10 +470,15 @@ WHERE id IN ('sub00000-0000-4000-8000-000000000001', 'sub00000-0000-4000-8000-00
 -- Weighted totals follow docs/06 §4: Σ(score×weight)/Σ(weight).
 -- ---------------------------------------------------------------------------
 
-INSERT INTO contacts (id, event_id, email, first_name, last_name, company, job_title, created_at, updated_at) VALUES
-  ('con00000-0000-4000-8000-000000000009', 'evt00000-0000-4000-8000-000000000001', 'rosalind.franklin@example.com', 'Rosalind', 'Franklin', 'Crystal Insights', 'Track Lead — Agents',   '2026-08-08T12:00:00Z', '2026-08-08T12:00:00Z'),
-  ('con00000-0000-4000-8000-000000000010', 'evt00000-0000-4000-8000-000000000001', 'vint.cerf@example.com',         'Vint',     'Cerf',     'Internetworks',    'Track Lead — Infra',    '2026-08-08T12:00:00Z', '2026-08-08T12:00:00Z'),
-  ('con00000-0000-4000-8000-000000000011', 'evt00000-0000-4000-8000-000000000001', 'frances.allen@example.com',     'Frances',  'Allen',    'Compiler Works',   'Track Lead — Evals',    '2026-08-08T12:00:00Z', '2026-08-08T12:00:00Z');
+INSERT INTO contacts (id, org_id, email, first_name, last_name, created_at, updated_at) VALUES
+  ('con00000-0000-4000-8000-000000000009', 'org00000-0000-4000-8000-000000000001', 'rosalind.franklin@example.com', 'Rosalind', 'Franklin', '2026-08-08T12:00:00Z', '2026-08-08T12:00:00Z'),
+  ('con00000-0000-4000-8000-000000000010', 'org00000-0000-4000-8000-000000000001', 'vint.cerf@example.com',         'Vint',     'Cerf',     '2026-08-08T12:00:00Z', '2026-08-08T12:00:00Z'),
+  ('con00000-0000-4000-8000-000000000011', 'org00000-0000-4000-8000-000000000001', 'frances.allen@example.com',     'Frances',  'Allen',    '2026-08-08T12:00:00Z', '2026-08-08T12:00:00Z');
+
+INSERT INTO event_contacts (event_id, contact_id, company, job_title, added_at, source) VALUES
+  ('evt00000-0000-4000-8000-000000000001', 'con00000-0000-4000-8000-000000000009', 'Crystal Insights', 'Track Lead — Agents', '2026-08-08T12:00:00Z', 'admin'),
+  ('evt00000-0000-4000-8000-000000000001', 'con00000-0000-4000-8000-000000000010', 'Internetworks',    'Track Lead — Infra',  '2026-08-08T12:00:00Z', 'admin'),
+  ('evt00000-0000-4000-8000-000000000001', 'con00000-0000-4000-8000-000000000011', 'Compiler Works',   'Track Lead — Evals',  '2026-08-08T12:00:00Z', 'admin');
 
 INSERT INTO event_users (event_id, contact_id, role, invited_at, accepted_at) VALUES
   ('evt00000-0000-4000-8000-000000000001', 'con00000-0000-4000-8000-000000000009', 'reviewer', '2026-08-08T12:00:00Z', '2026-08-08T12:00:00Z'),

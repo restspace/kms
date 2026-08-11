@@ -117,10 +117,12 @@ describe('POST /submit/:slug/:formId/submit', () => {
     expect(await countRows('SELECT COUNT(*) AS n FROM message_log WHERE event_id = ?', form.eventId)).toBe(0);
     expect(
       await countRows(
-        `SELECT COUNT(*) AS n FROM contacts WHERE event_id = ? AND email = 'submitter@example.com'`,
+        `SELECT COUNT(*) AS n FROM event_contacts ec
+         JOIN contacts c ON c.id = ec.contact_id
+         WHERE ec.event_id = ? AND c.email = 'submitter@example.com'`,
         form.eventId,
       ),
-    ).toBe(1); // the submitter's pre-existing row, nothing new
+    ).toBe(1); // the submitter's pre-existing roster row, nothing new
   });
 
   it('accepts the frozen participant payload and persists the full answer map', async () => {

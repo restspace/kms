@@ -2,19 +2,16 @@
 // Stability under concurrent inserts is the whole point of keyset pagination
 // over offset — this asserts it holds, and that a tampered cursor is a 400.
 
-import { SELF, env } from 'cloudflare:test';
+import { SELF } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
-import { createEvent } from './fixtures';
+import { createContact, createEvent } from './fixtures';
 import { bearerReq, orgIdForEvent, seedApiToken } from './restapi-helpers';
 
-async function seedContact(eventId: string, email: string): Promise<string> {
-  const id = `con-${crypto.randomUUID()}`;
-  await env.DB.prepare(
-    `INSERT INTO contacts (id, event_id, email, first_name, last_name, created_at, updated_at)
-     VALUES (?, ?, ?, 'Test', 'Person', '2026-08-01T00:00:00Z', '2026-08-01T00:00:00Z')`,
-  ).bind(id, eventId, email).run();
-  return id;
-}
+// Since 0015 a contact is org-level and its event membership is a separate
+// event_contacts row, so seeding is the shared fixture's job rather than a
+// single local INSERT. The listing this file paginates reads event_contacts.
+const seedContact = (eventId: string, email: string): Promise<string> =>
+  createContact(eventId, { email });
 
 describe('GET /events/:event_id/:resource — cursor pagination', () => {
   it('iterates every pre-existing row exactly once, even with an insert mid-iteration', async () => {

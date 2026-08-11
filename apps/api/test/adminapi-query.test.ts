@@ -4,6 +4,7 @@
 import { SELF, env } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
 import { jsonReq, seedContact, seedEvent, seedEventUser, seedStaff, seedSubmission } from './fixtures-admin';
+import { attachContactToEvent } from './fixtures';
 
 interface QueryResponse {
   items: Array<Record<string, unknown>>;
@@ -25,7 +26,11 @@ async function seedWorkspace() {
   const eventC = await seedEvent({ org_id: `org-z-${tag}`, name: "Event C", slug: `event-c-${tag}` });
 
   const admin = await seedStaff(eventA, 'admin', 'admin@example.com');
-  await seedEventUser(eventB, await seedContact(eventB, { email: 'admin@example.com' }), 'admin');
+  // Since 0015 a person is one contact per ORG, so the Event B seat is the same
+  // contact with a second event_contacts row — not a second contact record.
+  // Event C is a different org, so there the email is genuinely a separate person.
+  await attachContactToEvent(eventB, admin.contactId);
+  await seedEventUser(eventB, admin.contactId, 'admin');
   await seedEventUser(eventC, await seedContact(eventC, { email: 'admin@example.com' }), 'admin');
 
   await seedContact(eventA, { email: 'a-speaker@example.com', last_name: 'Aardvark' });

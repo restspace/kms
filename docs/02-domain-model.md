@@ -3,14 +3,22 @@
 All records are scoped to an **Event**, which is scoped to an **Organisation**. Every query in
 the data layer must carry the event/org scope — tenant isolation is enforced below the UI.
 
+**Contact is the one exception** (migration `0015`): a contact is scoped to the **Organisation**
+directly, so one person has a single identity across every event the org runs. What varies per
+event — profile fields, and membership itself — lives on `EventContact`, the join between a
+Contact and an Event. See §2.
+
 ---
 
 ## 1. Entity map
 
 ```
 Organisation
+├── Contact  (person: speaker / submitter / reviewer — one identity per org)
+│   └── PortalAccount (magic-link identity)
 └── Event
     ├── EventUser (role: owner | admin | reviewer)
+    ├── EventContact (a Contact's membership + per-event profile)
     ├── Track, Room, Tag, Persona, FieldDefinition
     ├── SubmissionForm
     │   ├── FormSection (welcome | abstract | participant | settings | notifications)
@@ -23,8 +31,6 @@ Organisation
     │   ├── FileAsset[]
     │   └── Review[]  ──> EvaluationPlan, Reviewer
     ├── Session  (a scheduled Submission, or created directly)
-    ├── Contact  (person: speaker / submitter / reviewer)
-    │   └── PortalAccount (magic-link identity)
     ├── EvaluationPlan
     │   ├── ScoringCriterion
     │   └── ReviewAssignment
@@ -70,23 +76,46 @@ Organisation
 `event_id, contact_id, role (owner|admin|reviewer), invited_at, accepted_at`
 
 ### Contact
-The person record. One contact may be speaker on several submissions.
+The person record, scoped to the **Organisation** (migration `0015`, was event-scoped before
+it). One contact may be speaker on several submissions across several events in the same org;
+their identity is a single row regardless of how many events they appear in.
 
 | Field | Type | Notes |
 |---|---|---|
 | id | uuid | |
-| event_id | uuid | |
-| email | citext | unique per event |
+| org_id | uuid → Organisation | |
+| email | citext | unique per org |
 | first_name / last_name | string(255) | |
 | salutation, honorific | string | |
 | pronouns, gender | string | free text or picklist |
 | mobile_phone | string | |
-| biography | richtext(5000) | |
-| headshot_asset_id | uuid → FileAsset | |
 | links | json | `{linkedin, twitter, facebook, website}` |
-| company, job_title | string | optional |
 | tags | uuid[] → Tag | |
 | created_at / updated_at | timestamptz | |
+
+Field split rule: identity lives on Contact; anything a person can legitimately answer
+differently at two events lives on `EventContact` below.
+
+### EventContact
+A Contact's membership in one Event, and their profile **at that event**. Biography, headshot
+and company/job title move here rather than onto Contact because they can genuinely differ
+event to event; `notes` is here too, since it holds one event team's private remarks about the
+person and promoting it to org level would disclose it to every other event in the org.
+
+| Field | Type | Notes |
+|---|---|---|
+| event_id, contact_id | uuid | **PRIMARY KEY**, both FK with `ON DELETE CASCADE` |
+| biography | richtext(5000) | |
+| headshot_asset_id | uuid → FileAsset | |
+| company, job_title | string | optional |
+| notes | text | private to this event's team |
+| added_at | timestamptz | |
+| source | enum | `import \| cfp \| admin \| migration` |
+
+A NULL profile field means "not set for this event" — it never falls back to another event's
+value. Instead, attaching a contact to a new event seeds its profile fields from that contact's
+most recent `EventContact` row in the same org, so a returning speaker does not retype
+everything.
 
 ### PortalAccount
 `id, contact_id, last_login_at, login_token_hash, login_token_expires_at, sessions[]`

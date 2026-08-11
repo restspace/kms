@@ -10,17 +10,9 @@ import { SELF, env } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
 import { createEvent } from './fixtures';
 import { bearerReq, orgIdForEvent, seedApiToken } from './restapi-helpers';
-import { seedSubmission } from './fixtures-admin';
+import { seedContact, seedSubmission } from './fixtures-admin';
 
 const ts = '2026-08-01T00:00:00Z';
-
-async function seedContactRow(eventId: string, email: string): Promise<string> {
-  const id = `ct-${crypto.randomUUID()}`;
-  await env.DB.prepare(
-    `INSERT INTO contacts (id, event_id, email, created_at, updated_at) VALUES (?, ?, ?, ?, ?)`,
-  ).bind(id, eventId, email, ts, ts).run();
-  return id;
-}
 
 describe('GET /api/v1/events/:event_id/submissions/export', () => {
   it('includes the aggregate rating and review_count columns in CSV', async () => {
@@ -40,7 +32,9 @@ describe('GET /api/v1/events/:event_id/submissions/export', () => {
     const submissionId = await seedSubmission(eventId, { code: 'SESS-EXPORT', title: 'Exportable Talk' });
     await env.DB.prepare('UPDATE submissions SET evaluation_plan_id = ? WHERE id = ?').bind(planId, submissionId).run();
 
-    const reviewerId = await seedContactRow(eventId, 'reviewer@example.com');
+    // Org-scoped identity plus an event_contacts row: the reviewer has to be on
+    // this event's roster, not merely exist in the org (0015).
+    const reviewerId = await seedContact(eventId, { email: 'reviewer@example.com' });
     await env.DB.prepare(
       `INSERT INTO reviews (id, submission_id, reviewer_contact_id, plan_id, scores, weighted_total, comment, conflict_of_interest, created_at)
        VALUES (?, ?, ?, ?, ?, ?, NULL, 0, ?)`,

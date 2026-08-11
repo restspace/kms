@@ -38,7 +38,11 @@ export async function getAccessibleEvents(
     .prepare(
       `SELECT eu.event_id, e.name AS event_name, eu.role, eu.contact_id
        FROM event_users eu
-       JOIN contacts ct ON ct.id = eu.contact_id AND ct.event_id = eu.event_id
+       JOIN contacts ct ON ct.id = eu.contact_id
+       -- event_contacts carries the membership that contacts.event_id used to
+       -- (0015). Keeping it as a join preserves the original guard exactly: a
+       -- staff seat only counts where the person is on that event's roster.
+       JOIN event_contacts ec ON ec.contact_id = ct.id AND ec.event_id = eu.event_id
        JOIN events e ON e.id = eu.event_id
        WHERE ct.email = ?
          AND e.org_id = (SELECT org_id FROM events WHERE id = ?)

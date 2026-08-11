@@ -24,7 +24,12 @@ export async function createEvent(
   }> = {},
 ): Promise<string> {
   const id = overrides.id ?? `evt-${crypto.randomUUID()}`;
-  const orgId = overrides.org_id ?? 'org-test-1';
+  // Each event gets its own organisation unless the caller names one. Contacts
+  // are unique per (org, email) since 0015, and storage persists across it()
+  // blocks in a file — a shared default org would make the same email collide
+  // between tests that are supposed to be independent. Tests that genuinely
+  // want two events in one org pass org_id explicitly.
+  const orgId = overrides.org_id ?? `org-${crypto.randomUUID()}`;
   const existingOrg = await env.DB.prepare('SELECT id FROM organisations WHERE id = ?').bind(orgId).first();
   if (!existingOrg) await createOrg(orgId);
   await env.DB.prepare(
@@ -47,22 +52,66 @@ export async function createEvent(
 
 export async function createContact(
   eventId: string,
-  overrides: Partial<{ id: string; email: string; first_name: string; last_name: string }> = {},
+  overrides: Partial<{
+    id: string; email: string; first_name: string; last_name: string;
+    biography: string; company: string; job_title: string; notes: string; headshot_asset_id: string;
+  }> = {},
 ): Promise<string> {
   const id = overrides.id ?? `con-${crypto.randomUUID()}`;
+  const event = await env.DB.prepare('SELECT org_id FROM events WHERE id = ?').bind(eventId).first<{ org_id: string }>();
+  if (!event) throw new Error(`createContact: no event ${eventId}`);
   await env.DB.prepare(
-    `INSERT INTO contacts (id, event_id, email, first_name, last_name, created_at, updated_at)
+    `INSERT INTO contacts (id, org_id, email, first_name, last_name, created_at, updated_at)
      VALUES (?, ?, ?, ?, ?, ?, ?)`,
   ).bind(
     id,
-    eventId,
+    event.org_id,
     overrides.email ?? `${id}@example.com`,
     overrides.first_name ?? 'Test',
     overrides.last_name ?? 'Person',
     ts,
     ts,
   ).run();
+  await env.DB.prepare(
+    `INSERT INTO event_contacts (event_id, contact_id, biography, headshot_asset_id, company, job_title, notes, added_at, source)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'admin')`,
+  ).bind(
+    eventId,
+    id,
+    overrides.biography ?? null,
+    overrides.headshot_asset_id ?? null,
+    overrides.company ?? null,
+    overrides.job_title ?? null,
+    overrides.notes ?? null,
+    ts,
+  ).run();
   return id;
+}
+
+/** Attach an EXISTING (already org-scoped) contact to a second event, for
+ * cross-event scenarios: same person, different event's roster/profile. */
+export async function attachContactToEvent(
+  eventId: string,
+  contactId: string,
+  overrides: Partial<{
+    biography: string; company: string; job_title: string; notes: string; headshot_asset_id: string;
+    source: 'import' | 'cfp' | 'admin' | 'migration';
+  }> = {},
+): Promise<void> {
+  await env.DB.prepare(
+    `INSERT INTO event_contacts (event_id, contact_id, biography, headshot_asset_id, company, job_title, notes, added_at, source)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).bind(
+    eventId,
+    contactId,
+    overrides.biography ?? null,
+    overrides.headshot_asset_id ?? null,
+    overrides.company ?? null,
+    overrides.job_title ?? null,
+    overrides.notes ?? null,
+    ts,
+    overrides.source ?? 'admin',
+  ).run();
 }
 
 export async function createEventUser(eventId: string, contactId: string, role: Role): Promise<void> {

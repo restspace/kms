@@ -4,6 +4,7 @@
 
 import { SELF, env } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
+import { attachContactToEvent } from './fixtures';
 import {
   jsonReq, seedContact, seedEvent, seedEventUser, seedFileAsset, seedStaff,
   seedSubmission, seedTask,
@@ -42,7 +43,8 @@ async function seedFanOut(eventId: string) {
   // The mutual reference: the contact points at an asset they uploaded.
   const headshot = await seedFileAsset(eventId, speaker, { filename: 'ada.png' });
   const other = await seedFileAsset(eventId, speaker, { filename: 'slides.pdf' });
-  await env.DB.prepare('UPDATE contacts SET headshot_asset_id = ? WHERE id = ?').bind(headshot, speaker).run();
+  await env.DB.prepare('UPDATE event_contacts SET headshot_asset_id = ? WHERE event_id = ? AND contact_id = ?')
+    .bind(headshot, eventId, speaker).run();
   // …and the event's branding points at one of their uploads too.
   await env.DB.prepare('UPDATE events SET logo_asset_id = ?, background_asset_id = ? WHERE id = ?')
     .bind(other, headshot, eventId).run();
@@ -116,5 +118,47 @@ describe('DELETE /app/api/contacts/:id', () => {
     const res = await SELF.fetch(`https://example.com/app/api/contacts/${victim}`, jsonReq(admin.cookie, undefined, 'DELETE'));
     expect(res.status).toBe(404);
     expect(await env.DB.prepare('SELECT id FROM contacts WHERE id = ?').bind(victim).first()).not.toBeNull();
+  });
+  // 0015: the route is a DETACH. The three tests above each have a speaker who
+  // belongs to exactly one event, so their detach IS the last membership and
+  // the identity row still goes. This is the other half of the contract — one
+  // person, two events in the SAME org — which nothing else covers.
+  it('detaches from one event only, and deletes the person on the last one', async () => {
+    const orgId = `org-${crypto.randomUUID()}`;
+    const eventA = await seedEvent({ org_id: orgId });
+    const eventB = await seedEvent({ org_id: orgId });
+    const adminA = await seedStaff(eventA, 'admin');
+    const adminB = await seedStaff(eventB, 'admin');
+    const speaker = await seedContact(eventA, { email: 'twice@example.com', first_name: 'Ada' });
+    await attachContactToEvent(eventB, speaker, { company: 'B Corp' });
+
+    const first = await SELF.fetch(`https://example.com/app/api/contacts/${speaker}`, jsonReq(adminA.cookie, undefined, 'DELETE'));
+    expect(await first.json().catch(() => null), `status ${first.status}`).toEqual({ ok: true });
+
+    // The person survives: only event A's membership row was dropped.
+    expect(await env.DB.prepare('SELECT id FROM contacts WHERE id = ?').bind(speaker).first()).not.toBeNull();
+    const memberships = await env.DB.prepare('SELECT event_id FROM event_contacts WHERE contact_id = ?')
+      .bind(speaker)
+      .all<{ event_id: string }>();
+    expect(memberships.results.map((r) => r.event_id)).toEqual([eventB]);
+
+    // …and event B still reads them, with event B's own profile untouched.
+    const inB = await SELF.fetch('https://example.com/app/api/contacts/query', jsonReq(adminB.cookie, { from: 0, size: 10, filters: { contact_id: speaker } }));
+    const bItems = ((await inB.json()) as { items: Array<{ id: string; company: string | null }> }).items;
+    expect(bItems).toHaveLength(1);
+    expect(bItems[0].company).toBe('B Corp');
+
+    // Event A's roster no longer has them.
+    const inA = await SELF.fetch('https://example.com/app/api/contacts/query', jsonReq(adminA.cookie, { from: 0, size: 10, filters: { contact_id: speaker } }));
+    expect(((await inA.json()) as { items: unknown[] }).items).toHaveLength(0);
+
+    // Deleting from the last remaining event takes the identity row too.
+    const second = await SELF.fetch(`https://example.com/app/api/contacts/${speaker}`, jsonReq(adminB.cookie, undefined, 'DELETE'));
+    expect(second.status).toBe(200);
+    expect(await env.DB.prepare('SELECT id FROM contacts WHERE id = ?').bind(speaker).first()).toBeNull();
+    const left = await env.DB.prepare('SELECT COUNT(*) AS n FROM event_contacts WHERE contact_id = ?')
+      .bind(speaker)
+      .first<{ n: number }>();
+    expect(left?.n).toBe(0);
   });
 });

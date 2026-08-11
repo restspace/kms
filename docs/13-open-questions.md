@@ -10,7 +10,7 @@ proceed, and flags what would change if the answer differs.
 
 | # | Area | Assumption | If wrong |
 |---|---|---|---|
-| A1 | Multi-event | The product is multi-tenant (org → many events) even though the demo shows one event. | Trivial to hide; the schema already supports it. |
+| A1 | Multi-event | The product is multi-tenant (org → many events) even though the demo shows one event. | Trivial to hide; the schema already supports it, and this is no longer purely theoretical: migration `0015` moved `Contact` to org-scoped identity (`docs/02` §2) precisely so it is exercised — a speaker record is now one row across every event in the org, not one per event. |
 | A2 | Sessions vs abstracts | Abstracts and Sessions are two views over **one** submission pipeline; a session is a submission with a time and room. | If they are genuinely separate records with a promotion step, add a `Session` table and a convert action. Localised to [02](02-domain-model.md). |
 | A3 | Payments | No payments, fees, promo codes or invoicing anywhere — the screenshot says "NOT NEEDED". | Would be a new module; not started. |
 | A4 | Exhibitors & sponsors | Out of scope. The event-settings toggle exists in the reference but no requirement references it. | Group entities would need adding; portal work is the same shape as speakers. |

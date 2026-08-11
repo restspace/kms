@@ -934,7 +934,7 @@ export const saveReview = (assignmentId: string, body: Record<string, unknown>) 
 // ---------------------------------------------------------------------------
 
 export type ImportTarget = 'sessions' | 'contacts'
-export type ImportRowAction = 'create' | 'update' | 'merge' | 'skip' | 'error'
+export type ImportRowAction = 'create' | 'update' | 'merge' | 'attach' | 'skip' | 'error'
 
 export interface ImportField {
   key: string

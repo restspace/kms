@@ -1,8 +1,8 @@
 // D1 implementation of the repository surface in ./types (docs/02, docs/03 §5).
 // All statements are prepared and bound; nothing here interpolates user input.
 
-import type { Contact, Event, Role, SubmissionSummary } from '@kms/core';
-import type { Db, OutboxJob, OutboxRow } from './types';
+import type { Contact, ContactAtEvent, Event, Role, SubmissionSummary } from '@kms/core';
+import type { AttachSource, Db, OutboxJob, OutboxRow } from './types';
 
 export * from './types';
 
@@ -55,37 +55,110 @@ export function createDb(d1: D1Database): Db {
     },
 
     contacts: {
-      async getByEmail(eventId: string, email: string): Promise<Contact | null> {
+      async getByEmail(orgId: string, email: string): Promise<Contact | null> {
         return await d1
-          .prepare('SELECT * FROM contacts WHERE event_id = ? AND email = ?')
-          .bind(eventId, email.trim().toLowerCase())
+          .prepare('SELECT * FROM contacts WHERE org_id = ? AND lower(email) = ?')
+          .bind(orgId, email.trim().toLowerCase())
           .first<Contact>();
       },
-      async getById(eventId: string, id: string): Promise<Contact | null> {
+      // The join to event_contacts IS the tenancy guard as well as the fetch:
+      // a contact with no row for this event returns null rather than leaking
+      // an org sibling's record (workplan §1).
+      async getById(eventId: string, id: string): Promise<ContactAtEvent | null> {
         return await d1
-          .prepare('SELECT * FROM contacts WHERE event_id = ? AND id = ?')
+          .prepare(
+            `SELECT c.id, c.org_id, c.email, c.first_name, c.last_name, c.salutation,
+                    c.honorific, c.pronouns, c.gender, c.mobile_phone, c.links,
+                    c.created_at, c.updated_at,
+                    ec.event_id, ec.biography, ec.headshot_asset_id, ec.company,
+                    ec.job_title, ec.notes, ec.added_at, ec.source
+               FROM contacts c
+               JOIN event_contacts ec ON ec.contact_id = c.id AND ec.event_id = ?
+              WHERE c.id = ?`,
+          )
           .bind(eventId, id)
+          .first<ContactAtEvent>();
+      },
+      async getByIdOrgWide(orgId: string, id: string): Promise<Contact | null> {
+        return await d1
+          .prepare('SELECT * FROM contacts WHERE org_id = ? AND id = ?')
+          .bind(orgId, id)
           .first<Contact>();
       },
-      async upsertByEmail(eventId: string, email: string): Promise<Contact> {
+      async upsertByEmail(orgId: string, email: string): Promise<Contact> {
         const normalised = email.trim().toLowerCase();
         const ts = nowIso();
-        // Idempotent create: the UNIQUE(event_id, email) constraint makes the
-        // insert a no-op when the contact already exists (docs/04 §5).
+        // Idempotent create: the unique index on (org_id, lower(email)) makes the
+        // insert a no-op when the contact already exists (docs/04 §5). Dedupe
+        // scope is the org, not the event, as of 0015.
         await d1
           .prepare(
-            `INSERT INTO contacts (id, event_id, email, created_at, updated_at)
+            `INSERT INTO contacts (id, org_id, email, created_at, updated_at)
              VALUES (?, ?, ?, ?, ?)
-             ON CONFLICT (event_id, email) DO NOTHING`,
+             ON CONFLICT (org_id, lower(email)) DO NOTHING`,
           )
-          .bind(crypto.randomUUID(), eventId, normalised, ts, ts)
+          .bind(crypto.randomUUID(), orgId, normalised, ts, ts)
           .run();
         const row = await d1
-          .prepare('SELECT * FROM contacts WHERE event_id = ? AND email = ?')
-          .bind(eventId, normalised)
+          .prepare('SELECT * FROM contacts WHERE org_id = ? AND lower(email) = ?')
+          .bind(orgId, normalised)
           .first<Contact>();
         if (!row) throw new Error(`contacts.upsertByEmail: row missing after upsert (${normalised})`);
         return row;
+      },
+      // Seed-on-create, not fallback-at-read (workplan §1 "Decided semantics"):
+      // the profile is copied from the contact's most recent event_contacts row
+      // in the SAME org, so a returning speaker does not retype everything, while
+      // a NULL still means "not set for this event" rather than "inherit".
+      //
+      // The inner SELECT is constrained to events sharing this event's org so a
+      // profile can never be seeded across an organisation boundary.
+      async attachToEvent(
+        eventId: string,
+        contactId: string,
+        source: AttachSource,
+      ): Promise<void> {
+        await d1
+          .prepare(
+            `INSERT INTO event_contacts
+               (event_id, contact_id, biography, headshot_asset_id, company,
+                job_title, notes, added_at, source)
+             SELECT ?1, ?2, prev.biography, NULL, prev.company, prev.job_title,
+                    NULL, ?3, ?4
+               FROM (SELECT ec.biography, ec.company, ec.job_title
+                       FROM event_contacts ec
+                       JOIN events e ON e.id = ec.event_id
+                      WHERE ec.contact_id = ?2
+                        AND e.org_id = (SELECT org_id FROM events WHERE id = ?1)
+                      ORDER BY ec.added_at DESC
+                      LIMIT 1) prev
+             -- WHERE true is load-bearing: with no WHERE clause SQLite parses
+             -- the following ON CONFLICT as a join constraint on prev and
+             -- rejects the statement outright.
+             WHERE true
+             ON CONFLICT (event_id, contact_id) DO NOTHING`,
+          )
+          .bind(eventId, contactId, nowIso(), source)
+          .run();
+        // No prior profile to seed from: the SELECT above yielded no row, so
+        // insert the bare membership.
+        await d1
+          .prepare(
+            `INSERT INTO event_contacts (event_id, contact_id, added_at, source)
+             VALUES (?, ?, ?, ?)
+             ON CONFLICT (event_id, contact_id) DO NOTHING`,
+          )
+          .bind(eventId, contactId, nowIso(), source)
+          .run();
+      },
+      async listEventIds(contactId: string): Promise<string[]> {
+        const { results } = await d1
+          .prepare(
+            'SELECT event_id FROM event_contacts WHERE contact_id = ? ORDER BY added_at DESC',
+          )
+          .bind(contactId)
+          .all<{ event_id: string }>();
+        return results.map((r) => r.event_id);
       },
     },
 

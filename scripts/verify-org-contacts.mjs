@@ -58,13 +58,22 @@ if (rows.length === 0) {
   process.exit(1);
 }
 
+// SKIP is not a failure: a check can be inapplicable, e.g. nothing to compare
+// against on a database that held no contacts before 0015 ran. It is still
+// printed — a silently skipped check is worse than a noisy one.
 let failed = 0;
+let skipped = 0;
 for (const row of rows) {
   const status = row.status ?? '?';
-  if (status !== 'PASS') failed++;
-  const mark = status === 'PASS' ? 'ok  ' : 'FAIL';
+  if (status === 'SKIP') skipped++;
+  else if (status !== 'PASS') failed++;
+  const mark = status === 'PASS' ? 'ok  ' : status === 'SKIP' ? 'skip' : 'FAIL';
   console.log(`${mark} ${String(row.check).padEnd(38)} ${row.detail ?? ''}`);
 }
 
-console.log(`\n${rows.length - failed}/${rows.length} checks passed`);
+console.log(
+  `\n${rows.length - failed - skipped}/${rows.length} checks passed` +
+    (skipped ? `, ${skipped} skipped` : '') +
+    (failed ? `, ${failed} FAILED` : ''),
+);
 process.exit(failed === 0 ? 0 : 1);
