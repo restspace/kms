@@ -18,6 +18,7 @@
     "test:unit": "vitest run --project unit --project ui",
     "test:workers": "vitest run --project workers",
     "dev": "npm run build && wrangler dev",
+    "dev:kms2": "npm run build && wrangler dev --port 8788 --inspector-port 9230",
     "typecheck": "tsc --noEmit",
     "migrate:local": "wrangler d1 migrations apply kms --local",
     "migrate:remote": "wrangler d1 migrations apply kms --remote",
