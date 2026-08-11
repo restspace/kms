@@ -279,6 +279,20 @@ export async function deliverEmail(db: D1Database, env: Env, payload: OutboxEmai
     .bind(payload.log_key)
     .first<{ status: string }>();
   if (existing?.status === 'sent') return;
+  // Demo deployments seed contacts with reserved example.com addresses, which
+  // Resend rejects outright (422) — every send would retry to death and the
+  // sent/Notified counters would sit at zero forever. Simulate delivery for
+  // those recipients so demo message accounting behaves like production.
+  if (env.DEMO_RESET === 'on' && /@example\.(com|org|net)$/i.test(payload.to)) {
+    await db
+      .prepare(
+        `UPDATE message_log SET status = 'sent', provider_message_id = 'demo-simulated', sent_at = ?, error = NULL
+         WHERE idempotency_key = ? AND status != 'sent'`,
+      )
+      .bind(new Date().toISOString(), payload.log_key)
+      .run();
+    return;
+  }
   const provider = payload.calendar ? selectCalendarProvider(env) : selectProvider(env);
   try {
     const result = await provider.send(payload);
