@@ -153,7 +153,18 @@ interface SendDecisionsParams {
   include_feedback?: boolean;
   /** render the "still under review" line on merged emails (workplan 10 §4; default true) */
   pending_note?: boolean;
+  /** workplan 13 W3: opt-in per send — render the employer-approval ask on
+   * accept emails and flag the covered accepted rows approval_state='pending' */
+  approval_ask?: boolean;
 }
+
+/** The {{approval_ask}} block (workplan 13 W3): prerendered system HTML, so it
+ * rides the raw {{{…}}} slot family like decision_summary's blocks. */
+const APPROVAL_ASK_HTML =
+  '<p>One thing before you confirm: if this talk needs sign-off from your employer ' +
+  '(manager, PR or legal), please start that conversation now and let us know once ' +
+  'it&rsquo;s granted — pending approvals are the most common reason accepted talks ' +
+  'are withdrawn late.</p>';
 
 interface DecisionRow {
   id: string; code: string; title: string; status: string;
@@ -286,6 +297,21 @@ async function expandSendDecisions(env: Env, job: BulkJobRow, limit: number): Pr
     }
     if (flipped.length === 0) continue;
 
+    // W3: the organiser asked this batch for employer approval — flag every
+    // accepted row in it 'pending'. COALESCE keeps an already-recorded
+    // granted/refused answer; independent of whether an email can be sent
+    // (the flag is what puts the talk on the tracking board's approval list).
+    if (params.approval_ask) {
+      for (const s of flipped) {
+        if (s.status === 'accept_queue') {
+          await db
+            .prepare(`UPDATE submissions SET approval_state = COALESCE(approval_state, 'pending') WHERE id = ?`)
+            .bind(s.id)
+            .run();
+        }
+      }
+    }
+
     const contact = flipped[0]!;
     if (contact.submitter_email) {
       const feedbackFor = new Map<string, string>();
@@ -316,6 +342,7 @@ async function expandSendDecisions(env: Env, job: BulkJobRow, limit: number): Pr
             submission: { title: s.title, code: s.code },
             portal_url: `${env.APP_URL}/portal/${event.slug}`,
             ...(reviewerFeedback ? { reviewer_feedback: reviewerFeedback } : {}),
+            ...(isAccept && params.approval_ask ? { approval_ask: APPROVAL_ASK_HTML } : {}),
           },
         }));
       } else {
@@ -378,7 +405,8 @@ async function expandSendDecisions(env: Env, job: BulkJobRow, limit: number): Pr
         const portalUrl = `${env.APP_URL}/portal/${event.slug}`;
         const closingBlock =
           accepts.length > 0
-            ? `<p>Your speaker portal lists everything we need from you next — including any onboarding tasks.</p>\n<p><a href="${escapeHtml(portalUrl)}" class="btn">Open your speaker portal</a></p>`
+            ? (params.approval_ask ? `${APPROVAL_ASK_HTML}\n` : '') +
+              `<p>Your speaker portal lists everything we need from you next — including any onboarding tasks.</p>\n<p><a href="${escapeHtml(portalUrl)}" class="btn">Open your speaker portal</a></p>`
             : '<p>We would love to see you submit again next time.</p>';
 
         // D5: one message_log row per merged email, keyed on the sorted

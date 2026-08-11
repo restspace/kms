@@ -141,3 +141,44 @@ describe('PUT /agenda/sessions/:id/schedule — invited sessions never move sile
     expect(res.status).toBe(200);
   });
 });
+
+// docs/13 W5 / D8: no migration, no new endpoint — starts_at, ends_at and
+// room_id are already independently nullable and this route already accepts
+// any combination. These tests pin the round-trip and the guard's silence on
+// the placed → pencilled transition, which the UI wave depends on.
+describe('PUT /agenda/sessions/:id/schedule — partial (pencilled) schedule states', () => {
+  it('a PUT with starts_at and no room_id round-trips: the row lands time-set/room-null (pencilled)', async () => {
+    const eventId = await seedEvent();
+    const admin = await seedStaff(eventId, 'admin');
+    const sessionId = await seedSubmission(eventId, { status: 'accepted' });
+
+    const res = await schedule(admin.cookie, sessionId, { ...SLOT, room_id: null });
+    expect(res.status).toBe(200);
+    const row = await env.DB
+      .prepare('SELECT starts_at, room_id FROM submissions WHERE id = ?')
+      .bind(sessionId)
+      .first<{ starts_at: string | null; room_id: string | null }>();
+    expect(row?.starts_at).toBe(SLOT.starts_at);
+    expect(row?.room_id).toBeNull();
+    // classifySchedule's rule (apps/admin/src/agenda/timeUtils.ts): time XOR room is pencilled.
+    const pencilled = row !== null && row.starts_at !== null && row.room_id === null;
+    expect(pencilled).toBe(true);
+  });
+
+  it('a placed → pencilled move for an uninvited session needs no notify decision and never queues a mail', async () => {
+    const eventId = await seedEvent();
+    const admin = await seedStaff(eventId, 'admin');
+    const { sessionId, speakerId } = await seedScheduledSession(eventId);
+    // No seedLiveInvite: this session has never been invited.
+
+    const res = await schedule(admin.cookie, sessionId, { ...SLOT, room_id: null });
+    expect(res.status).toBe(200);
+    expect((await startsAtOf(sessionId))?.starts_at).toBe(SLOT.starts_at);
+
+    const mail = await env.DB
+      .prepare('SELECT COUNT(*) AS n FROM message_log WHERE contact_id = ?')
+      .bind(speakerId)
+      .first<{ n: number }>();
+    expect(mail?.n).toBe(0);
+  });
+});

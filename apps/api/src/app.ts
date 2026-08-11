@@ -15,6 +15,7 @@ import { landingRoutes } from './routes/landing';
 import { publicAssetRoutes } from './routes/publicAssets';
 import { embedRoutes } from './routes/embed';
 import { messagingAdminRoutes } from './routes/messagingAdmin';
+import { chaseRoutes } from './chase';
 
 export function createApp() {
   const app = new Hono<AppEnv>();
@@ -44,6 +45,8 @@ export function createApp() {
   // Organiser-triggered sends that don't fit adminApi.ts's generic CRUD
   // tables (SPK-06 portal invitation); same mount convention as files/import/export.
   app.route('/app/api/messaging', messagingAdminRoutes);
+  // Assisted chasing inbox (workplan-13 W4c); same mount convention again.
+  app.route('/app/api/chase', chaseRoutes);
   app.get('/app/', (c) => c.redirect('/app')); // strict routing: normalise the slash form
   app.route('/app', adminRoutes);
   app.route('/hello', publicRoutes); // SSR + island proof page (commit 8454ce6)

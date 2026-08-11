@@ -18,7 +18,7 @@ import { createSessionToken, getRevalidatedPrivilegedSession, setSessionCookie, 
 import { IMAGE_TYPES, MAX_HEADSHOT_BYTES, saveFile } from '../filestore';
 import { appendUploadVersion } from '../fileVersions';
 import { formsAdminRoutes } from './formsAdmin';
-import { evaluationRoutes } from './evaluation';
+import { APPROVAL_STATES, evaluationRoutes } from './evaluation';
 import { agendaRoutes } from './agenda';
 import { stageAirtableDeletes } from '../airtableStage';
 import { dashboardRoutes } from './dashboard';
@@ -205,6 +205,13 @@ const SUBMISSION_STATUSES = new Set([
   'draft', 'pending', 'accept_queue', 'accepted', 'decline_queue', 'declined', 'withdrawn',
 ]);
 
+/** Bound on the per-submission review count (workplan 13 W2 coverage filters). */
+const reviewCountBound = (op: '>=' | '<='): FilterBuilder => (value) => {
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < 0) return null;
+  return { sql: `(SELECT COUNT(*) FROM reviews r WHERE r.submission_id = s.id) ${op} ?`, params: [n] };
+};
+
 // Exported: the REST API (/api/v1) and its OpenAPI document are generated from
 // this same registry, so the public surface cannot drift from the SPA's.
 const RESOURCE_SPECS: Record<string, Omit<ResourceDef, 'fromSql'>> = {
@@ -351,6 +358,11 @@ const RESOURCE_SPECS: Record<string, Omit<ResourceDef, 'fromSql'>> = {
       submitter_name: 'sc.last_name',
       created_at: 's.created_at',
       notified_at: 's.notified_at',
+      approval_state: 's.approval_state',
+      // Never NULL, so the NULL-ordering wrapper in queryResource does not
+      // bite: an unreviewed submission sorts as 0, first on ASC — which is
+      // the coverage worklist ("fewest ratings first", workplan 13 W2).
+      review_count: '(SELECT COUNT(*) FROM reviews r WHERE r.submission_id = s.id)',
       // rating_cache is json { "<plan_id>": 4.2 } (0001_init.sql:218), kept
       // current by evaluation.ts ratingCacheStatement — sorting off the cache
       // costs a walk of one small json object instead of a correlated AVG over
@@ -373,6 +385,14 @@ const RESOURCE_SPECS: Record<string, Omit<ResourceDef, 'fromSql'>> = {
         return v !== null && SUBMISSION_STATUSES.has(v)
           ? { sql: 's.status = ?', params: [v] }
           : null;
+      },
+      min_reviews: reviewCountBound('>='),
+      max_reviews: reviewCountBound('<='),
+      approval_state: (value) => {
+        const v = asText(value);
+        if (v === null) return null;
+        if (v === 'none') return { sql: 's.approval_state IS NULL', params: [] };
+        return APPROVAL_STATES.has(v) ? { sql: 's.approval_state = ?', params: [v] } : null;
       },
       track_id: eq('s.track_id'),
       tag_id: (value) => {
@@ -412,6 +432,11 @@ const RESOURCE_SPECS: Record<string, Omit<ResourceDef, 'fromSql'>> = {
       q: 'Free-text match over title and code.',
       status:
         'Exact status: draft | pending | accept_queue | accepted | decline_queue | declined | withdrawn.',
+      min_reviews: 'Submissions with at least this many recorded reviews.',
+      max_reviews:
+        'Submissions with at most this many recorded reviews — max_reviews=1 is the coverage worklist ("everything with fewer than two reads").',
+      approval_state:
+        'Exact employer-approval flag: pending | granted | refused, or none for submissions where approval was never asked (NULL). Independent of status (D4).',
       track_id: 'Submissions on this track.',
       tag_id: 'Submissions carrying this tag.',
       submitter_contact_id: 'Submissions this contact submitted (the narrow relation).',
@@ -519,7 +544,122 @@ const RESOURCE_SPECS: Record<string, Omit<ResourceDef, 'fromSql'>> = {
       contact_id: 'Messages sent to this contact. The global anchor filter uses this.',
     },
   },
+
+  // Workplan 13 W1a (D1): the committee's scores as a registry resource — one
+  // entry buys the workspace grid, /api/v1 list, CSV, XLSX and the generated
+  // OpenAPI at once. `scores` stays raw JSON: a CSV cell holding the
+  // per-criterion object is honest; exploding criteria into columns is a
+  // per-plan-variable header and belongs in a later wave, if ever. Reviews
+  // carry no event column, so scoping goes through the submission.
+  //
+  // ACCESS NOTE, NON-NEGOTIABLE: the workspace scope predicate is "every event
+  // where this staff email holds a seat", and a *reviewer* seat must not be
+  // able to list every other reviewer's scores wholesale. STAFF_ONLY_RESOURCES
+  // below narrows this resource (and comments) to owner/admin seats and 403s a
+  // reviewer-only session — the reviewWindow.ts / submissionComments.ts
+  // visibility rules, applied as a seat gate rather than row filtering.
+  reviews: {
+    baseFrom: `FROM reviews r
+              JOIN submissions s ON s.id = r.submission_id
+              JOIN events ev ON ev.id = s.event_id
+              LEFT JOIN contacts rc ON rc.id = r.reviewer_contact_id
+              LEFT JOIN evaluation_plans ep ON ep.id = r.plan_id`,
+    eventExpr: 's.event_id',
+    idExpr: 'r.id',
+    defaultCursorSort: { field: 'created_at', direction: 'desc' },
+    selectSql: `SELECT r.id, r.submission_id, s.code AS submission_code, s.title AS submission_title,
+                r.reviewer_contact_id,
+                NULLIF(TRIM(COALESCE(rc.first_name, '') || ' ' || COALESCE(rc.last_name, '')), '') AS reviewer_name,
+                r.plan_id, ep.name AS plan_name, r.weighted_total, r.scores, r.comment,
+                r.conflict_of_interest, r.created_at,
+                s.event_id AS event_id, ev.name AS event_name`,
+    sortable: {
+      created_at: 'r.created_at',
+      weighted_total: 'r.weighted_total',
+      reviewer_name: 'rc.last_name',
+      submission_code: 's.code',
+    },
+    defaultSort: 'r.created_at DESC',
+    filters: {
+      submission_id: eq('r.submission_id'),
+      plan_id: eq('r.plan_id'),
+      reviewer_contact_id: eq('r.reviewer_contact_id'),
+      conflict_of_interest: (value) =>
+        value === true || value === 'true'
+          ? { sql: 'r.conflict_of_interest = 1', params: [] }
+          : value === false || value === 'false'
+            ? { sql: 'r.conflict_of_interest = 0', params: [] }
+            : null,
+      q: (value) => {
+        const v = asText(value);
+        if (v === null) return null;
+        return { sql: 'r.comment LIKE ?', params: [`%${v}%`] };
+      },
+    },
+    filterDocs: {
+      submission_id: 'Reviews of this submission. The global anchor filter uses this.',
+      plan_id: 'Reviews recorded in this evaluation round.',
+      reviewer_contact_id: 'Reviews written by this reviewer.',
+      conflict_of_interest:
+        'true → only reviews where the reviewer declared a conflict of interest; false → only scored reviews.',
+      q: 'Free-text match over the review comment.',
+    },
+  },
+
+  // Workplan 13 W1b: the discussion threads, same shape over
+  // submission_comments (event_id is a real column there). Same seat gate as
+  // reviews — see STAFF_ONLY_RESOURCES.
+  comments: {
+    baseFrom: `FROM submission_comments sc
+              JOIN events ev ON ev.id = sc.event_id
+              JOIN submissions s ON s.id = sc.submission_id`,
+    eventExpr: 'sc.event_id',
+    idExpr: 'sc.id',
+    defaultCursorSort: { field: 'created_at', direction: 'desc' },
+    selectSql: `SELECT sc.id, sc.submission_id, s.code AS submission_code, s.title AS submission_title,
+                sc.plan_id, sc.assignment_id, sc.author_contact_id, sc.author_role, sc.author_name,
+                sc.kind, sc.body, sc.created_at,
+                sc.event_id AS event_id, ev.name AS event_name`,
+    sortable: {
+      created_at: 'sc.created_at',
+      submission_code: 's.code',
+      kind: 'sc.kind',
+      author_name: 'sc.author_name',
+    },
+    defaultSort: 'sc.created_at DESC',
+    filters: {
+      submission_id: eq('sc.submission_id'),
+      kind: (value) => {
+        const v = asText(value);
+        return v === 'rationale' || v === 'discussion'
+          ? { sql: 'sc.kind = ?', params: [v] }
+          : null;
+      },
+      author_contact_id: eq('sc.author_contact_id'),
+      q: (value) => {
+        const v = asText(value);
+        if (v === null) return null;
+        return { sql: 'sc.body LIKE ?', params: [`%${v}%`] };
+      },
+    },
+    filterDocs: {
+      submission_id: 'Comments on this submission. The global anchor filter uses this.',
+      kind: "Exact kind: rationale (a reviewer's score-save comment) | discussion.",
+      author_contact_id: 'Comments written by this contact.',
+      q: 'Free-text match over the comment body.',
+    },
+  },
 };
+
+/**
+ * Resources gated to owner/admin seats (workplan 13 W1a access note): the
+ * committee's raw scores and threads must not be listable through a reviewer
+ * seat. The gate narrows the scope predicate to writer seats rather than
+ * row-filtering, and a session with no writer seat at all gets 403 — the
+ * same visibility line reviewWindow.ts / submissionComments.ts draw for the
+ * per-submission surfaces.
+ */
+const STAFF_ONLY_RESOURCES = new Set(['reviews', 'comments']);
 
 // The single-event form every /api/v1 list and export builds on is derived
 // from the same spec, so the two surfaces can never disagree about the joins.
@@ -678,8 +818,20 @@ export async function queryResource(
 async function resolveQueryScope(
   c: Context<ApiEnv>,
   filters: Record<string, unknown>,
+  { staffOnly = false }: { staffOnly?: boolean } = {},
 ): Promise<{ ids: string[] } | { forbidden: true }> {
-  const ids = await accessibleEventIds(c);
+  let ids: string[];
+  if (staffOnly) {
+    // STAFF_ONLY_RESOURCES: only events where this email holds an owner/admin
+    // seat — a reviewer seat elsewhere in the org must not widen the scope
+    // into that event's scores/threads. No writer seat anywhere → 403.
+    const session = c.get('session');
+    ids = (await accessibleEvents(c)).filter((e) => isWriter(e.role)).map((e) => e.event_id);
+    if (!ids.includes(session.eventId) && isWriter(session.role)) ids = [session.eventId, ...ids];
+    if (ids.length === 0) return { forbidden: true };
+  } else {
+    ids = await accessibleEventIds(c);
+  }
   const requested = typeof filters.event_id === 'string' ? filters.event_id.trim() : '';
   if (requested === '') return { ids };
   if (!ids.includes(requested)) return { forbidden: true };
@@ -699,7 +851,7 @@ adminApiRoutes.post('/:resource/query', async (c) => {
   if (!def) return c.json({ error: 'unknown_resource' }, 404);
 
   const body = parseQueryBody(await c.req.json().catch(() => ({})));
-  const scope = await resolveQueryScope(c, body.filters);
+  const scope = await resolveQueryScope(c, body.filters, { staffOnly: STAFF_ONLY_RESOURCES.has(resource) });
   if ('forbidden' in scope) return c.json({ error: 'event_not_accessible' }, 403);
 
   try {

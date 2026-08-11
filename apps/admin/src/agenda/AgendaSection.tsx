@@ -30,6 +30,7 @@ import { RoomsBoard } from './RoomsBoard'
 import { TimeGrid, type DropPreview, type GridColumn } from './TimeGrid'
 import { Tray } from './Tray'
 import {
+  classifySchedule,
   durationMinutes,
   eventDays,
   fmtDay,
@@ -482,7 +483,11 @@ export function AgendaSection({
   }, [data, search])
 
   const unscheduled = useMemo(
-    () => filteredSessions.filter((s) => s.starts_at === null && s.room_id === null),
+    () => filteredSessions.filter((s) => classifySchedule(s) === 'tray'),
+    [filteredSessions],
+  )
+  const pencilledCount = useMemo(
+    () => filteredSessions.filter((s) => classifySchedule(s) === 'pencilled').length,
     [filteredSessions],
   )
   const pendingConfirmations = useMemo(
@@ -491,6 +496,7 @@ export function AgendaSection({
   )
   const errorCount = liveConflicts.filter((c) => c.severity === 'error').length
   const warningCount = liveConflicts.filter((c) => c.severity === 'warning').length
+  const conflictCount = errorCount + warningCount
 
   if (error) return <div className="agenda"><p className="agenda-error">{error}</p></div>
   if (!data) return <div className="agenda"><p className="agenda-loading">Loading agenda…</p></div>
@@ -630,6 +636,9 @@ export function AgendaSection({
           </h2>
           <p className="agenda-sub">
             Manage your event agenda and schedule · {data.event.name} · {tzAbbr(tz, data.event.starts_at)}
+          </p>
+          <p className="agenda-slot-summary">
+            {unscheduled.length} unplaced · {pencilledCount} pencilled · {conflictCount} conflict{conflictCount === 1 ? '' : 's'}
           </p>
           {jobNote && (
             <p className="agenda-job-note" role="status">{jobNote}</p>
@@ -773,6 +782,10 @@ export function AgendaSection({
                 const roomId = groupBy === 'room' ? col.key : sessionById.get(id)?.room_id ?? null
                 return previewFor(id, col.day, startMin, dur, roomId)
               }}
+              onDropDay={(id, day) => {
+                const s = sessionById.get(id)
+                if (s) commitSchedule(id, patchFrom(day, 0, defaultDuration(s), null))
+              }}
             />
           )}
 
@@ -800,6 +813,10 @@ export function AgendaSection({
               previewDrop={(id, col, startMin, dur) =>
                 previewFor(id, col.day, startMin, dur, sessionById.get(id)?.room_id ?? null)
               }
+              onDropDay={(id, day) => {
+                const s = sessionById.get(id)
+                if (s) commitSchedule(id, patchFrom(day, 0, defaultDuration(s), null))
+              }}
             />
           )}
 

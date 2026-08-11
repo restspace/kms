@@ -13,6 +13,7 @@ import {
   removeSubmissionParticipant,
   setSubmissionParticipantConfirmed,
   updateSubmission,
+  updateSubmissionApproval,
   updateSubmissionNotes,
   updateSubmissionParticipantRole,
   updateSubmissionStatus,
@@ -59,6 +60,16 @@ export const SUBMISSION_STATUSES = [
 export const statusLabel = (s: string): string =>
   s.split('_').map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ')
 
+/** Workplan 13 W3 (D4) vocabulary — must track routes/evaluation.ts's
+ * APPROVAL_STATES, duplicated client-side like SUBMISSION_STATUSES above. */
+export const APPROVAL_STATES = ['pending', 'granted', 'refused'] as const
+
+const APPROVAL_CHIP: Record<string, { className: string; label: string }> = {
+  pending: { className: 'status-pending', label: 'Approval pending' },
+  granted: { className: 'status-accepted', label: 'Approval granted' },
+  refused: { className: 'status-declined', label: 'Approval refused' },
+}
+
 /** Single-select status chips; the tab count tracks the active chip. */
 export function StatusChipsFilter({ filters, setFilters }: DataListFilterProps<Record<string, string>>) {
   const active = filters.status ?? ''
@@ -73,6 +84,119 @@ export function StatusChipsFilter({ filters, setFilters }: DataListFilterProps<R
           {statusLabel(s)}
         </button>
       ))}
+    </div>
+  )
+}
+
+/** Workplan 13 W2: the coverage bar's "read enough" threshold — two reads. */
+const COVERAGE_MIN_READS = 2
+
+/**
+ * Review-coverage bar for the Submissions tab header (workplan 13 W2):
+ * `n of m have ≥2 reads`. Both numbers come from the same query endpoint and
+ * the same `min_reviews` filter the grid uses, so the bar and the list cannot
+ * disagree; the "Under-reviewed" chip below applies the matching
+ * `max_reviews` filter — the actual worklist.
+ */
+function SubmissionCoverageBar({
+  filters,
+  eventFilterId,
+}: {
+  filters: Record<string, unknown>
+  eventFilterId?: string | null
+}) {
+  const [coverage, setCoverage] = useState<{ covered: number; total: number } | null>(null)
+  const base: Record<string, unknown> = { ...filters }
+  delete base.min_reviews
+  delete base.max_reviews
+  if (eventFilterId) base.event_id = eventFilterId
+  const signature = JSON.stringify(base)
+
+  useEffect(() => {
+    let cancelled = false
+    const parsed = JSON.parse(signature) as Record<string, unknown>
+    const query = queryResource<Record<string, unknown>>('submissions')
+    Promise.all([
+      query({ from: 0, size: 1, filters: parsed }),
+      query({ from: 0, size: 1, filters: { ...parsed, min_reviews: COVERAGE_MIN_READS } }),
+    ])
+      .then(([all, covered]) => {
+        if (!cancelled) setCoverage({ total: all.total, covered: covered.total })
+      })
+      .catch(() => {
+        if (!cancelled) setCoverage(null)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [signature])
+
+  if (!coverage || coverage.total === 0) return null
+  const pct = Math.round((coverage.covered / coverage.total) * 100)
+  return (
+    <div
+      className="coverage-bar"
+      role="status"
+      title={`Review coverage: ${coverage.covered} of ${coverage.total} submissions have at least ${COVERAGE_MIN_READS} reviews`}
+      style={{ display: 'inline-flex', alignItems: 'center', gap: 8, marginLeft: 12, fontSize: 12, color: 'var(--text-muted)' }}
+    >
+      <span>
+        {coverage.covered} of {coverage.total} have ≥{COVERAGE_MIN_READS} reads
+      </span>
+      <span
+        aria-hidden="true"
+        style={{ display: 'inline-block', width: 96, height: 6, background: 'var(--border)', borderRadius: 3, overflow: 'hidden' }}
+      >
+        <span style={{ display: 'block', width: `${pct}%`, height: '100%', background: 'var(--accent)' }} />
+      </span>
+    </div>
+  )
+}
+
+/**
+ * The Submissions tab's filter row: the status chips plus the coverage
+ * worklist chip ("everything with fewer than two reads" as a filter, not just
+ * a sort — workplan 13 W2) and the coverage bar reading the same filters.
+ * `eventFilterId` arrives via filterConfig.filterProps so the bar's counts
+ * are scoped exactly like the grid's own dataSource.
+ */
+export function SubmissionsFilter({
+  filters,
+  setFilters,
+  eventFilterId,
+}: DataListFilterProps<Record<string, unknown>> & { eventFilterId?: string | null }) {
+  const underReviewed = filters.max_reviews === COVERAGE_MIN_READS - 1
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 4 }}>
+      <StatusChipsFilter
+        filters={filters as Record<string, string>}
+        setFilters={setFilters as DataListFilterProps<Record<string, string>>['setFilters']}
+        resetFilters={() =>
+          setFilters((prev) => {
+            const next = { ...prev, status: '' }
+            delete next.max_reviews
+            return next
+          })
+        }
+      />
+      <div className="chip-filter" role="group" aria-label="Review coverage filter">
+        <button
+          className={underReviewed ? 'active' : ''}
+          aria-pressed={underReviewed}
+          title={`Only submissions with fewer than ${COVERAGE_MIN_READS} reviews — the coverage worklist`}
+          onClick={() =>
+            setFilters((prev) => {
+              const next = { ...prev }
+              if (underReviewed) delete next.max_reviews
+              else next.max_reviews = COVERAGE_MIN_READS - 1
+              return next
+            })
+          }
+        >
+          Under-reviewed
+        </button>
+      </div>
+      <SubmissionCoverageBar filters={filters} eventFilterId={eventFilterId} />
     </div>
   )
 }
@@ -133,10 +257,14 @@ export interface BulkBarProps {
   onAction: (action: 'accept_queue' | 'decline_queue' | 'pending' | 'send_decisions') => void
   onClear: () => void
   note: string | null
+  /** Workplan 13 W3: per-send opt-in — accept emails carry the employer-approval
+   * ask and the covered submissions are flagged approval_state='pending'. */
+  approvalAsk?: boolean
+  onApprovalAskChange?: (next: boolean) => void
 }
 
 /** Floating bar shown while submissions are checked (docs/06 §5). */
-export function BulkBar({ count, busy, onAction, onClear, note }: BulkBarProps) {
+export function BulkBar({ count, busy, onAction, onClear, note, approvalAsk, onApprovalAskChange }: BulkBarProps) {
   return (
     <div className="bulk-bar" role="toolbar" aria-label="Bulk actions">
       {count > 0 ? (
@@ -148,6 +276,20 @@ export function BulkBar({ count, busy, onAction, onClear, note }: BulkBarProps) 
           <button className="primary" disabled={busy} onClick={() => onAction('send_decisions')}>
             Send decision emails
           </button>
+          {onApprovalAskChange && (
+            <label
+              style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12 }}
+              title="Accept emails ask the speaker to confirm employer sign-off, and their talks are marked Approval pending on the tracking board"
+            >
+              <input
+                type="checkbox"
+                checked={approvalAsk === true}
+                disabled={busy}
+                onChange={(e) => onApprovalAskChange((e.target as HTMLInputElement).checked)}
+              />
+              Ask for employer approval
+            </label>
+          )}
         </>
       ) : null}
       {note && <span className="bulk-note">{note}</span>}
@@ -482,6 +624,8 @@ export function SubmissionDetailPanel({ id, onEdit, onItemSaved }: {
   const [savedNotes, setSavedNotes] = useState('')
   const [notesSaving, setNotesSaving] = useState(false)
   const [notesError, setNotesError] = useState<string | null>(null)
+  /** Workplan 13 W3: the approval note draft (saved on blur/button). */
+  const [approvalNote, setApprovalNote] = useState('')
   /** Inline save feedback for the status / visibility controls. */
   const [fieldSaving, setFieldSaving] = useState(false)
   const [fieldSaved, setFieldSaved] = useState(false)
@@ -504,6 +648,7 @@ export function SubmissionDetailPanel({ id, onEdit, onItemSaved }: {
         const initialNotes = typeof d.submission.notes === 'string' ? d.submission.notes : ''
         setNotes(initialNotes)
         setSavedNotes(initialNotes)
+        setApprovalNote(typeof d.submission.approval_note === 'string' ? d.submission.approval_note : '')
       })
       .catch((e: unknown) => setError(e instanceof Error ? e.message : 'Failed to load'))
   }, [id])
@@ -559,6 +704,11 @@ export function SubmissionDetailPanel({ id, onEdit, onItemSaved }: {
       <h2>
         {String(s.title)}{' '}
         <span className={`status-chip status-${String(s.status)}`}>{statusLabel(String(s.status))}</span>
+        {typeof s.approval_state === 'string' && APPROVAL_CHIP[s.approval_state] && (
+          <span className={`status-chip ${APPROVAL_CHIP[s.approval_state].className}`}>
+            {APPROVAL_CHIP[s.approval_state].label}
+          </span>
+        )}
         {mean !== null && <span className="rating-badge">★ {mean}</span>}
       </h2>
       <div className="detail-sub">
@@ -591,6 +741,40 @@ export function SubmissionDetailPanel({ id, onEdit, onItemSaved }: {
             <option key={st} value={st}>{statusLabel(st)}</option>
           ))}
         </select>
+        {/* Workplan 13 W3: the employer-approval flag lives beside the status
+            editor — accepted AND awaiting sign-off are independent axes (D4);
+            picking Refused prompts a human, it never auto-withdraws (D7). */}
+        <label htmlFor="sub-detail-approval">Approval</label>
+        <select
+          id="sub-detail-approval"
+          value={typeof s.approval_state === 'string' ? s.approval_state : ''}
+          disabled={fieldSaving}
+          onChange={(e) => {
+            const next = (e.target as HTMLSelectElement).value
+            void saveField(() => updateSubmissionApproval(id, { approval_state: next || null }))
+          }}
+        >
+          <option value="">Not asked</option>
+          {APPROVAL_STATES.map((st) => (
+            <option key={st} value={st}>{statusLabel(st)}</option>
+          ))}
+        </select>
+        {typeof s.approval_state === 'string' && (
+          <input
+            type="text"
+            aria-label="Approval note"
+            placeholder="Approval note — who is chasing what"
+            value={approvalNote}
+            disabled={fieldSaving}
+            style={{ minWidth: 200 }}
+            onChange={(e) => setApprovalNote((e.target as HTMLInputElement).value)}
+            onBlur={() => {
+              const stored = typeof s.approval_note === 'string' ? s.approval_note : ''
+              if (approvalNote.trim() === stored.trim()) return
+              void saveField(() => updateSubmissionApproval(id, { approval_note: approvalNote.trim() || null }))
+            }}
+          />
+        )}
         <label htmlFor="sub-detail-content-approved" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
           <input
             id="sub-detail-content-approved"

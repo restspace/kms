@@ -138,3 +138,33 @@ describe('computeConflictsForSession parity with computeConflicts', () => {
     expect(hits[0]?.signature).toBe('ROOM_DOUBLE_BOOKED:a+b');
   });
 });
+
+// docs/13 W5 / D8: pencilled sessions (time XOR room) never block a save —
+// they are excluded from room-overlap conflicts (there is no room to double
+// book) but still included in speaker double-booking, which is the whole
+// point of surfacing the conflict instead of refusing the write.
+describe('pencilled sessions and conflicts (docs/13 W5, D8)', () => {
+  const speaker = { contact_id: 'sp-1', name: 'Speaker One' };
+  const placed: AgendaSessionInput = {
+    id: 'placed', code: 'SESS-1', title: 'Placed talk', starts_at: '2026-10-01T09:00:00.000Z',
+    ends_at: '2026-10-01T10:00:00.000Z', room_id: 'room-a', track_id: null, capacity: null, speakers: [speaker],
+  };
+
+  it('a time-set/no-room session sharing a speaker with an overlapping placed session still raises SPEAKER_DOUBLE_BOOKED', () => {
+    const pencilled: AgendaSessionInput = {
+      ...placed, id: 'pencilled', code: 'SESS-2', title: 'Pencilled talk', room_id: null,
+    };
+    const hits = computeConflicts([placed, pencilled], ROOMS, EVENT);
+    expect(hits.map((c) => c.code)).toContain('SPEAKER_DOUBLE_BOOKED');
+    const speakerHit = hits.find((c) => c.code === 'SPEAKER_DOUBLE_BOOKED');
+    expect(speakerHit?.session_ids.sort()).toEqual(['pencilled', 'placed']);
+    expect(hits.map((c) => c.code)).not.toContain('ROOM_DOUBLE_BOOKED');
+  });
+
+  it('a time-set/no-room session never raises ROOM_DOUBLE_BOOKED even against another roomless overlap', () => {
+    const a: AgendaSessionInput = { ...placed, id: 'a', room_id: null, speakers: [] };
+    const b: AgendaSessionInput = { ...placed, id: 'b', room_id: null, speakers: [] };
+    const hits = computeConflicts([a, b], ROOMS, EVENT);
+    expect(hits.map((c) => c.code)).not.toContain('ROOM_DOUBLE_BOOKED');
+  });
+});

@@ -531,6 +531,67 @@
   text-underline-offset: 2px;
 }
 
+/* Chase inbox (workplan 13 W4c) */
+
+.chase-group {
+  border-top: 1px solid var(--border);
+  padding-top: 0.6rem;
+  margin-top: 0.6rem;
+}
+
+.chase-group:first-of-type {
+  border-top: none;
+  padding-top: 0;
+  margin-top: 0;
+}
+
+.chase-group-title {
+  margin: 0 0 0.4rem;
+  font-size: var(--text-label);
+  font-weight: 650;
+}
+
+.chase-draft {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  margin-bottom: 0.5rem;
+  background: var(--bg);
+}
+
+.chase-draft-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  font-size: var(--text-caption);
+  color: var(--text-faint);
+}
+
+.chase-draft-field input,
+.chase-draft-field textarea {
+  font: inherit;
+  font-size: var(--text-label);
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 0.3rem 0.45rem;
+  resize: vertical;
+}
+
+.chase-draft-meta {
+  font-size: var(--text-caption);
+  color: var(--text-muted);
+}
+
+.chase-draft-actions {
+  display: flex;
+  gap: 0.4rem;
+}
+
 /* Compact (640): the cards already stack at medium; this is the padding and
    the two rows whose fixed label column squeezes the bar to nothing. */
 @media (max-width: 640px) {

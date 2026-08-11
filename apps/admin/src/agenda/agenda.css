@@ -26,6 +26,9 @@
 }
 .agenda-header h2 { font-family: var(--font-display); margin: 0; font-size: 18px; display: flex; align-items: center; gap: 8px; }
 .agenda-sub { margin: 2px 0 0; color: var(--text-muted); font-size: var(--text-label); }
+/* Slot math (docs/13 W5): "3 unplaced · 2 pencilled · 1 conflict" — never a
+   modal that refuses a save, just a count that stays honest. */
+.agenda-slot-summary { margin: 2px 0 0; color: var(--text-muted); font-size: var(--text-label); }
 
 /* Agenda go-live state (FR-AGENDA-9): the chip is the at-a-glance answer to
    "is the public feed serving?", the header button is the control. */
@@ -273,6 +276,8 @@
   gap: 6px;
   border-left: 1px solid var(--border);
 }
+/* Day-only placement (docs/13 W5): dropping on the header sets the day, room stays NULL. */
+.tg-col-head.drop-over { background: var(--accent-soft); color: var(--accent); }
 .tg-col-sub { color: var(--text-faint); font-weight: 400; font-size: var(--text-caption); }
 .tg-body { display: flex; position: relative; }
 .tg-gutter {
@@ -330,6 +335,24 @@
   background: var(--notice-soft);
   border-color: var(--notice-border);
   border-left-color: var(--notice-text);
+}
+/* Pencilled (docs/13 W5): time set, no room — a dashed muted band across the
+   whole grid rather than one room's column, since it cannot double-book a
+   room it does not have. */
+.tg-pencil-lane {
+  position: absolute;
+  top: 0;
+  left: 64px;
+  right: 0;
+  height: var(--tg-height);
+  pointer-events: none;
+  z-index: 1;
+}
+.tg-block.pencilled {
+  pointer-events: auto;
+  border-style: dashed;
+  background: var(--surface);
+  opacity: 0.75;
 }
 .tg-block-flag { position: absolute; top: 2px; right: 5px; }
 .tg-block.conflict-error .tg-block-flag { color: var(--danger); }
@@ -403,6 +426,23 @@
   flex-direction: column;
 }
 .rb-cap { color: var(--text-faint); font-weight: 400; font-size: var(--text-caption); }
+.rb-pencil-chip {
+  align-self: flex-start;
+  margin-top: 3px;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text-muted);
+  font-size: var(--text-caption);
+  font-weight: 400;
+  padding: 1px 6px;
+  cursor: pointer;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rb-pencil-chip:hover { color: var(--text); border-color: var(--accent-border); }
 .rb-cell {
   flex: 1;
   position: relative;

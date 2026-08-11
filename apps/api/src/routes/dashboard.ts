@@ -159,6 +159,7 @@ async function dashboardPayload(c: Context<ApiEnv>) {
     roomRows,
     sessions,
     ignored,
+    approvalRows,
   ] = await Promise.all([
     db.prepare('SELECT id, name, slug, timezone, starts_at, ends_at FROM events WHERE id = ?').bind(eventId).first<EventRow>(),
     db.prepare('SELECT status, COUNT(*) AS n FROM submissions WHERE event_id = ? GROUP BY status').bind(eventId).all<{ status: string; n: number }>(),
@@ -245,6 +246,21 @@ async function dashboardPayload(c: Context<ApiEnv>) {
     db.prepare('SELECT id, name, capacity FROM rooms WHERE event_id = ? ORDER BY position').bind(eventId).all<AgendaRoomInput & { capacity: number | null }>(),
     loadSessions(db, eventId),
     loadIgnored(c.env.KV, eventId),
+    // Workplan 13 W3: accepted-but-awaiting-employer-approval, for the
+    // tracking board's "Approval pending" panel — "approval chatter peaks
+    // about a month out" is only actionable if it is visible a month out.
+    db.prepare(
+      `SELECT s.id AS submission_id, s.code, s.title, s.approval_note, s.starts_at,
+              s.submitter_contact_id AS contact_id,
+              NULLIF(TRIM(COALESCE(c.first_name,'') || ' ' || COALESCE(c.last_name,'')), '') AS name,
+              c.email
+       FROM submissions s
+       LEFT JOIN contacts c ON c.id = s.submitter_contact_id
+       WHERE s.event_id = ? AND s.approval_state = 'pending'`,
+    ).bind(eventId).all<{
+      submission_id: string; code: string; title: string; approval_note: string | null;
+      starts_at: string | null; contact_id: string | null; name: string | null; email: string | null;
+    }>(),
   ]);
 
   if (!event) return null;
@@ -403,6 +419,21 @@ async function dashboardPayload(c: Context<ApiEnv>) {
         name: fullName(row.name, row.email),
         days_overdue: Math.max(1, Math.floor((Date.parse(now) - Date.parse(row.due_at)) / 86_400_000)),
       })),
+      // Days-until-event ascending: the session's own slot when it has one,
+      // the event start otherwise — the soonest exposure sorts first.
+      approval_pending: approvalRows.results
+        .map((row) => ({
+          submission_id: row.submission_id,
+          code: row.code,
+          title: row.title,
+          approval_note: row.approval_note,
+          contact_id: row.contact_id,
+          name: row.name ?? row.email ?? 'No submitter',
+          days_until_event: Math.ceil(
+            (Date.parse(row.starts_at ?? event.starts_at) - Date.parse(now)) / 86_400_000,
+          ),
+        }))
+        .sort((a, b) => a.days_until_event - b.days_until_event),
       assets: missingAny.map((s) => ({
         contact_id: s.contact_id,
         name: fullName(s.name, s.email),

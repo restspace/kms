@@ -12,6 +12,7 @@ import { appAlert, appConfirm } from '../components/dialogs'
 import { RoomsTracksCard } from './RoomsTracksCard'
 import { ContactFieldsCard } from './ContactFieldsCard'
 import { EmailTemplatesCard } from './EmailTemplatesCard'
+import { ChaseSettingsCard } from './ChaseSettingsCard'
 import './settings.css'
 
 /**
@@ -216,6 +217,8 @@ export function SettingsSection({ me }: { me: Me }) {
       <ContactFieldsCard />
 
       <EmailTemplatesCard />
+
+      <ChaseSettingsCard />
 
       <section className="settings-card">
         <h2>API docs</h2>

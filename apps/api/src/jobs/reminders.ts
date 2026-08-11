@@ -2,8 +2,16 @@
 // outbox sweep so anything queued here is delivered in the same minute.
 // Every send's idempotency key embeds the offset (or overdue day index), so
 // a sweep can run as often as it likes without double-sending.
+//
+// Workplan-13 W4b (D5): the sweep is now a *detector*. The selects and the
+// offset arithmetic below are unchanged, but the render step stages a
+// chase_drafts row (chase.ts stageChase) whose idem_key is exactly the send
+// key queueTemplated would have used. In the default chase_mode='auto' the
+// same stageChase call sends the staged draft through queueTemplated in this
+// pass — today's behaviour byte for byte, OVERDUE_CAP and idempotency
+// included. In chase_mode='assisted' the draft waits for a human.
 
-import { queueTemplated } from '../mailer';
+import { stageChase } from '../chase';
 import type { Env } from '../env';
 
 const DAY_MS = 86_400_000;
@@ -22,6 +30,7 @@ interface TaskReminderRow {
   event_id: string;
   event_name: string;
   event_slug: string;
+  chase_mode: string | null;
 }
 
 interface DraftReminderRow {
@@ -35,6 +44,7 @@ interface DraftReminderRow {
   event_id: string;
   event_name: string;
   event_slug: string;
+  chase_mode: string | null;
 }
 
 export async function sweepReminders(env: Env): Promise<void> {
@@ -48,7 +58,7 @@ async function sweepTaskReminders(env: Env, now: number): Promise<void> {
   const { results } = await env.DB.prepare(
     `SELECT ta.id AS assignment_id, t.id AS task_id, t.title AS task_title, t.due_at,
             t.reminder_offsets_days, c.id AS contact_id, c.email, c.first_name,
-            e.id AS event_id, e.name AS event_name, e.slug AS event_slug
+            e.id AS event_id, e.name AS event_name, e.slug AS event_slug, e.chase_mode
      FROM task_assignments ta
      JOIN tasks t ON t.id = ta.task_id
      JOIN contacts c ON c.id = ta.contact_id
@@ -86,13 +96,15 @@ async function sweepTaskReminders(env: Env, now: number): Promise<void> {
     }
     if (!sendKey) continue;
 
-    await queueTemplated(env.DB, {
+    await stageChase(env.DB, {
       templateKey: 'task_reminder',
+      subjectOf: 'task',
+      subjectId: row.assignment_id,
+      version: sendKey,
       eventId: row.event_id,
       contactId: row.contact_id,
       toEmail: row.email,
-      entityId: row.assignment_id,
-      version: sendKey,
+      chaseMode: row.chase_mode,
       context: {
         event: { name: row.event_name },
         speaker: { first_name: row.first_name ?? 'there' },
@@ -117,7 +129,7 @@ async function sweepDraftReminders(env: Env, now: number): Promise<void> {
   const { results } = await env.DB.prepare(
     `SELECT s.id AS submission_id, f.id AS form_id, f.internal_name AS form_name, f.close_at,
             c.id AS contact_id, c.email, c.first_name,
-            e.id AS event_id, e.name AS event_name, e.slug AS event_slug
+            e.id AS event_id, e.name AS event_name, e.slug AS event_slug, e.chase_mode
      FROM submissions s
      JOIN submission_forms f ON f.id = s.form_id
      JOIN contacts c ON c.id = s.submitter_contact_id
@@ -140,13 +152,15 @@ async function sweepDraftReminders(env: Env, now: number): Promise<void> {
       minute: '2-digit',
       timeZoneName: 'short',
     });
-    await queueTemplated(env.DB, {
+    await stageChase(env.DB, {
       templateKey: 'draft_reminder',
+      subjectOf: 'draft_close',
+      subjectId: row.submission_id,
+      version: active.key,
       eventId: row.event_id,
       contactId: row.contact_id,
       toEmail: row.email,
-      entityId: row.submission_id,
-      version: active.key,
+      chaseMode: row.chase_mode,
       context: {
         event: { name: row.event_name },
         speaker: { first_name: row.first_name ?? 'there' },

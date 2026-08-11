@@ -6,7 +6,7 @@
 // `eventDays()` — fixing it here fixes those call sites too.
 
 import { describe, expect, it } from 'vitest'
-import { eventDays, localToUtc, utcToLocal, formatEventDateRange } from './timeUtils'
+import { classifySchedule, eventDays, localToUtc, utcToLocal, formatEventDateRange } from './timeUtils'
 
 describe('eventDays', () => {
   it('a US-timezone (west of UTC) event spanning local May 12–14 yields exactly those three days', () => {
@@ -107,5 +107,23 @@ describe('formatEventDateRange', () => {
     expect(formatEventDateRange(null, null, 'America/Los_Angeles')).toBe('')
     expect(formatEventDateRange(undefined, undefined, 'America/Los_Angeles')).toBe('')
     expect(formatEventDateRange('2027-05-12T07:00:00Z', null, 'America/Los_Angeles')).toBe('')
+  })
+})
+
+describe('classifySchedule', () => {
+  it('is "tray" when neither time nor room is set', () => {
+    expect(classifySchedule({ starts_at: null, room_id: null })).toBe('tray')
+  })
+
+  it('is "pencilled" when time is set with no room', () => {
+    expect(classifySchedule({ starts_at: '2027-05-12T09:00:00.000Z', room_id: null })).toBe('pencilled')
+  })
+
+  it('is "pencilled" when room is set with no time', () => {
+    expect(classifySchedule({ starts_at: null, room_id: 'room-a' })).toBe('pencilled')
+  })
+
+  it('is "placed" when both time and room are set', () => {
+    expect(classifySchedule({ starts_at: '2027-05-12T09:00:00.000Z', room_id: 'room-a' })).toBe('placed')
   })
 })

@@ -1269,11 +1269,13 @@ export function commitStatements(
       statements.push(
         db
           .prepare(
-            `INSERT INTO submission_participants (id, submission_id, contact_id, role, position${batchId ? ', import_batch_id' : ''})
-             VALUES (?, ?, ?, 'speaker', ?${batchId ? ', ?' : ''})
+            `INSERT INTO submission_participants (id, submission_id, contact_id, role, position, title_at_time, org_at_time${batchId ? ', import_batch_id' : ''})
+             VALUES (?2, ?3, ?4, 'speaker', ?5,
+               (SELECT ec.job_title FROM event_contacts ec WHERE ec.contact_id = ?4 AND ec.event_id = ?1),
+               (SELECT ec.company FROM event_contacts ec WHERE ec.contact_id = ?4 AND ec.event_id = ?1)${batchId ? ', ?6' : ''})
              ON CONFLICT (submission_id, contact_id, role) DO NOTHING`,
           )
-          .bind(crypto.randomUUID(), submissionId, link.contactId, position, ...(batchId ? [batchId] : [])),
+          .bind(eventId, crypto.randomUUID(), submissionId, link.contactId, position, ...(batchId ? [batchId] : [])),
       );
     }
 

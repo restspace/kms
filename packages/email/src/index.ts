@@ -21,6 +21,12 @@ export interface OutgoingEmail {
   /** when present the message is a calendar invite (docs/08 §5) */
   ics?: IcsPayload;
   /**
+   * Reply-To header (workplan-13 D6): assisted chase sends carry the acting
+   * organiser's address here so replies land in her inbox honestly — never in
+   * From, which would fail SPF/DKIM and land in spam.
+   */
+  reply_to?: string;
+  /**
    * message_log idempotency key (sweep item P2-20). Declared here — not only
    * on mailer.ts's OutboxEmailPayload — so providers can read it off the
    * `OutgoingEmail` they're handed without a cast; `OutboxEmailPayload`
@@ -52,6 +58,7 @@ export function createResendProvider(apiKey: string, from: string): EmailProvide
         text: mail.text,
         html: mail.html,
       };
+      if (mail.reply_to) body.reply_to = mail.reply_to;
       if (mail.ics) {
         // Attachment-only: Gmail renders it natively, Outlook shows a file.
         body.attachments = [
@@ -101,6 +108,7 @@ export function createSendGridProvider(apiKey: string, from: string): EmailProvi
         subject: mail.subject,
         content,
       };
+      if (mail.reply_to) body.reply_to = { email: mail.reply_to };
       if (mail.ics) {
         content.push({
           type: `text/calendar; method=${mail.ics.method}`,

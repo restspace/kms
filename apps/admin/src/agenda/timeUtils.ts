@@ -113,6 +113,22 @@ export function durationMinutes(startIso: string, endIso: string): number {
 export const snapTo = (minutes: number, step: number): number => Math.round(minutes / step) * step
 
 /**
+ * Three schedule states (docs/13 W5, D8): Tray (nothing set), Pencilled
+ * (time XOR room — "Tuesday morning, somewhere"), Placed (both). No
+ * migration backs this; it is a read of the same two nullable columns the
+ * server already accepts independently.
+ */
+export type ScheduleState = 'tray' | 'pencilled' | 'placed'
+
+export function classifySchedule(s: { starts_at: string | null; room_id: string | null }): ScheduleState {
+  const hasTime = s.starts_at !== null
+  const hasRoom = s.room_id !== null
+  if (hasTime && hasRoom) return 'placed'
+  if (hasTime || hasRoom) return 'pencilled'
+  return 'tray'
+}
+
+/**
  * Format an event's date range for display in the sidebar (e.g., "May 12 – May 14").
  * Handles the common case where ends_at is exclusive (midnight UTC of the next day)
  * by using eventDays to compute the inclusive day range in the event's timezone.

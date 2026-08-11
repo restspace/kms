@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { AgendaSessionRow } from '../api'
 import { getDrag, setDrag } from './dragState'
-import { durationMinutes, fmtMinutes, snapTo, utcToLocal } from './timeUtils'
+import { classifySchedule, durationMinutes, fmtMinutes, snapTo, utcToLocal } from './timeUtils'
 
 /**
  * Vertical time grid (docs/07 §2): Day view (columns = rooms or tracks) and
@@ -39,6 +39,8 @@ interface TimeGridProps {
   onResize: (id: string, durationMin: number) => void
   onOpenMove: (id: string) => void
   previewDrop: (id: string, column: GridColumn, startMin: number, durationMin: number) => DropPreview
+  /** Dropped on the column header rather than a time slot (docs/13 W5): day-only placement, room stays NULL. */
+  onDropDay?: (id: string, day: string) => void
 }
 
 interface Ghost {
@@ -66,8 +68,10 @@ export function TimeGrid({
   onResize,
   onOpenMove,
   previewDrop,
+  onDropDay,
 }: TimeGridProps) {
   const [ghost, setGhost] = useState<Ghost | null>(null)
+  const [dayOverKey, setDayOverKey] = useState<string | null>(null)
   const [resizing, setResizing] = useState<{ id: string; durationMin: number } | null>(null)
   const resizeStart = useRef<{ y: number; durationMin: number } | null>(null)
 
@@ -111,11 +115,23 @@ export function TimeGrid({
   const hours: number[] = []
   for (let m = Math.ceil(dayStartMin / 60) * 60; m <= dayEndMin; m += 60) hours.push(m)
 
+  // A time-set/no-room pencilled session has no column of its own — it does
+  // not double-book any one room, so it renders as a dashed band across the
+  // whole grid instead of vanishing (docs/13 W5). `columnOf` returning null
+  // for the wrong day is filtered the same way it always was; only sessions
+  // whose day matches a column actually present here are spanning.
+  const sameDayColumns = columns.length > 0 && columns.every((c) => c.day === columns[0]?.day)
   const byColumn = new Map<string, AgendaSessionRow[]>()
+  const spanning: AgendaSessionRow[] = []
   for (const s of sessions) {
     if (!s.starts_at || !s.ends_at) continue
     const key = columnOf(s)
-    if (key === null) continue
+    if (key === null) {
+      if (sameDayColumns && utcToLocal(s.starts_at, timezone).day === columns[0]?.day && s.room_id === null) {
+        spanning.push(s)
+      }
+      continue
+    }
     const list = byColumn.get(key) ?? []
     list.push(s)
     byColumn.set(key, list)
@@ -171,7 +187,29 @@ export function TimeGrid({
       <div className="tg-head">
         <div className="tg-gutter-head" />
         {columns.map((col) => (
-          <div className="tg-col-head" key={col.key}>
+          <div
+            className={`tg-col-head${onDropDay && dayOverKey === col.key ? ' drop-over' : ''}`}
+            key={col.key}
+            onDragOver={(e) => {
+              if (!onDropDay || !getDrag()) return
+              e.preventDefault()
+              e.dataTransfer.dropEffect = 'move'
+              setDayOverKey(col.key)
+            }}
+            onDragLeave={(e) => {
+              if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
+                setDayOverKey((k) => (k === col.key ? null : k))
+              }
+            }}
+            onDrop={(e) => {
+              if (!onDropDay) return
+              e.preventDefault()
+              const drag = getDrag()
+              setDayOverKey(null)
+              setDrag(null)
+              if (drag) onDropDay(drag.id, col.day)
+            }}
+          >
             <span>{col.label}</span>
             {col.sub && <span className="tg-col-sub">{col.sub}</span>}
           </div>
@@ -185,6 +223,44 @@ export function TimeGrid({
             </div>
           ))}
         </div>
+        {spanning.length > 0 && (
+          <div className="tg-pencil-lane">
+            {spanning.map((s) => {
+              const local = utcToLocal(s.starts_at as string, timezone)
+              const dur = durationMinutes(s.starts_at as string, s.ends_at as string)
+              return (
+                <div
+                  className="tg-block pencilled"
+                  key={s.id}
+                  style={{ top: local.minutes - dayStartMin, height: Math.max(dur, 36) }}
+                  draggable
+                  tabIndex={0}
+                  role="button"
+                  aria-label={`${s.title}, ${fmtMinutes(local.minutes)}, no room assigned. Press Enter to move.`}
+                  title={`${s.code} · ${s.title} · no room assigned`}
+                  onDragStart={(e) => {
+                    setDrag({ id: s.id, durationMin: dur, fromTray: false })
+                    e.dataTransfer.setData('text/plain', s.id)
+                    e.dataTransfer.effectAllowed = 'move'
+                  }}
+                  onDragEnd={() => setDrag(null)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'm' || e.key === 'M' || e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault()
+                      onOpenMove(s.id)
+                    }
+                  }}
+                  onDoubleClick={() => onOpenMove(s.id)}
+                >
+                  <div className="tg-block-time">
+                    {fmtMinutes(local.minutes)} – {fmtMinutes(local.minutes + dur)} · no room
+                  </div>
+                  <div className="tg-block-title">{s.title}</div>
+                </div>
+              )
+            })}
+          </div>
+        )}
         {columns.map((col) => (
           <div
             className="tg-col"
@@ -227,9 +303,10 @@ export function TimeGrid({
               const dur = resizing?.id === s.id ? resizing.durationMin : baseDur
               const level = conflictLevel(s.id)
               const color = trackColor(s)
+              const pencilled = classifySchedule(s) === 'pencilled'
               return (
                 <div
-                  className={`tg-block${level ? ` conflict-${level}` : ''}`}
+                  className={`tg-block${pencilled ? ' pencilled' : ''}${level ? ` conflict-${level}` : ''}`}
                   key={s.id}
                   style={{
                     top: local.minutes - dayStartMin,

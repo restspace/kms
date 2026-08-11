@@ -34,6 +34,8 @@ import {
   getEvents,
   type EventListRow,
   type BulkJobStatus,
+  type ReviewRow,
+  type CommentListRow,
 } from './api'
 import { buildExportUrl, downloadFilesBundle } from './api'
 import { appAlert, appConfirm, ModalDialog } from './components/dialogs'
@@ -51,9 +53,9 @@ import { EmbedsSection } from './embeds/EmbedsSection'
 import {
   BulkBar,
   ConfirmationChipsFilter,
-  StatusChipsFilter,
   SubmissionDetailPanel,
   SubmissionEditForm,
+  SubmissionsFilter,
   SUBMISSION_STATUSES,
   statusLabel,
   TaskStatusFilter,
@@ -594,9 +596,9 @@ const submissionSchema = {
  */
 
 /** Workspace tab keys addressable by dashboard deep-links. */
-type WorkspaceTabKey = 'speakers' | 'submissions' | 'tasks' | 'messages' | 'files' | 'events'
+type WorkspaceTabKey = 'speakers' | 'submissions' | 'reviews' | 'comments' | 'tasks' | 'messages' | 'files' | 'events'
 
-const WORKSPACE_TAB_KEYS: readonly WorkspaceTabKey[] = ['speakers', 'submissions', 'tasks', 'messages', 'files', 'events']
+const WORKSPACE_TAB_KEYS: readonly WorkspaceTabKey[] = ['speakers', 'submissions', 'reviews', 'comments', 'tasks', 'messages', 'files', 'events']
 
 /**
  * Events tab dataSource (manual-QA item 1: no way to list/switch events from
@@ -673,6 +675,8 @@ async function loadWorkspaceRecord(
 interface ScopedSources {
   contacts: (params: DataSourceParams) => Promise<DataSourceResult<ContactRow>>
   submissions: (params: DataSourceParams) => Promise<DataSourceResult<unknown>>
+  reviews: (params: DataSourceParams) => Promise<DataSourceResult<ReviewRow>>
+  comments: (params: DataSourceParams) => Promise<DataSourceResult<CommentListRow>>
   tasks: (params: DataSourceParams) => Promise<DataSourceResult<TaskAssignmentRow>>
   messages: (params: DataSourceParams) => Promise<DataSourceResult<MessageRow>>
   files: (params: DataSourceParams) => Promise<DataSourceResult<FileLibraryRow>>
@@ -689,7 +693,7 @@ interface ScopedSources {
  * ~2s cross-tab reset/refetch jitter after a bubble click.
  */
 function buildScopedSources(eventFilterId: string | null): ScopedSources {
-  const scoped = <T,>(resource: 'contacts' | 'submissions' | 'messages' | 'tasks') => {
+  const scoped = <T,>(resource: 'contacts' | 'submissions' | 'messages' | 'tasks' | 'reviews' | 'comments') => {
     const base = queryResource<T>(resource)
     if (!eventFilterId) return base
     return (params: DataSourceParams): Promise<DataSourceResult<T>> =>
@@ -698,6 +702,8 @@ function buildScopedSources(eventFilterId: string | null): ScopedSources {
   return {
     contacts: scoped<ContactRow>('contacts'),
     submissions: scoped('submissions'),
+    reviews: scoped<ReviewRow>('reviews'),
+    comments: scoped<CommentListRow>('comments'),
     tasks: scoped<TaskAssignmentRow>('tasks'),
     messages: scoped<MessageRow>('messages'),
     files: (params: DataSourceParams): Promise<DataSourceResult<FileLibraryRow>> =>
@@ -783,7 +789,7 @@ export function buildWorkspaceConfig(
   // and anchor included — through the public REST API's export endpoint.
   // KNOWN LIMITATION: the export endpoint is single-event, so with the filter
   // on "All events" the download covers the *current* event only.
-  const exportFor = (resource: 'contacts' | 'submissions' | 'tasks' | 'messages') => ({
+  const exportFor = (resource: 'contacts' | 'submissions' | 'tasks' | 'messages' | 'reviews' | 'comments') => ({
     buildUrl: (format: 'csv' | 'xlsx', query: { filters: Record<string, unknown>; sort?: { field: string; direction: 'asc' | 'desc' } }) => {
       const { event_id: _scopedEvent, ...rest } = query.filters as Record<string, unknown>
       // Same resolution as the import guard (D3): the sidebar scope is not in
@@ -1046,7 +1052,11 @@ export function buildWorkspaceConfig(
     filterConfig: {
       initialFilters: { status: '', ...(seeds.submissions ?? {}) },
       defaultFilters: { status: '' },
-      FilterComponent: StatusChipsFilter,
+      FilterComponent: SubmissionsFilter,
+      // The coverage bar scopes its counts exactly like the tab's own
+      // dataSource (workplan 13 W2) — the sidebar's event scope is baked into
+      // that closure, so it has to be handed over explicitly here.
+      filterProps: { eventFilterId },
     },
     onChecklist,
     checklistResetKey,
@@ -1081,6 +1091,13 @@ export function buildWorkspaceConfig(
         header: 'Rating',
         width: '80px',
         sortable: true,
+        // The two sorts the doc calls the whole review UI (workplan 13 W2):
+        // first click = decision-meeting agenda (score desc), second click =
+        // coverage worklist (fewest ratings first), third clears.
+        sortCycle: [
+          { field: 'rating', direction: 'desc' },
+          { field: 'review_count', direction: 'asc' },
+        ],
         render: (value: number | null, item) =>
           value === null ? (
             <span style={{ color: 'var(--text-faint)' }}>—</span>
@@ -1389,6 +1406,120 @@ export function buildWorkspaceConfig(
     },
   }
 
+  // Workplan 13 W1d: the committee's scores as a standard workspace tab —
+  // registry resource `reviews` (adminApi.ts), so the grid, anchor slice and
+  // export button all come for free. Owner/admin seats only; a reviewer
+  // session never reaches the workspace.
+  const reviews: TabConfig<ReviewRow> = {
+    displayTitle: 'Reviews',
+    dataSource: scopedSources.reviews,
+    getItemId: (item) => item.id,
+    getItemTitle: (item) => `${item.submission_code} — ${item.reviewer_name ?? 'Reviewer'}`,
+    initialSort: { field: 'created_at', direction: 'desc' },
+    columns: [
+      { field: 'submission_code', header: 'Code', width: '84px', sortable: true },
+      { field: 'submission_title', header: 'Submission', width: '2fr' },
+      {
+        field: 'reviewer_name',
+        header: 'Reviewer',
+        sortable: true,
+        render: (value: string | null) => value ?? 'Reviewer',
+      },
+      { field: 'plan_name', header: 'Round', mobileHidden: true },
+      {
+        field: 'weighted_total',
+        header: 'Score',
+        width: '80px',
+        sortable: true,
+        render: (value: number | null, item) =>
+          item.conflict_of_interest === 1 ? (
+            <span style={{ color: 'var(--text-faint)' }}>CoI</span>
+          ) : value === null ? (
+            <span style={{ color: 'var(--text-faint)' }}>—</span>
+          ) : (
+            <span>★ {value}</span>
+          ),
+      },
+      {
+        field: 'created_at',
+        header: 'Recorded',
+        width: '110px',
+        sortable: true,
+        mobileHidden: true,
+        render: (value: string) => fmtDate(value),
+      },
+      eventColumn,
+    ],
+    detailComponent: ({ item }) => (
+      <div className="detail-panel">
+        <h2>
+          {item.submission_code} — {item.submission_title}
+        </h2>
+        <div className="detail-sub">
+          {item.reviewer_name ?? 'Reviewer'}{item.plan_name ? ` · ${item.plan_name}` : ''} · {fmtDate(item.created_at)}
+        </div>
+        <dl>
+          <dt>Score</dt>
+          <dd>{item.conflict_of_interest === 1 ? 'Conflict of interest declared' : item.weighted_total ?? '—'}</dd>
+          {item.scores && <><dt>Per-criterion</dt><dd style={{ fontFamily: 'monospace' }}>{item.scores}</dd></>}
+          {item.comment && <><dt>Comment</dt><dd>{item.comment}</dd></>}
+        </dl>
+      </div>
+    ),
+    globalFilterReceives: { submission_id: 'submission_id' },
+    exportConfig: exportFor('reviews'),
+  }
+
+  // Workplan 13 W1d: the discussion threads (rationales included) as a tab —
+  // registry resource `comments`, same seat gate as reviews.
+  const comments: TabConfig<CommentListRow> = {
+    displayTitle: 'Comments',
+    dataSource: scopedSources.comments,
+    getItemId: (item) => item.id,
+    getItemTitle: (item) => `${item.submission_code} — ${item.author_name ?? 'Someone'}`,
+    initialSort: { field: 'created_at', direction: 'desc' },
+    columns: [
+      { field: 'submission_code', header: 'Code', width: '84px', sortable: true },
+      { field: 'body', header: 'Comment', width: '2.5fr' },
+      {
+        field: 'author_name',
+        header: 'Author',
+        sortable: true,
+        render: (value: string | null, item) => `${value ?? 'Someone'} (${item.author_role})`,
+      },
+      {
+        field: 'kind',
+        header: 'Kind',
+        width: '100px',
+        sortable: true,
+        render: (value: string) => (value === 'rationale' ? 'Review comment' : 'Discussion'),
+      },
+      {
+        field: 'created_at',
+        header: 'Posted',
+        width: '110px',
+        sortable: true,
+        mobileHidden: true,
+        render: (value: string) => fmtDate(value),
+      },
+      eventColumn,
+    ],
+    detailComponent: ({ item }) => (
+      <div className="detail-panel">
+        <h2>
+          {item.submission_code} — {item.submission_title}
+        </h2>
+        <div className="detail-sub">
+          {item.author_name ?? 'Someone'} · {item.author_role}
+          {item.kind === 'rationale' ? ' · Review comment' : ''} · {fmtDate(item.created_at)}
+        </div>
+        <div className="detail-body" style={{ whiteSpace: 'pre-line' }}>{item.body}</div>
+      </div>
+    ),
+    globalFilterReceives: { submission_id: 'submission_id' },
+    exportConfig: exportFor('comments'),
+  }
+
   const messages: TabConfig<MessageRow> = {
     displayTitle: 'Messages',
     dataSource: scopedSources.messages,
@@ -1603,6 +1734,8 @@ export function buildWorkspaceConfig(
   return {
     speakers: speakers as TabConfig,
     submissions: submissions as TabConfig,
+    reviews: reviews as TabConfig,
+    comments: comments as TabConfig,
     tasks: tasks as TabConfig,
     messages: messages as TabConfig,
     files: files as TabConfig,
@@ -1648,6 +1781,11 @@ export default function App() {
   const [checklistResetKey, setChecklistResetKey] = useState(0)
   const [bulkBusy, setBulkBusy] = useState(false)
   const [bulkNote, setBulkNote] = useState<string | null>(null)
+  // Workplan 13 W3: per-send opt-in for the employer-approval ask. Read via a
+  // ref so sendDecisionsForReal keeps its stable identity.
+  const [approvalAsk, setApprovalAsk] = useState(false)
+  const approvalAskRef = useRef(false)
+  approvalAskRef.current = approvalAsk
 
   // SPK-15: the Speakers tab's custom-field definitions, scoped to the
   // current session event (new/edited contacts always write there — same
@@ -1962,6 +2100,10 @@ export default function App() {
       navigate({ v: 'forms', form: null, fstep: null })
       return
     }
+    if (target.view === 'settings') {
+      navigate({ v: 'settings' })
+      return
+    }
     setWsPreset(target.seedFilters || target.label ? { seeds: target.seedFilters ?? {}, label: target.label ?? null } : null)
     navigate({ v: 'workspace', tab: target.tab, rec: null })
   }, [])
@@ -1999,7 +2141,10 @@ export default function App() {
     async (ids: string[], extra?: { hold_contact_ids?: string[] }) => {
       let polling = false
       try {
-        const r = await sendDecisions(ids, extra)
+        const r = await sendDecisions(ids, {
+          ...extra,
+          ...(approvalAskRef.current ? { approval_ask: true } : {}),
+        })
         const planned = r.accepted + r.declined
         const other = r.skipped - r.skipped_notified
         // r.skipped_no_submitter is a subset of the *queued* (accepted +
@@ -2257,7 +2402,7 @@ export default function App() {
             )}
             <DataTabManager
               config={workspaceConfig}
-              defaultTabs={['speakers', 'submissions', 'tasks', 'messages', 'files', 'events']}
+              defaultTabs={['speakers', 'submissions', 'reviews', 'comments', 'tasks', 'messages', 'files', 'events']}
               activeTabRequest={wsTabRequest}
               detailRequest={detailRequest}
               onActiveTabChange={handleActiveTabChange}
@@ -2272,6 +2417,8 @@ export default function App() {
                 count={checkedIds.length}
                 busy={bulkBusy}
                 note={bulkNote}
+                approvalAsk={approvalAsk}
+                onApprovalAskChange={setApprovalAsk}
                 onAction={(a) => void runBulk(a)}
                 onClear={() => {
                   setCheckedIds([])

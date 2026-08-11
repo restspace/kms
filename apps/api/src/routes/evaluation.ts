@@ -33,6 +33,13 @@ const SUBMISSION_STATUSES = new Set([
   'draft', 'pending', 'accept_queue', 'accepted', 'decline_queue', 'declined', 'withdrawn',
 ]);
 
+// Workplan 13 W3 (D4): employer approval is a flag alongside the accepted
+// status, not a status value. NULL = not applicable / not asked. Exported —
+// the submissions resource filter (adminApi.ts) validates against this same
+// set, the SUBMISSION_STATUSES pattern; the column carries no CHECK so the
+// vocabulary can grow here without a migration.
+export const APPROVAL_STATES = new Set(['pending', 'granted', 'refused']);
+
 // F14/ABS-11 — kept as a Set for O(1) membership checks; ALL_PARTICIPANT_ROLES
 // (packages/core) is the canonical ordered vocabulary, in lockstep with the
 // submission_participants.role CHECK constraint (0008 migration).
@@ -57,6 +64,55 @@ evaluationRoutes.put('/submissions/:id/status', async (c) => {
     .run();
   if (result.meta.changes === 0) return c.json({ error: 'not_found' }, 404);
   return c.json({ ok: true, status });
+});
+
+const APPROVAL_NOTE_MAX_CHARS = 2000;
+
+// PUT /submissions/:id/approval { approval_state?, approval_note? } — the
+// inline editor beside the status editor (workplan 13 W3). 'refused' is a
+// prompt for a human, never an automatic withdrawal (D7): status is untouched
+// by every value here.
+evaluationRoutes.put('/submissions/:id/approval', async (c) => {
+  const session = c.get('session');
+  if (!isWriter(session.role)) return c.json({ error: 'forbidden' }, 403);
+  const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+
+  const sets: string[] = [];
+  const params: unknown[] = [];
+  if ('approval_state' in body) {
+    const v = body.approval_state;
+    if (v === null || v === '') {
+      sets.push('approval_state = ?');
+      params.push(null);
+    } else if (typeof v === 'string' && APPROVAL_STATES.has(v)) {
+      sets.push('approval_state = ?');
+      params.push(v);
+    } else {
+      return c.json({ error: 'invalid_approval_state', allowed: [...APPROVAL_STATES] }, 400);
+    }
+  }
+  if ('approval_note' in body) {
+    const v = body.approval_note;
+    if (v !== null && typeof v !== 'string') return c.json({ error: 'invalid_approval_note' }, 400);
+    const trimmed = v === null ? null : v.trim();
+    sets.push('approval_note = ?');
+    params.push(trimmed === null || trimmed === '' ? null : trimmed.slice(0, APPROVAL_NOTE_MAX_CHARS));
+  }
+  if (sets.length === 0) return c.json({ error: 'no_fields' }, 400);
+
+  const result = await c.env.DB.prepare(
+    `UPDATE submissions SET ${sets.join(', ')}, updated_at = ? WHERE id = ? AND event_id = ?`,
+  )
+    .bind(...params, nowIso(), c.req.param('id'), session.eventId)
+    .run();
+  if (result.meta.changes === 0) return c.json({ error: 'not_found' }, 404);
+  await bumpEventRevision(c.env, session.eventId);
+  const row = await c.env.DB.prepare(
+    'SELECT approval_state, approval_note FROM submissions WHERE id = ? AND event_id = ?',
+  )
+    .bind(c.req.param('id'), session.eventId)
+    .first<{ approval_state: string | null; approval_note: string | null }>();
+  return c.json({ ok: true, ...row });
 });
 
 function parseIds(raw: unknown): string[] {
@@ -243,6 +299,10 @@ evaluationRoutes.post('/submissions/send-decisions', async (c) => {
     ? body.hold_contact_ids.filter((x): x is string => typeof x === 'string')
     : [];
   const pendingNote = body.pending_note !== false;
+  // Workplan 13 W3: opt-in per send, never the default — adds the
+  // {{approval_ask}} block to accept emails and flags the covered accepted
+  // submissions approval_state='pending' (see jobs/bulkJobs.ts).
+  const approvalAsk = body.approval_ask === true;
   if (ids.length === 0) return c.json({ error: 'ids_required' }, 400);
 
   const event = await db
@@ -358,7 +418,7 @@ evaluationRoutes.post('/submissions/send-decisions', async (c) => {
       .bind(
         jobId,
         session.eventId,
-        JSON.stringify({ ids: queued.map((s) => s.id), include_feedback: includeFeedback, pending_note: pendingNote }),
+        JSON.stringify({ ids: queued.map((s) => s.id), include_feedback: includeFeedback, pending_note: pendingNote, approval_ask: approvalAsk }),
         queued.length,
         session.contactId,
         ts,
@@ -569,13 +629,15 @@ evaluationRoutes.post('/submissions/:id/participants', async (c) => {
   // 0015: the join to event_contacts is the tenancy guard the old
   // `contacts.event_id = ?` was — a contact from a sibling event in the same
   // org must not be seatable on this event's submission.
+  // job_title/company double as the W1c provenance stamp below: the join row
+  // freezes what THIS event's profile said at link time (D3).
   const contact = await c.env.DB.prepare(
-    `SELECT c.id FROM contacts c
+    `SELECT c.id, ec.job_title, ec.company FROM contacts c
      JOIN event_contacts ec ON ec.contact_id = c.id AND ec.event_id = ?
      WHERE c.id = ?`,
   )
     .bind(session.eventId, contactId)
-    .first();
+    .first<{ id: string; job_title: string | null; company: string | null }>();
   if (!contact) return c.json({ error: 'contact_not_found' }, 404);
 
   const { results: existingRows } = await c.env.DB.prepare(
@@ -586,10 +648,10 @@ evaluationRoutes.post('/submissions/:id/participants', async (c) => {
   const id = crypto.randomUUID();
   try {
     await c.env.DB.prepare(
-      `INSERT INTO submission_participants (id, submission_id, contact_id, role, position, is_primary_contact)
-       VALUES (?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO submission_participants (id, submission_id, contact_id, role, position, is_primary_contact, title_at_time, org_at_time)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     )
-      .bind(id, submissionId, contactId, role, nextPosition, body.is_primary_contact === true ? 1 : 0)
+      .bind(id, submissionId, contactId, role, nextPosition, body.is_primary_contact === true ? 1 : 0, contact.job_title, contact.company)
       .run();
   } catch (err) {
     const message = err instanceof Error ? err.message : '';

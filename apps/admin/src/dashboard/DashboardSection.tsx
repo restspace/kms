@@ -7,6 +7,7 @@ import {
   type DashboardPayload,
 } from '../api'
 import { fmtDateInTz } from '../utils/dates'
+import { ChaseInboxPanel, ChaseModeBanner } from './ChaseInbox'
 import './dashboard.css'
 
 /**
@@ -19,6 +20,7 @@ import './dashboard.css'
 export type AppNavTarget =
   | { view: 'agenda'; agendaView?: 'conflicts' }
   | { view: 'forms' }
+  | { view: 'settings' }
   | {
       view: 'workspace'
       tab: 'speakers' | 'submissions' | 'tasks' | 'messages'
@@ -407,7 +409,7 @@ export function DashboardSection({ onNavigate }: { onNavigate: (target: AppNavTa
         />
       )}
       {board === 'tracking' && (
-        <TrackingBoard data={data} busy={busy} onRemind={remind} onSpeaker={openSpeaker} />
+        <TrackingBoard data={data} busy={busy} onRemind={remind} onSpeaker={openSpeaker} onNavigate={onNavigate} />
       )}
       {board === 'pipeline' && <PipelineBoard data={data} onNavigate={onNavigate} />}
     </div>
@@ -636,11 +638,12 @@ function TodayBoard({ data, tab, onTab, onNudge, onNavigate }: {
 
 // --- Speaker Tracking (the required board, docs/09 §2) ----------------------
 
-function TrackingBoard({ data, busy, onRemind, onSpeaker }: {
+function TrackingBoard({ data, busy, onRemind, onSpeaker, onNavigate }: {
   data: DashboardPayload
   busy: boolean
   onRemind: (ids?: string[]) => void
   onSpeaker: (contactId: string, name: string, tab: 'speakers' | 'tasks') => void
+  onNavigate: (t: AppNavTarget) => void
 }) {
   const t = data.tracking
   return (
@@ -648,7 +651,9 @@ function TrackingBoard({ data, busy, onRemind, onSpeaker }: {
       <p className="db-board-desc">
         Confirmation status, outstanding tasks, and an overdue list for accepted speakers.
       </p>
+      <ChaseModeBanner onNavigate={onNavigate} />
       <div className="db-grid">
+        <ChaseInboxPanel />
         <section className="db-card db-stat-card">
           <div className="db-kpi-value">{t.accepted_speakers}</div>
           <div className="db-kpi-label">Accepted Speakers</div>
@@ -701,6 +706,46 @@ function TrackingBoard({ data, busy, onRemind, onSpeaker }: {
               </span>
             </div>
           ))}
+        </section>
+        {/* Workplan 13 W3: accepted-but-awaiting-employer-approval, sorted by
+            days-until-event ascending server-side — the withdrawals cluster a
+            month out, so the closest exposure leads the list. */}
+        <section className="db-card db-span3">
+          <h3>Approval pending</h3>
+          {t.approval_pending.length === 0 && (
+            <div className="db-empty">No accepted talks are awaiting employer approval.</div>
+          )}
+          {t.approval_pending.length > 0 && (
+            <table className="db-table">
+              <thead>
+                <tr><th>Talk</th><th>Speaker</th><th>Note</th><th>Event in</th></tr>
+              </thead>
+              <tbody>
+                {t.approval_pending.map((row) => (
+                  <tr key={row.submission_id}>
+                    <td className="db-td-title">{row.code} · {row.title}</td>
+                    <td>
+                      {row.contact_id ? (
+                        <button
+                          className="db-link"
+                          onClick={() => onSpeaker(row.contact_id!, row.name, 'speakers')}
+                          title="Open this speaker in the workspace"
+                        >
+                          {row.name}
+                        </button>
+                      ) : (
+                        row.name
+                      )}
+                    </td>
+                    <td>{row.approval_note ?? ''}</td>
+                    <td className="db-overdue">
+                      {row.days_until_event <= 0 ? 'now' : `${row.days_until_event} day${row.days_until_event === 1 ? '' : 's'}`}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
         </section>
         <section className="db-card db-span3">
           <div className="db-card-head">

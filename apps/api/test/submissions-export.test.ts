@@ -53,6 +53,11 @@ describe('GET /api/v1/events/:event_id/submissions/export', () => {
     const cols = headerLine!.split(',');
     expect(cols).toContain('rating');
     expect(cols).toContain('review_count');
+    // Workplan 13 W1e: the decision record rides the same export — status is
+    // in s.*, and these two complete it. "Who decided" has no column; see
+    // docs/13-open-questions.md.
+    expect(cols).toContain('notified_at');
+    expect(cols).toContain('approval_state');
 
     const ratingIdx = cols.indexOf('rating');
     const reviewCountIdx = cols.indexOf('review_count');

@@ -69,6 +69,11 @@ Ask in Discord; none of these block the build.
     - Let's include this
 11. Is the **embeddable agenda/speaker gallery** (item #9, struck through) genuinely dead, or
     would a simple version be valued? The spec keeps it as a stretch.
+12. The submissions export now carries the full decision record — `status`, `notified_at`,
+    the derived `rating` and `review_count` (workplan 13 W1e) — but there is **no actor column
+    on a status flip**, so "who decided" cannot be exported. Is a decision audit trail wanted
+    (actor + timestamp per status change), or is the batch send's `created_by` on `bulk_jobs`
+    close enough? Deliberately not invented in workplan 13; logged here instead.
 
 ---
 

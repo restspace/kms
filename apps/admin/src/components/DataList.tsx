@@ -7,6 +7,7 @@ import { breakpoints } from '@kms/theme';
 import useElementSize from '../hooks/useElementSize';
 import PlusIcon from '../assets/plus-icon.svg';
 import { stableSerialize } from '../utils/stableSerialize';
+import { advanceSort, type SortCycleEntry } from './sortCycle';
 import {
   applyCellEdit,
   applyCellMerge,
@@ -156,6 +157,13 @@ export interface ColumnDefinition<T = any> {
   header: string;
   width?: string; // CSS grid size (e.g., "1fr", "200px")
   sortable?: boolean;
+  /**
+   * Explicit header-click sort sequence (advanced entry by entry, then
+   * cleared) replacing the default asc → desc → cleared cycle. Entries may
+   * name sort fields that are not displayed columns, as long as the resource
+   * declares them sortable (e.g. Ratings: score desc, then review_count asc).
+   */
+  sortCycle?: SortCycleEntry[];
   render?: (value: any, item: T) => React.ReactNode;
   /**
    * When provided, the column is placed in the given mobile card row.
@@ -1340,20 +1348,7 @@ export const DataList = <T extends Record<string, any>, TFilters extends Record<
    */
   const handleHeaderClick = useCallback((column: ColumnDefinition<T>) => {
     if (!column.sortable) return;
-
-    setSortState((prev) => {
-      const field = String(column.field);
-      if (prev.field !== field) {
-        // New column: start with ascending
-        return { field, direction: 'asc' };
-      } else if (prev.direction === 'asc') {
-        // Same column, was ascending: go to descending
-        return { field, direction: 'desc' };
-      } else {
-        // Same column, was descending: clear sort
-        return { field: null, direction: null };
-      }
-    });
+    setSortState((prev) => advanceSort(prev, String(column.field), column.sortCycle) as SortState);
   }, []);
 
   /**
@@ -1615,7 +1610,10 @@ export const DataList = <T extends Record<string, any>, TFilters extends Record<
   const getSortIndicator = useCallback((column: ColumnDefinition<T>) => {
     if (!column.sortable) return null;
     const field = String(column.field);
-    if (sortState.field !== field) return null;
+    const active =
+      sortState.field === field ||
+      (column.sortCycle?.some((entry) => entry.field === sortState.field) ?? false);
+    if (!active || sortState.field === null) return null;
     return sortState.direction === 'asc' ? '↑' : '↓';
   }, [sortState]);
 
@@ -2223,7 +2221,9 @@ export const DataList = <T extends Record<string, any>, TFilters extends Record<
                     );
                   }
                   const field = String(column.field);
-                  const isActiveSort = sortState.field === field;
+                  const isActiveSort =
+                    sortState.field === field ||
+                    (column.sortCycle?.some((entry) => entry.field === sortState.field) ?? false);
                   const ariaSort: React.AriaAttributes['aria-sort'] = isActiveSort
                     ? (sortState.direction === 'asc' ? 'ascending' : 'descending')
                     : 'none';

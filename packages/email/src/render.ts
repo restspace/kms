@@ -138,11 +138,15 @@ export const DEFAULT_TEMPLATES: Record<string, DefaultTemplate> = {
   },
   // {{reviewer_feedback}} renders shared reviewer comments when the organiser
   // opts in per send (Swyx-1 bonus); unknown/absent variables render as ''.
+  // {{{approval_ask}}} is the optional employer-approval ask (workplan 13 W3):
+  // prerendered system HTML supplied by the bulk-jobs expander when the
+  // organiser enables it for a batch, '' otherwise.
   decision_accepted: {
     subject: 'Congratulations — {{submission.title}} was accepted for {{event.name}}',
     body: `<p>Great news, {{speaker.first_name}}!</p>
 <p><strong>{{submission.title}}</strong> ({{submission.code}}) has been <strong>accepted</strong> for {{event.name}}.</p>
 <p style="white-space:pre-line;">{{reviewer_feedback}}</p>
+{{{approval_ask}}}
 <p>Your speaker portal lists everything we need from you next — including any onboarding tasks.</p>
 <p><a href="{{portal_url}}" class="btn">Open your speaker portal</a></p>`,
   },

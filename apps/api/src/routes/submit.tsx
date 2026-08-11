@@ -1381,8 +1381,9 @@ submitRoutes.post('/:slug/:formId/submit', async (c) => {
         db
           .prepare(
             `INSERT INTO submission_participants
-               (id, submission_id, contact_id, role, position, is_primary_contact, confirmed_at, answers_json)
-             SELECT ?1, ?2, c.id, ?3, ?4, ?5, ?6, ?7 FROM contacts c
+               (id, submission_id, contact_id, role, position, is_primary_contact, confirmed_at, answers_json,
+                title_at_time, org_at_time)
+             SELECT ?1, ?2, c.id, ?3, ?4, ?5, ?6, ?7, ec.job_title, ec.company FROM contacts c
              JOIN event_contacts ec ON ec.contact_id = c.id AND ec.event_id = ?8
              WHERE c.org_id = (SELECT org_id FROM events WHERE id = ?8)
                AND lower(c.email) = ?9
@@ -1421,11 +1422,14 @@ submitRoutes.post('/:slug/:formId/submit', async (c) => {
         db
           .prepare(
             `INSERT INTO submission_participants
-               (id, submission_id, contact_id, role, position, is_primary_contact, confirmed_at)
-             SELECT ?1, ?2, ?3, 'speaker', 1, 1, ?4
+               (id, submission_id, contact_id, role, position, is_primary_contact, confirmed_at,
+                title_at_time, org_at_time)
+             SELECT ?1, ?2, ?3, 'speaker', 1, 1, ?4,
+               (SELECT ec.job_title FROM event_contacts ec WHERE ec.contact_id = ?3 AND ec.event_id = ?5),
+               (SELECT ec.company FROM event_contacts ec WHERE ec.contact_id = ?3 AND ec.event_id = ?5)
              WHERE EXISTS (SELECT 1 FROM submissions WHERE id = ?2)`,
           )
-          .bind(crypto.randomUUID(), newId, session.contactId, ts),
+          .bind(crypto.randomUUID(), newId, session.contactId, ts, ctx.event.id),
       );
     }
 

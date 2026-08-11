@@ -130,6 +130,12 @@ const ERROR_MESSAGES: Record<string, string> = {
     'They also belong to events you do not administer, so they can only be removed from this one.',
   empty_body: 'A comment needs some text.',
   review_not_submitted: 'Post your review to join the discussion.',
+  not_staged: 'This draft already left the inbox — reload to see its current state.',
+  contact_has_no_email: 'This speaker has no email address on file.',
+  rung_max: 'This chase is already at the top rung — the next step happens outside the tool.',
+  rung_invalid: 'That escalation rung is not recognised.',
+  status_invalid: 'That draft status is not recognised.',
+  chase_mode_invalid: 'Chase mode must be "auto" or "assisted".',
 }
 
 function readableError(code: string): string {
@@ -340,9 +346,47 @@ export interface MessageRow {
   sent_at: string | null
 }
 
+/** One reviews-resource row (workplan 13 W1a) — the committee's scores. */
+export interface ReviewRow {
+  id: string
+  event_id: string
+  event_name?: string | null
+  submission_id: string
+  submission_code: string
+  submission_title: string
+  reviewer_contact_id: string | null
+  reviewer_name: string | null
+  plan_id: string
+  plan_name: string | null
+  weighted_total: number | null
+  /** Raw `{ criterion_id: score }` JSON text — deliberately not exploded into columns. */
+  scores: string | null
+  comment: string | null
+  conflict_of_interest: number
+  created_at: string
+}
+
+/** One comments-resource row (workplan 13 W1b) — the discussion threads. */
+export interface CommentListRow {
+  id: string
+  event_id: string
+  event_name?: string | null
+  submission_id: string
+  submission_code: string
+  submission_title: string
+  plan_id: string | null
+  assignment_id: string | null
+  author_contact_id: string | null
+  author_role: string
+  author_name: string | null
+  kind: string
+  body: string
+  created_at: string
+}
+
 /** DataList-compatible data source for the generic query endpoint. */
 export const queryResource =
-  <T>(resource: 'contacts' | 'submissions' | 'messages' | 'tasks') =>
+  <T>(resource: 'contacts' | 'submissions' | 'messages' | 'tasks' | 'reviews' | 'comments') =>
   (params: DataSourceParams): Promise<DataSourceResult<T>> =>
     request<DataSourceResult<T>>(`/app/api/${resource}/query`, {
       method: 'POST',
@@ -635,6 +679,9 @@ export const sendDecisions = (
     preflight?: boolean
     /** Workplan 10 Wave B: exclude these speakers' queued rows from a real send. */
     hold_contact_ids?: string[]
+    /** Workplan 13 W3: opt-in per send — ask accepted speakers for employer
+     * approval and flag their submissions approval_state='pending'. */
+    approval_ask?: boolean
   },
 ) =>
   request<{
@@ -664,6 +711,17 @@ export const sendDecisions = (
     { method: 'POST', body: JSON.stringify({ ids, ...options }) },
   )
 export const getSubmissionDetail = (id: string) => request<SubmissionDetail>(`/app/api/submissions/${id}/detail`)
+
+/** Workplan 13 W3 (D4): the employer-approval flag beside the status editor.
+ * State null clears it back to "not asked"; 'refused' never auto-withdraws. */
+export const updateSubmissionApproval = (
+  id: string,
+  body: { approval_state?: string | null; approval_note?: string | null },
+) =>
+  request<{ ok: boolean; approval_state: string | null; approval_note: string | null }>(
+    `/app/api/submissions/${id}/approval`,
+    { method: 'PUT', body: JSON.stringify(body) },
+  )
 
 // ---------------------------------------------------------------------------
 // Submission edit + participants (F14/ABS-11): the fuller edit surface — the
@@ -954,6 +1012,8 @@ export interface DashboardPayload {
     confirmation: { confirmed: number; awaiting: number }
     top_speakers: Array<{ contact_id: string; name: string; outstanding: number; overdue: number }>
     overdue: Array<{ assignment_id: string; contact_id: string; name: string; task_title: string; due_at: string; days_overdue: number }>
+    /** Workplan 13 W3: accepted talks awaiting employer approval, sorted by days-until-event ascending. */
+    approval_pending: Array<{ submission_id: string; code: string; title: string; approval_note: string | null; contact_id: string | null; name: string; days_until_event: number }>
     assets: Array<{ contact_id: string; name: string; missing_bio: number; missing_headshot: number; missing_slides: number }>
   }
   pipeline: {
@@ -1087,7 +1147,7 @@ export const resetDemoData = () =>
  */
 export function buildExportUrl(
   eventId: string,
-  resource: 'contacts' | 'submissions' | 'tasks' | 'messages',
+  resource: 'contacts' | 'submissions' | 'tasks' | 'messages' | 'reviews' | 'comments',
   format: 'csv' | 'xlsx',
   filters: Record<string, unknown>,
   sort?: { field: string; direction: 'asc' | 'desc' },
@@ -1352,3 +1412,77 @@ export const updateEmailTemplate = (
     `/app/api/messaging/templates/${key}`,
     { method: 'PUT', body: JSON.stringify(data) },
   )
+
+// ---------------------------------------------------------------------------
+// Assisted chasing (workplan 13 W4): the reminder sweep stages drafts instead
+// of sending, per D5/D6/D7 — the ladder is recorded, never automated, and a
+// send always carries the acting organiser's address in Reply-To, never From.
+// ---------------------------------------------------------------------------
+
+export const CHASE_RUNGS = ['tool_email', 'personal_email', 'cc_chair', 'text', 'call'] as const
+export type ChaseRung = (typeof CHASE_RUNGS)[number]
+export type ChaseDraftStatus = 'staged' | 'sent' | 'dismissed' | 'resolved'
+
+export interface ChaseDraftRow {
+  id: string
+  contact_id: string
+  contact_email: string | null
+  contact_name: string | null
+  subject_of: string
+  subject_id: string | null
+  rung: ChaseRung
+  status: ChaseDraftStatus
+  subject: string
+  body: string
+  staged_at: string
+  acted_at: string | null
+  acted_by: string | null
+}
+
+/** Sorted by contact server-side for grouping; `status` defaults to 'staged'. */
+export const getChaseDrafts = (params: { status?: ChaseDraftStatus; contact_id?: string } = {}) => {
+  const qs = new URLSearchParams()
+  if (params.status) qs.set('status', params.status)
+  if (params.contact_id) qs.set('contact_id', params.contact_id)
+  const s = qs.toString()
+  return request<{ items: ChaseDraftRow[] }>(`/app/api/chase/drafts${s ? `?${s}` : ''}`)
+}
+
+export const updateChaseDraft = (id: string, data: { subject?: string; body?: string }) =>
+  request<{ ok: boolean; item: ChaseDraftRow }>(`/app/api/chase/drafts/${id}`, {
+    method: 'PATCH',
+    body: JSON.stringify(data),
+  })
+
+/** Queues the draft with the organiser's Reply-To (D6); 422 contact_has_no_email. */
+export const sendChaseDraft = (id: string) =>
+  request<{ ok: boolean; outcome: 'queued' | 'duplicate' }>(`/app/api/chase/drafts/${id}/send`, { method: 'POST' })
+
+export const sendAllChaseDrafts = (contactId?: string) =>
+  request<{ ok: boolean; sent: number; skipped: number; total: number }>('/app/api/chase/drafts/send-all', {
+    method: 'POST',
+    body: JSON.stringify(contactId ? { contact_id: contactId } : {}),
+  })
+
+export const dismissChaseDraft = (id: string) =>
+  request<{ ok: boolean }>(`/app/api/chase/drafts/${id}/dismiss`, { method: 'POST' })
+
+/** Bumps the rung and records when; sends nothing (D7). Omitted rung advances
+ * one step; 409 rung_max at the top of the ladder. */
+export const escalateChaseDraft = (id: string, rung?: ChaseRung) =>
+  request<{ ok: boolean; rung: ChaseRung; acted_at: string }>(`/app/api/chase/drafts/${id}/escalate`, {
+    method: 'POST',
+    body: JSON.stringify(rung ? { rung } : {}),
+  })
+
+export interface ChaseSettings {
+  chase_mode: 'auto' | 'assisted'
+}
+
+export const getChaseSettings = () => request<ChaseSettings>('/app/api/chase/settings')
+
+export const updateChaseSettings = (chase_mode: ChaseSettings['chase_mode']) =>
+  request<{ ok: boolean; chase_mode: ChaseSettings['chase_mode'] }>('/app/api/chase/settings', {
+    method: 'PUT',
+    body: JSON.stringify({ chase_mode }),
+  })

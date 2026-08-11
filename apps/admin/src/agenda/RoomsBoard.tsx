@@ -3,7 +3,7 @@ import type { AgendaRoom, AgendaSessionRow } from '../api'
 import { getDrag, setDrag } from './dragState'
 import type { DropPreview } from './TimeGrid'
 import { DROP_SNAP_MIN } from './TimeGrid'
-import { durationMinutes, fmtDay, fmtMinutes, snapTo, utcToLocal } from './timeUtils'
+import { classifySchedule, durationMinutes, fmtDay, fmtMinutes, snapTo, utcToLocal } from './timeUtils'
 
 /**
  * Room-major board (docs/07 §2): one lane per room across the event days —
@@ -128,6 +128,20 @@ export function RoomsBoard({
           <div className="rb-room-label">
             <span>{room.name}</span>
             {room.capacity !== null && <span className="rb-cap">{room.capacity}</span>}
+            {/* Room set, no time (docs/13 W5) — a chip in the room's header
+                strip rather than a spot on the timeline it has no time for. */}
+            {sessions
+              .filter((s) => s.room_id === room.id && classifySchedule(s) === 'pencilled' && s.starts_at === null)
+              .map((s) => (
+                <button
+                  key={s.id}
+                  className="rb-pencil-chip"
+                  title={`${s.code} · ${s.title} · no time set`}
+                  onClick={() => onOpenMove(s.id)}
+                >
+                  {s.title}
+                </button>
+              ))}
           </div>
           {days.map((day) => (
             <div

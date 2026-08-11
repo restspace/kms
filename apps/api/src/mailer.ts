@@ -28,6 +28,12 @@ export interface SendTemplatedArgs {
   context: Record<string, unknown>;
   ics?: IcsPayload;
   /**
+   * Reply-To address (workplan-13 D6): assisted chase sends carry the acting
+   * organiser's address so replies reach her inbox; From stays EMAIL_FROM so
+   * SPF/DKIM keep passing.
+   */
+  replyTo?: string;
+  /**
    * Ad-hoc template body supplied by the caller instead of looked up from
    * `email_templates`/DEFAULT_TEMPLATES (SPK-13: the organiser compose flow
    * writes its subject/body once into a bulk_jobs snapshot, then renders it
@@ -140,6 +146,7 @@ export async function queueTemplated(
     text: rendered.text,
     html: rendered.html,
     ...(args.ics ? { ics: args.ics, calendar: true } : {}),
+    ...(args.replyTo ? { reply_to: args.replyTo } : {}),
     log_key: logKey,
   };
   await createDb(db).outbox.enqueue({ kind: 'email', idempotencyKey: logKey, payload });
@@ -176,6 +183,7 @@ export async function prepareTemplated(db: D1Database, args: SendTemplatedArgs):
     text: rendered.text,
     html: rendered.html,
     ...(args.ics ? { ics: args.ics, calendar: true } : {}),
+    ...(args.replyTo ? { reply_to: args.replyTo } : {}),
     log_key: logKey,
   };
   const statements = [
