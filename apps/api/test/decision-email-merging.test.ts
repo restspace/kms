@@ -391,23 +391,38 @@ describe('decision email merging (workplan 10)', () => {
     const acc = await seedSubmission(eventId, speaker, 'accept_queue', { title: 'Feedback Accept Talk' });
     const dec = await seedSubmission(eventId, speaker, 'decline_queue', { title: 'Feedback Decline Talk' });
 
+    // reviews.comment is deprecated (workplan 7 §3): feedback now comes from
+    // the submission_comments thread — each assignment's latest
+    // kind='rationale' row, with a conflicted assignment excluded via the
+    // reviews join. Fixture shape mirrors bulkjobs-expander.test.ts: a real
+    // review_assignments row per rationale, plus a second plan for the
+    // conflicted assignment (UNIQUE(plan_id, submission_id, reviewer)).
     const plan = `plan-${crypto.randomUUID()}`;
+    const plan2 = `plan-${crypto.randomUUID()}`;
     await env.DB.prepare(`INSERT INTO evaluation_plans (id, event_id, name, status, created_at) VALUES (?, ?, 'Plan', 'active', ?)`)
       .bind(plan, eventId, ts).run();
+    await env.DB.prepare(`INSERT INTO evaluation_plans (id, event_id, name, status, created_at) VALUES (?, ?, 'Plan 2', 'active', ?)`)
+      .bind(plan2, eventId, ts).run();
     const reviewer = await createContact(eventId, { email: 'reviewer@example.com' });
-    await env.DB.prepare(
-      `INSERT INTO reviews (id, submission_id, reviewer_contact_id, plan_id, comment, conflict_of_interest, created_at)
-       VALUES (?, ?, ?, ?, ?, 0, ?)`,
-    ).bind(`rev-${crypto.randomUUID()}`, acc, reviewer, plan, 'Loved the pacing.', ts).run();
-    await env.DB.prepare(
-      `INSERT INTO reviews (id, submission_id, reviewer_contact_id, plan_id, comment, conflict_of_interest, created_at)
-       VALUES (?, ?, ?, ?, ?, 0, ?)`,
-    ).bind(`rev-${crypto.randomUUID()}`, dec, reviewer, plan, 'Not a fit for this track.', ts).run();
-    // A conflicted review's comment must never leak into the merged email.
-    await env.DB.prepare(
-      `INSERT INTO reviews (id, submission_id, reviewer_contact_id, plan_id, comment, conflict_of_interest, created_at)
-       VALUES (?, ?, ?, ?, ?, 1, ?)`,
-    ).bind(`rev-${crypto.randomUUID()}`, acc, reviewer, plan, 'CONFLICTED comment — must not appear', ts).run();
+    const seedRationale = async (planId: string, submissionId: string, conflict: boolean, rationale: string) => {
+      const assignmentId = `ra-${crypto.randomUUID()}`;
+      await env.DB.prepare(
+        `INSERT INTO review_assignments (id, plan_id, submission_id, reviewer_contact_id, status, assigned_at)
+         VALUES (?, ?, ?, ?, 'complete', ?)`,
+      ).bind(assignmentId, planId, submissionId, reviewer, ts).run();
+      await env.DB.prepare(
+        `INSERT INTO reviews (id, assignment_id, submission_id, reviewer_contact_id, plan_id, comment, conflict_of_interest, created_at)
+         VALUES (?, ?, ?, ?, ?, NULL, ?, ?)`,
+      ).bind(`rev-${crypto.randomUUID()}`, assignmentId, submissionId, reviewer, planId, conflict ? 1 : 0, ts).run();
+      await env.DB.prepare(
+        `INSERT INTO submission_comments (id, event_id, submission_id, plan_id, assignment_id, author_contact_id, author_role, kind, body, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, 'reviewer', 'rationale', ?, ?)`,
+      ).bind(`sc-${crypto.randomUUID()}`, eventId, submissionId, planId, assignmentId, reviewer, rationale, ts).run();
+    };
+    await seedRationale(plan, acc, false, 'Loved the pacing.');
+    await seedRationale(plan, dec, false, 'Not a fit for this track.');
+    // A conflicted assignment's rationale must never leak into the merged email.
+    await seedRationale(plan2, acc, true, 'CONFLICTED comment — must not appear');
 
     const res = await SELF.fetch(SEND_DECISIONS_URL, post(cookie, { ids: [acc, dec], include_feedback: true }));
     const body = (await res.json()) as { job_id: string };
