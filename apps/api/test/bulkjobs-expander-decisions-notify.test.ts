@@ -25,6 +25,22 @@ const ts = '2026-08-01T00:00:00Z';
 const clearPendingJobs = () =>
   env.DB.prepare("DELETE FROM bulk_jobs WHERE status IN ('pending', 'running')").run();
 
+// The send-decisions route now kicks the expander itself via waitUntil (the
+// dead-minute fix), so the job may be mid-expansion in the background when
+// the response lands. Sweep for anything still pending, then wait for the
+// job row to reach a terminal state before asserting.
+async function settleJob(jobId: string) {
+  await sweepBulkJobs(env, 50);
+  for (let i = 0; i < 50; i++) {
+    const row = await env.DB.prepare('SELECT status FROM bulk_jobs WHERE id = ?')
+      .bind(jobId)
+      .first<{ status: string }>();
+    if (row && row.status !== 'pending' && row.status !== 'running') return;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  throw new Error(`bulk job ${jobId} never settled`);
+}
+
 async function staffSession(eventId: string) {
   const contactId = await createContact(eventId, { email: `admin-${crypto.randomUUID()}@example.com` });
   await createEventUser(eventId, contactId, 'admin');
@@ -70,7 +86,7 @@ describe('POST /app/api/submissions/send-decisions — notified_at only on succe
     expect(body.declined).toBe(1);
     expect(body.skipped_no_submitter).toBe(1);
 
-    await sweepBulkJobs(env, 50);
+    await settleJob(body.job_id);
 
     const rows = await env.DB.prepare('SELECT id, status, notified_at FROM submissions WHERE id IN (?, ?)')
       .bind(withSubmitter, withoutSubmitter)
@@ -113,7 +129,7 @@ describe('POST /app/api/submissions/send-decisions — notified_at only on succe
       post(cookie, { ids: [submissionId] }),
     );
     const body = (await res.json()) as { job_id: string };
-    await sweepBulkJobs(env, 50);
+    await settleJob(body.job_id);
 
     const row = await env.DB.prepare('SELECT status, notified_at FROM submissions WHERE id = ?')
       .bind(submissionId)

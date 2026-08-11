@@ -217,6 +217,18 @@ const ContactHeadshot = ({ item }: { item: ContactRow }) =>
       alt={`${contactName(item)} headshot`}
       width={64}
       height={64}
+      // A pointer whose asset fails to serve would otherwise paint as a bare
+      // chrome-coloured circle, indistinguishable from "no headshot at all" —
+      // swap in the initials fallback so the failure is at least legible.
+      onError={(e) => {
+        const el = e.currentTarget
+        el.style.display = 'none'
+        const fallback = document.createElement('div')
+        fallback.className = 'contact-headshot contact-headshot-fallback'
+        fallback.setAttribute('aria-hidden', 'true')
+        fallback.textContent = initials(item)
+        el.parentElement?.insertBefore(fallback, el)
+      }}
     />
   ) : (
     <div className="contact-headshot contact-headshot-fallback" aria-hidden="true">

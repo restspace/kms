@@ -11,6 +11,7 @@ import type { Context } from 'hono';
 import { computeConflicts } from '@kms/core';
 import type { AgendaRoomInput } from '@kms/core';
 import type { AccessEnv } from '../access';
+import { sweepBulkJobs } from '../jobs/bulkJobs';
 import { getEventRevision } from '../revision';
 import { loadIgnored, loadSessions, toEngineInput } from './agenda';
 
@@ -471,6 +472,17 @@ dashboardRoutes.post('/remind', async (c) => {
       now,
     )
     .run();
+
+  // Kick the expander now instead of leaving the job for the next cron tick:
+  // the dashboard poll otherwise reads "0/N queued" for up to a minute
+  // (CNT-08). One sweep call expands one chunk after the response; anything
+  // beyond RECIPIENTS_PER_TICK still drains on cron, so the P2-19 request
+  // budget concern is unchanged.
+  try {
+    c.executionCtx.waitUntil(sweepBulkJobs(c.env));
+  } catch {
+    await sweepBulkJobs(c.env); // environments without an execution context (tests)
+  }
 
   return c.json({ ok: true, job_id: jobId, total: targets.length, sent: 0, skipped: 0 }, 202);
 });

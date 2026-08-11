@@ -98,19 +98,33 @@ describe('POST /app/api/dashboard/remind', () => {
     const body = (await res.json()) as { ok: boolean; job_id: string; sent: number; skipped: number; total: number };
     expect(body).toMatchObject({ ok: true, sent: 0, skipped: 0, total: 1 });
 
+    // The route kicks the expander via waitUntil; wait for the background
+    // expansion to reach a terminal state before asserting.
+    let jobStatus = '';
+    for (let i = 0; i < 50 && jobStatus !== 'done' && jobStatus !== 'failed'; i++) {
+      const r = await env.DB.prepare('SELECT status FROM bulk_jobs WHERE id = ?')
+        .bind(body.job_id).first<{ status: string }>();
+      jobStatus = r?.status ?? '';
+      if (jobStatus !== 'done' && jobStatus !== 'failed') await new Promise((rs) => setTimeout(rs, 100));
+    }
+
     const job = await env.DB.prepare('SELECT kind, status, total, params_json FROM bulk_jobs WHERE id = ?')
       .bind(body.job_id).first<{ kind: string; status: string; total: number; params_json: string }>();
-    expect(job).toMatchObject({ kind: 'remind-tasks', status: 'pending', total: 1 });
+    // The route now kicks the expander before returning (dead-minute fix for
+    // CNT-08: the dashboard poll otherwise reads "0/N queued" until the next
+    // cron tick), so a small job is fully expanded by the time the response
+    // lands. The response body itself still reports frozen zeros.
+    expect(job).toMatchObject({ kind: 'remind-tasks', status: 'done', total: 1 });
     expect(JSON.parse(job!.params_json).assignment_ids).toHaveLength(1);
 
-    // Nothing was sent by the request itself.
+    // The expander delivered inline (console provider): one logged message.
     const messages = await env.DB.prepare('SELECT COUNT(*) AS n FROM message_log WHERE event_id = ?')
       .bind(eventId).first<{ n: number }>();
-    expect(messages?.n).toBe(0);
+    expect(messages?.n).toBe(1);
 
     const status = await SELF.fetch(`https://example.com/app/api/bulk-jobs/${body.job_id}`, { headers: { cookie: admin.cookie } });
     expect(status.status).toBe(200);
-    expect(await status.json()).toMatchObject({ id: body.job_id, kind: 'remind-tasks', status: 'pending', total: 1, enqueued: 0, sent: 0, failed: 0 });
+    expect(await status.json()).toMatchObject({ id: body.job_id, kind: 'remind-tasks', status: 'done', total: 1, enqueued: 1, sent: 1, failed: 0 });
 
     // Progress is read back through message_log.bulk_job_id (migration 0014).
     // The idempotency key deliberately no longer carries the job id: it names
@@ -125,7 +139,8 @@ describe('POST /app/api/dashboard/remind', () => {
     await env.DB.prepare('UPDATE bulk_jobs SET enqueued = 3, status = \'running\' WHERE id = ?').bind(body.job_id).run();
 
     const progressed = await SELF.fetch(`https://example.com/app/api/bulk-jobs/${body.job_id}`, { headers: { cookie: admin.cookie } });
-    expect(await progressed.json()).toMatchObject({ status: 'running', enqueued: 3, sent: 2, failed: 1 });
+    // 3 synthetic rows + the 1 the inline expansion really sent above.
+    expect(await progressed.json()).toMatchObject({ status: 'running', enqueued: 3, sent: 3, failed: 1 });
   });
 
   it('404s a bulk job from another event', async () => {

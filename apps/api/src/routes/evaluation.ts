@@ -9,6 +9,7 @@ import { ALL_PARTICIPANT_ROLES } from '@kms/core';
 import type { AppEnv, Env } from '../env';
 import type { SendTemplatedArgs } from '../mailer';
 import { sendTemplated } from '../mailer';
+import { sweepBulkJobs } from '../jobs/bulkJobs';
 import { requestMagicLink } from './auth';
 import { mintToken } from '../tokens';
 import { bumpEventRevision } from '../revision';
@@ -297,6 +298,14 @@ evaluationRoutes.post('/submissions/send-decisions', async (c) => {
         ts,
       )
       .run();
+    // Expand now rather than on the next cron tick, so the decision toast's
+    // first polls see real progress instead of "0/N processed" for up to a
+    // minute (same dead-minute fix as dashboard /remind).
+    try {
+      c.executionCtx.waitUntil(sweepBulkJobs(c.env));
+    } catch {
+      await sweepBulkJobs(c.env); // environments without an execution context (tests)
+    }
   }
 
   return c.json({

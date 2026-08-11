@@ -28,6 +28,21 @@ import './review.css'
  * chips), the bulk-action bar and the submission detail tab.
  */
 
+/**
+ * Rich-text answers (wysiwyg description fields) reach the detail as an HTML
+ * string; rendering it as a React child shows literal '<p>…</p>' tags
+ * (CNT eval, SESS-1). Reduce to plain text with paragraph/line breaks kept as
+ * newlines — same approach as App.tsx's stripHtml, plus break preservation.
+ */
+const htmlToText = (html: string): string => {
+  if (!/[<>]/.test(html)) return html
+  const el = document.createElement('div')
+  el.innerHTML = html
+    .replace(/<\s*br\s*\/?>/gi, '\n')
+    .replace(/<\/\s*(p|div|li|h[1-6])\s*>/gi, '\n')
+  return (el.textContent ?? '').replace(/\n{3,}/g, '\n\n').trim()
+}
+
 export const SUBMISSION_STATUSES = [
   'pending',
   'accept_queue',
@@ -553,7 +568,11 @@ export function SubmissionDetailPanel({ id, onEdit, onItemSaved }: {
       </div>
 
       <dl>
-        {s.description ? <DetailPair term="Description">{String(s.description)}</DetailPair> : null}
+        {s.description ? (
+          <DetailPair term="Description">
+            <span style={{ whiteSpace: 'pre-line' }}>{htmlToText(String(s.description))}</span>
+          </DetailPair>
+        ) : null}
         {s.format ? <DetailPair term="Format">{String(s.format)}</DetailPair> : null}
         {s.track_name ? <DetailPair term="Track">{String(s.track_name)}</DetailPair> : null}
         {s.plan_name ? <DetailPair term="Evaluation plan">{String(s.plan_name)}</DetailPair> : null}
