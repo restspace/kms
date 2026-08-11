@@ -2088,10 +2088,11 @@ adminApiRoutes.get('/events', async (c) => {
 // Progress for all three producers of a bulk_jobs row: this file's remind
 // handler ('remind-tasks'), agenda send-confirmations (BE-1) and evaluation
 // send-decisions (BE-4). `enqueued` is the expander's own counter on the row.
-// sent/failed are counted from message_log: the expander sends with
-// entityId = "<jobId>:<naturalId>", so the key reads
-// "<template>:<contactId>:<jobId>:<naturalId>:v<version>" — the job id is an
-// interior segment, matched as ':<jobId>:' (frozen contract with BE-4).
+// sent/failed are counted from message_log by `bulk_job_id` — its own
+// indexed column since migration 0014. This used to match the job id as an
+// interior segment of idempotency_key (`LIKE '%:'||id||':%'`), which put the
+// batch inside the UNIQUE key that per-message dedupe depends on and broke
+// per-day reminder idempotency outright; it also could never use an index.
 // `queued` is every message_log row for this job that is neither sent nor
 // failed yet, so a caller that settles on 'done' can distinguish "nothing was
 // ever queued" from "queued, delivery still in flight" — reporting the former
@@ -2101,20 +2102,20 @@ adminApiRoutes.get('/bulk-jobs/:id', async (c) => {
   const session = c.get('session');
   const jobId = c.req.param('id');
   const row = await c.env.DB.prepare(
-    `SELECT j.id, j.kind, j.status, j.total, j.enqueued, j.error, j.params_json,
+    `SELECT j.id, j.kind, j.status, j.total, j.enqueued, j.error, j.params_json, j.skipped_duplicate,
             (SELECT COUNT(*) FROM message_log m
-              WHERE m.idempotency_key LIKE '%:' || ?1 || ':%' AND m.status = 'sent') AS sent,
+              WHERE m.bulk_job_id = ?1 AND m.status = 'sent') AS sent,
             (SELECT COUNT(*) FROM message_log m
-              WHERE m.idempotency_key LIKE '%:' || ?1 || ':%' AND m.status = 'failed') AS failed,
+              WHERE m.bulk_job_id = ?1 AND m.status = 'failed') AS failed,
             (SELECT COUNT(*) FROM message_log m
-              WHERE m.idempotency_key LIKE '%:' || ?1 || ':%'
-                AND m.status NOT IN ('sent', 'failed')) AS queued
+              WHERE m.bulk_job_id = ?1 AND m.status NOT IN ('sent', 'failed')) AS queued
      FROM bulk_jobs j WHERE j.id = ?1 AND j.event_id = ?2`,
   )
     .bind(jobId, session.eventId)
     .first<{
       id: string; kind: string; status: string; total: number | null; enqueued: number;
-      error: string | null; params_json: string; sent: number; failed: number; queued: number;
+      error: string | null; params_json: string; skipped_duplicate: number;
+      sent: number; failed: number; queued: number;
     }>();
   if (!row) return c.json({ error: 'not_found' }, 404);
   const { params_json, ...body } = row;

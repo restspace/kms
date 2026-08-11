@@ -66,9 +66,73 @@ describe('sweepBulkJobs / remind-tasks', () => {
     expect(job).toEqual({ status: 'done', enqueued: 2, total: 2 });
 
     const messages = await env.DB.prepare(
-      `SELECT COUNT(*) AS n FROM message_log WHERE template_key = 'task_reminder' AND idempotency_key LIKE '%:' || ? || ':%'`,
+      `SELECT COUNT(*) AS n FROM message_log WHERE template_key = 'task_reminder' AND bulk_job_id = ?`,
     ).bind(jobId).first<{ n: number }>();
     expect(messages?.n).toBe(2);
+  });
+
+  // Regression for the defect the 2026-08-10 unhappy-path e2e run caught
+  // (tests/e2e-unhappy-run-u08102133.md, M5.2/M5.3): every press of
+  // "Remind all" snapshots a *new* bulk job, and the expander used to bake
+  // that job id into the idempotency key as
+  // `task_reminder:<contact>:<jobId>:<assignment>:vmanual-<day>`. Since the
+  // job id was fresh each press, the UNIQUE key never collided and speakers
+  // were re-reminded once per press — the per-day guarantee (NFR-11) existed
+  // only in the `vmanual-<day>` suffix and was defeated by its neighbour.
+  it('sends a given assignment at most one reminder per day, however many jobs are enqueued (NFR-11)', async () => {
+    await clearPendingJobs();
+    const eventId = await createEvent();
+    const speaker = await createContact(eventId, { email: 'twice@example.com' });
+    const { assignId } = await seedOverdueAssignment(eventId, speaker);
+
+    const firstJob = await seedRemindJob(eventId, [assignId]);
+    await sweepBulkJobs(env, 50);
+    const secondJob = await seedRemindJob(eventId, [assignId]);
+    await sweepBulkJobs(env, 50);
+
+    // One message for this assignment today, not one per job.
+    const messages = await env.DB.prepare(
+      `SELECT COUNT(*) AS n FROM message_log WHERE template_key = 'task_reminder' AND contact_id = ?`,
+    ).bind(speaker).first<{ n: number }>();
+    expect(messages?.n).toBe(1);
+
+    // The one message belongs to the job that actually sent it; the second
+    // job reports its recipient as a suppressed duplicate rather than
+    // reporting a bare "0 sent" that reads like a failure.
+    const owner = await env.DB.prepare(
+      `SELECT bulk_job_id FROM message_log WHERE template_key = 'task_reminder' AND contact_id = ?`,
+    ).bind(speaker).first<{ bulk_job_id: string }>();
+    expect(owner?.bulk_job_id).toBe(firstJob);
+
+    const second = await env.DB.prepare('SELECT status, enqueued, skipped_duplicate FROM bulk_jobs WHERE id = ?')
+      .bind(secondJob)
+      .first<{ status: string; enqueued: number; skipped_duplicate: number }>();
+    expect(second).toEqual({ status: 'done', enqueued: 1, skipped_duplicate: 1 });
+  });
+
+  // The key's day segment is the event's calendar day, not the worker's UTC
+  // one (packages/core/src/time.ts). For an America/Los_Angeles event an
+  // organiser pressing "Remind all" at 17:00 local is already on the next
+  // UTC date, and a UTC-keyed guard would wave the duplicate through.
+  it('keys the per-day guard to the event timezone, not UTC', async () => {
+    await clearPendingJobs();
+    const eventId = await createEvent();
+    await env.DB.prepare('UPDATE events SET timezone = ? WHERE id = ?').bind('America/Los_Angeles', eventId).run();
+    const speaker = await createContact(eventId, { email: 'tz@example.com' });
+    const { assignId } = await seedOverdueAssignment(eventId, speaker);
+
+    const jobId = await seedRemindJob(eventId, [assignId]);
+    await sweepBulkJobs(env, 50);
+
+    const row = await env.DB.prepare(
+      `SELECT idempotency_key FROM message_log WHERE template_key = 'task_reminder' AND contact_id = ?`,
+    ).bind(speaker).first<{ idempotency_key: string }>();
+    // No job id anywhere in the key, and the day is the event-local one.
+    expect(row?.idempotency_key).not.toContain(jobId);
+    const expectedDay = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'America/Los_Angeles', year: 'numeric', month: '2-digit', day: '2-digit',
+    }).format(new Date());
+    expect(row?.idempotency_key).toBe(`task_reminder:${speaker}:${assignId}:vmanual-${expectedDay}`);
   });
 
   it('never hangs when a targeted assignment stops being overdue before the sweep runs (CNT-08)', async () => {
@@ -94,7 +158,7 @@ describe('sweepBulkJobs / remind-tasks', () => {
     expect(job).toEqual({ status: 'done', enqueued: 2, total: 2 });
 
     const messages = await env.DB.prepare(
-      `SELECT COUNT(*) AS n FROM message_log WHERE template_key = 'task_reminder' AND idempotency_key LIKE '%:' || ? || ':%'`,
+      `SELECT COUNT(*) AS n FROM message_log WHERE template_key = 'task_reminder' AND bulk_job_id = ?`,
     ).bind(jobId).first<{ n: number }>();
     expect(messages?.n).toBe(0);
   });
@@ -142,7 +206,7 @@ describe('sweepBulkJobs / remind-tasks', () => {
 
     const sent = await env.DB.prepare(
       `SELECT COUNT(*) AS n FROM message_log
-       WHERE template_key = 'task_reminder' AND status = 'sent' AND idempotency_key LIKE '%:' || ? || ':%'`,
+       WHERE template_key = 'task_reminder' AND status = 'sent' AND bulk_job_id = ?`,
     ).bind(jobId).first<{ n: number }>();
     expect(sent?.n).toBe(2);
   });
@@ -172,7 +236,7 @@ describe('sweepBulkJobs / remind-tasks', () => {
 
     const sent = await env.DB.prepare(
       `SELECT COUNT(*) AS n FROM message_log
-       WHERE status = 'sent' AND idempotency_key LIKE '%:' || ? || ':%'`,
+       WHERE status = 'sent' AND bulk_job_id = ?`,
     ).bind(jobId).first<{ n: number }>();
     expect(sent?.n).toBe(1);
 

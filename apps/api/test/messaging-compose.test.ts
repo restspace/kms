@@ -216,7 +216,7 @@ describe('sweepBulkJobs / compose', () => {
 
     const { results: logs } = await env.DB.prepare(
       `SELECT to_email, subject, template_key, contact_id FROM message_log
-       WHERE idempotency_key LIKE '%:' || ? || ':%' ORDER BY to_email`,
+       WHERE bulk_job_id = ? ORDER BY to_email`,
     )
       .bind(jobId)
       .all<{ to_email: string; subject: string; template_key: string; contact_id: string }>();
@@ -230,7 +230,9 @@ describe('sweepBulkJobs / compose', () => {
     // The body is merged too — check the queued outbox payload, which carries
     // the rendered HTML/text the provider would receive.
     const outbox = await env.DB.prepare(
-      `SELECT payload FROM outbox WHERE idempotency_key LIKE '%:' || ? || ':%' ORDER BY idempotency_key`,
+      `SELECT payload FROM outbox
+       WHERE idempotency_key IN (SELECT idempotency_key FROM message_log WHERE bulk_job_id = ?)
+       ORDER BY idempotency_key`,
     )
       .bind(jobId)
       .all<{ payload: string }>();
@@ -265,7 +267,7 @@ describe('sweepBulkJobs / compose', () => {
     expect(job?.status).toBe('done');
 
     expect(
-      await countRows(`SELECT COUNT(*) AS n FROM message_log WHERE idempotency_key LIKE '%:' || ? || ':%'`, jobId),
+      await countRows(`SELECT COUNT(*) AS n FROM message_log WHERE bulk_job_id = ?`, jobId),
     ).toBe(3);
   });
 
@@ -310,13 +312,13 @@ describe('sweepBulkJobs / compose', () => {
 
     const sent = await env.DB.prepare(
       `SELECT COUNT(*) AS n FROM message_log
-       WHERE template_key = 'compose' AND status = 'sent' AND idempotency_key LIKE '%:' || ? || ':%'`,
+       WHERE template_key = 'compose' AND status = 'sent' AND bulk_job_id = ?`,
     ).bind(jobId).first<{ n: number }>();
     expect(sent?.n).toBe(2);
 
     const queuedStill = await env.DB.prepare(
       `SELECT COUNT(*) AS n FROM message_log
-       WHERE template_key = 'compose' AND status = 'queued' AND idempotency_key LIKE '%:' || ? || ':%'`,
+       WHERE template_key = 'compose' AND status = 'queued' AND bulk_job_id = ?`,
     ).bind(jobId).first<{ n: number }>();
     expect(queuedStill?.n).toBe(0);
 

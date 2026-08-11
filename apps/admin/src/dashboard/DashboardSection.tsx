@@ -254,17 +254,27 @@ export function DashboardSection({ onNavigate }: { onNavigate: (target: AppNavTa
           remindPollTimerRef.current = null
           setBusy(false)
           const skippedNoEmail = job.skipped_no_email ?? 0
+          const skippedDuplicate = job.skipped_duplicate ?? 0
+          // A run that sent nothing because everyone was already reminded is
+          // the guarantee working, so lead with that rather than reporting a
+          // bare "0 reminders sent" that reads like a failure.
+          const allAlreadyReminded = job.sent === 0 && job.failed === 0 && skippedDuplicate > 0
           setNote(
             job.status === 'failed'
               ? (job.error ?? 'Sending reminders failed.')
-              : `${job.sent} reminder${job.sent === 1 ? '' : 's'} sent` +
-                (job.failed > 0 ? `, ${job.failed} failed` : '') +
-                // Additive (CNT-08 follow-through): a snapshot id can't be
-                // mailed when its contact has no email on file — say so
-                // instead of letting "N sent" imply every overdue id was
-                // reached when some were silently unreachable.
-                (skippedNoEmail > 0 ? `, ${skippedNoEmail} skipped — no email` : '') +
-                '.',
+              : allAlreadyReminded
+                ? `Already reminded today — ${skippedDuplicate} skipped` +
+                  (skippedNoEmail > 0 ? `, ${skippedNoEmail} skipped — no email` : '') +
+                  '.'
+                : `${job.sent} reminder${job.sent === 1 ? '' : 's'} sent` +
+                  (job.failed > 0 ? `, ${job.failed} failed` : '') +
+                  (skippedDuplicate > 0 ? `, ${skippedDuplicate} already reminded today` : '') +
+                  // Additive (CNT-08 follow-through): a snapshot id can't be
+                  // mailed when its contact has no email on file — say so
+                  // instead of letting "N sent" imply every overdue id was
+                  // reached when some were silently unreachable.
+                  (skippedNoEmail > 0 ? `, ${skippedNoEmail} skipped — no email` : '') +
+                  '.',
           )
           await load(true)
           return
@@ -283,17 +293,16 @@ export function DashboardSection({ onNavigate }: { onNavigate: (target: AppNavTa
   const remind = useCallback(async (ids?: string[]) => {
     setBusy(true)
     try {
+      // POST /remind always snapshots a bulk job and hands back its id; the
+      // counts in the body are frozen zeros for pre-job clients. Everything
+      // the admin sees comes from the poll.
       const r = await remindTasks(ids) as { ok: boolean; sent: number; skipped: number; job_id?: string }
       if (r.job_id) {
         setNote('Sending reminders…')
         pollRemindJob(r.job_id)
         return
       }
-      setNote(
-        r.sent === 0 && r.skipped > 0
-          ? `Already reminded today — ${r.skipped} skipped.`
-          : `${r.sent} reminder${r.sent === 1 ? '' : 's'} sent${r.skipped > 0 ? `, ${r.skipped} already reminded today` : ''}.`,
-      )
+      setNote('Reminders queued.')
       await load(true)
       setBusy(false)
     } catch (err) {

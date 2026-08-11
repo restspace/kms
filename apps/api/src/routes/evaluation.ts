@@ -154,9 +154,10 @@ evaluationRoutes.post('/submissions/bulk-status', async (c) => {
  * call actually created, so already-assigned tasks are silently skipped and
  * never re-emailed (sweep item P1-5). `send` is injected so the same core
  * works from a request (sendTemplated, immediate attempt) and from the bulk
- * job expander (queueTemplated, cron has no request Context) — the expander
- * passes `entityPrefix` so its keys carry the job id per the bulk-job
- * idempotency convention (see jobs/bulkJobs.ts).
+ * job expander (queueTemplated, cron has no request Context). The entity id
+ * is always the plain assignment id — an expander tags its sends with
+ * `bulkJobId` instead, keeping batch membership out of the idempotency key
+ * (see jobs/bulkJobs.ts).
  */
 export async function autoAssignAcceptTasksCore(
   db: D1Database,
@@ -166,7 +167,6 @@ export async function autoAssignAcceptTasksCore(
   eventSlug: string,
   appUrl: string,
   send: (args: SendTemplatedArgs) => Promise<unknown>,
-  entityPrefix?: string,
 ): Promise<number> {
   const { results: tasks } = await db
     .prepare(
@@ -212,7 +212,7 @@ export async function autoAssignAcceptTasksCore(
       eventId,
       contactId: owner.id,
       toEmail: owner.email,
-      entityId: entityPrefix ? `${entityPrefix}:${row.id}` : row.id,
+      entityId: row.id,
       context: {
         event: { name: eventName },
         speaker: { first_name: owner.first_name ?? 'there' },

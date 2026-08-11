@@ -80,7 +80,7 @@ describe('send-decisions reports delivery truthfully', () => {
       .bind(accepted, declined)
       .first<{ n: number }>();
     const logged = await env.DB.prepare(
-      `SELECT COUNT(*) AS n FROM message_log WHERE idempotency_key LIKE '%:' || ? || ':%'`,
+      `SELECT COUNT(*) AS n FROM message_log WHERE bulk_job_id = ?`,
     )
       .bind(body.job_id)
       .first<{ n: number }>();

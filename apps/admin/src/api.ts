@@ -310,6 +310,9 @@ export interface BulkJobStatus {
   error: string | null
   /** send-decisions only: accepted/declined submissions with no submitter contact to notify. */
   skipped_no_submitter?: number
+  /** Recipients the idempotency key caught as already messaged (remind-tasks:
+   *  already reminded today). Optional: older workers omit it. */
+  skipped_duplicate?: number
   /** remind-tasks only: overdue assignments whose contact has no email on file. */
   skipped_no_email?: number
 }

@@ -56,7 +56,7 @@ describe('sweepBulkJobs / send-decisions', () => {
     expect(byId[s3]).toBe('accepted');
 
     // One decision email per submission — never a duplicate from the two ticks.
-    const messages = await env.DB.prepare(`SELECT COUNT(*) AS n FROM message_log WHERE idempotency_key LIKE '%:' || ? || ':%'`)
+    const messages = await env.DB.prepare(`SELECT COUNT(*) AS n FROM message_log WHERE bulk_job_id = ?`)
       .bind(jobId)
       .first<{ n: number }>();
     expect(messages?.n).toBe(3);
@@ -114,7 +114,9 @@ describe('sweepBulkJobs / send-decisions', () => {
     // message via the jobId-embedded idempotency-key convention — a bare
     // 'decision_accepted:%' pattern can match an earlier test's row instead.
     const outboxRow = await env.DB.prepare(
-      `SELECT payload FROM outbox WHERE idempotency_key LIKE 'decision_accepted:%' AND idempotency_key LIKE '%' || ? || '%'`,
+      `SELECT payload FROM outbox
+       WHERE idempotency_key IN (SELECT idempotency_key FROM message_log WHERE bulk_job_id = ?)
+         AND idempotency_key LIKE 'decision_accepted:%'`,
     ).bind(jobId).first<{ payload: string }>();
     expect(outboxRow).toBeTruthy();
     const payload = JSON.parse(outboxRow!.payload) as { html: string; text: string };

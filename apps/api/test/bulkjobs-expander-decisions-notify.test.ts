@@ -85,7 +85,7 @@ describe('POST /app/api/submissions/send-decisions — notified_at only on succe
     expect(byId[withoutSubmitter].notified_at).toBeNull();
 
     const messages = await env.DB.prepare(
-      `SELECT template_key, to_email FROM message_log WHERE idempotency_key LIKE '%:' || ? || ':%'`,
+      `SELECT template_key, to_email FROM message_log WHERE bulk_job_id = ?`,
     ).bind(body.job_id).all<{ template_key: string; to_email: string }>();
     expect(messages.results).toHaveLength(1);
     expect(messages.results[0]).toMatchObject({ template_key: 'decision_accepted', to_email: 'has-submitter@example.com' });
@@ -121,7 +121,7 @@ describe('POST /app/api/submissions/send-decisions — notified_at only on succe
     expect(row?.status).toBe('accepted');
     expect(row?.notified_at).toBeNull();
 
-    const messages = await env.DB.prepare(`SELECT COUNT(*) AS n FROM message_log WHERE idempotency_key LIKE '%:' || ? || ':%'`)
+    const messages = await env.DB.prepare(`SELECT COUNT(*) AS n FROM message_log WHERE bulk_job_id = ?`)
       .bind(body.job_id)
       .first<{ n: number }>();
     expect(messages?.n).toBe(0);

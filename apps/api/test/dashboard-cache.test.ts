@@ -112,14 +112,15 @@ describe('POST /app/api/dashboard/remind', () => {
     expect(status.status).toBe(200);
     expect(await status.json()).toMatchObject({ id: body.job_id, kind: 'remind-tasks', status: 'pending', total: 1, enqueued: 0, sent: 0, failed: 0 });
 
-    // Progress is read back through the expander's key shape (BE-4 contract):
-    // "<template>:<contactId>:<jobId>:<naturalId>:v<version>".
+    // Progress is read back through message_log.bulk_job_id (migration 0014).
+    // The idempotency key deliberately no longer carries the job id: it names
+    // the message, so that a re-send of the same message collides with it.
     const ts = '2026-08-01T00:00:00Z';
     for (const [n, state] of [[1, 'sent'], [2, 'sent'], [3, 'failed']] as const) {
       await env.DB.prepare(
-        `INSERT INTO message_log (id, event_id, template_key, to_email, contact_id, status, idempotency_key, created_at)
-         VALUES (?, ?, 'task_reminder', 'late@example.com', ?, ?, ?, ?)`,
-      ).bind(`ml-${n}-${crypto.randomUUID().slice(0, 6)}`, eventId, speaker, state, `task_reminder:${speaker}:${body.job_id}:assign-${n}:v1`, ts).run();
+        `INSERT INTO message_log (id, event_id, template_key, to_email, contact_id, status, idempotency_key, bulk_job_id, created_at)
+         VALUES (?, ?, 'task_reminder', 'late@example.com', ?, ?, ?, ?, ?)`,
+      ).bind(`ml-${n}-${crypto.randomUUID().slice(0, 6)}`, eventId, speaker, state, `task_reminder:${speaker}:assign-${n}:v1`, body.job_id, ts).run();
     }
     await env.DB.prepare('UPDATE bulk_jobs SET enqueued = 3, status = \'running\' WHERE id = ?').bind(body.job_id).run();
 

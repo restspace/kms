@@ -7,15 +7,23 @@
 // and expands a bounded slice of recipients per tick.
 //
 // Idempotency-key convention (coordinate with BE-3's `GET /bulk-jobs/:id`):
-// every expander-driven send passes `entityId = "<jobId>:<naturalEntityId>"`
-// to queueTemplated, so the resulting message_log.idempotency_key is
-// `<template>:<contact>:<jobId>:<naturalEntityId>:v<version>` — countable by
-// `idempotency_key LIKE '%:' || jobId || ':%'`. This is deliberate: mailer's
-// key format is `${templateKey}:${contactId}:${entityId}:v${version}`, so a
-// bare jobId prefix doesn't line up, but embedding it *inside* entityId does
-// and survives the `:v<version>` suffix untouched.
+// expander-driven sends pass the *natural* entity id to queueTemplated and
+// name their job separately, via `bulkJobId` — which mailer.ts writes to
+// message_log.bulk_job_id, so a job's messages are countable by
+// `bulk_job_id = ?`.
+//
+// This used to work the other way round: `entityId = "<jobId>:<naturalId>"`,
+// making the key `<template>:<contact>:<jobId>:<naturalId>:v<version>` and
+// the count a `LIKE '%:'||jobId||':%'`. That put the job id inside the
+// UNIQUE column whose entire job is to be *stable* across re-sends, and a
+// fresh job id per press is exactly what a re-send looks like. Reminders —
+// the one flow with no second guard like submissions.notified_at — therefore
+// re-sent on every "Remind all" press. Migration 0014 splits the two facts:
+// the key names the message, the column names the batch. Don't merge them
+// again.
 
 import { createDb } from '@kms/db';
+import { eventLocalDay } from '@kms/core';
 import { deliverEmail, queueTemplated, type OutboxEmailPayload, type SendOutcome } from '../mailer';
 import { autoAssignAcceptTasksCore } from '../routes/evaluation';
 import { sendScheduleEmailsCore } from '../scheduleMail';
@@ -38,10 +46,14 @@ function nowIso(): string {
   return new Date().toISOString();
 }
 
-/** Adapts queueTemplated's richer return to the `send` shape scheduleMail/evaluation expect. */
-function queueSend(db: D1Database) {
+/**
+ * Adapts queueTemplated's richer return to the `send` shape
+ * scheduleMail/evaluation expect, stamping every send with the job it came
+ * from so those callers never have to know about bulk jobs at all.
+ */
+function queueSend(db: D1Database, bulkJobId: string) {
   return async (args: Parameters<typeof queueTemplated>[1]): Promise<SendOutcome> => {
-    const { outcome } = await queueTemplated(db, args);
+    const { outcome } = await queueTemplated(db, { ...args, bulkJobId });
     return outcome;
   };
 }
@@ -162,7 +174,7 @@ async function expandSendDecisions(env: Env, job: BulkJobRow, limit: number): Pr
     }>();
 
   const ts = nowIso();
-  const send = queueSend(db);
+  const send = queueSend(db, job.id);
   for (const s of batch) {
     const isAccept = s.status === 'accept_queue';
     // Conditional flip: guards against a concurrent tick (or a resumed job
@@ -200,7 +212,8 @@ async function expandSendDecisions(env: Env, job: BulkJobRow, limit: number): Pr
         eventId: job.event_id,
         contactId: s.submitter_contact_id,
         toEmail: s.submitter_email,
-        entityId: `${job.id}:${s.id}`,
+        entityId: s.id,
+        bulkJobId: job.id,
         context: {
           event: { name: event.name },
           speaker: { first_name: s.submitter_first_name ?? 'there' },
@@ -231,7 +244,7 @@ async function expandSendDecisions(env: Env, job: BulkJobRow, limit: number): Pr
       if (outcome === 'queued' && payload) await deliverNow(db, env, payload.log_key, payload);
     }
     if (isAccept) {
-      await autoAssignAcceptTasksCore(db, job.event_id, s, event.name, event.slug, env.APP_URL, send, job.id);
+      await autoAssignAcceptTasksCore(db, job.event_id, s, event.name, event.slug, env.APP_URL, send);
     }
   }
 
@@ -260,9 +273,9 @@ async function expandSendConfirmations(env: Env, job: BulkJobRow, limit: number)
   const params = JSON.parse(job.params_json) as SendConfirmationsParams;
   const total = job.total ?? params.session_ids.length;
   const slice = params.session_ids.slice(job.enqueued, job.enqueued + limit);
-  const send = queueSend(db);
+  const send = queueSend(db, job.id);
   for (const sessionId of slice) {
-    await sendScheduleEmailsCore(env, db, sessionId, 'confirmed', send, job.id);
+    await sendScheduleEmailsCore(env, db, sessionId, 'confirmed', send);
   }
   const enqueued = Math.min(params.session_ids.length, job.enqueued + slice.length);
   await db
@@ -308,15 +321,22 @@ async function expandRemindTasks(env: Env, job: BulkJobRow, limit: number): Prom
   }
 
   const event = await db
-    .prepare('SELECT id, name, slug FROM events WHERE id = ?')
+    .prepare('SELECT id, name, slug, timezone FROM events WHERE id = ?')
     .bind(job.event_id)
-    .first<{ id: string; name: string; slug: string }>();
+    .first<{ id: string; name: string; slug: string; timezone: string }>();
   if (!event) {
     await failJob(db, job.id, 'event_not_found');
     return;
   }
 
+  // The day that makes a reminder "already sent today" is the day where the
+  // *event* is, not where this worker runs — see core/time.ts. A UTC-derived
+  // day rolls over mid-afternoon for US events, which would hand a second
+  // press a fresh key and let the duplicate through.
+  const day = eventLocalDay(now, event.timezone);
+
   const slice = ids.slice(job.enqueued, job.enqueued + limit);
+  let duplicates = 0;
   if (slice.length > 0) {
     const placeholders = slice.map(() => '?').join(', ');
     // LEFT JOIN contacts, not the inner join this used to be: an inner join
@@ -348,8 +368,9 @@ async function expandRemindTasks(env: Env, job: BulkJobRow, limit: number): Prom
         eventId: job.event_id,
         contactId: row.contact_id,
         toEmail: row.email,
-        entityId: `${job.id}:${row.assignment_id}`,
-        version: `manual-${now.slice(0, 10)}`,
+        entityId: row.assignment_id,
+        bulkJobId: job.id,
+        version: `manual-${day}`,
         context: {
           event: { name: event.name },
           speaker: { first_name: row.first_name ?? 'there' },
@@ -360,12 +381,21 @@ async function expandRemindTasks(env: Env, job: BulkJobRow, limit: number): Prom
       // sweepOutbox — see deliverNow's doc comment for why that's required
       // for the completion banner's sent count to be truthful.
       if (outcome === 'queued' && payload) await deliverNow(db, env, payload.log_key, payload);
+      // 'duplicate' means the UNIQUE idempotency key caught a reminder this
+      // contact already had for this assignment today — the guarantee
+      // working, not a failure. Count it so the completion banner can say
+      // "0 sent, 2 already reminded today" rather than a bare "0 sent" that
+      // reads like something broke.
+      if (outcome === 'duplicate') duplicates += 1;
     }
   }
   const enqueued = Math.min(ids.length, job.enqueued + slice.length);
   await db
-    .prepare(`UPDATE bulk_jobs SET enqueued = ?, status = ?, updated_at = ? WHERE id = ?`)
-    .bind(enqueued, enqueued >= total ? 'done' : 'running', nowIso(), job.id)
+    .prepare(
+      `UPDATE bulk_jobs SET enqueued = ?, status = ?, skipped_duplicate = skipped_duplicate + ?, updated_at = ?
+       WHERE id = ?`,
+    )
+    .bind(enqueued, enqueued >= total ? 'done' : 'running', duplicates, nowIso(), job.id)
     .run();
 }
 
@@ -440,7 +470,8 @@ async function expandCompose(env: Env, job: BulkJobRow, limit: number): Promise<
         eventId: job.event_id,
         contactId: contact.id,
         toEmail: contact.email,
-        entityId: `${job.id}:${contact.id}`,
+        entityId: contact.id,
+        bulkJobId: job.id,
         template: { subject: params.subject, body: params.body },
         context: {
           ...recipientContext,

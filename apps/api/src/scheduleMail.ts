@@ -74,10 +74,10 @@ function fmtLocal(isoUtc: string, timeZone: string): string {
  * `queueTemplated` as the `send` callback (delivery happens on the next
  * outbox sweep tick, same as every other cron-originated email). Request
  * callers keep using `sendScheduleEmails`, which attempts immediate delivery
- * via `sendTemplated`/waitUntil as before. `entityPrefix`, when given,
- * prefixes the message_log entity id with `<jobId>:` per the bulk-job
- * idempotency-key convention (jobs/bulkJobs.ts) so job progress is countable
- * by `idempotency_key LIKE '%:'||jobId||':%'`.
+ * via `sendTemplated`/waitUntil as before. The entity id is always the plain
+ * session id: a bulk-job caller tags its sends via the `bulkJobId` field on
+ * the send args (see jobs/bulkJobs.ts's queueSend), which keeps batch
+ * membership out of the idempotency key.
  */
 export async function sendScheduleEmailsCore(
   env: Env,
@@ -85,7 +85,6 @@ export async function sendScheduleEmailsCore(
   submissionId: string,
   kind: ScheduleMailKind,
   send: (args: SendTemplatedArgs) => Promise<SendOutcome>,
-  entityPrefix?: string,
 ): Promise<number> {
   const session = await db
     .prepare(
@@ -182,7 +181,7 @@ export async function sendScheduleEmailsCore(
       eventId: session.event_id,
       contactId: speaker.contact_id,
       toEmail: speaker.email,
-      entityId: entityPrefix ? `${entityPrefix}:${session.id}` : session.id,
+      entityId: session.id,
       version: sequence, // each schedule change is a distinct send
       context: {
         event: { name: session.event_name, location: session.event_location ?? '' },

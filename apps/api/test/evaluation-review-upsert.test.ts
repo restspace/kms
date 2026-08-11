@@ -178,7 +178,7 @@ describe('autoAssignAcceptTasksCore (P1-5)', () => {
     expect(rows?.n).toBe(1);
   });
 
-  it('prefixes the entity id with the job id when an entityPrefix is given (bulk-job idempotency convention)', async () => {
+  it('keeps the entity id to the bare assignment id so a batch never enters the idempotency key', async () => {
     const eventId = await createEvent();
     const owner = await createContact(eventId, { email: 'speaker2@example.com' });
     const submission = await seedSubmission(eventId, { submitter_contact_id: owner, status: 'accepted' });
@@ -191,9 +191,15 @@ describe('autoAssignAcceptTasksCore (P1-5)', () => {
     };
 
     await autoAssignAcceptTasksCore(
-      env.DB, eventId, { id: submission, code: 'SESS-000002', title: 'Another talk' }, 'Test Event', 'evt', 'https://app.example.com', send, 'job-123',
+      env.DB, eventId, { id: submission, code: 'SESS-000002', title: 'Another talk' }, 'Test Event', 'evt', 'https://app.example.com', send,
     );
-    expect(capturedEntityId.startsWith('job-123:')).toBe(true);
+    // A bulk-job caller tags the send with `bulkJobId` (see jobs/bulkJobs.ts's
+    // queueSend) rather than smuggling the job id in here — migration 0014.
+    const assignment = await env.DB
+      .prepare('SELECT id FROM task_assignments WHERE submission_id = ?')
+      .bind(submission)
+      .first<{ id: string }>();
+    expect(capturedEntityId).toBe(assignment?.id);
   });
 });
 

@@ -37,6 +37,13 @@ export interface SendTemplatedArgs {
    * the event.
    */
   template?: { subject: string; body: string };
+  /**
+   * The bulk job this send belongs to, when it came from an expander
+   * (jobs/bulkJobs.ts). Recorded in its own message_log column so job
+   * progress is countable without the job id having to appear in
+   * `idempotency_key` — see migration 0014.
+   */
+  bulkJobId?: string | null;
 }
 
 export interface OutboxEmailPayload extends OutgoingEmail {
@@ -110,10 +117,20 @@ export async function queueTemplated(
   const inserted = await db
     .prepare(
       `INSERT OR IGNORE INTO message_log
-         (id, event_id, template_key, to_email, contact_id, subject, status, idempotency_key, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?)`,
+         (id, event_id, template_key, to_email, contact_id, subject, status, idempotency_key, bulk_job_id, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)`,
     )
-    .bind(crypto.randomUUID(), args.eventId, args.templateKey, args.toEmail, args.contactId, rendered.subject, logKey, ts)
+    .bind(
+      crypto.randomUUID(),
+      args.eventId,
+      args.templateKey,
+      args.toEmail,
+      args.contactId,
+      rendered.subject,
+      logKey,
+      args.bulkJobId ?? null,
+      ts,
+    )
     .run();
   if (inserted.meta.changes === 0) return { outcome: 'duplicate' };
 
@@ -165,10 +182,20 @@ export async function prepareTemplated(db: D1Database, args: SendTemplatedArgs):
     db
       .prepare(
         `INSERT OR IGNORE INTO message_log
-           (id, event_id, template_key, to_email, contact_id, subject, status, idempotency_key, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?)`,
+           (id, event_id, template_key, to_email, contact_id, subject, status, idempotency_key, bulk_job_id, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)`,
       )
-      .bind(crypto.randomUUID(), args.eventId, args.templateKey, args.toEmail, args.contactId, rendered.subject, logKey, ts),
+      .bind(
+        crypto.randomUUID(),
+        args.eventId,
+        args.templateKey,
+        args.toEmail,
+        args.contactId,
+        rendered.subject,
+        logKey,
+        args.bulkJobId ?? null,
+        ts,
+      ),
     db
       .prepare(
         `INSERT OR IGNORE INTO outbox
