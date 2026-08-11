@@ -120,6 +120,9 @@ const ERROR_MESSAGES: Record<string, string> = {
   email_exists: 'A contact with this email already exists for this event.',
   email_required: 'An email address is required.',
   not_found: 'The record no longer exists.',
+  nothing_to_nudge: 'This speaker has no incomplete tasks to remind them about.',
+  no_email: 'This speaker has no email address on file.',
+  template_disabled: 'The task-reminder email template is disabled for this event.',
   conflict: 'This record changed in another session — reload to pick up the latest version before saving again.',
   invite_notify_required: 'This session has live calendar invites — choose whether to notify speakers before moving it.',
   already_on_event: 'They are already on this event.',
@@ -985,6 +988,72 @@ export const remindTasks = (assignmentIds?: string[]) =>
   request<{ ok: boolean; sent: number; skipped: number; job_id?: string; total?: number }>('/app/api/dashboard/remind', {
     method: 'POST',
     body: JSON.stringify(assignmentIds ? { assignment_ids: assignmentIds } : {}),
+  })
+
+// ---------------------------------------------------------------------------
+// Green room / run-of-show (workplan 12)
+// ---------------------------------------------------------------------------
+
+export interface GreenRoomSpeaker {
+  name: string
+  email: string
+  mobile_phone: string | null
+  arrived_at: string | null
+  /** false → participant with no event_contacts row: readiness unknown, check-in refused. */
+  on_roster: boolean
+  missing_bio: number
+  missing_headshot: number
+  missing_slides: number
+  outstanding: number
+}
+
+export interface GreenRoomSession {
+  id: string
+  code: string
+  title: string
+  format: string | null
+  track_name: string | null
+  room_id: string
+  starts_at: string
+  ends_at: string | null
+  speaker_ids: string[]
+}
+
+export interface GreenRoomPayload {
+  now: string
+  event: { id: string; name: string; slug: string; timezone: string; starts_at: string; ends_at: string }
+  rooms: Array<{ id: string; name: string }>
+  sessions: GreenRoomSession[]
+  speakers: Record<string, GreenRoomSpeaker>
+}
+
+/** ETag-aware poll, same contract as fetchDashboard: 304 → { fresh: false }. */
+export async function fetchGreenRoom(
+  etag: string | null,
+): Promise<{ fresh: true; payload: GreenRoomPayload; etag: string | null } | { fresh: false }> {
+  const res = await fetch('/app/api/greenroom', {
+    headers: { accept: 'application/json', ...(etag ? { 'if-none-match': etag } : {}) },
+  })
+  if (res.status === 304) return { fresh: false }
+  if (res.status === 401) {
+    window.location.assign('/app')
+    throw new ApiError('Signed out', 401)
+  }
+  if (!res.ok) throw new ApiError(`The server rejected the request (HTTP ${res.status}).`, res.status)
+  return { fresh: true, payload: (await res.json()) as GreenRoomPayload, etag: res.headers.get('etag') }
+}
+
+/** The write returns the whole refreshed payload plus its new etag. */
+export const greenroomCheckin = (contactId: string, arrived: boolean) =>
+  request<GreenRoomPayload & { ok: boolean; etag: string }>('/app/api/greenroom/checkin', {
+    method: 'POST',
+    body: JSON.stringify({ contact_id: contactId, arrived }),
+  })
+
+export const greenroomNudge = (contactId: string) =>
+  request<{ ok: boolean; sent: number; duplicates: number }>('/app/api/greenroom/nudge', {
+    method: 'POST',
+    body: JSON.stringify({ contact_id: contactId }),
   })
 
 // ---------------------------------------------------------------------------

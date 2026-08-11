@@ -22,6 +22,7 @@ import { evaluationRoutes } from './evaluation';
 import { agendaRoutes } from './agenda';
 import { stageAirtableDeletes } from '../airtableStage';
 import { dashboardRoutes } from './dashboard';
+import { greenroomRoutes } from './greenroom';
 
 type ApiEnv = AccessEnv;
 
@@ -99,6 +100,9 @@ adminApiRoutes.route('/agenda', agendaRoutes);
 
 // Dashboards (docs/09) — aggregates with ETag polling, reminder sends.
 adminApiRoutes.route('/dashboard', dashboardRoutes);
+
+// Green room / run-of-show (workplan 12) — day-of board, check-in, nudge.
+adminApiRoutes.route('/greenroom', greenroomRoutes);
 
 // Last-resort safety net: any exception that escapes a route handler below
 // (this file's own, or a mounted sub-router's) used to propagate past Hono

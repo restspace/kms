@@ -22,7 +22,7 @@ import { render, screen, waitFor } from '@testing-library/preact'
  * preact/compat routes `onChange` to the native `input` event for text fields
  * and to `change` for selects; firing both keeps the helper indifferent.
  */
-const setValue = (el: HTMLInputElement | HTMLSelectElement, value: string) => {
+const setValue = (el: HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement, value: string) => {
   el.value = value
   el.dispatchEvent(new Event('input', { bubbles: true }))
   el.dispatchEvent(new Event('change', { bubbles: true }))

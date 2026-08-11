@@ -45,6 +45,7 @@ import { SettingsSection } from './settings/SettingsSection'
 import { EvaluationSection } from './evaluation/EvaluationSection'
 import { AgendaSection } from './agenda/AgendaSection'
 import { DashboardSection, type AppNavTarget } from './dashboard/DashboardSection'
+import { GreenRoomSection } from './greenroom/GreenRoomSection'
 import { ReviewerWorkspace } from './review/ReviewerWorkspace'
 import { EmbedsSection } from './embeds/EmbedsSection'
 import {
@@ -224,6 +225,7 @@ const NAV_ITEMS: ReadonlyArray<{ key: ViewKey; label: string; soon: string | nul
   { key: 'evaluation', label: 'Evaluation', soon: null },
   { key: 'review', label: 'Review', soon: null },
   { key: 'agenda', label: 'Agenda', soon: null },
+  { key: 'greenroom', label: 'Green Room', soon: null },
   { key: 'embeds', label: 'Embeds', soon: null },
   { key: 'settings', label: 'Settings', soon: null },
 ]
@@ -2116,7 +2118,9 @@ export default function App() {
 
   return (
     <EventScopeProvider value={scope}>
-    <div className="shell">
+    {/* .shell--greenroom scopes the green room's compact-width sidebar
+        override (greenroom.css); every other view renders exactly as before. */}
+    <div className={view === 'greenroom' ? 'shell shell--greenroom' : 'shell'}>
       <aside className="shell-sidebar">
         <div className="shell-brand">
           KMS <span className="shell-brand-sub">{isReviewer ? 'review' : 'admin'}</span>
@@ -2276,6 +2280,8 @@ export default function App() {
             onViewChange={(mode) => navigate({ mode }, { replace: true })}
             onDayChange={(day) => navigate({ day }, { replace: true })}
           />
+        ) : view === 'greenroom' && !isReviewer ? (
+          <GreenRoomSection key={me.event.id} />
         ) : view === 'dashboard' && !isReviewer ? (
           <DashboardSection key={me.event.id} onNavigate={handleNavigate} />
         ) : view === 'embeds' && !isReviewer ? (

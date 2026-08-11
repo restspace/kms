@@ -1,0 +1,421 @@
+/* Green room / run-of-show (workplan 12). Mobile-first: this screen is read
+   on a phone in a corridor, so every actionable control is ≥44px tall and the
+   layout is a single column below medium (768). Tokens only — dark mode and
+   the Editorial Broadsheet ground come free.
+
+   Shell override, deliberately scoped: on `main` the admin sidebar is a fixed
+   184px column with no media query, which leaves ~200px of content at phone
+   widths. Only while the green room is the active view (App.tsx adds
+   .shell--greenroom) and only below medium, the sidebar is hidden and brought
+   back on demand as an overlay via .gr-nav-open. Every other view, and every
+   width ≥768px, renders exactly as before. */
+
+@media (max-width: 767px) {
+  .shell--greenroom .shell-sidebar {
+    display: none;
+  }
+  .shell--greenroom.gr-nav-open .shell-sidebar {
+    display: flex;
+    position: fixed;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: min(260px, 80vw);
+    z-index: 60;
+    box-shadow: var(--shadow-overlay, 0 8px 32px rgba(0, 0, 0, 0.35));
+  }
+}
+
+.gr-shell {
+  height: 100%;
+  overflow-y: auto;
+  padding: var(--space-3);
+  -webkit-overflow-scrolling: touch;
+}
+
+/* --- header ---------------------------------------------------------------- */
+
+.gr-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
+}
+
+.gr-header-main {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.gr-header h2 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 1.25rem;
+  line-height: 1.2;
+}
+
+.gr-header-sub {
+  color: var(--text-muted);
+  font-size: var(--text-label);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.gr-updated {
+  flex: 0 0 auto;
+  color: var(--text-muted);
+  font-size: var(--text-caption);
+}
+
+/* The Menu button only exists visually below medium, where the sidebar is
+   hidden; above it the regular sidebar is present and the button is noise. */
+.gr-menu {
+  display: none;
+  min-height: 44px;
+  padding: 0 var(--space-3);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text);
+  font-size: var(--text-label);
+}
+
+@media (max-width: 767px) {
+  .gr-menu {
+    display: inline-flex;
+    align-items: center;
+  }
+}
+
+.gr-scrim {
+  display: none;
+}
+
+@media (max-width: 767px) {
+  .gr-scrim {
+    display: block;
+    position: fixed;
+    inset: 0;
+    background: var(--scrim, rgba(0, 0, 0, 0.4));
+    z-index: 50;
+  }
+}
+
+/* --- day chips, banners, notes --------------------------------------------- */
+
+.gr-days {
+  display: flex;
+  gap: var(--space-1);
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  margin-bottom: var(--space-2);
+  padding-bottom: 2px;
+}
+
+.gr-day {
+  flex: 0 0 auto;
+  min-height: 44px;
+  padding: 0 var(--space-3);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text);
+  font-size: var(--text-label);
+  white-space: nowrap;
+}
+
+.gr-day.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-contrast, #fff);
+}
+
+.gr-banner {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  margin-bottom: var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  font-size: var(--text-label);
+}
+
+.gr-banner-link {
+  min-height: 32px;
+  border: none;
+  background: none;
+  color: var(--accent);
+  font-size: var(--text-label);
+  text-decoration: underline;
+  cursor: pointer;
+  padding: 0;
+}
+
+.gr-note {
+  padding: var(--space-2) var(--space-3);
+  margin-bottom: var(--space-2);
+  border: 1px solid var(--status-declined-text);
+  border-radius: var(--radius-sm);
+  background: var(--status-declined-bg);
+  color: var(--status-declined-text);
+  font-size: var(--text-label);
+}
+
+.gr-state {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-2);
+  padding: var(--space-4) var(--space-3);
+  color: var(--text-muted);
+}
+
+/* --- room lanes ------------------------------------------------------------ */
+
+.gr-rooms {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: var(--space-3);
+  align-items: start;
+}
+
+@media (min-width: 768px) {
+  .gr-rooms {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (min-width: 1080px) {
+  .gr-rooms {
+    grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+  }
+}
+
+.gr-room-name {
+  margin: 0 0 var(--space-2);
+  font-family: var(--font-display);
+  font-size: 1rem;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: var(--space-1);
+}
+
+.gr-room-empty {
+  color: var(--text-muted);
+  font-size: var(--text-label);
+  padding: var(--space-2) 0;
+}
+
+.gr-empty-rooms {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  grid-column: 1 / -1;
+}
+
+/* --- session cards ---------------------------------------------------------- */
+
+.gr-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: var(--space-2) var(--space-3);
+  margin-bottom: var(--space-2);
+  background: var(--surface);
+}
+
+.gr-card-now {
+  border-color: var(--accent);
+  border-width: 2px;
+}
+
+.gr-card-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: var(--space-2);
+  font-size: var(--text-caption);
+}
+
+.gr-card-when {
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+
+.gr-card-now .gr-card-when {
+  color: var(--accent);
+}
+
+.gr-card-when em {
+  font-style: normal;
+  font-weight: 500;
+  text-transform: none;
+  letter-spacing: 0;
+  margin-left: var(--space-1);
+}
+
+.gr-card-time {
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.gr-card-title {
+  margin: var(--space-1) 0 0;
+  font-size: var(--text-base);
+  line-height: 1.3;
+}
+
+.gr-card-sub {
+  color: var(--text-muted);
+  font-size: var(--text-caption);
+  margin-bottom: var(--space-1);
+}
+
+/* --- speakers --------------------------------------------------------------- */
+
+.gr-speaker {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) 0;
+  border-top: 1px solid var(--border);
+}
+
+.gr-speaker-main {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.gr-speaker-name {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.gr-speaker-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+}
+
+.gr-speaker-actions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  flex: 0 0 auto;
+}
+
+/* Arrival toggle: colour never travels without its label. */
+.gr-arrive {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 44px;
+  min-width: 108px;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--status-pending-bg);
+  color: var(--status-pending-text);
+  font-size: var(--text-caption);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.gr-arrive.is-arrived {
+  background: var(--status-accepted-bg);
+  color: var(--status-accepted-text);
+}
+
+.gr-arrive:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.gr-arrive-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+  flex: 0 0 auto;
+}
+
+.gr-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
+  min-width: 64px;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text);
+  font-size: var(--text-caption);
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.gr-action:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.gr-action-none {
+  border-style: dashed;
+  color: var(--text-muted);
+  cursor: default;
+}
+
+/* --- chips ------------------------------------------------------------------ */
+
+.gr-chip {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 var(--space-2);
+  border-radius: 10px;
+  font-size: var(--text-caption);
+  font-weight: 600;
+  background: var(--surface-hover);
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.gr-chip-warn {
+  background: var(--status-pending-bg);
+  color: var(--status-pending-text);
+}
+
+.gr-chip-note {
+  background: var(--status-accepted-bg);
+  color: var(--status-accepted-text);
+}
+
+.gr-empty-note {
+  color: var(--text-muted);
+  font-size: var(--text-caption);
+}
+
+/* --- later-today fold ------------------------------------------------------- */
+
+.gr-later summary {
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  color: var(--text-muted);
+  font-size: var(--text-label);
+  cursor: pointer;
+}
+
+/* Desktop niceties: the section also serves a laptop backstage. */
+@media (min-width: 768px) {
+  .gr-shell {
+    padding: var(--space-4);
+  }
+}

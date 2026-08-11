@@ -32,16 +32,86 @@ interface EventRow {
   ends_at: string;
 }
 
-interface SpeakerAggRow {
+export interface SpeakerAggRow {
   contact_id: string;
   name: string | null;
   email: string;
+  mobile_phone: string | null;
+  arrived_at: string | null;
+  arrival_marked_by: string | null;
   missing_bio: number;
   missing_headshot: number;
   missing_slides: number;
   outstanding: number;
   overdue: number;
   confirmed: number;
+}
+
+/**
+ * One pass over accepted speakers: readiness (bio/headshot/slides), task
+ * counters, confirmation state — plus phone and arrival for the green room.
+ * Shared by the dashboard and the green room (workplan 12) so the two screens
+ * can never disagree about who is missing what. The task counters come from
+ * one grouped aggregate joined in, not three correlated subqueries per
+ * contact (sweep item P2-16).
+ */
+export async function speakerTracking(
+  db: D1Database,
+  eventId: string,
+  now: string,
+): Promise<SpeakerAggRow[]> {
+  const { results } = await db.prepare(
+    `SELECT c.id AS contact_id,
+            NULLIF(TRIM(COALESCE(c.first_name,'') || ' ' || COALESCE(c.last_name,'')), '') AS name,
+            c.email,
+            c.mobile_phone,
+            ec.arrived_at,
+            ec.arrival_marked_by,
+            CASE WHEN ec.biography IS NULL OR ec.biography = '' THEN 1 ELSE 0 END AS missing_bio,
+            CASE WHEN ec.headshot_asset_id IS NULL THEN 1 ELSE 0 END AS missing_headshot,
+            COALESCE(tg.missing_slides, 0) AS missing_slides,
+            COALESCE(tg.outstanding, 0) AS outstanding,
+            COALESCE(tg.overdue, 0) AS overdue,
+            CASE WHEN cf.contact_id IS NULL THEN 0 ELSE 1 END AS confirmed
+     FROM contacts c
+     -- 0015: membership guard AND the source of the profile columns. Bio and
+     -- headshot are per-event, so a speaker who wrote a bio at another event
+     -- in the org still reads as missing one here — the panel is about what
+     -- THIS event has on file.
+     JOIN event_contacts ec ON ec.contact_id = c.id AND ec.event_id = ?1
+     JOIN (SELECT DISTINCT sp.contact_id
+           FROM submission_participants sp
+           JOIN submissions s ON s.id = sp.submission_id
+           WHERE s.event_id = ?1 AND s.status = 'accepted') acc ON acc.contact_id = c.id
+     LEFT JOIN (SELECT ta.contact_id,
+                       -- A contact can carry more than one file_upload
+                       -- assignment (e.g. co-presenting a second accepted
+                       -- talk, or an unrelated upload task an organiser
+                       -- added). Counting *any* incomplete one flagged
+                       -- "missing slides" even after the presentation
+                       -- upload itself was done, contradicting the Tasks
+                       -- tab where that assignment showed complete with
+                       -- uploaded versions. A completed file_upload
+                       -- assignment now counts as "slides present" outright;
+                       -- only contacts with file_upload assignments and
+                       -- none of them complete are still flagged.
+                       CASE WHEN SUM(CASE WHEN t.action_type = 'file_upload' AND ta.status = 'complete' THEN 1 ELSE 0 END) > 0 THEN 0
+                            WHEN SUM(CASE WHEN t.action_type = 'file_upload' THEN 1 ELSE 0 END) > 0 THEN 1
+                            ELSE 0 END AS missing_slides,
+                       SUM(CASE WHEN ta.status != 'complete' THEN 1 ELSE 0 END) AS outstanding,
+                       SUM(CASE WHEN ta.status != 'complete' AND t.due_at IS NOT NULL AND t.due_at < ?2 THEN 1 ELSE 0 END) AS overdue
+                FROM task_assignments ta
+                JOIN tasks t ON t.id = ta.task_id
+                WHERE t.event_id = ?1
+                GROUP BY ta.contact_id) tg ON tg.contact_id = c.id
+     LEFT JOIN (SELECT DISTINCT sp2.contact_id
+                FROM submission_participants sp2
+                JOIN submissions s2 ON s2.id = sp2.submission_id
+                WHERE s2.event_id = ?1 AND s2.status = 'accepted'
+                  AND sp2.confirmed_at IS NOT NULL) cf ON cf.contact_id = c.id
+     ORDER BY outstanding DESC, overdue DESC, name`,
+  ).bind(eventId, now).all<SpeakerAggRow>();
+  return results;
 }
 
 interface OverdueRow {
@@ -93,57 +163,8 @@ async function dashboardPayload(c: Context<ApiEnv>) {
     db.prepare('SELECT id, name, slug, timezone, starts_at, ends_at FROM events WHERE id = ?').bind(eventId).first<EventRow>(),
     db.prepare('SELECT status, COUNT(*) AS n FROM submissions WHERE event_id = ? GROUP BY status').bind(eventId).all<{ status: string; n: number }>(),
     // One pass over accepted speakers powers the stat, the confirmation mix,
-    // top-by-outstanding and asset completeness. The task counters come from
-    // one grouped aggregate joined in, not three correlated subqueries per
-    // contact (sweep item P2-16).
-    db.prepare(
-      `SELECT c.id AS contact_id,
-              NULLIF(TRIM(COALESCE(c.first_name,'') || ' ' || COALESCE(c.last_name,'')), '') AS name,
-              c.email,
-              CASE WHEN ec.biography IS NULL OR ec.biography = '' THEN 1 ELSE 0 END AS missing_bio,
-              CASE WHEN ec.headshot_asset_id IS NULL THEN 1 ELSE 0 END AS missing_headshot,
-              COALESCE(tg.missing_slides, 0) AS missing_slides,
-              COALESCE(tg.outstanding, 0) AS outstanding,
-              COALESCE(tg.overdue, 0) AS overdue,
-              CASE WHEN cf.contact_id IS NULL THEN 0 ELSE 1 END AS confirmed
-       FROM contacts c
-       -- 0015: membership guard AND the source of the profile columns. Bio and
-       -- headshot are per-event, so a speaker who wrote a bio at another event
-       -- in the org still reads as missing one here — the panel is about what
-       -- THIS event has on file.
-       JOIN event_contacts ec ON ec.contact_id = c.id AND ec.event_id = ?1
-       JOIN (SELECT DISTINCT sp.contact_id
-             FROM submission_participants sp
-             JOIN submissions s ON s.id = sp.submission_id
-             WHERE s.event_id = ?1 AND s.status = 'accepted') acc ON acc.contact_id = c.id
-       LEFT JOIN (SELECT ta.contact_id,
-                         -- A contact can carry more than one file_upload
-                         -- assignment (e.g. co-presenting a second accepted
-                         -- talk, or an unrelated upload task an organiser
-                         -- added). Counting *any* incomplete one flagged
-                         -- "missing slides" even after the presentation
-                         -- upload itself was done, contradicting the Tasks
-                         -- tab where that assignment showed complete with
-                         -- uploaded versions. A completed file_upload
-                         -- assignment now counts as "slides present" outright;
-                         -- only contacts with file_upload assignments and
-                         -- none of them complete are still flagged.
-                         CASE WHEN SUM(CASE WHEN t.action_type = 'file_upload' AND ta.status = 'complete' THEN 1 ELSE 0 END) > 0 THEN 0
-                              WHEN SUM(CASE WHEN t.action_type = 'file_upload' THEN 1 ELSE 0 END) > 0 THEN 1
-                              ELSE 0 END AS missing_slides,
-                         SUM(CASE WHEN ta.status != 'complete' THEN 1 ELSE 0 END) AS outstanding,
-                         SUM(CASE WHEN ta.status != 'complete' AND t.due_at IS NOT NULL AND t.due_at < ?2 THEN 1 ELSE 0 END) AS overdue
-                  FROM task_assignments ta
-                  JOIN tasks t ON t.id = ta.task_id
-                  WHERE t.event_id = ?1
-                  GROUP BY ta.contact_id) tg ON tg.contact_id = c.id
-       LEFT JOIN (SELECT DISTINCT sp2.contact_id
-                  FROM submission_participants sp2
-                  JOIN submissions s2 ON s2.id = sp2.submission_id
-                  WHERE s2.event_id = ?1 AND s2.status = 'accepted'
-                    AND sp2.confirmed_at IS NOT NULL) cf ON cf.contact_id = c.id
-       ORDER BY outstanding DESC, overdue DESC, name`,
-    ).bind(eventId, now).all<SpeakerAggRow>(),
+    // top-by-outstanding and asset completeness — shared with the green room.
+    speakerTracking(db, eventId, now),
     db.prepare(
       `SELECT ta.id AS assignment_id, ta.contact_id,
               NULLIF(TRIM(COALESCE(c.first_name,'') || ' ' || COALESCE(c.last_name,'')), '') AS name,
@@ -232,7 +253,7 @@ async function dashboardPayload(c: Context<ApiEnv>) {
   for (const row of statusRows.results) status[row.status] = row.n;
   const n = (key: string) => status[key] ?? 0;
 
-  const speakers = speakerAgg.results;
+  const speakers = speakerAgg;
   const outstandingTotal = speakers.reduce((sum, s) => sum + s.outstanding, 0);
   const missingBio = speakers.filter((s) => s.missing_bio === 1);
   const missingHeadshot = speakers.filter((s) => s.missing_headshot === 1);
