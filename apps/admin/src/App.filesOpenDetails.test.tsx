@@ -81,6 +81,8 @@ function filesTabConfig() {
       tasks: stubSource as any,
       messages: stubSource as any,
       files: stubSource as any,
+      reviews: stubSource as any,
+      comments: stubSource as any,
     },
     () => {},
     () => {},

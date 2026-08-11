@@ -173,7 +173,7 @@ export function SubmissionsFilter({
         setFilters={setFilters as DataListFilterProps<Record<string, string>>['setFilters']}
         resetFilters={() =>
           setFilters((prev) => {
-            const next = { ...prev, status: '' }
+            const next: Record<string, unknown> = { ...prev, status: '' }
             delete next.max_reviews
             return next
           })
