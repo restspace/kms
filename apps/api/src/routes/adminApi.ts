@@ -1015,6 +1015,312 @@ adminApiRoutes.delete('/contacts/:id', async (c) => {
   return c.json({ ok: true });
 });
 
+// ---------------------------------------------------------------------------
+// Cross-event contact surface (workplan §4) — the payoff of 0015. Three routes
+// that only make sense once a contact is an ORG-level person: put someone the
+// org already knows onto this event, read their history across the events you
+// administer, and destroy the person outright rather than detaching them.
+//
+// All three are guarded exactly like their neighbours above — against the
+// session's event, resolved from the cookie and never from the request — with
+// the single documented exception called out on the history route.
+// ---------------------------------------------------------------------------
+
+/** Picker page size. Small on purpose: it is a type-ahead, not a roster. */
+const ORG_SEARCH_LIMIT = 25;
+
+// GET /contacts/org-search?q= — everyone in the session's organisation who is
+// NOT already on this event, for the Speakers tab's "Add existing contact".
+// Until 0015 the question could not even be asked: a contact belonged to one
+// event, so "already exists elsewhere in the org" was not a state.
+adminApiRoutes.get('/contacts/org-search', async (c) => {
+  const session = c.get('session');
+  const q = (c.req.query('q') ?? '').trim();
+  const orgId = await sessionOrgId(c);
+  if (!orgId) return c.json({ error: 'not_found' }, 404);
+
+  const like = `%${q}%`;
+  const { results } = await c.env.DB.prepare(
+    // `contacts` carries org_id since 0015, so THAT is the tenancy guard here
+    // and there is no event_contacts join to make — the whole point of the
+    // endpoint is the people who have no row for this event yet. The NOT
+    // EXISTS is the exclusion, not the guard.
+    //
+    // company/job_title come from the person's most recent event in the same
+    // org: precisely the row contacts.attachToEvent seeds the new profile
+    // from, so the picker shows the organiser what they are about to get.
+    `SELECT c.id, c.email, c.first_name, c.last_name,
+            (SELECT ec.company FROM event_contacts ec
+               JOIN events e ON e.id = ec.event_id
+              WHERE ec.contact_id = c.id AND e.org_id = c.org_id
+              ORDER BY ec.added_at DESC LIMIT 1) AS company,
+            (SELECT ec.job_title FROM event_contacts ec
+               JOIN events e ON e.id = ec.event_id
+              WHERE ec.contact_id = c.id AND e.org_id = c.org_id
+              ORDER BY ec.added_at DESC LIMIT 1) AS job_title
+       FROM contacts c
+      WHERE c.org_id = ?1
+        AND NOT EXISTS (SELECT 1 FROM event_contacts ec
+                         WHERE ec.contact_id = c.id AND ec.event_id = ?2)
+        AND (?3 = '' OR c.first_name LIKE ?4 OR c.last_name LIKE ?4 OR c.email LIKE ?4)
+      -- Nameless stub contacts (submit.tsx's bare {email} rows — see the admin
+      -- app's isPlaceholderContact) sort last rather than being dropped: still
+      -- findable by typing the address, but they never head the list.
+      ORDER BY (COALESCE(c.first_name, '') = '' AND COALESCE(c.last_name, '') = ''),
+               c.last_name, c.first_name, c.email
+      LIMIT ?5`,
+  )
+    .bind(orgId, session.eventId, q, like, ORG_SEARCH_LIMIT)
+    .all();
+  return c.json({ items: results });
+});
+
+// POST /contacts/:id/attach — put an existing org contact on this event. The
+// counterpart to DELETE /contacts/:id's detach, and the only write path that
+// adds membership without touching identity.
+adminApiRoutes.post('/contacts/:id/attach', async (c) => {
+  const session = c.get('session');
+  const id = c.req.param('id');
+  const db = c.env.DB;
+  const orgId = await sessionOrgId(c);
+  if (!orgId) return c.json({ error: 'not_found' }, 404);
+
+  // The org check stands in for the event_contacts join every other
+  // /contacts/:id route guards with — that join cannot be the guard here,
+  // because a contact with no row for this event is exactly what this route
+  // takes. Another org's person still reads as absent.
+  const contact = await createDb(db).contacts.getByIdOrgWide(orgId, id);
+  if (!contact) return c.json({ error: 'not_found' }, 404);
+
+  const already = await db
+    .prepare('SELECT 1 AS ok FROM event_contacts WHERE event_id = ? AND contact_id = ?')
+    .bind(session.eventId, id)
+    .first();
+  if (already) return c.json({ error: 'already_on_event' }, 409);
+
+  // Seeds biography/company/job_title from their most recent event in the same
+  // org (never the headshot, which is an event-scoped asset) — the whole
+  // reason a returning speaker does not have to retype their profile.
+  await createDb(db).contacts.attachToEvent(session.eventId, id, 'admin');
+  await bumpEventRevision(c.env, session.eventId);
+  const row = await contactWithCustomFields(db, session.eventId, id);
+  return c.json(row, 201);
+});
+
+/** One event a contact has been part of — the history panel's grouping key. */
+interface ContactHistoryEvent {
+  event_id: string;
+  event_name: string;
+  event_starts_at: string | null;
+  added_at: string | null;
+  source: string | null;
+  company: string | null;
+  job_title: string | null;
+}
+
+/** One submission of theirs, already narrowed to a readable event. */
+interface ContactHistorySubmission {
+  id: string;
+  event_id: string;
+  code: string;
+  title: string;
+  status: string;
+  starts_at: string | null;
+  room_name: string | null;
+  role: string | null;
+}
+
+// GET /contacts/:id/history — submissions and sessions grouped by event: the
+// feature the whole workplan exists for (§4).
+adminApiRoutes.get('/contacts/:id/history', async (c) => {
+  const session = c.get('session');
+  const id = c.req.param('id');
+  const db = c.env.DB;
+
+  // Ordinary event guard first, identical to the headshot route's: the panel
+  // opens off this event's roster, so a contact with no row here is absent.
+  const onRoster = await db
+    .prepare(
+      `SELECT c.id FROM contacts c
+         JOIN event_contacts ec ON ec.contact_id = c.id AND ec.event_id = ?
+        WHERE c.id = ?`,
+    )
+    .bind(session.eventId, id)
+    .first();
+  if (!onRoster) return c.json({ error: 'not_found' }, 404);
+
+  // THE ONE DELIBERATELY ORG-WIDE READ IN THIS FILE. Everything else joins
+  // event_contacts to stay pinned to the session's event; this joins on
+  // contact_id alone, because a person's history spanning the organisation is
+  // the entire point of 0015. Two things keep it from being the silent
+  // widening the sweep warns about:
+  //
+  //  1. the roster check above — you can only ask about someone already
+  //     standing in front of you on this event;
+  //  2. `accessibleEventIds` (access.ts) — the answer is clipped to events
+  //     where this staff email holds an owner/admin/reviewer seat, so an admin
+  //     of event A never learns that event B exists, never mind that the
+  //     contact is on it. There is deliberately no "…and N events you cannot
+  //     see" tally either: the count alone discloses the existence this is
+  //     withholding.
+  const eventIds = await accessibleEventIds(c);
+  const marks = eventIds.map(() => '?').join(', ');
+
+  const memberships = await db
+    .prepare(
+      `SELECT ec.event_id, e.name AS event_name, e.starts_at AS event_starts_at,
+              ec.added_at, ec.source, ec.company, ec.job_title
+         FROM event_contacts ec
+         JOIN events e ON e.id = ec.event_id
+        WHERE ec.contact_id = ? AND ec.event_id IN (${marks})`,
+    )
+    .bind(id, ...eventIds)
+    .all<ContactHistoryEvent>();
+
+  // Same broad "theirs" relation the submissions resource's `contact_id`
+  // filter uses (submitter OR participant), lifted across events. `role` is
+  // their participant role where they have one, falling back to 'submitter'.
+  const submissions = await db
+    .prepare(
+      `SELECT s.id, s.event_id, s.code, s.title, s.status, s.starts_at,
+              r.name AS room_name,
+              COALESCE(
+                (SELECT sp.role FROM submission_participants sp
+                  WHERE sp.submission_id = s.id AND sp.contact_id = ?1 LIMIT 1),
+                CASE WHEN s.submitter_contact_id = ?1 THEN 'submitter' END
+              ) AS role
+         FROM submissions s
+         LEFT JOIN rooms r ON r.id = s.room_id
+        WHERE s.event_id IN (${marks})
+          AND (s.submitter_contact_id = ?1
+               OR EXISTS (SELECT 1 FROM submission_participants sp
+                           WHERE sp.submission_id = s.id AND sp.contact_id = ?1))
+        ORDER BY s.starts_at IS NULL, s.starts_at, s.code`,
+    )
+    .bind(id, ...eventIds)
+    .all<ContactHistorySubmission>();
+
+  // Grouped server-side so the panel renders one list per event without
+  // knowing the accessible set. An event they submitted to but were never
+  // attached to still gets a group — the membership row can be missing on
+  // legacy data — and its profile columns simply read null.
+  const groups = new Map<string, ContactHistoryEvent & { submissions: ContactHistorySubmission[] }>();
+  for (const row of memberships.results) groups.set(row.event_id, { ...row, submissions: [] });
+  for (const row of submissions.results) {
+    let group = groups.get(row.event_id);
+    if (!group) {
+      const meta = await db
+        .prepare('SELECT name, starts_at FROM events WHERE id = ?')
+        .bind(row.event_id)
+        .first<{ name: string; starts_at: string | null }>();
+      group = {
+        event_id: row.event_id,
+        event_name: meta?.name ?? row.event_id,
+        event_starts_at: meta?.starts_at ?? null,
+        added_at: null,
+        source: null,
+        company: null,
+        job_title: null,
+        submissions: [],
+      };
+      groups.set(row.event_id, group);
+    }
+    group.submissions.push(row);
+  }
+
+  // Most recent event first; the current one is just another entry, flagged so
+  // the panel can label it rather than hide it.
+  const events = [...groups.values()].sort((a, b) =>
+    (b.event_starts_at ?? '').localeCompare(a.event_starts_at ?? ''),
+  );
+  return c.json({ events, current_event_id: session.eventId });
+});
+
+// DELETE /contacts/:id/org — destroy the PERSON, as opposed to DELETE
+// /contacts/:id, which detaches them from this event and only reaches the
+// identity row when that was their last membership (workplan §4).
+//
+// Free when no other event references them; otherwise it needs ?confirm=1, and
+// the 409 asking for it names every event that goes with them. That list
+// cannot honestly be shown for events the caller holds no seat on, so those
+// refuse outright (403) rather than rendering as "…and 2 others" — the count
+// alone would disclose exactly what the history route above withholds.
+adminApiRoutes.delete('/contacts/:id/org', async (c) => {
+  const session = c.get('session');
+  const id = c.req.param('id');
+  const db = c.env.DB;
+  const confirmed = c.req.query('confirm') === '1';
+
+  const orgId = await sessionOrgId(c);
+  if (!orgId) return c.json({ error: 'not_found' }, 404);
+
+  // The same roster join the detach guards with: this is reached from the
+  // contact detail panel, so the person must be on this event.
+  const onRoster = await db
+    .prepare(
+      `SELECT c.id FROM contacts c
+         JOIN event_contacts ec ON ec.contact_id = c.id AND ec.event_id = ?
+        WHERE c.id = ?`,
+    )
+    .bind(session.eventId, id)
+    .first();
+  if (!onRoster) return c.json({ error: 'not_found' }, 404);
+
+  const others = await db
+    .prepare(
+      `SELECT ec.event_id, e.name AS event_name
+         FROM event_contacts ec
+         JOIN events e ON e.id = ec.event_id
+        WHERE ec.contact_id = ? AND ec.event_id <> ?
+        ORDER BY e.starts_at, e.name`,
+    )
+    .bind(id, session.eventId)
+    .all<{ event_id: string; event_name: string }>();
+
+  const accessible = await accessibleEventIds(c);
+  if (others.results.some((r) => !accessible.includes(r.event_id))) {
+    return c.json({ error: 'other_events_not_accessible' }, 403);
+  }
+  if (others.results.length > 0 && !confirmed) {
+    return c.json({ error: 'confirm_required', events: others.results }, 409);
+  }
+
+  // Every event losing them, this one included — bounded, and checked
+  // accessible above, so it is safe to write across.
+  const affected = [session.eventId, ...others.results.map((r) => r.event_id)];
+  const affectedMarks = affected.map(() => '?').join(', ');
+  try {
+    await db.batch([
+      // Same branding carve-out as the detach route, minus its last-membership
+      // condition (the person is going regardless): the branding columns point
+      // *at* an asset and carry no ON DELETE clause, and
+      // file_assets.uploaded_by_contact_id (SET NULL) is the mutual reference
+      // that makes the ordering matter.
+      db.prepare(
+        `UPDATE events SET logo_asset_id = NULL
+          WHERE id IN (${affectedMarks})
+            AND logo_asset_id IN (SELECT id FROM file_assets WHERE uploaded_by_contact_id = ?)`,
+      ).bind(...affected, id),
+      db.prepare(
+        `UPDATE events SET background_asset_id = NULL
+          WHERE id IN (${affectedMarks})
+            AND background_asset_id IN (SELECT id FROM file_assets WHERE uploaded_by_contact_id = ?)`,
+      ).bind(...affected, id),
+      // org_id is this statement's own tenancy guard, repeating the check the
+      // roster join made. The cascade fan-out (memberships, participants,
+      // assignments, invites, …) fires exactly as on the detach route's
+      // last-membership path.
+      db.prepare('DELETE FROM contacts WHERE id = ? AND org_id = ?').bind(id, orgId),
+    ]);
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    return c.json({ error: 'delete_conflict', detail }, 409);
+  }
+
+  for (const eventId of affected) await bumpEventRevision(c.env, eventId);
+  return c.json({ ok: true, events_affected: affected.length });
+});
+
 // SPK-10 fix: headshots were stored as a plain file_assets row (via
 // saveFile) plus a pointer on contacts.headshot_asset_id, but the Files
 // library (filesAdminRoutes.get('/library'), the query behind the Files

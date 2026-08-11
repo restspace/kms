@@ -76,19 +76,28 @@ export async function requestMagicLink(
 ): Promise<{ devLink: string | null }> {
   const db = createDb(c.env.DB);
   // Contacts are org-scoped as of 0015, and callers only hand us the event, so
-  // the org is read off the event row. Attaching is not optional: a contact
-  // created without an event_contacts row sits in no roster, and the callback
-  // below (db.contacts.getById, join-guarded) would then refuse their own link.
+  // the org is read off the event row.
   const event = await db.events.getById(args.event.id);
   if (!event) throw new Error(`requestMagicLink: unknown event ${args.event.id}`);
-  const contact = await db.contacts.upsertByEmail(event.org_id, args.email);
-  // Deliberately NOT attached here. This endpoint is unauthenticated: anyone can
-  // type any address against any event slug, so attaching at request time would
-  // let a stranger add an existing org contact to this event's roster — and,
-  // because attachToEvent seeds from their most recent event, copy another event
-  // team's biography/company/job_title across with them. The attach happens in
-  // /auth/callback instead, once possession of the mailbox has been proven.
-  // Until then getById's join guard means the contact cannot sign in here.
+
+  // Look up, never create (workplan §5). This endpoint is unauthenticated —
+  // anyone can type any address against any event slug — so creating here let
+  // a stranger litter the organisation with empty contact rows. Creation now
+  // belongs to the paths that have a reason to add a person: the CFP wizard,
+  // the importer, and staff adding someone by hand. Every caller of this
+  // function already resolved or created its contact first; only the public
+  // /auth/request form can arrive with an address we do not know.
+  //
+  // Nor is the contact attached to the event here: attaching would let a
+  // stranger add an existing org contact to this event's roster and, because
+  // attachToEvent seeds from their most recent event, copy another event
+  // team's biography/company/job_title across with them. That happens in
+  // /auth/callback, once consuming the token has proven the caller receives
+  // mail at this address.
+  const contact = await db.contacts.getByEmail(event.org_id, args.email);
+  // Silently do nothing for an unknown address. The caller's response must not
+  // depend on this, or the form becomes an address-enumeration oracle.
+  if (!contact) return { devLink: null };
 
   // One request path serves both destinations (the role decides where the
   // callback lands), so the link is minted as 'portal-login'; the callback

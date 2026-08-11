@@ -128,12 +128,18 @@ export async function sessionCookieFor(opts: {
   email?: string;
   role?: Role;
 }): Promise<string> {
+  // The email is the identity the portal and /files resolve per event against
+  // (workplan-5 §5), so a cookie whose email does not match its contact is not a
+  // realistic session. Default it from the contact row rather than a constant.
+  const row = await env.DB.prepare('SELECT email FROM contacts WHERE id = ?')
+    .bind(opts.contactId)
+    .first<{ email: string }>();
   const token = await createSessionToken(
     {
       contactId: opts.contactId,
       eventId: opts.eventId,
       eventSlug: opts.eventSlug ?? opts.eventId,
-      email: opts.email ?? 'test@example.com',
+      email: opts.email ?? row?.email ?? 'test@example.com',
       role: opts.role ?? 'speaker',
     },
     env.SESSION_SECRET,

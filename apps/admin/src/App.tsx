@@ -65,6 +65,11 @@ import {
   type BulkJobPollHandle,
 } from './workspace/messaging'
 import { openImportWizard } from './workspace/ImportWizard'
+import {
+  ContactCrossEventHistory,
+  DeleteFromOrgButton,
+  openContactPicker,
+} from './workspace/contactOrg'
 import { HeadshotUploadControl } from './workspace/headshotUpload'
 import { resolveTargetEventId } from './utils/importTarget'
 import {
@@ -685,6 +690,24 @@ export function buildWorkspaceConfig(
     },
   })
 
+  /**
+   * Workplan 5 §4: the org-wide picker. "+ New" creates a person from scratch
+   * and 409s on an email the org already knows; this is the other half —
+   * someone the organisation has on file with no row for this event yet, a
+   * state that did not exist before 0015. Unlike `importAction` it needs no
+   * target-event resolution: the attach endpoint writes to the session's
+   * current event, exactly as "+ New" does, so the dialog names that event
+   * rather than reading the sidebar scope.
+   */
+  const addExistingContactAction = {
+    id: 'add-existing-contact',
+    label: '＋ EXISTING',
+    title: `Add someone already in this organisation to ${currentEventName}`,
+    onClick: ({ reload }: { reload: () => void }) => {
+      openContactPicker({ eventName: currentEventName, onAdded: reload })
+    },
+  }
+
   /** Cross-event provenance column; hidden on mobile where width is scarce. */
   const eventColumn = { field: 'event_name', header: 'Event', width: '140px', sortable: false, mobileHidden: true }
   // SPK-15: the grid/detail item needs `cf__<key>` flat keys so a subsequent
@@ -741,7 +764,7 @@ export function buildWorkspaceConfig(
       },
       eventColumn,
     ],
-    detailComponent: ({ item, onEdit, onItemSaved }) => {
+    detailComponent: ({ item, onClose, onEdit, onItemSaved }) => {
       const customValues = parseContactFieldValues(item.custom_fields_json)
       // Contacts-hygiene item 2: same `links` json the portal profile page
       // reads/writes, surfaced read-only here (edited via the `link_*` form
@@ -798,6 +821,14 @@ export function buildWorkspaceConfig(
           )}
           <SpeakerSessions contactId={item.id} />
           {/*
+            * Workplan 5 §4: what this person is to the organisation, next to
+            * what they are to this event. `SpeakerSessions` above stays
+            * event-scoped — it answers the common question — while this one is
+            * the product's single deliberately org-wide read, clipped
+            * server-side to events the caller holds a seat on.
+            */}
+          <ContactCrossEventHistory contactId={item.id} />
+          {/*
             * SPK-06: the organiser can now put a known contact into the speaker
             * portal directly. Deliberately outside the `onEdit` guard — inviting
             * is not an edit, and the panel renders without `onEdit` in read-only
@@ -806,6 +837,23 @@ export function buildWorkspaceConfig(
           <div className="detail-actions">
             {onEdit && <button onClick={onEdit}>Edit</button>}
             <PortalInviteButton contactId={item.id} contactName={contactName(item)} />
+            {/*
+              * The tab's own Delete detaches from this event (adminApi.ts's
+              * DELETE /contacts/:id); this destroys the person org-wide, so it
+              * lives here rather than in `onDelete` where the two would be
+              * indistinguishable. `onItemSaved` before `onClose` is what
+              * refreshes the parent list — the tab manager has no "deleted"
+              * channel for a detail panel, and reporting the row it no longer
+              * finds is enough to invalidate the list behind it.
+              */}
+            <DeleteFromOrgButton
+              contactId={item.id}
+              contactName={contactName(item)}
+              onDeleted={() => {
+                onItemSaved?.(item)
+                onClose()
+              }}
+            />
           </div>
         </div>
       )
@@ -813,7 +861,7 @@ export function buildWorkspaceConfig(
     globalFilterSets: { id: 'contact_id' },
     globalFilterReceives: { submission_id: 'submission_id' },
     exportConfig: exportFor('contacts'),
-    toolbarActions: [importAction('contacts', 'speakers')],
+    toolbarActions: [addExistingContactAction, importAction('contacts', 'speakers')],
     schema: {
       ...speakerSchema,
       properties: { ...speakerSchema.properties, ...customFieldSchemaProperties(contactFields) },

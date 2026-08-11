@@ -15,6 +15,11 @@ let slug: string;
 beforeEach(async () => {
   slug = `evt-${crypto.randomUUID().slice(0, 8)}`;
   eventId = await createEvent({ slug, name: 'Magic Link Conf' });
+  // /auth/request looks the contact up and no longer creates one (workplan §5):
+  // an unauthenticated form must not be able to litter the org with empty rows.
+  // The token tests below are about token mechanics, so the speaker has to
+  // already exist for a link to be minted at all.
+  await createContact(eventId, { email: 'speaker@example.com' });
 });
 
 /** DEV_MODE=on returns the link in the response instead of only emailing it. */
@@ -53,6 +58,32 @@ describe('POST /auth/request', () => {
 
     const kv = await env.KV.list({ prefix: 'magic:' });
     expect(kv.keys).toHaveLength(0);
+  });
+
+  it('mints nothing for an unknown address, and says the same thing either way', async () => {
+    // Storage persists across it() blocks in a file, so these are before/after
+    // deltas rather than absolute zeroes.
+    const before = await env.DB.prepare('SELECT COUNT(*) AS n FROM contacts').first<{ n: number }>();
+    const tokensBefore = await env.DB.prepare('SELECT COUNT(*) AS n FROM auth_tokens').first<{ n: number }>();
+
+    const res = await SELF.fetch(`${ORIGIN}/auth/request`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', accept: 'application/json' },
+      body: JSON.stringify({ email: 'nobody@example.com', event_slug: slug }),
+    });
+
+    // Same 200 / ok:true a known address gets: the response must not reveal
+    // whether we hold the address, or the form is an enumeration oracle.
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { ok: boolean; dev_link?: string };
+    expect(body.ok).toBe(true);
+    expect(body.dev_link).toBeUndefined();
+
+    // No contact conjured, and no token to find.
+    const after = await env.DB.prepare('SELECT COUNT(*) AS n FROM contacts').first<{ n: number }>();
+    expect(after?.n).toBe(before?.n);
+    const tokens = await env.DB.prepare('SELECT COUNT(*) AS n FROM auth_tokens').first<{ n: number }>();
+    expect(tokens?.n).toBe(tokensBefore?.n);
   });
 });
 
