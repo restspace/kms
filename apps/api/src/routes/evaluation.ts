@@ -16,6 +16,14 @@ import { mintToken } from '../tokens';
 import { bumpEventRevision } from '../revision';
 import { isWriter } from '../access';
 import type { SessionPayload } from '../session';
+import { reviewWindowState } from '../reviewWindow';
+import {
+  addComment,
+  appendRationale,
+  canReviewerSeeThread,
+  loadAuthorName,
+  loadThread,
+} from '../submissionComments';
 
 type ApiEnv = { Bindings: Env; Variables: { session: SessionPayload } };
 
@@ -105,30 +113,9 @@ function parseIsoOrNull(raw: unknown): { ok: true; value: string | null } | { ok
   return { ok: true, value: new Date(ms).toISOString() };
 }
 
-export interface ReviewWindow {
-  opens_at: string | null;
-  closes_at: string | null;
-}
-
-/**
- * ABS-01: a plan may carry an optional review window. Null on either side is
- * "no bound", so a plan that never sets dates is always open — every existing
- * plan keeps its current behaviour.
- */
-export function reviewWindowState(
-  plan: ReviewWindow,
-  now = Date.now(),
-): { open: boolean; reason: 'not_yet_open' | 'closed' | null } {
-  if (plan.opens_at) {
-    const opens = Date.parse(plan.opens_at);
-    if (Number.isFinite(opens) && now < opens) return { open: false, reason: 'not_yet_open' };
-  }
-  if (plan.closes_at) {
-    const closes = Date.parse(plan.closes_at);
-    if (Number.isFinite(closes) && now > closes) return { open: false, reason: 'closed' };
-  }
-  return { open: true, reason: null };
-}
+// Moved to ../reviewWindow so the submission-comment gate (workplan 7 D3) can
+// share the derivation; re-exported to keep this module the reference point.
+export { reviewWindowState, type ReviewWindow } from '../reviewWindow';
 
 // POST /submissions/bulk-status — queue moves from the bulk-action bar.
 evaluationRoutes.post('/submissions/bulk-status', async (c) => {
@@ -622,7 +609,7 @@ evaluationRoutes.get('/submissions/:id/detail', async (c) => {
     .first<Record<string, unknown>>();
   if (!submission) return c.json({ error: 'not_found' }, 404);
 
-  const [answers, participants, reviews, tags] = await Promise.all([
+  const [answers, participants, reviews, tags, comments] = await Promise.all([
     db.prepare(
       `SELECT COALESCE(q.label, f.label) AS label, a.value_json, q.position
        FROM submission_answers a
@@ -656,7 +643,7 @@ evaluationRoutes.get('/submissions/:id/detail', async (c) => {
     // stay visible too; they are a record of work done, and the plan name
     // says which round each one belongs to.
     db.prepare(
-      `SELECT r.weighted_total, r.comment, r.conflict_of_interest, r.created_at,
+      `SELECT r.weighted_total, r.conflict_of_interest, r.created_at,
               r.plan_id, p.name AS plan_name,
               NULLIF(TRIM(COALESCE(c.first_name, '') || ' ' || COALESCE(c.last_name, '')), '') AS reviewer_name
        FROM reviews r
@@ -668,6 +655,7 @@ evaluationRoutes.get('/submissions/:id/detail', async (c) => {
     db.prepare(
       `SELECT tg.name FROM submission_tags st JOIN tags tg ON tg.id = st.tag_id WHERE st.submission_id = ?`,
     ).bind(id).all(),
+    loadThread(db, id),
   ]);
 
   // Per-round means, additive alongside the flat `reviews` list above. The
@@ -701,7 +689,38 @@ evaluationRoutes.get('/submissions/:id/detail', async (c) => {
     reviews: reviews.results,
     review_plan_means,
     tags: tags.results.map((t) => (t as { name: string }).name),
+    comments,
   });
+});
+
+// POST /submissions/:id/comments — organiser reply on the discussion thread
+// (workplan 7). Append-only: there is deliberately no update or delete route.
+evaluationRoutes.post('/submissions/:id/comments', async (c) => {
+  const session = c.get('session');
+  // The shared guard already refuses reviewers outside /review/*; this is the
+  // explicit second lock, matching PUT /submissions/:id/notes.
+  if (!isWriter(session.role)) return c.json({ error: 'forbidden' }, 403);
+  const db = c.env.DB;
+  const id = c.req.param('id');
+  const submission = await db
+    .prepare('SELECT id FROM submissions WHERE id = ? AND event_id = ?')
+    .bind(id, session.eventId)
+    .first<{ id: string }>();
+  if (!submission) return c.json({ error: 'not_found' }, 404);
+
+  const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+  if (typeof body.body !== 'string') return c.json({ error: 'empty_body' }, 400);
+  const commentId = await addComment(db, {
+    eventId: session.eventId,
+    submissionId: id,
+    authorContactId: session.contactId,
+    authorRole: session.role,
+    authorName: await loadAuthorName(db, session.contactId),
+    body: body.body,
+  });
+  if (!commentId) return c.json({ error: 'empty_body' }, 400);
+  await bumpEventRevision(c.env, session.eventId);
+  return c.json({ ok: true, id: commentId, comments: await loadThread(db, id) });
 });
 
 // ---------------------------------------------------------------------------
@@ -1510,7 +1529,13 @@ evaluationRoutes.get('/review/queue', async (c) => {
                 p.opens_at AS plan_opens_at, p.closes_at AS plan_closes_at,
                 s.code, s.title, s.description, s.format, s.level, s.language,
                 t.name AS track_name,
-                r.scores AS my_scores, r.comment AS my_comment, r.conflict_of_interest AS my_conflict
+                r.scores AS my_scores, r.conflict_of_interest AS my_conflict,
+                -- reviews.comment is deprecated (workplan 7 §3): the rationale
+                -- lives in the thread now, so the form prefill reads the
+                -- assignment's most recent kind='rationale' comment.
+                (SELECT sc.body FROM submission_comments sc
+                 WHERE sc.assignment_id = ra.id AND sc.kind = 'rationale'
+                 ORDER BY sc.created_at DESC, sc.id DESC LIMIT 1) AS my_comment
          FROM review_assignments ra
          JOIN evaluation_plans p ON p.id = ra.plan_id
          JOIN submissions s ON s.id = ra.submission_id
@@ -1658,7 +1683,10 @@ evaluationRoutes.post('/review/assignments/:id', async (c) => {
 
   const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
   const conflict = body.conflict_of_interest === true;
-  const comment = typeof body.comment === 'string' ? body.comment.slice(0, 5000) : null;
+  // The wire field is still `comment`, but it lands in the thread as a
+  // kind='rationale' comment (workplan 7 §3); reviews.comment is deprecated
+  // and no longer written.
+  const comment = typeof body.comment === 'string' ? body.comment : '';
 
   const { results: criteria } = await db
     .prepare('SELECT id, weight FROM scoring_criteria WHERE plan_id = ?')
@@ -1692,22 +1720,35 @@ evaluationRoutes.post('/review/assignments/:id', async (c) => {
   const reviewUpsert = db
     .prepare(
       `INSERT INTO reviews (id, assignment_id, submission_id, reviewer_contact_id, plan_id,
-         scores, weighted_total, comment, conflict_of_interest, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         scores, weighted_total, conflict_of_interest, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(assignment_id) WHERE assignment_id IS NOT NULL DO UPDATE SET
          scores = excluded.scores,
          weighted_total = excluded.weighted_total,
-         comment = excluded.comment,
          conflict_of_interest = excluded.conflict_of_interest`,
     )
     .bind(crypto.randomUUID(), assignment.id, assignment.submission_id, session.contactId,
-      assignment.plan_id, JSON.stringify(scores), weightedTotal, comment, conflict ? 1 : 0, ts);
+      assignment.plan_id, JSON.stringify(scores), weightedTotal, conflict ? 1 : 0, ts);
 
   const assignmentUpdate = db
     .prepare(`UPDATE review_assignments SET status = ?, completed_at = ? WHERE id = ?`)
     .bind(conflict ? 'skipped' : 'complete', ts, assignment.id);
 
   await db.batch([reviewUpsert, assignmentUpdate, ratingCacheStatement(db, assignment.submission_id, assignment.plan_id)]);
+
+  // Fold the rationale into the discussion thread (workplan 7 §3). Posted
+  // blind — writing it never requires reading the thread, so the D3 gate
+  // holds. appendRationale suppresses the no-op re-save; a genuinely revised
+  // rationale appends a second row (D4: append-only).
+  await appendRationale(db, {
+    eventId: session.eventId,
+    submissionId: assignment.submission_id,
+    planId: assignment.plan_id,
+    assignmentId: assignment.id,
+    authorContactId: session.contactId,
+    authorName: await loadAuthorName(db, session.contactId),
+    body: comment,
+  });
   await bumpEventRevision(c.env, session.eventId);
 
   const rating = await db
@@ -1715,4 +1756,68 @@ evaluationRoutes.post('/review/assignments/:id', async (c) => {
     .bind(assignment.submission_id, assignment.plan_id)
     .first<{ v: number | null }>();
   return c.json({ ok: true, weighted_total: weightedTotal, submission_rating: rating?.v ?? null });
+});
+
+// ---------------------------------------------------------------------------
+// Reviewer discussion thread (workplan 7). Lives under /review/* so the
+// adminApi guard's reviewer carve-out applies unchanged.
+// ---------------------------------------------------------------------------
+
+/** The assignment row a reviewer thread route hangs off, or null → 404. */
+async function reviewerAssignment(
+  db: D1Database,
+  assignmentId: string,
+  contactId: string,
+  eventId: string,
+): Promise<{ id: string; plan_id: string; submission_id: string } | null> {
+  return db
+    .prepare(
+      `SELECT ra.id, ra.plan_id, ra.submission_id
+       FROM review_assignments ra JOIN evaluation_plans p ON p.id = ra.plan_id
+       WHERE ra.id = ? AND ra.reviewer_contact_id = ? AND p.event_id = ?`,
+    )
+    .bind(assignmentId, contactId, eventId)
+    .first<{ id: string; plan_id: string; submission_id: string }>();
+}
+
+// GET /review/assignments/:id/comments — the thread, once the D3 gate opens.
+// The gate is server-side: a still-pending reviewer gets a bare 403 with no
+// counts, authors or excerpts — the rows never leave the server.
+evaluationRoutes.get('/review/assignments/:id/comments', async (c) => {
+  const session = c.get('session');
+  const db = c.env.DB;
+  const assignment = await reviewerAssignment(db, c.req.param('id'), session.contactId, session.eventId);
+  if (!assignment) return c.json({ error: 'not_found' }, 404);
+  if (!(await canReviewerSeeThread(db, session.contactId, assignment.submission_id))) {
+    return c.json({ error: 'review_not_submitted' }, 403);
+  }
+  return c.json({ comments: await loadThread(db, assignment.submission_id) });
+});
+
+// POST /review/assignments/:id/comments — reviewer reply. Same gate as the
+// read: joining the discussion and reading it unlock together (D3).
+evaluationRoutes.post('/review/assignments/:id/comments', async (c) => {
+  const session = c.get('session');
+  const db = c.env.DB;
+  const assignment = await reviewerAssignment(db, c.req.param('id'), session.contactId, session.eventId);
+  if (!assignment) return c.json({ error: 'not_found' }, 404);
+  if (!(await canReviewerSeeThread(db, session.contactId, assignment.submission_id))) {
+    return c.json({ error: 'review_not_submitted' }, 403);
+  }
+  const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+  if (typeof body.body !== 'string') return c.json({ error: 'empty_body' }, 400);
+  const commentId = await addComment(db, {
+    eventId: session.eventId,
+    submissionId: assignment.submission_id,
+    planId: assignment.plan_id,
+    assignmentId: assignment.id,
+    authorContactId: session.contactId,
+    authorRole: 'reviewer',
+    authorName: await loadAuthorName(db, session.contactId),
+    body: body.body,
+    kind: 'discussion',
+  });
+  if (!commentId) return c.json({ error: 'empty_body' }, 400);
+  await bumpEventRevision(c.env, session.eventId);
+  return c.json({ ok: true, id: commentId, comments: await loadThread(db, assignment.submission_id) });
 });
