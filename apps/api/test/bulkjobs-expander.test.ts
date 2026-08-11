@@ -83,28 +83,47 @@ describe('sweepBulkJobs / send-decisions', () => {
   });
 
   it('embeds non-empty, non-conflicted reviewer comments as bullet lines when include_feedback is set', async () => {
+    // reviews.comment is deprecated (workplan 7 §3): bulkJobs.ts now reads
+    // feedback from the submission_comments thread — each assignment's latest
+    // kind='rationale' row, joined back to `reviews` only to exclude a
+    // conflicted assignment's rationale. So the fixture here needs a real
+    // review_assignments row per reviewer (the join key) rather than a bare
+    // `reviews` insert.
     const eventId = await createEvent();
     const speaker = await createContact(eventId, { email: 'speaker3@example.com' });
     const s1 = await seedSubmission(eventId, speaker, 'accept_queue');
 
     const plan = `plan-${crypto.randomUUID()}`;
+    // A second plan for reviewer A's conflicted assignment: review_assignments
+    // is UNIQUE(plan_id, submission_id, reviewer_contact_id), so the same
+    // reviewer cannot hold two assignments on one submission in one plan.
+    const plan2 = `plan-${crypto.randomUUID()}`;
     await env.DB.prepare(`INSERT INTO evaluation_plans (id, event_id, name, status, created_at) VALUES (?, ?, 'Plan', 'active', ?)`)
       .bind(plan, eventId, ts).run();
+    await env.DB.prepare(`INSERT INTO evaluation_plans (id, event_id, name, status, created_at) VALUES (?, ?, 'Plan 2', 'active', ?)`)
+      .bind(plan2, eventId, ts).run();
     const reviewerA = await createContact(eventId, { email: 'ra@example.com' });
     const reviewerB = await createContact(eventId, { email: 'rb@example.com' });
-    await env.DB.prepare(
-      `INSERT INTO reviews (id, submission_id, reviewer_contact_id, plan_id, comment, conflict_of_interest, created_at)
-       VALUES (?, ?, ?, ?, ?, 0, ?)`,
-    ).bind(`rev-${crypto.randomUUID()}`, s1, reviewerA, plan, 'Great talk, solid structure.', ts).run();
-    await env.DB.prepare(
-      `INSERT INTO reviews (id, submission_id, reviewer_contact_id, plan_id, comment, conflict_of_interest, created_at)
-       VALUES (?, ?, ?, ?, ?, 0, ?)`,
-    ).bind(`rev-${crypto.randomUUID()}`, s1, reviewerB, plan, 'Needs more concrete examples.', ts).run();
-    // A conflicted review's comment must never leak into the email.
-    await env.DB.prepare(
-      `INSERT INTO reviews (id, submission_id, reviewer_contact_id, plan_id, comment, conflict_of_interest, created_at)
-       VALUES (?, ?, ?, ?, ?, 1, ?)`,
-    ).bind(`rev-${crypto.randomUUID()}`, s1, reviewerA, plan, 'CONFLICTED — should not appear', ts).run();
+
+    const seedAssignment = async (planId: string, reviewerId: string, conflict: boolean, rationale: string) => {
+      const assignmentId = `ra-${crypto.randomUUID()}`;
+      await env.DB.prepare(
+        `INSERT INTO review_assignments (id, plan_id, submission_id, reviewer_contact_id, status, assigned_at)
+         VALUES (?, ?, ?, ?, 'complete', ?)`,
+      ).bind(assignmentId, planId, s1, reviewerId, ts).run();
+      await env.DB.prepare(
+        `INSERT INTO reviews (id, assignment_id, submission_id, reviewer_contact_id, plan_id, comment, conflict_of_interest, created_at)
+         VALUES (?, ?, ?, ?, ?, NULL, ?, ?)`,
+      ).bind(`rev-${crypto.randomUUID()}`, assignmentId, s1, reviewerId, planId, conflict ? 1 : 0, ts).run();
+      await env.DB.prepare(
+        `INSERT INTO submission_comments (id, event_id, submission_id, plan_id, assignment_id, author_contact_id, author_role, kind, body, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, 'reviewer', 'rationale', ?, ?)`,
+      ).bind(`sc-${crypto.randomUUID()}`, eventId, s1, planId, assignmentId, reviewerId, rationale, ts).run();
+    };
+    await seedAssignment(plan, reviewerA, false, 'Great talk, solid structure.');
+    await seedAssignment(plan, reviewerB, false, 'Needs more concrete examples.');
+    // A conflicted assignment's rationale must never leak into the email.
+    await seedAssignment(plan2, reviewerA, true, 'CONFLICTED — should not appear');
 
     const jobId = await seedBulkJob(eventId, [s1], true);
     await sweepBulkJobs(env, 50);

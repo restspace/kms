@@ -38,6 +38,7 @@ const api = vi.hoisted(() => ({
   updateSubmissionParticipantRole: vi.fn(),
   setSubmissionParticipantConfirmed: vi.fn(),
   contactSearch: vi.fn(),
+  addSubmissionComment: vi.fn(),
 }))
 
 vi.mock('../api', () => ({
@@ -50,6 +51,7 @@ vi.mock('../api', () => ({
   removeSubmissionParticipant: api.removeSubmissionParticipant,
   updateSubmissionParticipantRole: api.updateSubmissionParticipantRole,
   setSubmissionParticipantConfirmed: api.setSubmissionParticipantConfirmed,
+  addSubmissionComment: api.addSubmissionComment,
   queryResource: () => api.contactSearch,
   listTracks: async () => ({ items: [] }),
   listRooms: async () => ({ items: [] }),
@@ -86,6 +88,7 @@ const detail = (
   participants = [PARTICIPANT],
   reviews: Array<Record<string, unknown>> = [],
   review_plan_means: Array<{ plan_id: string; plan_name: string | null; mean: number; count: number }> = [],
+  comments: Array<Record<string, unknown>> = [],
 ) => ({
   submission: {
     id: 'sub-1',
@@ -103,6 +106,7 @@ const detail = (
   participants,
   reviews,
   review_plan_means,
+  comments,
   tags: [],
 })
 
@@ -114,6 +118,7 @@ beforeEach(() => {
   api.addSubmissionParticipant.mockResolvedValue({ ok: true, id: 'sp-2' })
   api.removeSubmissionParticipant.mockResolvedValue({ ok: true })
   api.contactSearch.mockResolvedValue({ items: [], total: 0 })
+  api.addSubmissionComment.mockResolvedValue({ ok: true, id: 'sc-2', comments: [] })
 })
 
 describe('SubmissionDetailPanel — edit affordance (CNT-09)', () => {
@@ -180,6 +185,73 @@ describe('SubmissionDetailPanel — participants (AIA-04)', () => {
   })
 })
 
+describe('SubmissionDetailPanel — discussion thread (workplan 7)', () => {
+  it('renders thread comments with author and body', async () => {
+    api.getSubmissionDetail.mockResolvedValue(
+      detail({}, [PARTICIPANT], [], [], [
+        {
+          id: 'sc-1',
+          submission_id: 'sub-1',
+          plan_id: null,
+          assignment_id: null,
+          author_contact_id: 'c-9',
+          author_role: 'admin',
+          author_name: 'Jordan Lee',
+          kind: 'discussion',
+          body: 'Strong proposal, worth a second look.',
+          created_at: '2026-01-06T10:00:00Z',
+        },
+      ]),
+    )
+    render(<SubmissionDetailPanel id="sub-1" />)
+
+    await screen.findByText('Jordan Lee')
+    expect(screen.getByText('Strong proposal, worth a second look.')).toBeTruthy()
+  })
+
+  it('shows the empty state when there are no comments', async () => {
+    render(<SubmissionDetailPanel id="sub-1" />)
+
+    await screen.findByText('Designing for Doubt')
+    expect(screen.getByText('No comments yet.')).toBeTruthy()
+  })
+
+  it('posts a comment and renders the refreshed thread', async () => {
+    api.addSubmissionComment.mockResolvedValue({
+      ok: true,
+      id: 'sc-2',
+      comments: [
+        {
+          id: 'sc-2',
+          submission_id: 'sub-1',
+          plan_id: null,
+          assignment_id: null,
+          author_contact_id: 'c-9',
+          author_role: 'admin',
+          author_name: 'Jordan Lee',
+          kind: 'discussion',
+          body: 'Checking in with the co-chair.',
+          created_at: '2026-01-07T10:00:00Z',
+        },
+      ],
+    })
+    render(<SubmissionDetailPanel id="sub-1" />)
+
+    const box = (await screen.findByLabelText('Add to the discussion')) as HTMLTextAreaElement
+    setValue(box, 'Checking in with the co-chair.')
+
+    const post = (await screen.findByRole('button', { name: 'Post' })) as HTMLButtonElement
+    await waitFor(() => expect(post.disabled).toBe(false))
+    post.click()
+
+    await waitFor(() =>
+      expect(api.addSubmissionComment).toHaveBeenCalledWith('sub-1', 'Checking in with the co-chair.'),
+    )
+    await screen.findByText('Checking in with the co-chair.')
+    await screen.findByText('Jordan Lee')
+  })
+})
+
 describe('SubmissionDetailPanel — reviews grouped by round (aggregate rating mixes independent rounds)', () => {
   it('groups reviews under a round heading with a per-round mean, alongside the pooled header rating', async () => {
     api.getSubmissionDetail.mockResolvedValue(
@@ -187,9 +259,9 @@ describe('SubmissionDetailPanel — reviews grouped by round (aggregate rating m
         {},
         [PARTICIPANT],
         [
-          { reviewer_name: 'Ada Lovelace', weighted_total: 5, comment: null, conflict_of_interest: 0, plan_id: 'plan-a', plan_name: 'Screening Round' },
-          { reviewer_name: 'Grace Hopper', weighted_total: 4, comment: null, conflict_of_interest: 0, plan_id: 'plan-a', plan_name: 'Screening Round' },
-          { reviewer_name: 'Alan Turing', weighted_total: 2, comment: null, conflict_of_interest: 0, plan_id: 'plan-b', plan_name: 'Final Round' },
+          { reviewer_name: 'Ada Lovelace', weighted_total: 5, conflict_of_interest: 0, plan_id: 'plan-a', plan_name: 'Screening Round' },
+          { reviewer_name: 'Grace Hopper', weighted_total: 4, conflict_of_interest: 0, plan_id: 'plan-a', plan_name: 'Screening Round' },
+          { reviewer_name: 'Alan Turing', weighted_total: 2, conflict_of_interest: 0, plan_id: 'plan-b', plan_name: 'Final Round' },
         ],
         [
           { plan_id: 'plan-a', plan_name: 'Screening Round', mean: 4.5, count: 2 },
@@ -270,6 +342,7 @@ describe('SubmissionDetailPanel — Title/Description/Format/Track dedup (stale-
       ],
       participants: [PARTICIPANT],
       reviews: [],
+      comments: [],
       tags: [],
     })
 
@@ -289,6 +362,7 @@ describe('SubmissionDetailPanel — Title/Description/Format/Track dedup (stale-
       ],
       participants: [PARTICIPANT],
       reviews: [],
+      comments: [],
       tags: [],
     })
     const checkbox = await screen.findByLabelText('Visible in public agenda')

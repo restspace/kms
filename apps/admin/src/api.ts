@@ -125,6 +125,8 @@ const ERROR_MESSAGES: Record<string, string> = {
   already_on_event: 'They are already on this event.',
   other_events_not_accessible:
     'They also belong to events you do not administer, so they can only be removed from this one.',
+  empty_body: 'A comment needs some text.',
+  review_not_submitted: 'Post your review to join the discussion.',
 }
 
 function readableError(code: string): string {
@@ -540,6 +542,24 @@ export interface TaskAssignmentRow {
   submission_title: string | null
 }
 
+/**
+ * One row of a submission's discussion thread (workplan 7). Append-only —
+ * there is no update or delete. kind='rationale' rows are review comments
+ * posted at score-save time; kind='discussion' is everything else.
+ */
+export interface SubmissionComment {
+  id: string
+  submission_id: string
+  plan_id: string | null
+  assignment_id: string | null
+  author_contact_id: string | null
+  author_role: string
+  author_name: string | null
+  kind: string
+  body: string
+  created_at: string
+}
+
 export interface SubmissionDetail {
   submission: Record<string, unknown>
   answers: Array<{ label: string; value_json: string | null }>
@@ -561,12 +581,13 @@ export interface SubmissionDetail {
   reviews: Array<{
     reviewer_name: string | null
     weighted_total: number | null
-    comment: string | null
     conflict_of_interest: number
     plan_id: string
     plan_name: string | null
     created_at: string
   }>
+  /** The discussion thread (workplan 7), oldest first — rationale rows included. */
+  comments: SubmissionComment[]
   /** Per-round mean, additive alongside `reviews` (evaluation.ts's detail
    *  route) — the same AVG(weighted_total) grouping rating_cache keeps per
    *  plan_id, just also handed to the client so round-level results stay
@@ -1016,6 +1037,23 @@ export const saveReview = (assignmentId: string, body: Record<string, unknown>) 
   request<{ ok: boolean; weighted_total: number | null; submission_rating: number | null }>(
     `/app/api/review/assignments/${assignmentId}`,
     { method: 'POST', body: JSON.stringify(body) },
+  )
+
+// Submission discussion thread (workplan 7). The organiser posts against the
+// submission; the reviewer reads/posts through their assignment, and the
+// server answers 403 { error: 'review_not_submitted' } until the D3 gate
+// (own review submitted, or round closed) opens.
+export const addSubmissionComment = (id: string, body: string) =>
+  request<{ ok: boolean; id: string; comments: SubmissionComment[] }>(`/app/api/submissions/${id}/comments`, {
+    method: 'POST',
+    body: JSON.stringify({ body }),
+  })
+export const getAssignmentComments = (assignmentId: string) =>
+  request<{ comments: SubmissionComment[] }>(`/app/api/review/assignments/${assignmentId}/comments`)
+export const addAssignmentComment = (assignmentId: string, body: string) =>
+  request<{ ok: boolean; id: string; comments: SubmissionComment[] }>(
+    `/app/api/review/assignments/${assignmentId}/comments`,
+    { method: 'POST', body: JSON.stringify({ body }) },
   )
 
 // ---------------------------------------------------------------------------

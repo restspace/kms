@@ -3,6 +3,7 @@ import type { DataListFilterProps } from '../components/DataList'
 import type { CreateFormProps } from '../components/DataTabManager'
 import { appConfirm } from '../components/dialogs'
 import {
+  addSubmissionComment,
   addSubmissionParticipant,
   getSubmissionDetail,
   listRooms,
@@ -17,10 +18,12 @@ import {
   updateSubmissionStatus,
   type ContactRow,
   type RoomRow,
+  type SubmissionComment,
   type SubmissionDetail,
   type TrackRow,
 } from '../api'
 import { SubmissionFilesPanel } from './FilePanels'
+import './files.css'
 import './review.css'
 
 /**
@@ -159,6 +162,22 @@ const fmtDate = (iso: unknown): string => {
   return Number.isNaN(d.getTime())
     ? iso
     : d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+}
+
+/** Same shape as FilePanels' fmtDateTime — the discussion thread needs the
+ *  time too, not just the day, since replies can stack up within an hour. */
+const fmtDateTime = (iso: string | null | undefined): string => {
+  if (!iso) return ''
+  const d = new Date(iso)
+  return Number.isNaN(d.getTime())
+    ? iso
+    : d.toLocaleString('en-US', {
+        month: 'short',
+        day: 'numeric',
+        year: 'numeric',
+        hour: 'numeric',
+        minute: '2-digit',
+      })
 }
 
 const answerText = (json: string | null): string => {
@@ -666,12 +685,92 @@ export function SubmissionDetailPanel({ id, onEdit, onItemSaved }: {
                   <span>{r.reviewer_name ?? 'Reviewer'}</span>
                   <span>{r.conflict_of_interest === 1 ? 'Conflict of interest' : r.weighted_total ?? '—'}</span>
                 </div>
-                {r.comment && <div className="rev-comment">{r.comment}</div>}
               </div>
             ))}
           </div>
         )
       })}
+
+      {/* Workplan 7: the discussion thread. Rationale rows (posted at
+          score-save time) and free-standing discussion rows share one
+          append-only thread — labelled distinctly from Internal notes above,
+          which stays a writer-only scratchpad. */}
+      <h2 style={{ fontSize: 14, marginTop: 16 }}>
+        Discussion {detail.comments.length > 0 && <span style={{ color: 'var(--text-muted)', fontWeight: 400 }}>({detail.comments.length})</span>}
+      </h2>
+      <SubmissionDiscussionThread
+        submissionId={id}
+        comments={detail.comments}
+        onComments={(next) => setDetail((d) => (d ? { ...d, comments: next } : d))}
+      />
+    </div>
+  )
+}
+
+/**
+ * The submission discussion thread (workplan 7). Same markup/CSS as
+ * FilePanels' FileThread — `.file-thread` / `.file-comment` / `.fc-head` /
+ * `.fc-body` / `.file-reply` / `.file-empty` / `.file-error` — so the two
+ * threads read as one visual language. Append-only: no edit/delete controls.
+ */
+function SubmissionDiscussionThread({
+  submissionId,
+  comments,
+  onComments,
+}: {
+  submissionId: string
+  comments: SubmissionComment[]
+  onComments: (next: SubmissionComment[]) => void
+}) {
+  const [draft, setDraft] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const post = async () => {
+    if (draft.trim() === '') return
+    setBusy(true)
+    setError(null)
+    try {
+      const res = await addSubmissionComment(submissionId, draft.trim())
+      onComments(res.comments)
+      setDraft('')
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to post comment')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="file-thread">
+      {comments.length === 0 && <p className="file-empty">No comments yet.</p>}
+      {comments.map((m) => (
+        <div key={m.id} className="file-comment">
+          <div className="fc-head">
+            <strong>{m.author_name ?? 'Someone'}</strong>
+            {m.author_role === 'reviewer' ? ' · Reviewer' : ' · Organiser'}
+            {m.kind === 'rationale' ? ' · Review comment' : ''}
+            {' · '}{fmtDateTime(m.created_at)}
+          </div>
+          <div className="fc-body">{m.body}</div>
+        </div>
+      ))}
+      <div className="file-reply">
+        <textarea
+          rows={2}
+          value={draft}
+          aria-label="Add to the discussion"
+          placeholder="Add to the discussion…"
+          disabled={busy}
+          onChange={(e) => setDraft((e.target as HTMLTextAreaElement).value)}
+        />
+        <div className="file-reply-actions">
+          <button type="button" disabled={busy || draft.trim() === ''} onClick={() => void post()}>
+            {busy ? 'Posting…' : 'Post'}
+          </button>
+          {error && <span className="file-error" role="alert">{error}</span>}
+        </div>
+      </div>
     </div>
   )
 }

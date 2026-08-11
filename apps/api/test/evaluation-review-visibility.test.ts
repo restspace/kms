@@ -19,7 +19,6 @@ const base = 'https://example.com/app/api';
 
 interface DetailReview {
   weighted_total: number | null;
-  comment: string | null;
   reviewer_name: string | null;
   plan_id?: string;
   plan_name?: string | null;
@@ -82,10 +81,16 @@ const saveReview = (cookie: string, assignmentId: string, criterionId: string, b
     jsonReq(cookie, { scores: { [criterionId]: 4 }, comment: 'Strong, well-scoped talk.', ...body }),
   );
 
+interface DetailComment {
+  kind: string;
+  body: string;
+  author_role: string;
+}
+
 const detail = async (cookie: string, submissionId: string) => {
   const res = await SELF.fetch(`${base}/submissions/${submissionId}/detail`, { headers: { cookie } });
   expect(res.status).toBe(200);
-  return (await res.json()) as { reviews: DetailReview[]; submission: Record<string, unknown> };
+  return (await res.json()) as { reviews: DetailReview[]; comments: DetailComment[]; submission: Record<string, unknown> };
 };
 
 const gridRow = async (cookie: string, submissionId: string) => {
@@ -96,16 +101,23 @@ const gridRow = async (cookie: string, submissionId: string) => {
 };
 
 describe('organiser visibility of recorded reviews', () => {
-  it('shows the rating, comment and reviewer on the submission detail', async () => {
+  it('shows the rating and reviewer on the submission detail, and the rationale on the comment thread', async () => {
     const { admin, reviewer, submissionId, assignmentId, criterionId } = await seedRound();
     expect((await saveReview(reviewer.cookie, assignmentId, criterionId)).status).toBe(200);
 
-    const { reviews } = await detail(admin.cookie, submissionId);
+    const { reviews, comments } = await detail(admin.cookie, submissionId);
     expect(reviews).toHaveLength(1);
     expect(reviews[0]).toMatchObject({
       weighted_total: 4,
-      comment: 'Strong, well-scoped talk.',
       reviewer_name: 'Sam Whitfield',
+    });
+    // reviews.comment is deprecated (workplan 7 §3): the reviewer's rationale
+    // now lands on the discussion thread as a kind='rationale' comment.
+    expect(comments).toHaveLength(1);
+    expect(comments[0]).toMatchObject({
+      kind: 'rationale',
+      body: 'Strong, well-scoped talk.',
+      author_role: 'reviewer',
     });
   });
 
@@ -119,7 +131,6 @@ describe('organiser visibility of recorded reviews', () => {
     expect(reviews).toHaveLength(1);
     expect(reviews[0]).toMatchObject({
       weighted_total: 4,
-      comment: 'Strong, well-scoped talk.',
       reviewer_name: 'Sam Whitfield',
       plan_id: planId,
       plan_name: 'Round 1',

@@ -240,10 +240,25 @@ async function expandSendDecisions(env: Env, job: BulkJobRow, limit: number): Pr
   const ts = nowIso();
   const send = queueSend(db, job.id);
   const gatherFeedback = async (submissionId: string): Promise<string> => {
+    // Reviewer rationales live in the submission_comments thread since
+    // workplan 7 (reviews.comment is deprecated). Feedback is each
+    // assignment's most recent kind='rationale' row — append-only means a
+    // revised rationale is a newer row, and only the latest should be sent.
+    // Discussion rows are never included (D5: the thread is internal); the
+    // conflict-of-interest exclusion carries over via the reviews join.
     const { results: comments } = await db
       .prepare(
-        `SELECT comment FROM reviews
-         WHERE submission_id = ? AND conflict_of_interest = 0 AND comment IS NOT NULL AND TRIM(comment) != ''`,
+        `SELECT body AS comment FROM (
+           SELECT sc.body, sc.id,
+                  ROW_NUMBER() OVER (
+                    PARTITION BY COALESCE(sc.assignment_id, sc.id)
+                    ORDER BY sc.created_at DESC, sc.id DESC) AS rn
+           FROM submission_comments sc
+           LEFT JOIN reviews r ON r.assignment_id = sc.assignment_id
+           WHERE sc.submission_id = ? AND sc.kind = 'rationale'
+             AND COALESCE(r.conflict_of_interest, 0) = 0
+         ) WHERE rn = 1 AND TRIM(body) != ''
+         ORDER BY id`,
       )
       .bind(submissionId)
       .all<{ comment: string }>();

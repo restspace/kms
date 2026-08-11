@@ -116,9 +116,13 @@ describe('review upsert (P1-5)', () => {
     const body = (await res.json()) as { weighted_total: number };
     expect(body.weighted_total).toBe(4);
 
-    const rows = await env.DB.prepare('SELECT comment FROM reviews WHERE assignment_id = ?').bind(assignmentId).all<{ comment: string }>();
+    // Still exactly one reviews row on re-save; reviews.comment is deprecated
+    // (workplan 7 §3) and is no longer written — the rationale text lives on
+    // the submission_comments thread instead (see submission-comments.test.ts
+    // for the append-on-change behaviour).
+    const rows = await env.DB.prepare('SELECT id, comment FROM reviews WHERE assignment_id = ?').bind(assignmentId).all<{ id: string; comment: string | null }>();
     expect(rows.results).toHaveLength(1);
-    expect(rows.results[0]!.comment).toBe('second pass');
+    expect(rows.results[0]!.comment).toBeNull();
   });
 
   it('preserves another plan\'s cached rating when this plan\'s rating changes', async () => {
