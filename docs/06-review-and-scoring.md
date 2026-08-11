@@ -156,13 +156,24 @@ Per the dashboard screenshot: **Evaluation plans**, **Evaluated submissions**,
 1. Filter or sort by rating (e.g. `Ratings: Round 1 desc`).
 2. Bulk-select the top N → **Change status → Accept Queue**.
 3. Review the Accept Queue tab; adjust.
-4. **Send decision emails** → accepted speakers get the acceptance template (with a portal link
-   and any auto-assigned tasks), declined get the decline template. `notified_at` is stamped and
-   the `Notified` column updates.
-5. Accepted submissions now appear in the agenda's unscheduled tray.
+4. **Send decision emails** opens a preflight dialog when speakers in the batch have other
+   submissions still under review (pending, or in accept/decline queues from earlier batches).
+   The dialog lists affected speakers and offers:
+   - **Send all now** (default) — send one merged email per speaker covering all their
+     decisions in this batch, with a "still under review" note on their pending submissions.
+   - **Hold those speakers** — exclude those speakers from this send; their rows stay in queue
+     states and appear as "staged" in the grid, released in a later batch.
+   - **Cancel.**
+5. When the job runs, speakers with multiple queued decisions in the batch get a single
+   `decision_summary` email listing their accepted submissions first, then declines, plus any
+   pending-submission note. Speakers with exactly one decision per batch keep the per-submission
+   `decision_accepted` / `decision_declined` templates unchanged. `notified_at` is stamped on
+   every submission covered by an email, and the `Notified` column updates.
+6. Accepted submissions now appear in the agenda's unscheduled tray.
 
 Decision emails are idempotent — re-running the action does not double-send (see
-[08 §Idempotency](08-communications.md)).
+[08 §Idempotency](08-communications.md)). Held submissions remain in their queue states across
+multiple batches until explicitly sent.
 
 ---
 

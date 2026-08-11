@@ -23,6 +23,7 @@ Admins may edit any of them; the system seeds sensible defaults so nothing is bl
 | `admin_submission_updated` | Submission updated | nice to have |
 | `decision_accepted` | Status → accepted, decision emails sent | **must** |
 | `decision_declined` | Status → declined | **must** |
+| `decision_summary` | Status → accepted/declined, speaker has multiple decisions in batch | **must** (merged email; single decisions stay per-submission) |
 | `task_assigned` | Task assigned to a speaker | **must** |
 | `task_reminder` | N days before a task due date | **must** |
 | `draft_reminder` | Before a form's close date, to submitters with drafts | should (enabled by setting a close date) |
@@ -49,6 +50,35 @@ events can have different voices.
 ```
 Unknown variables render as empty strings and are reported in the preview as warnings. Dates
 render in the event timezone with the zone abbreviation.
+
+### The `decision_summary` template — merged emails for multi-decision speakers
+
+When a speaker has multiple submissions in a single batch of decisions, a single email replaces
+the per-submission `decision_accepted` / `decision_declined` templates. The email lists all
+accepted submissions first, then declined ones, with optional notes on submissions still under
+review and follow-up messaging. The template uses four prerendered HTML block variables
+(triple-brace slots interpolate raw HTML; ordinary `{{var}}` slots stay escaped):
+
+- `{{{decisions_block}}}` — one line per submission with title, code and outcome, accepts
+  first, with each submission's reviewer feedback nested under it if `include_feedback` is
+  enabled.
+- `{{{pending_note}}}` — an optional paragraph (e.g. "Your submission **Title** (CODE) is still
+  under review") when the speaker has other undecided submissions and `pending_note: true` is
+  set in the job params; empty string when disabled or no pending submissions exist.
+- `{{{followup_note}}}` — an optional paragraph ("Following our earlier decisions on your other
+  submissions…") when any other submission by this speaker already has `notified_at` stamped;
+  empty string otherwise.
+- `{{{closing_block}}}` — the sign-off: any accept in the batch renders the onboarding-tasks
+  line and portal button from `decision_accepted`; a declines-only batch renders the softer
+  `decision_declined` sign-off.
+
+A single decision by a speaker keeps the `decision_accepted` / `decision_declined` templates
+unchanged (same merge variables, same `entityId` key), ensuring the common case has zero
+template churn.
+
+If `decision_summary` is **disabled** in the template settings, the email is not sent, but
+statuses still flip and `notified_at` stays unset — the "skip this template" rule is
+identical to the existing `decision_accepted` / `decision_declined` disable behaviour.
 
 ---
 

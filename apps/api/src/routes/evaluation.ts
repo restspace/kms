@@ -244,6 +244,18 @@ evaluationRoutes.post('/submissions/send-decisions', async (c) => {
   const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
   const ids = parseIds(body.ids);
   const includeFeedback = body.include_feedback === true;
+  // Workplan 10 §4: `preflight: true` computes and returns — without creating
+  // a job — the usual counts plus speakers_with_pending, so the UI can warn
+  // about mixed-completeness speakers before anything sends.
+  // `hold_contact_ids` excludes those speakers' rows from this send (their
+  // rows stay in queue states, visible as "staged" on the dashboard — no new
+  // status, no new table). `pending_note` rides into params_json and controls
+  // the merged email's still-under-review line.
+  const preflight = body.preflight === true;
+  const holdContactIds = Array.isArray(body.hold_contact_ids)
+    ? body.hold_contact_ids.filter((x): x is string => typeof x === 'string')
+    : [];
+  const pendingNote = body.pending_note !== false;
   if (ids.length === 0) return c.json({ error: 'ids_required' }, 400);
 
   const event = await db
@@ -255,20 +267,87 @@ evaluationRoutes.post('/submissions/send-decisions', async (c) => {
   const placeholders = ids.map(() => '?').join(', ');
   const { results } = await db
     .prepare(
-      `SELECT s.id, s.status, s.notified_at, c.email AS submitter_email
+      `SELECT s.id, s.status, s.notified_at, s.submitter_contact_id, c.email AS submitter_email
        FROM submissions s
        LEFT JOIN contacts c ON c.id = s.submitter_contact_id
        WHERE s.event_id = ? AND s.id IN (${placeholders})`,
     )
     .bind(session.eventId, ...ids)
-    .all<{ id: string; status: string; notified_at: string | null; submitter_email: string | null }>();
+    .all<{
+      id: string; status: string; notified_at: string | null;
+      submitter_contact_id: string | null; submitter_email: string | null;
+    }>();
 
   // Rows outside the queues are skipped; split out those already notified so
   // the UI can say "nothing re-sent" rather than a bare zero (docs/06 §5).
-  const queued = results.filter((s) => s.status === 'accept_queue' || s.status === 'decline_queue');
+  const allQueued = results.filter((s) => s.status === 'accept_queue' || s.status === 'decline_queue');
   const skippedNotified = results.filter(
     (s) => s.status !== 'accept_queue' && s.status !== 'decline_queue' && s.notified_at !== null,
   ).length;
+
+  if (preflight) {
+    // For each distinct submitter in the queued selection: their *other*
+    // submissions still undecided — status not in (accepted, declined,
+    // withdrawn) and not part of this selection. `draft` is excluded by
+    // decision (§4): a never-submitted draft shouldn't hold a decision email.
+    const speakerIds = [...new Set(allQueued.map((s) => s.submitter_contact_id).filter((x): x is string => x !== null))];
+    const speakersWithPending: Array<{
+      contact_id: string; name: string; pending_count: number; pending_titles: string[];
+    }> = [];
+    if (speakerIds.length > 0) {
+      const speakerPh = speakerIds.map(() => '?').join(', ');
+      const { results: pending } = await db
+        .prepare(
+          `SELECT s.submitter_contact_id AS contact_id, s.title,
+                  c.first_name, c.last_name, c.email
+           FROM submissions s
+           JOIN contacts c ON c.id = s.submitter_contact_id
+           WHERE s.event_id = ? AND s.submitter_contact_id IN (${speakerPh})
+             AND s.status NOT IN ('accepted', 'declined', 'withdrawn', 'draft')
+             AND s.id NOT IN (${placeholders})
+           ORDER BY s.submitter_contact_id, s.created_at`,
+        )
+        .bind(session.eventId, ...speakerIds, ...ids)
+        .all<{ contact_id: string; title: string; first_name: string | null; last_name: string | null; email: string }>();
+      for (const row of pending) {
+        const last = speakersWithPending[speakersWithPending.length - 1];
+        if (last && last.contact_id === row.contact_id) {
+          last.pending_count += 1;
+          if (last.pending_titles.length < 3) last.pending_titles.push(row.title);
+        } else {
+          speakersWithPending.push({
+            contact_id: row.contact_id,
+            name: [row.first_name, row.last_name].filter(Boolean).join(' ') || row.email,
+            pending_count: 1,
+            pending_titles: [row.title],
+          });
+        }
+      }
+    }
+    return c.json({
+      ok: true,
+      preflight: true,
+      accepted: allQueued.filter((s) => s.status === 'accept_queue').length,
+      declined: allQueued.filter((s) => s.status === 'decline_queue').length,
+      tasks_assigned: 0,
+      skipped: ids.length - allQueued.length,
+      skipped_notified: skippedNotified,
+      skipped_no_submitter: allQueued.filter((s) => !s.submitter_email).length,
+      speakers_with_pending: speakersWithPending,
+      job_id: null,
+    });
+  }
+
+  // Hold filtering happens here, before the ids are snapshotted into the job
+  // — not in the expander's select (deliberate deviation from the plan doc's
+  // §4 sketch): job.total is the snapshot length, so ids the expander would
+  // filter out could never be counted and the job would sit 'running'
+  // forever. Held rows simply never enter the job; they stay queued.
+  const holdSet = new Set(holdContactIds);
+  const queued = holdSet.size > 0
+    ? allQueued.filter((s) => s.submitter_contact_id === null || !holdSet.has(s.submitter_contact_id))
+    : allQueued;
+  const held = allQueued.length - queued.length;
   const accepted = queued.filter((s) => s.status === 'accept_queue').length;
   const declined = queued.filter((s) => s.status === 'decline_queue').length;
   // CFP-14: a submission with no submitter contact (or a submitter with no
@@ -292,7 +371,7 @@ evaluationRoutes.post('/submissions/send-decisions', async (c) => {
       .bind(
         jobId,
         session.eventId,
-        JSON.stringify({ ids: queued.map((s) => s.id), include_feedback: includeFeedback }),
+        JSON.stringify({ ids: queued.map((s) => s.id), include_feedback: includeFeedback, pending_note: pendingNote }),
         queued.length,
         session.contactId,
         ts,
@@ -314,9 +393,10 @@ evaluationRoutes.post('/submissions/send-decisions', async (c) => {
     accepted,
     declined,
     tasks_assigned: 0,
-    skipped: ids.length - queued.length,
+    skipped: ids.length - allQueued.length,
     skipped_notified: skippedNotified,
     skipped_no_submitter: queuedNoSubmitter,
+    held,
     job_id: jobId,
   });
 });
@@ -1021,10 +1101,10 @@ evaluationRoutes.post('/evaluation/plans/:id/submissions', async (c) => {
     changed = inserted.meta.changes ?? 0;
     await db
       .prepare(
-        `UPDATE submissions SET evaluation_plan_id = ?
+        `UPDATE submissions SET evaluation_plan_id = ?, updated_at = ?
          WHERE id IN (${placeholders}) AND event_id = ? AND evaluation_plan_id IS NULL`,
       )
-      .bind(planId, ...ids, session.eventId)
+      .bind(planId, ts, ...ids, session.eventId)
       .run();
   } else {
     const removed = await db
@@ -1034,10 +1114,10 @@ evaluationRoutes.post('/evaluation/plans/:id/submissions', async (c) => {
     changed = removed.meta.changes ?? 0;
     await db
       .prepare(
-        `UPDATE submissions SET evaluation_plan_id = NULL
+        `UPDATE submissions SET evaluation_plan_id = NULL, updated_at = ?
          WHERE id IN (${placeholders}) AND event_id = ? AND evaluation_plan_id = ?`,
       )
-      .bind(...ids, session.eventId, planId)
+      .bind(ts, ...ids, session.eventId, planId)
       .run();
     // Assignments for a submission no longer in the round would otherwise
     // linger in reviewers' queues.
@@ -1613,10 +1693,10 @@ function ratingCacheStatement(db: D1Database, submissionId: string, planId: stri
            THEN json_remove(COALESCE(rating_cache, '{}'), '$."' || ?2 || '"')
          ELSE json_set(COALESCE(rating_cache, '{}'), '$."' || ?2 || '"',
            (SELECT ROUND(AVG(weighted_total), 2) FROM reviews WHERE submission_id = ?1 AND plan_id = ?2))
-       END
+       END, updated_at = ?3
        WHERE id = ?1`,
     )
-    .bind(submissionId, planId);
+    .bind(submissionId, planId, new Date().toISOString());
 }
 
 // POST /review/assignments/:id — save scores. Upserts the review, computes
@@ -1692,16 +1772,17 @@ evaluationRoutes.post('/review/assignments/:id', async (c) => {
   const reviewUpsert = db
     .prepare(
       `INSERT INTO reviews (id, assignment_id, submission_id, reviewer_contact_id, plan_id,
-         scores, weighted_total, comment, conflict_of_interest, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         scores, weighted_total, comment, conflict_of_interest, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(assignment_id) WHERE assignment_id IS NOT NULL DO UPDATE SET
          scores = excluded.scores,
          weighted_total = excluded.weighted_total,
          comment = excluded.comment,
-         conflict_of_interest = excluded.conflict_of_interest`,
+         conflict_of_interest = excluded.conflict_of_interest,
+         updated_at = excluded.updated_at`,
     )
     .bind(crypto.randomUUID(), assignment.id, assignment.submission_id, session.contactId,
-      assignment.plan_id, JSON.stringify(scores), weightedTotal, comment, conflict ? 1 : 0, ts);
+      assignment.plan_id, JSON.stringify(scores), weightedTotal, comment, conflict ? 1 : 0, ts, ts);
 
   const assignmentUpdate = db
     .prepare(`UPDATE review_assignments SET status = ?, completed_at = ? WHERE id = ?`)

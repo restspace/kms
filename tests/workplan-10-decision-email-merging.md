@@ -1,6 +1,8 @@
 # Workplan 10 — Per-speaker decision email merging
 
-Status: **not started.** Scoping document, not a change log.
+Status: **implemented 2026-08-11** (Waves A+B+C; hold filtering moved to the
+route rather than the expander select — see §4 note in evaluation.ts — so
+job.total matches the snapshot and multi-tick jobs can complete).
 
 Today `expandSendDecisions` emails **per submission**: a speaker with three
 submissions and mixed outcomes gets three separate emails — one accept, two

@@ -40,20 +40,26 @@ function flatten(context: Record<string, unknown>, prefix = ''): Map<string, str
   return out;
 }
 
-/** Replace {{var.path}} with context values; unknown variables become ''. */
+/**
+ * Replace {{var.path}} with context values; unknown variables become ''.
+ * Triple-brace {{{var.path}}} interpolates *raw*, bypassing the transform —
+ * for system-prerendered HTML blocks (decision_summary's {{decisions_block}}
+ * family) that would otherwise be escaped into visible markup. Context values
+ * for raw slots are always built server-side with escapeHtml applied to any
+ * user-entered text; never point a raw slot at unescaped user input.
+ */
 export function mergeVariables(
   template: string,
   context: Record<string, unknown>,
   transform: (value: string) => string = (value) => value,
 ): string {
   const vars = flatten(context);
-  return template.replace(
-    /\{\{\s*([\w.]+)\s*\}\}/g,
-    (_, path: string) => transform(vars.get(path) ?? ''),
-  );
+  return template
+    .replace(/\{\{\{\s*([\w.]+)\s*\}\}\}/g, (_, path: string) => vars.get(path) ?? '')
+    .replace(/\{\{\s*([\w.]+)\s*\}\}/g, (_, path: string) => transform(vars.get(path) ?? ''));
 }
 
-const escapeHtml = (s: string): string =>
+export const escapeHtml = (s: string): string =>
   s
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
@@ -146,6 +152,22 @@ export const DEFAULT_TEMPLATES: Record<string, DefaultTemplate> = {
 <p>Thank you for submitting <strong>{{submission.title}}</strong> ({{submission.code}}) to {{event.name}}. After careful review we are unable to include it in this year's programme.</p>
 <p style="white-space:pre-line;">{{reviewer_feedback}}</p>
 <p>We would love to see you submit again next time.</p>`,
+  },
+  // Workplan 10: one email per speaker per decision batch when they have ≥2
+  // decisions queued (single-decision speakers keep the two templates above —
+  // D6). The {{{…}}} blocks are prerendered by the bulk-jobs expander:
+  // decisions_block (accepts first, feedback nested), pending_note (other
+  // submissions still under review, when enabled), followup_note (earlier
+  // batches already notified), closing_block (portal button + onboarding line
+  // when any accept, softer sign-off when declines-only).
+  decision_summary: {
+    subject: 'Your {{event.name}} submissions — decisions',
+    body: `<p>Hi {{speaker.first_name}},</p>
+<p>We have decisions on your submissions to <strong>{{event.name}}</strong>:</p>
+{{{decisions_block}}}
+{{{pending_note}}}
+{{{followup_note}}}
+{{{closing_block}}}`,
   },
   task_assigned: {
     subject: 'New task for {{event.name}}: {{task.title}}',

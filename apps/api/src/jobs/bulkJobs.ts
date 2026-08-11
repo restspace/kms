@@ -24,6 +24,7 @@
 
 import { createDb } from '@kms/db';
 import { eventLocalDay } from '@kms/core';
+import { escapeHtml } from '@kms/email';
 import { deliverEmail, queueTemplated, type OutboxEmailPayload, type SendOutcome } from '../mailer';
 import { autoAssignAcceptTasksCore } from '../routes/evaluation';
 import { sendScheduleEmailsCore } from '../scheduleMail';
@@ -150,8 +151,25 @@ async function failJob(db: D1Database, id: string, error: string): Promise<void>
 interface SendDecisionsParams {
   ids: string[];
   include_feedback?: boolean;
+  /** render the "still under review" line on merged emails (workplan 10 §4; default true) */
+  pending_note?: boolean;
 }
 
+interface DecisionRow {
+  id: string; code: string; title: string; status: string;
+  submitter_contact_id: string | null; submitter_email: string | null; submitter_first_name: string | null;
+}
+
+/**
+ * Workplan 10: the decision flush is speaker-shaped. One email per speaker
+ * per batch — a speaker with several decisions queued gets a single
+ * `decision_summary` email (accepts listed first) instead of N contradictory-
+ * feeling messages in the same minute. Speakers with exactly one decision in
+ * the batch keep the untouched `decision_accepted`/`decision_declined`
+ * templates and log keys (D6 — byte-for-byte today's email). No scheduler,
+ * no debounce: the queue-then-flush design is the timing mechanism, and a
+ * speaker across two flushes correctly gets two emails (D1/D2).
+ */
 async function expandSendDecisions(env: Env, job: BulkJobRow, limit: number): Promise<void> {
   const db = env.DB;
   const params = JSON.parse(job.params_json) as SendDecisionsParams;
@@ -169,79 +187,220 @@ async function expandSendDecisions(env: Env, job: BulkJobRow, limit: number): Pr
   }
 
   const placeholders = params.ids.map(() => '?').join(', ');
-  const { results: batch } = await db
-    .prepare(
-      `SELECT s.id, s.code, s.title, s.status, s.submitter_contact_id,
+  const selectSql = `SELECT s.id, s.code, s.title, s.status, s.submitter_contact_id,
               c.email AS submitter_email, c.first_name AS submitter_first_name
        FROM submissions s
        LEFT JOIN contacts c ON c.id = s.submitter_contact_id
-       WHERE s.event_id = ? AND s.id IN (${placeholders}) AND s.status IN ('accept_queue', 'decline_queue')
-       ORDER BY s.id
-       LIMIT ?`,
-    )
-    .bind(job.event_id, ...params.ids, limit)
-    .all<{
-      id: string; code: string; title: string; status: string;
-      submitter_contact_id: string | null; submitter_email: string | null; submitter_first_name: string | null;
-    }>();
+       WHERE s.event_id = ? AND s.id IN (${placeholders}) AND s.status IN ('accept_queue', 'decline_queue')`;
+  // ORDER BY submitter_contact_id makes a speaker's decisions adjacent, so
+  // grouping is a single pass; over-fetch by one row to detect a group
+  // straddling the tick boundary.
+  const { results: fetched } = await db
+    .prepare(`${selectSql} ORDER BY s.submitter_contact_id, s.id LIMIT ?`)
+    .bind(job.event_id, ...params.ids, limit + 1)
+    .all<DecisionRow>();
+
+  let batch = fetched.slice(0, limit);
+  if (fetched.length > limit && batch.length > 0) {
+    const boundaryCid = batch[batch.length - 1]!.submitter_contact_id;
+    if (boundaryCid !== null && fetched[limit]!.submitter_contact_id === boundaryCid) {
+      // Tick-boundary rule (workplan 10 §3.2): the per-tick LIMIT would split
+      // this speaker's group across ticks — two emails, the exact bug this
+      // grouping exists to kill. Defer the whole trailing group (its rows stay
+      // in queue states; the next tick picks it up complete) — unless the
+      // group alone fills the batch, i.e. one speaker has ≥limit decisions
+      // queued: deferring would deadlock the job, so fetch and process their
+      // group whole this tick instead.
+      const trimmed = batch.filter((r) => r.submitter_contact_id !== boundaryCid);
+      if (trimmed.length > 0) {
+        batch = trimmed;
+      } else {
+        const { results: whole } = await db
+          .prepare(`${selectSql} AND s.submitter_contact_id = ? ORDER BY s.id`)
+          .bind(job.event_id, ...params.ids, boundaryCid)
+          .all<DecisionRow>();
+        batch = whole;
+      }
+    }
+  }
+
+  // Group adjacent rows per speaker. NULL contacts (admin-created rows) are
+  // never grouped together — each is its own singleton, keeping today's
+  // flip-without-email behaviour exactly (CFP-14 rule).
+  const groups: DecisionRow[][] = [];
+  for (const row of batch) {
+    const prev = groups[groups.length - 1];
+    if (prev && row.submitter_contact_id !== null && prev[0]!.submitter_contact_id === row.submitter_contact_id) {
+      prev.push(row);
+    } else {
+      groups.push([row]);
+    }
+  }
 
   const ts = nowIso();
   const send = queueSend(db, job.id);
-  for (const s of batch) {
-    const isAccept = s.status === 'accept_queue';
-    // Conditional flip: guards against a concurrent tick (or a resumed job
-    // after a mid-tick failure) reprocessing a submission this same sweep
-    // already moved out of the queue state. The decision itself (accepted/
-    // declined) is a distinct fact from whether anyone was told about it —
-    // notified_at is deliberately NOT set here (CFP-14 fix): stamping it
-    // unconditionally on flip is what let the UI show a "Notified <date>"
-    // checkmark for admin-created submissions with no submitter contact,
-    // even though nothing was ever queued or sent. It is set below, only
-    // after a send actually succeeds.
-    const flipped = await db
-      .prepare(`UPDATE submissions SET status = ?, updated_at = ? WHERE id = ? AND status IN ('accept_queue', 'decline_queue')`)
-      .bind(isAccept ? 'accepted' : 'declined', ts, s.id)
-      .run();
-    if (flipped.meta.changes === 0) continue;
+  const gatherFeedback = async (submissionId: string): Promise<string> => {
+    const { results: comments } = await db
+      .prepare(
+        `SELECT comment FROM reviews
+         WHERE submission_id = ? AND conflict_of_interest = 0 AND comment IS NOT NULL AND TRIM(comment) != ''`,
+      )
+      .bind(submissionId)
+      .all<{ comment: string }>();
+    if (comments.length === 0) return '';
+    return `Reviewer feedback:\n${comments.map((c) => `- ${c.comment.trim()}`).join('\n')}`;
+  };
 
-    let reviewerFeedback = '';
-    if (params.include_feedback) {
-      const { results: comments } = await db
-        .prepare(
-          `SELECT comment FROM reviews
-           WHERE submission_id = ? AND conflict_of_interest = 0 AND comment IS NOT NULL AND TRIM(comment) != ''`,
-        )
-        .bind(s.id)
-        .all<{ comment: string }>();
-      if (comments.length > 0) {
-        reviewerFeedback = `Reviewer feedback:\n${comments.map((c) => `- ${c.comment.trim()}`).join('\n')}`;
-      }
+  for (const group of groups) {
+    // Conditional flip, per row exactly as before: guards against a
+    // concurrent tick (or a resumed job after a mid-tick failure)
+    // reprocessing a submission this same sweep already moved out of the
+    // queue state. The decision itself (accepted/declined) is a distinct
+    // fact from whether anyone was told about it — notified_at is
+    // deliberately NOT set here (CFP-14 fix); it is set below, only after a
+    // send actually succeeds. Because flips are conditional and precede
+    // queueing, a retry never rebuilds the same group differently: it finds
+    // the rows already flipped and skips (D5's safety argument).
+    const flipped: DecisionRow[] = [];
+    for (const s of group) {
+      const res = await db
+        .prepare(`UPDATE submissions SET status = ?, updated_at = ? WHERE id = ? AND status IN ('accept_queue', 'decline_queue')`)
+        .bind(s.status === 'accept_queue' ? 'accepted' : 'declined', ts, s.id)
+        .run();
+      if (res.meta.changes > 0) flipped.push(s);
     }
+    if (flipped.length === 0) continue;
 
-    if (s.submitter_email) {
-      const { outcome, payload } = await queueTemplated(db, {
-        templateKey: isAccept ? 'decision_accepted' : 'decision_declined',
-        eventId: job.event_id,
-        contactId: s.submitter_contact_id,
-        toEmail: s.submitter_email,
-        entityId: s.id,
-        bulkJobId: job.id,
-        context: {
-          event: { name: event.name },
-          speaker: { first_name: s.submitter_first_name ?? 'there' },
-          submission: { title: s.title, code: s.code },
-          portal_url: `${env.APP_URL}/portal/${event.slug}`,
-          ...(reviewerFeedback ? { reviewer_feedback: reviewerFeedback } : {}),
-        },
-      });
+    const contact = flipped[0]!;
+    if (contact.submitter_email) {
+      const feedbackFor = new Map<string, string>();
+      if (params.include_feedback) {
+        for (const s of flipped) feedbackFor.set(s.id, await gatherFeedback(s.id));
+      }
+
+      let outcome: SendOutcome;
+      let payload: OutboxEmailPayload | undefined;
+      if (flipped.length === 1) {
+        // Single decision in the batch for this speaker: existing template,
+        // existing context, existing entityId/log key — byte-for-byte today's
+        // email (D6), so 'duplicate' handling against pre-change sends is
+        // unchanged.
+        const s = flipped[0]!;
+        const isAccept = s.status === 'accept_queue';
+        const reviewerFeedback = feedbackFor.get(s.id) ?? '';
+        ({ outcome, payload } = await queueTemplated(db, {
+          templateKey: isAccept ? 'decision_accepted' : 'decision_declined',
+          eventId: job.event_id,
+          contactId: s.submitter_contact_id,
+          toEmail: s.submitter_email!,
+          entityId: s.id,
+          bulkJobId: job.id,
+          context: {
+            event: { name: event.name },
+            speaker: { first_name: s.submitter_first_name ?? 'there' },
+            submission: { title: s.title, code: s.code },
+            portal_url: `${env.APP_URL}/portal/${event.slug}`,
+            ...(reviewerFeedback ? { reviewer_feedback: reviewerFeedback } : {}),
+          },
+        }));
+      } else {
+        // ≥2 decisions: one merged decision_summary email. Accepts first.
+        const accepts = flipped.filter((s) => s.status === 'accept_queue');
+        const declines = flipped.filter((s) => s.status !== 'accept_queue');
+        const line = (s: DecisionRow, verdict: string) => {
+          const feedback = feedbackFor.get(s.id) ?? '';
+          return (
+            `<p style="margin:0 0 6px 0;"><strong>${escapeHtml(s.title)}</strong> (${escapeHtml(s.code)}) — <strong>${verdict}</strong></p>` +
+            (feedback
+              ? `<p style="white-space:pre-line;margin:0 0 12px 16px;color:#57534e;">${escapeHtml(feedback)}</p>`
+              : '')
+          );
+        };
+        const decisionsBlock =
+          accepts.map((s) => line(s, 'Accepted')).join('\n') +
+          (accepts.length && declines.length ? '\n' : '') +
+          declines.map((s) => line(s, 'Not accepted')).join('\n');
+
+        // Pending titles are queried at send time, not pre-flight time — they
+        // may have changed between the organiser's click and this tick.
+        let pendingNote = '';
+        if (params.pending_note !== false) {
+          const { results: pending } = await db
+            .prepare(
+              `SELECT title, code FROM submissions
+               WHERE event_id = ? AND submitter_contact_id = ?
+                 AND status NOT IN ('accepted', 'declined', 'withdrawn', 'draft')
+                 AND id NOT IN (${placeholders})
+               ORDER BY created_at`,
+            )
+            .bind(job.event_id, contact.submitter_contact_id, ...params.ids)
+            .all<{ title: string; code: string }>();
+          if (pending.length === 1) {
+            pendingNote = `<p>Your submission <strong>${escapeHtml(pending[0]!.title)}</strong> (${escapeHtml(pending[0]!.code)}) is still under review — we&rsquo;ll be in touch.</p>`;
+          } else if (pending.length > 1) {
+            const items = pending
+              .map((p) => `<strong>${escapeHtml(p.title)}</strong> (${escapeHtml(p.code)})`)
+              .join(', ');
+            pendingNote = `<p>Your submissions ${items} are still under review — we&rsquo;ll be in touch.</p>`;
+          }
+        }
+
+        // Followup note (workplan 10 §5 nice-to-have): acknowledge earlier
+        // batches so a second flush doesn't read like we forgot the first.
+        const earlier = await db
+          .prepare(
+            `SELECT COUNT(*) AS n FROM submissions
+             WHERE event_id = ? AND submitter_contact_id = ? AND notified_at IS NOT NULL
+               AND id NOT IN (${placeholders})`,
+          )
+          .bind(job.event_id, contact.submitter_contact_id, ...params.ids)
+          .first<{ n: number }>();
+        const followupNote =
+          (earlier?.n ?? 0) > 0
+            ? '<p>Following our earlier decisions on your other submissions, here is where the rest now stand.</p>'
+            : '';
+
+        const portalUrl = `${env.APP_URL}/portal/${event.slug}`;
+        const closingBlock =
+          accepts.length > 0
+            ? `<p>Your speaker portal lists everything we need from you next — including any onboarding tasks.</p>\n<p><a href="${escapeHtml(portalUrl)}" class="btn">Open your speaker portal</a></p>`
+            : '<p>We would love to see you submit again next time.</p>';
+
+        // D5: one message_log row per merged email, keyed on the sorted
+        // covered-submission ids. Contact id in the key gives per-speaker
+        // dedupe as before; conditional flips preceding queueing guarantee a
+        // retry can never rebuild the same group with a different id set.
+        const entityId = `batch:${flipped.map((s) => s.id).sort().join('+')}`;
+        ({ outcome, payload } = await queueTemplated(db, {
+          templateKey: 'decision_summary',
+          eventId: job.event_id,
+          contactId: contact.submitter_contact_id,
+          toEmail: contact.submitter_email,
+          entityId,
+          bulkJobId: job.id,
+          context: {
+            event: { name: event.name },
+            speaker: { first_name: contact.submitter_first_name ?? 'there' },
+            portal_url: portalUrl,
+            decisions_block: decisionsBlock,
+            pending_note: pendingNote,
+            followup_note: followupNote,
+            closing_block: closingBlock,
+          },
+        }));
+      }
+
       // 'queued' is a fresh send; 'duplicate' means an earlier tick (or an
       // earlier click of the same bulk action) already queued/sent this
-      // exact (template, contact, entity) — both count as "notified".
-      // 'template_disabled' means the event has switched this template off:
-      // nothing was sent, so notified_at must stay unset, same as the
-      // no-submitter case.
+      // exact (template, contact, entity) — both count as "notified", for
+      // every submission the email covers. 'template_disabled' means the
+      // event has switched this template off: nothing was sent, so
+      // notified_at must stay unset (statuses still flipped — same rule as
+      // the no-submitter case).
       if (outcome === 'queued' || outcome === 'duplicate') {
-        await db.prepare(`UPDATE submissions SET notified_at = COALESCE(notified_at, ?) WHERE id = ?`).bind(ts, s.id).run();
+        for (const s of flipped) {
+          await db.prepare(`UPDATE submissions SET notified_at = COALESCE(notified_at, ?) WHERE id = ?`).bind(ts, s.id).run();
+        }
       }
       // Deliver inline, exactly as expandRemindTasks and
       // expandSendConfirmations already do — see deliverNow's doc comment.
@@ -255,8 +414,11 @@ async function expandSendDecisions(env: Env, job: BulkJobRow, limit: number): Pr
       // already stamped notified_at on the submission.
       if (outcome === 'queued' && payload) await deliverNow(db, env, payload.log_key, payload);
     }
-    if (isAccept) {
-      await autoAssignAcceptTasksCore(db, job.event_id, s, event.name, event.slug, env.APP_URL, send);
+    // Accept side-effects stay per-submission by nature (D7 note in plan).
+    for (const s of flipped) {
+      if (s.status === 'accept_queue') {
+        await autoAssignAcceptTasksCore(db, job.event_id, s, event.name, event.slug, env.APP_URL, send);
+      }
     }
   }
 

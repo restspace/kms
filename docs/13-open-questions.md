@@ -82,3 +82,22 @@ Ask in Discord; none of these block the build.
 | Grid feature creep (saved views, column config, filters) | Build one grid component; anything beyond filter/sort/columns is cut-listed |
 | Airtable rate limits make the demo feel slow if used as primary | Ship with D1 primary and the mirror on; document the trade-off in the README as a deliberate judgment call |
 | Scope temptation: CRM, marketing, invoices, studio all exist in the reference | The scope table in [00](00-overview.md) is the contract; anything not in it needs a written reason |
+
+---
+
+## 4. Recorded design decisions
+
+The following are deliberate scoping or design choices, not oversights, recorded for clarity in
+future work.
+
+**D7 — Co-speaker notification on decision emails (out of scope v1)**
+
+When a submission has multiple participants (co-speakers), only the primary submitter/contact
+receives the decision email in the merged per-speaker batches. Co-speakers in `submission_participants`
+remain un-notified.
+
+Rationale: Portal access and account-level task lists are keyed to the submitter contact; adding
+co-speaker recipients interacts non-trivially with email grouping (a co-speaker appearing on two
+different submitters' talks would receive multiple emails or require separate grouping logic per
+recipient contact). This is deferred to a future wave pending clearer requirements on whether
+co-speakers should have full portal accounts and task ownership.

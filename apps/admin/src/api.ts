@@ -604,7 +604,15 @@ export const bulkStatus = (ids: string[], status: string) =>
     method: 'POST',
     body: JSON.stringify({ ids, status }),
   })
-export const sendDecisions = (ids: string[]) =>
+export const sendDecisions = (
+  ids: string[],
+  options?: {
+    /** Workplan 10 Wave B: compute counts + speakers_with_pending without creating a job. */
+    preflight?: boolean
+    /** Workplan 10 Wave B: exclude these speakers' queued rows from a real send. */
+    hold_contact_ids?: string[]
+  },
+) =>
   request<{
     ok: boolean
     accepted: number
@@ -614,11 +622,22 @@ export const sendDecisions = (ids: string[]) =>
     skipped_notified: number
     /** Submissions flipped without an email because no submitter contact/address exists. */
     skipped_no_submitter?: number
+    /** Workplan 10 Wave B: echoes back whether this call was preflight-only. */
+    preflight?: boolean
+    /** Workplan 10 Wave B: count of queued rows excluded via hold_contact_ids. */
+    held?: number
+    /** Workplan 10 Wave B: speakers in this batch with other undecided submissions. */
+    speakers_with_pending?: Array<{
+      contact_id: string
+      name: string
+      pending_count: number
+      pending_titles: string[]
+    }>
     /** CFP-14: null when nothing was in a decision queue; poll it for real sent/failed counts. */
     job_id: string | null
   }>(
     '/app/api/submissions/send-decisions',
-    { method: 'POST', body: JSON.stringify({ ids }) },
+    { method: 'POST', body: JSON.stringify({ ids, ...options }) },
   )
 export const getSubmissionDetail = (id: string) => request<SubmissionDetail>(`/app/api/submissions/${id}/detail`)
 

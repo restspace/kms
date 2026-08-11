@@ -29,7 +29,11 @@ async function seedBulkJob(eventId: string, ids: string[], includeFeedback = fal
 }
 
 describe('sweepBulkJobs / send-decisions', () => {
-  it('expands a 3-submission job fully across ticks bounded to 2 recipients, flipping each status exactly once', async () => {
+  it('processes a 3-submission single-speaker job whole in one tick despite a limit of 2 (anti-split rule), flipping each status exactly once', async () => {
+    // Pre-workplan-10 this test pinned 2+1 across two ticks — three separate
+    // emails to the same speaker. The tick-boundary rule now refuses to split
+    // a speaker's group: when the group alone fills the batch it is fetched
+    // and processed whole, producing ONE merged decision_summary email.
     const eventId = await createEvent();
     const speaker = await createContact(eventId, { email: 'speaker@example.com' });
     const s1 = await seedSubmission(eventId, speaker, 'accept_queue');
@@ -37,29 +41,26 @@ describe('sweepBulkJobs / send-decisions', () => {
     const s3 = await seedSubmission(eventId, speaker, 'accept_queue');
     const jobId = await seedBulkJob(eventId, [s1, s2, s3]);
 
-    await sweepBulkJobs(env, 2); // tick 1: claims + processes 2
-    let job = await env.DB.prepare('SELECT status, enqueued FROM bulk_jobs WHERE id = ?').bind(jobId).first<{ status: string; enqueued: number }>();
-    expect(job?.enqueued).toBe(2);
-    expect(job?.status).toBe('running');
-
-    await sweepBulkJobs(env, 2); // tick 2: finishes the last one
-    job = await env.DB.prepare('SELECT status, enqueued FROM bulk_jobs WHERE id = ?').bind(jobId).first<{ status: string; enqueued: number }>();
+    await sweepBulkJobs(env, 2); // tick 1: the whole group, not a 2-row slice
+    const job = await env.DB.prepare('SELECT status, enqueued FROM bulk_jobs WHERE id = ?').bind(jobId).first<{ status: string; enqueued: number }>();
     expect(job?.enqueued).toBe(3);
     expect(job?.status).toBe('done');
 
-    const statuses = await env.DB.prepare('SELECT id, status FROM submissions WHERE id IN (?, ?, ?)')
+    const statuses = await env.DB.prepare('SELECT id, status, notified_at FROM submissions WHERE id IN (?, ?, ?)')
       .bind(s1, s2, s3)
-      .all<{ id: string; status: string }>();
-    const byId = Object.fromEntries(statuses.results.map((r) => [r.id, r.status]));
-    expect(byId[s1]).toBe('accepted');
-    expect(byId[s2]).toBe('declined');
-    expect(byId[s3]).toBe('accepted');
+      .all<{ id: string; status: string; notified_at: string | null }>();
+    const byId = Object.fromEntries(statuses.results.map((r) => [r.id, r]));
+    expect(byId[s1]!.status).toBe('accepted');
+    expect(byId[s2]!.status).toBe('declined');
+    expect(byId[s3]!.status).toBe('accepted');
+    // The one merged email covers — and stamps — all three.
+    for (const id of [s1, s2, s3]) expect(byId[id]!.notified_at).not.toBeNull();
 
-    // One decision email per submission — never a duplicate from the two ticks.
-    const messages = await env.DB.prepare(`SELECT COUNT(*) AS n FROM message_log WHERE bulk_job_id = ?`)
+    const messages = await env.DB.prepare(`SELECT template_key FROM message_log WHERE bulk_job_id = ?`)
       .bind(jobId)
-      .first<{ n: number }>();
-    expect(messages?.n).toBe(3);
+      .all<{ template_key: string }>();
+    expect(messages.results).toHaveLength(1);
+    expect(messages.results[0]!.template_key).toBe('decision_summary');
   });
 
   it('re-running the expander on a done job is a no-op and creates no duplicate message_log rows', async () => {
