@@ -269,7 +269,16 @@ describe('sweepBulkJobs / remind-tasks', () => {
     const { job_id: jobId, total } = (await res.json()) as { job_id: string; total: number };
     expect(total).toBe(2);
 
+    // The route's waitUntil kick may hold the exclusive claim lease (0016), in
+    // which case this sweep is a no-op — poll for the terminal state.
     await sweepBulkJobs(env, 50);
+    for (let i = 0; i < 50; i++) {
+      const row = await env.DB.prepare('SELECT status FROM bulk_jobs WHERE id = ?')
+        .bind(jobId)
+        .first<{ status: string }>();
+      if (row && row.status !== 'pending' && row.status !== 'running') break;
+      await new Promise((r) => setTimeout(r, 100));
+    }
 
     const pollRes = await SELF.fetch(`https://example.com/app/api/bulk-jobs/${jobId}`, { headers: { cookie } });
     const polled = (await pollRes.json()) as { status: string; enqueued: number; total: number };

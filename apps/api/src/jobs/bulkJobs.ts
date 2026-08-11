@@ -105,22 +105,34 @@ async function deliverNow(db: D1Database, env: Env, logKey: string, payload: Out
   }
 }
 
+/** How long a mid-tick claim blocks other sweeps if its worker dies there. A
+ * live tick expands at most RECIPIENTS_PER_TICK sends, well under this. */
+const CLAIM_LEASE_MS = 5 * 60_000;
+
 async function claimJob(db: D1Database): Promise<BulkJobRow | null> {
-  const candidate = await db
-    .prepare(`SELECT id FROM bulk_jobs WHERE status IN ('pending', 'running') ORDER BY created_at LIMIT 1`)
-    .first<{ id: string }>();
-  if (!candidate) return null;
-  // Conditional UPDATE: claiming a 'running' job just resumes it (a previous
-  // tick may have failed partway or hit the recipient limit); claiming a
-  // 'pending' job starts it. Either way the WHERE guard means a job another
-  // concurrent sweep already moved out of (pending|running) is not reclaimed.
+  // Exclusive claim (migration 0016): a 'pending' job is claimable, and a
+  // 'running' job only when no expander is inside a tick on it right now —
+  // claim_expires_at NULL (last tick finished; resume it) or expired (a
+  // worker died mid-tick; take over). This used to accept any
+  // (pending|running) row, which let the request-path waitUntil kick and the
+  // cron sweep expand the same job concurrently — the second claimant judged
+  // the job complete off the first one's half-committed work and marked it
+  // 'done' before the sends and notified_at stamps had happened. One
+  // statement, so candidate selection and claim are atomic; sweepBulkJobs
+  // releases the lease when the tick's expander returns.
+  const now = Date.now();
   return await db
     .prepare(
-      `UPDATE bulk_jobs SET status = 'running', updated_at = ?
-       WHERE id = ? AND status IN ('pending', 'running')
+      `UPDATE bulk_jobs SET status = 'running', claim_expires_at = ?1, updated_at = ?2
+       WHERE id = (
+         SELECT id FROM bulk_jobs
+         WHERE status = 'pending'
+            OR (status = 'running' AND (claim_expires_at IS NULL OR claim_expires_at < ?2))
+         ORDER BY created_at LIMIT 1
+       )
        RETURNING *`,
     )
-    .bind(nowIso(), candidate.id)
+    .bind(new Date(now + CLAIM_LEASE_MS).toISOString(), new Date(now).toISOString())
     .first<BulkJobRow>();
 }
 
@@ -541,5 +553,12 @@ export async function sweepBulkJobs(env: Env, limit = RECIPIENTS_PER_TICK): Prom
     // cleanly: status flips are conditional on the pre-flip state and every
     // send is message_log-deduped, so no double work or double email.
     await failJob(env.DB, job.id, message);
+  } finally {
+    // Release the claim lease taken in claimJob. The expander's own final
+    // UPDATE decided the status (done/running/failed); clearing the lease
+    // afterwards is what makes a still-'running' multi-tick job claimable by
+    // the next sweep. Skipped only if the worker dies mid-tick, in which case
+    // the lease expiry reopens the job.
+    await env.DB.prepare(`UPDATE bulk_jobs SET claim_expires_at = NULL WHERE id = ?`).bind(job.id).run();
   }
 }

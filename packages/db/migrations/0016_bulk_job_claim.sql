@@ -1,0 +1,19 @@
+-- Exclusive expander claim for bulk jobs.
+--
+-- claimJob (apps/api/src/jobs/bulkJobs.ts) used to claim any job in
+-- (pending|running), so the request-path waitUntil kick (the dead-minute fix)
+-- and the cron sweep could expand the SAME job concurrently. For
+-- send-decisions, completion is judged by counting submissions already flipped
+-- out of the queue states — the second claimant saw everything flipped,
+-- marked the job 'done' and let the poll report a sent-count while the first
+-- claimant was still between the status flip and the send + notified_at
+-- stamp: the "No decision emails were sent" symptom CFP-14 fixed, back via a
+-- different door.
+--
+-- claim_expires_at is a lease, only meaningful while status = 'running':
+-- non-NULL means an expander is inside a tick right now (or died there — the
+-- timestamp bounds how long that can block the job); NULL means the last tick
+-- finished cleanly and the job is claimable again. sweepBulkJobs clears it
+-- after the expander returns; a worker that dies mid-tick leaves it set, and
+-- the job becomes claimable again once the lease expires.
+ALTER TABLE bulk_jobs ADD COLUMN claim_expires_at TEXT;

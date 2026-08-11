@@ -26,6 +26,21 @@ const ts = '2026-08-01T00:00:00Z';
 const clearPendingJobs = () =>
   env.DB.prepare("DELETE FROM bulk_jobs WHERE status IN ('pending', 'running')").run();
 
+// The route kicks the expander via waitUntil, and the exclusive claim lease
+// (migration 0016) makes a sweep called mid-kick a no-op — sweep for anything
+// unclaimed, then wait for the job to reach a terminal state.
+async function settleJob(jobId: string) {
+  await sweepBulkJobs(env, 50);
+  for (let i = 0; i < 50; i++) {
+    const row = await env.DB.prepare('SELECT status FROM bulk_jobs WHERE id = ?')
+      .bind(jobId)
+      .first<{ status: string }>();
+    if (row && row.status !== 'pending' && row.status !== 'running') return;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  throw new Error(`bulk job ${jobId} never settled`);
+}
+
 async function staffSession(eventId: string) {
   const contactId = await createContact(eventId, { email: `admin-${crypto.randomUUID()}@example.com` });
   await createEventUser(eventId, contactId, 'admin');
@@ -59,7 +74,7 @@ describe('send-decisions reports delivery truthfully', () => {
     const body = (await res.json()) as { job_id: string };
     expect(body.job_id).toBeTruthy();
 
-    await sweepBulkJobs(env, 50);
+    await settleJob(body.job_id);
 
     const pollRes = await SELF.fetch(`https://example.com/app/api/bulk-jobs/${body.job_id}`, { headers: { cookie } });
     const polled = (await pollRes.json()) as {
@@ -100,7 +115,7 @@ describe('send-decisions reports delivery truthfully', () => {
       body: JSON.stringify({ ids: [orphan] }),
     });
     const body = (await res.json()) as { job_id: string };
-    await sweepBulkJobs(env, 50);
+    await settleJob(body.job_id);
 
     const pollRes = await SELF.fetch(`https://example.com/app/api/bulk-jobs/${body.job_id}`, { headers: { cookie } });
     const polled = (await pollRes.json()) as { sent: number; failed: number; queued: number };

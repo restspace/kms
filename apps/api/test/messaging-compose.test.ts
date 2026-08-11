@@ -25,6 +25,25 @@ const ts = '2026-08-01T00:00:00Z';
 const clearPendingJobs = () =>
   env.DB.prepare("DELETE FROM bulk_jobs WHERE status IN ('pending', 'running')").run();
 
+/**
+ * The compose route kicks the expander itself via waitUntil (dead-minute fix),
+ * and since the exclusive claim lease (migration 0016) only one expander can
+ * hold a job at a time — a sweep called while the kick is mid-tick is a no-op.
+ * So for route-created jobs: sweep for anything unclaimed, then wait for the
+ * job row to reach a terminal state before asserting.
+ */
+async function settleJob(jobId: string) {
+  await sweepBulkJobs(env, 50);
+  for (let i = 0; i < 50; i++) {
+    const row = await env.DB.prepare('SELECT status FROM bulk_jobs WHERE id = ?')
+      .bind(jobId)
+      .first<{ status: string }>();
+    if (row && row.status !== 'pending' && row.status !== 'running') return;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  throw new Error(`bulk job ${jobId} never settled`);
+}
+
 const post = (cookie: string, body: unknown) => ({
   method: 'POST',
   headers: { 'content-type': 'application/json', cookie },
@@ -82,7 +101,10 @@ describe('POST /app/api/messaging/compose', () => {
       .bind(body.job_id)
       .first<{ kind: string; status: string; params_json: string }>();
     expect(job?.kind).toBe('compose');
-    expect(job?.status).toBe('pending');
+    // The row is created 'pending', but the route's waitUntil kick may already
+    // have claimed or even finished it by the time this read lands — any
+    // status short of 'failed' means the snapshot was frozen correctly.
+    expect(['pending', 'running', 'done']).toContain(job?.status);
     const params = JSON.parse(job!.params_json) as { contact_ids: string[] };
     expect(params.contact_ids.sort()).toEqual([submitter, coSpeaker].sort());
     expect(params.contact_ids).not.toContain(bystander);
@@ -206,7 +228,7 @@ describe('sweepBulkJobs / compose', () => {
     );
     const { job_id: jobId } = (await res.json()) as { job_id: string };
 
-    await sweepBulkJobs(env, 50);
+    await settleJob(jobId);
 
     const job = await env.DB.prepare('SELECT status, enqueued, total FROM bulk_jobs WHERE id = ?')
       .bind(jobId)
@@ -246,15 +268,25 @@ describe('sweepBulkJobs / compose', () => {
   it('expands in bounded ticks and never double-sends to a recipient', async () => {
     await clearPendingJobs();
     const eventId = await createEvent();
-    const admin = await staffSession(eventId);
     const ids: string[] = [];
     for (let i = 0; i < 3; i += 1) ids.push(await createContact(eventId, { email: `bulk${i}@example.com` }));
 
-    const res = await SELF.fetch(
-      'https://example.com/app/api/messaging/compose',
-      post(admin.cookie, { subject: 'Tick', body: 'Body', audience: 'selected', contact_ids: ids }),
-    );
-    const { job_id: jobId } = (await res.json()) as { job_id: string };
+    // Seed the job row directly (same shape the compose route freezes) rather
+    // than POSTing: the route's waitUntil kick would race the manual ticks
+    // below, and since the exclusive claim lease the tick-by-tick assertions
+    // are only meaningful when this test drives the only expander.
+    const jobId = crypto.randomUUID();
+    await env.DB.prepare(
+      `INSERT INTO bulk_jobs (id, event_id, kind, status, params_json, total, enqueued, created_by, created_at, updated_at)
+       VALUES (?, ?, 'compose', 'pending', ?, ?, 0, 'tester', ?, ?)`,
+    ).bind(
+      jobId,
+      eventId,
+      JSON.stringify({ subject: 'Tick', body: composeBodyToHtml('Body'), body_text: 'Body', contact_ids: ids }),
+      ids.length,
+      ts,
+      ts,
+    ).run();
 
     await sweepBulkJobs(env, 2);
     let job = await env.DB.prepare('SELECT status, enqueued FROM bulk_jobs WHERE id = ?').bind(jobId).first<{ status: string; enqueued: number }>();
@@ -303,7 +335,7 @@ describe('sweepBulkJobs / compose', () => {
     );
     const { job_id: jobId } = (await res.json()) as { job_id: string };
 
-    await sweepBulkJobs(env, 50); // no sweepOutbox call — delivery must happen inline
+    await settleJob(jobId); // no sweepOutbox call — delivery must happen inline
 
     const job = await env.DB.prepare('SELECT status, enqueued, total FROM bulk_jobs WHERE id = ?')
       .bind(jobId)
