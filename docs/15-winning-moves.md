@@ -213,3 +213,66 @@ Under-promising here reads as competence, not weakness.
 **Keep the demo off the critical path.** Demo the import against a known fixture. Keep the messy
 file as the follow-up beat — "and here is what happens with real data" — where the preview, the
 report and the one-click undo are the point being made.
+
+---
+
+## 6. Mobile / responsive — scope and the line
+
+The brief says "mobile-friendly" exactly once, inside struck item #9. Treat that as a gap in the
+brief rather than a signal: **speakers are not at desks.** Every speaker-facing surface is reached
+by tapping a link in an email, and email is read on a phone. Judges will do the same — the demo
+involves receiving a confirmation or decision email, and the natural way to check it is on the
+handset it arrived on.
+
+### The rule
+
+> **If the task is "act on one record", it goes mobile. If the task is "arrange many records
+> relative to each other", it stays desktop.**
+
+Consumption and single decisions are phone-shaped. Composition and arrangement are not.
+
+### Tiers
+
+| Tier | Treatment | Surfaces |
+|---|---|---|
+| **A** | Mobile-first, must be genuinely good | Public CFP form, magic-link login, portal profile, headshot upload, task list, acknowledgements, add-to-calendar |
+| **B** | Mobile-useful: read-mostly plus one decisive action | Review/score queue, outstanding-tasks dashboard, approve/decline a single submission, send a nudge, public schedule, **run-of-show / green room** |
+| **C** | Desktop-only, deliberately | Form builder with conditional logic, agenda drag-and-drop grid, anchored multi-tab bulk workspace, email template editor, importer column mapping, settings |
+
+Notes on the tiers:
+
+- Headshot upload is **better** on mobile — camera roll or straight from the camera beats hunting
+  through Downloads. Tier A is not purely defensive.
+- Reviewing is genuinely phone-shaped: read an abstract, tap a score, next. A sofa activity.
+- The run-of-show view is the most phone-shaped screen in the product — you are standing in a
+  corridor asking who is on next and whether their slides arrived. Desktop-only would be a
+  category error.
+- A rooms × time grid at 390px is the classic trap: a day of work, unusable result.
+
+### How to refuse Tier C
+
+Do not hide the screen and do not let it break. Show a deliberate panel — *"The agenda builder
+needs a wider window. Here is today's schedule read-only, and you can still reschedule a single
+session."* A considered refusal that still offers the one useful action reads as judgment; a
+squashed grid reads as an unfinished app.
+
+### Mobile-only wins worth taking
+
+- **QR codes.** Speaker check-in by QR on the day; a QR on the CFP success page that opens the
+  portal on the speaker's phone. Cheap, and demos memorably.
+- **Partial delivery of struck #9.** A mobile-first public schedule and speaker gallery is most of
+  "embeddable, mobile-friendly speaker gallery and schedule itinerary" — the one place the brief
+  used the word.
+
+### Current state and cost
+
+Viewport meta is set across all entry points, and `apps/admin/src/components/DataList.tsx` already
+implements a mobile row layout behind `isViewportMobile`. The weakness is consistency: six ad-hoc
+breakpoints are in use — 560, 640, 720, 768, 900, 1080 — with no breakpoint tokens in
+`packages/theme`. Collapse those to two or three named tokens first; Tier A then becomes mostly
+verification rather than construction. Tier B is real work, but only for the run-of-show view,
+which is being built anyway.
+
+**Caveat:** mobile is where the "no slow SaaS" bonus is stress-tested. A dashboard that feels
+instant on a laptop over wifi can feel sluggish on a phone on conference wifi — which is exactly
+the condition the run-of-show view operates under.
