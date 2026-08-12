@@ -31,6 +31,9 @@ export type EmbedWidget = (typeof EMBED_WIDGETS)[number];
 //           data-event="my-conf" data-widget="agenda"
 //           data-accent="#ff0055" data-header="0"
 //           data-track="Platform" data-day="2026-05-12"
+//           data-show-abstract="0" data-show-speakers="0"
+//           data-show-room="0" data-show-track="0"
+//           data-font="serif" data-radius="8" data-spacing="roomy" data-muted="#667"
 //           data-height="640"></script>
 //
 // The script runs at parse time, so `document.currentScript` is its own tag;
@@ -60,6 +63,17 @@ const LOADER_JS = `(function () {
   if (d.accent) params.set('accent', d.accent);
   if (d.track) params.set('track', d.track);
   if (d.day) params.set('day', d.day);
+  // Field-visibility toggles (workplan 14, F3/D6) and theme tokens (F3/D5):
+  // same data-* -> query-param mapping the admin Embeds builder generates, so
+  // the <script> tag and the direct-link URL it also hands out always agree.
+  if (d.showAbstract === '0' || d.showAbstract === 'false') params.set('show_abstract', '0');
+  if (d.showSpeakers === '0' || d.showSpeakers === 'false') params.set('show_speakers', '0');
+  if (d.showRoom === '0' || d.showRoom === 'false') params.set('show_room', '0');
+  if (d.showTrack === '0' || d.showTrack === 'false') params.set('show_track', '0');
+  if (d.font) params.set('font', d.font);
+  if (d.radius) params.set('radius', d.radius);
+  if (d.spacing) params.set('spacing', d.spacing);
+  if (d.muted) params.set('muted', d.muted);
 
   var src = origin + '/e/' + encodeURIComponent(slug) + '/' + encodeURIComponent(widget) + '?' + params.toString();
 

@@ -75,6 +75,12 @@ async function loadOverride(
     : { override: null, themeId: null };
 }
 
+/** The subset of SendTemplatedArgs the override/theme/render steps actually
+ * read — narrowed so `renderTemplatedPreview` below can share this exact code
+ * path without having to fabricate the send-only fields (toEmail, entityId…)
+ * a preview has no use for. */
+type RenderableArgs = Pick<SendTemplatedArgs, 'template' | 'eventId' | 'templateKey'>;
+
 /**
  * The (subject, body) pair for a send: an inline `args.template` when the
  * caller brought its own (compose), otherwise the event's DB override — with
@@ -82,7 +88,7 @@ async function loadOverride(
  */
 async function resolveOverride(
   db: D1Database,
-  args: SendTemplatedArgs,
+  args: RenderableArgs,
 ): Promise<{ override: TemplateOverride | null; themeId: string | null }> {
   if (args.template) {
     return { override: { subject: args.template.subject, body_richtext: args.template.body, enabled: 1 }, themeId: null };
@@ -157,6 +163,27 @@ export async function queueTemplated(
   };
   await createDb(db).outbox.enqueue({ kind: 'email', idempotencyKey: logKey, payload });
   return { outcome: 'queued', payload };
+}
+
+/**
+ * Render (never send) the (subject, html, text) a send with these args would
+ * produce — the override lookup, theme lookup and `renderTemplate` call, in
+ * that order, with no message_log/outbox write. This is not a second render
+ * implementation to keep in sync with the real one: it *is* the first three
+ * steps of `queueTemplated`/`prepareTemplated`, factored out so a preview
+ * endpoint (workplan-14 D3) can never drift from what actually gets sent.
+ * Returns null when the template is disabled for the event, same as the
+ * send-side functions.
+ */
+export async function renderTemplatedPreview(
+  db: D1Database,
+  args: RenderableArgs & { context: Record<string, unknown> },
+): Promise<{ subject: string; body_html: string; body_text: string } | null> {
+  const { override, themeId } = await resolveOverride(db, args);
+  const theme = await loadTheme(db, args.eventId, themeId);
+  const rendered = renderTemplate(args.templateKey, override, theme, args.context);
+  if (!rendered) return null;
+  return { subject: rendered.subject, body_html: rendered.html, body_text: rendered.text };
 }
 
 export interface PreparedEmail {

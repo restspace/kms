@@ -13,7 +13,7 @@ import { sendTemplated } from '../mailer';
 import { sweepBulkJobs } from '../jobs/bulkJobs';
 import { requestMagicLink } from './auth';
 import { mintToken } from '../tokens';
-import { bumpEventRevision } from '../revision';
+import { bumpEventRevision, entityRevisionInsert } from '../revision';
 import { isWriter } from '../access';
 import type { SessionPayload } from '../session';
 import { reviewWindowState } from '../reviewWindow';
@@ -681,7 +681,51 @@ evaluationRoutes.get('/submissions/:id/revisions', async (c) => {
 // atomic upsert-contact-by-email version of this; here the admin already
 // knows the contact_id (picked from Speakers), so this is a plain insert
 // against the existing contact, scoped to the organiser's event.
+//
+// Workplan 14 F5 (decision D7): the eval sweep's ABS complaint ("co-author
+// cannot be added after acceptance") was investigated against this endpoint
+// specifically — unlike the speaker portal (portal.ts's isEditLocked), it has
+// never gated on submission status, so an organiser could already add/edit/
+// remove participants on a decided (accepted/declined) submission; there was
+// no status check to "drop" here. What WAS missing is traceability: unlike
+// the submission title/description path just above, no snapshot was taken
+// before the roster changed. snapshotParticipantsRevision below closes that
+// gap so a post-decision participant change is now provable, the same way
+// D7 asks for, while the speaker portal stays locked exactly as before.
 // ---------------------------------------------------------------------------
+
+/**
+ * Pre-edit snapshot of a submission's full participant roster, batched
+ * ahead of the INSERT/UPDATE/DELETE it precedes (same commit-together
+ * discipline as the submission title/description revision above and the
+ * contact/settings ones in adminApi.ts). Recorded unconditionally — unlike a
+ * field-diff, a roster add/remove/role-change IS the content change, so
+ * there is no "unchanged, skip it" case to filter for.
+ */
+async function snapshotParticipantsRevision(
+  db: D1Database,
+  args: { eventId: string; submissionId: string; editedBy: string; editedByName: string | null; editedAt: string },
+): Promise<D1PreparedStatement> {
+  const { results } = await db
+    .prepare(
+      `SELECT sp.id AS participant_id, sp.contact_id, sp.role, sp.position, sp.is_primary_contact,
+              c.first_name, c.last_name, c.email
+       FROM submission_participants sp JOIN contacts c ON c.id = sp.contact_id
+       WHERE sp.submission_id = ? ORDER BY sp.position`,
+    )
+    .bind(args.submissionId)
+    .all();
+  return entityRevisionInsert(db, {
+    eventId: args.eventId,
+    entityType: 'submission_participants',
+    entityId: args.submissionId,
+    payload: { participants: results ?? [] },
+    editedBy: args.editedBy,
+    editedByName: args.editedByName,
+    source: 'admin',
+    editedAt: args.editedAt,
+  });
+}
 
 /** POST /submissions/:id/participants { contact_id, role, is_primary_contact? } */
 evaluationRoutes.post('/submissions/:id/participants', async (c) => {
@@ -696,6 +740,9 @@ evaluationRoutes.post('/submissions/:id/participants', async (c) => {
     return c.json({ error: 'invalid_role', allowed: [...PARTICIPANT_ROLES] }, 400);
   }
 
+  // No status gate: adding a participant is allowed regardless of whether
+  // this submission has already been decided (D7) — the speaker portal is
+  // the only surface where post-decision edits stay locked.
   const submission = await c.env.DB.prepare('SELECT id FROM submissions WHERE id = ? AND event_id = ?')
     .bind(submissionId, session.eventId)
     .first();
@@ -720,13 +767,20 @@ evaluationRoutes.post('/submissions/:id/participants', async (c) => {
   const nextPosition = (existingRows[0]?.max_position ?? -1) + 1;
 
   const id = crypto.randomUUID();
+  const ts = nowIso();
+  const revisionStmt = await snapshotParticipantsRevision(c.env.DB, {
+    eventId: session.eventId,
+    submissionId,
+    editedBy: session.contactId,
+    editedByName: await loadAuthorName(c.env.DB, session.contactId),
+    editedAt: ts,
+  });
+  const insertStmt = c.env.DB.prepare(
+    `INSERT INTO submission_participants (id, submission_id, contact_id, role, position, is_primary_contact, title_at_time, org_at_time)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).bind(id, submissionId, contactId, role, nextPosition, body.is_primary_contact === true ? 1 : 0, contact.job_title, contact.company);
   try {
-    await c.env.DB.prepare(
-      `INSERT INTO submission_participants (id, submission_id, contact_id, role, position, is_primary_contact, title_at_time, org_at_time)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-    )
-      .bind(id, submissionId, contactId, role, nextPosition, body.is_primary_contact === true ? 1 : 0, contact.job_title, contact.company)
-      .run();
+    await c.env.DB.batch([revisionStmt, insertStmt]);
   } catch (err) {
     const message = err instanceof Error ? err.message : '';
     if (message.includes('UNIQUE')) return c.json({ error: 'already_participant' }, 409);

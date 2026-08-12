@@ -1,6 +1,12 @@
 # Workplan 14 — Features deferred from the 2026-08-12 eval defect sweep
 
-Status: **planned 2026-08-12**. Commit `b815e77` fixed 30 of the 33 defects the
+Status: **built 2026-08-12** — all five waves implemented and green (workers
+637, unit+ui 528, both typechecks clean); migrations landed as
+`0030_contact_merge.sql` + `0031_revisions_entity_type.sql`, pending on remote
+D1 along with 0026/0029. F9 rejected per D4. Notable build findings: the F5
+"decided-status gate" never existed (the gap was traceability only, now
+revision-recorded); compose has no stored-template concept so D3's template
+picker clause is N/A; feed URLs deliberately do not carry show_*/theme params. Commit `b815e77` fixed 30 of the 33 defects the
 sbek judge logged (run `2026-08-12T09-11-31-BFqRwm`, overall 83.8%). What
 remains here is the work that was correctly refused during a bug-fix pass:
 things that need a design decision, a new surface, or a migration that

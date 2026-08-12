@@ -10,6 +10,7 @@ import {
 import { DesktopOnlyNotice } from '@kms/ui/desktop-only'
 import { appAlert, appConfirm } from '../components/dialogs'
 import { RoomsTracksCard } from './RoomsTracksCard'
+import { EventSettingsHistory } from '../workspace/entityHistory'
 import { ContactFieldsCard } from './ContactFieldsCard'
 import { EmailTemplatesCard } from './EmailTemplatesCard'
 import { ChaseSettingsCard } from './ChaseSettingsCard'
@@ -219,6 +220,20 @@ export function SettingsSection({ me }: { me: Me }) {
       <EmailTemplatesCard />
 
       <ChaseSettingsCard />
+
+      {/*
+        * Wave E (workplan 14, D8): pre-edit snapshots of the event's settings
+        * (name/slug/dates/description/…, content_revisions entity_type
+        * 'settings'). Restore writes the snapshot back through the normal
+        * events PATCH, which snapshots the replaced values itself.
+        */}
+      <section className="settings-card">
+        <h2>Settings history</h2>
+        <p className="settings-hint">
+          Every change to the event's details is recorded; restore puts the pre-edit values back.
+        </p>
+        <EventSettingsHistory eventId={me.event.id} />
+      </section>
 
       <section className="settings-card">
         <h2>API docs</h2>

@@ -1,0 +1,90 @@
+/* Duplicates panel (workplan 14 Wave B) — candidate pairs + the side-by-side
+   merge field picker. Same visual family as contactOrg.css's picker. */
+
+.merge-pairs {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.merge-pairs > li {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: var(--space-2) var(--space-3);
+}
+
+.merge-pair-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.merge-pair-names {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.merge-tier {
+  flex: 0 0 auto;
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-small, 12px);
+  font-weight: 600;
+  border: 1px solid var(--border-strong, var(--border));
+}
+
+.merge-tier-strong {
+  color: var(--accent, currentColor);
+  border-color: var(--accent, currentColor);
+}
+
+.merge-editor {
+  margin-top: var(--space-3);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.merge-keep-choice {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.merge-keep-choice label {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  cursor: pointer;
+}
+
+.merge-fields {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--text-grid);
+}
+
+.merge-fields th,
+.merge-fields td {
+  text-align: left;
+  padding: var(--space-1) var(--space-2);
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+
+.merge-fields td label {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-1);
+  cursor: pointer;
+}
+
+.merge-actions {
+  display: flex;
+  justify-content: flex-end;
+}

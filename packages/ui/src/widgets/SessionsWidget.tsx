@@ -2,7 +2,9 @@ import { useEffect, useMemo, useState } from 'react'
 import {
   applyFeedFilter,
   fetchAgenda,
+  fieldVisible,
   type AgendaFeed,
+  type FieldVisibility,
   type PublicFeedFilter,
   type PublicSession,
 } from '../publicData'
@@ -26,6 +28,12 @@ export interface SessionsWidgetProps {
    * public page, where the widget's own controls stay in charge.
    */
   filter?: PublicFeedFilter
+  /**
+   * Optional field-visibility toggles (workplan 14, F3/D6): hides the
+   * abstract/speaker line/room/track chip per-field. Undefined/omitted keys
+   * default to shown, same as a bare public page without ?show_*= at all.
+   */
+  show?: FieldVisibility
 }
 
 const ALL = '__all__'
@@ -35,15 +43,21 @@ function SessionCard({
   roomName,
   trackName,
   tz,
+  show,
   onOpen,
 }: {
   session: PublicSession
   roomName: string | null
   trackName: string | null
   tz: string
+  show?: FieldVisibility
   onOpen: () => void
 }) {
   const [expanded, setExpanded] = useState(false)
+  const showAbstract = fieldVisible(show, 'abstract')
+  const showSpeakers = fieldVisible(show, 'speakers')
+  const showRoom = fieldVisible(show, 'room')
+  const showTrack = fieldVisible(show, 'track')
   const description = stripHtml(session.description ?? '')
   const isLong = description.length > 180
   const shown = expanded || !isLong ? description : `${description.slice(0, 180).trimEnd()}…`
@@ -58,14 +72,14 @@ function SessionCard({
         </h3>
         <div className="sessions-card-tags">
           {session.format && <span className="sessions-tag sessions-tag-format">{session.format}</span>}
-          {trackName && <span className="sessions-tag sessions-tag-track">{trackName}</span>}
+          {showTrack && trackName && <span className="sessions-tag sessions-tag-track">{trackName}</span>}
         </div>
       </div>
       <div className="muted sessions-card-meta">
         {session.day} · {fmtTimeRange(session.starts_at, session.ends_at, tz)}
-        {roomName ? ` · ${roomName}` : ''}
+        {showRoom && roomName ? ` · ${roomName}` : ''}
       </div>
-      {description && (
+      {showAbstract && description && (
         <p className="sessions-card-desc">
           {shown}
           {isLong && (
@@ -80,23 +94,26 @@ function SessionCard({
           )}
         </p>
       )}
-      {session.speaker_details.length > 0 ? (
-        <div className="sessions-card-speakers muted">
-          {session.speaker_details.map((sp, i) => (
-            <span key={sp.id} className="sessions-card-speaker">
-              {i > 0 ? ', ' : ''}
-              {sp.name}
-              {(sp.title || sp.company) && ` — ${[sp.title, sp.company].filter(Boolean).join(', ')}`}
-            </span>
-          ))}
-        </div>
-      ) : session.speakers.length > 0 ? (
-        <div className="sessions-card-speakers muted">{session.speakers.join(', ')}</div>
-      ) : (
-        // A speakerless session used to silently omit the block (eval defect);
-        // a visible placeholder tells attendees the slot is real but uncast.
-        <div className="sessions-card-speakers muted sessions-card-speakers-tba">Speaker TBA</div>
-      )}
+      {showSpeakers &&
+        (session.speaker_details.length > 0 ? (
+          <div className="sessions-card-speakers muted">
+            {session.speaker_details.map((sp, i) => (
+              <span key={sp.id} className="sessions-card-speaker">
+                {i > 0 ? ', ' : ''}
+                {sp.name}
+                {(sp.title || sp.company) && ` — ${[sp.title, sp.company].filter(Boolean).join(', ')}`}
+              </span>
+            ))}
+          </div>
+        ) : session.speakers.length > 0 ? (
+          <div className="sessions-card-speakers muted">{session.speakers.join(', ')}</div>
+        ) : (
+          // A speakerless session used to silently omit the block (eval defect);
+          // a visible placeholder tells attendees the slot is real but uncast.
+          // Dropped entirely when show.speakers is off (F3): the toggle means
+          // "don't show speaker info", which the TBA placeholder still is.
+          <div className="sessions-card-speakers muted sessions-card-speakers-tba">Speaker TBA</div>
+        ))}
     </li>
   )
 }
@@ -111,7 +128,7 @@ function SessionCard({
  * (agenda.json, EMB-01); `session.speakers` (plain names) remains as a
  * fallback for the rare feed that hasn't been re-fetched with the new field.
  */
-export function SessionsWidget({ eventSlug, filter }: SessionsWidgetProps) {
+export function SessionsWidget({ eventSlug, filter, show }: SessionsWidgetProps) {
   const [feed, setFeed] = useState<AgendaFeed | null | undefined>(undefined)
   const [query, setQuery] = useState('')
   const [track, setTrack] = useState(ALL)
@@ -235,6 +252,7 @@ export function SessionsWidget({ eventSlug, filter }: SessionsWidgetProps) {
               roomName={s.room_id ? roomsById.get(s.room_id)?.name ?? null : null}
               trackName={s.track_id ? tracksById.get(s.track_id)?.name ?? null : null}
               tz={feed.event.timezone}
+              show={show}
               onOpen={() => setOpenSessionId(s.id)}
             />
           ))}
@@ -249,6 +267,7 @@ export function SessionsWidget({ eventSlug, filter }: SessionsWidgetProps) {
               roomName={roomName}
               trackName={trackName}
               tz={feed.event.timezone}
+              show={show}
               onClose={() => setOpenSessionId(null)}
             />
           )

@@ -30,7 +30,7 @@ import {
   saveFile,
 } from '../filestore';
 import { attemptImmediate, prepareTemplated, sendTemplated, type PreparedEmail } from '../mailer';
-import { bumpEventRevision } from '../revision';
+import { bumpEventRevision, entityRevisionInsert, watchedFieldsChanged } from '../revision';
 import { loadQuestions } from './formsAdmin';
 import { isFormClosed, normaliseTrackAnswers, storableAnswers, synthesizeAnswersFromColumns } from './submit';
 import { clearSessionCookie, getSession, type SessionPayload } from '../session';
@@ -248,6 +248,28 @@ const fmtDate = (iso: string | null): string => {
   return Number.isNaN(d.getTime())
     ? iso
     : d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+};
+
+// F4: scheduling display for an accepted+scheduled submission, in the
+// event's own timezone (the same field the public agenda groups days by —
+// see landing.tsx's eventDayRange/dayKey).
+const fmtDateRange = (startIso: string, endIso: string, timezone: string): string => {
+  const start = new Date(startIso);
+  const end = new Date(endIso);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return `${startIso} – ${endIso}`;
+  let dateFmt: Intl.DateTimeFormat;
+  let timeFmt: Intl.DateTimeFormat;
+  try {
+    dateFmt = new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: timezone });
+    timeFmt = new Intl.DateTimeFormat('en-US', { hour: 'numeric', minute: '2-digit', timeZone: timezone });
+  } catch {
+    dateFmt = new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+    timeFmt = new Intl.DateTimeFormat('en-US', { hour: 'numeric', minute: '2-digit' });
+  }
+  const sameDay = dateFmt.format(start) === dateFmt.format(end);
+  return sameDay
+    ? `${dateFmt.format(start)}, ${timeFmt.format(start)}–${timeFmt.format(end)}`
+    : `${dateFmt.format(start)} ${timeFmt.format(start)} – ${dateFmt.format(end)} ${timeFmt.format(end)}`;
 };
 
 // ---------------------------------------------------------------------------
@@ -517,8 +539,9 @@ portalRoutes.get('/:slug/submissions/:id', async (c) => {
 
   const submission = redactInternal(
     await c.env.DB.prepare(
-      `SELECT s.*, t.name AS track_name FROM submissions s
+      `SELECT s.*, t.name AS track_name, r.name AS room_name FROM submissions s
        LEFT JOIN tracks t ON t.id = s.track_id
+       LEFT JOIN rooms r ON r.id = s.room_id
        WHERE s.id = ? AND s.event_id = ? AND (s.submitter_contact_id = ?
          OR EXISTS (SELECT 1 FROM submission_participants sp WHERE sp.submission_id = s.id AND sp.contact_id = ?))`,
     )
@@ -526,6 +549,28 @@ portalRoutes.get('/:slug/submissions/:id', async (c) => {
       .first<Record<string, unknown>>(),
   );
   if (!submission) return c.redirect(`${base}/submissions`);
+
+  // F4 (eval sweep, missed by the first pass): the speaker portal showed
+  // format/track/description/participants but never told an accepted
+  // speaker *when or where* they were on — the same starts_at/ends_at/
+  // room_id the public agenda (landing.tsx) already reads off the
+  // submission row. Gate on the exact flag the public feed gates on
+  // (`events.agenda_published === 1`) plus the session actually being
+  // scheduled (accepted + both timestamps set, same as the public feed's
+  // `status = 'accepted' AND starts_at IS NOT NULL AND ends_at IS NOT NULL`
+  // predicate) so a speaker never sees a time the public agenda doesn't
+  // also show yet. Accepted-but-not-yet-scheduled gets a "Scheduling TBC"
+  // line instead; non-accepted statuses show neither.
+  const isScheduled =
+    submission.status === 'accepted' && submission.starts_at != null && submission.ends_at != null;
+  const schedulingHtml =
+    ctx.event.agenda_published === 1 && isScheduled
+      ? `<dt>When</dt><dd>${esc(fmtDateRange(String(submission.starts_at), String(submission.ends_at), ctx.event.timezone))}</dd>${
+          submission.room_name ? `<dt>Room</dt><dd>${esc(String(submission.room_name))}</dd>` : ''
+        }`
+      : submission.status === 'accepted'
+        ? `<dt>When</dt><dd class="muted">Scheduling TBC</dd>`
+        : '';
 
   const [{ results: answers }, { results: participants }] = await Promise.all([
     c.env.DB.prepare(
@@ -586,6 +631,7 @@ portalRoutes.get('/:slug/submissions/:id', async (c) => {
 <dl class="detail">
 ${submission.format ? `<dt>Format</dt><dd>${esc(String(submission.format))}</dd>` : ''}
 ${submission.track_name ? `<dt>Track</dt><dd>${esc(String(submission.track_name))}</dd>` : ''}
+${schedulingHtml}
 ${submission.description ? `<dt>Description</dt><dd>${sanitizeRichHtml(String(submission.description)) ?? ''}</dd>` : ''}
 ${answers
   // The form's own "Title"/"Description"/"Format"/"Track" questions freeze
@@ -892,7 +938,37 @@ portalRoutes.post('/:slug/profile', async (c) => {
   ];
   if (writeLinks) identityBinds.push(JSON.stringify(posted));
   identityBinds.push(now, ctx.contactId);
+  // Wave E (workplan 14, D8): profile history. ctx.contact is still the row as
+  // loadPortalCtx read it, so it IS the pre-edit snapshot — recorded only when
+  // a watched field (bio/company/job title) actually changes, batched with the
+  // UPDATE it precedes, mirroring this file's submission-edit path above.
+  const incomingProfile = {
+    biography: nullable('biography'),
+    company: nullable('company'),
+    job_title: nullable('job_title'),
+  };
+  const beforeProfile = {
+    biography: ctx.contact.biography,
+    company: ctx.contact.company,
+    job_title: ctx.contact.job_title,
+  };
+  const profileStatements: D1PreparedStatement[] = [];
+  if (watchedFieldsChanged(beforeProfile, incomingProfile, ['biography', 'company', 'job_title'])) {
+    profileStatements.push(
+      entityRevisionInsert(c.env.DB, {
+        eventId: ctx.event.id,
+        entityType: 'contact',
+        entityId: ctx.contactId,
+        payload: beforeProfile,
+        editedBy: ctx.contactId,
+        editedByName: displayName(ctx.contact),
+        source: 'portal',
+        editedAt: now,
+      }),
+    );
+  }
   await c.env.DB.batch([
+    ...profileStatements,
     c.env.DB.prepare(identitySql).bind(...identityBinds),
     c.env.DB.prepare(
       `UPDATE event_contacts SET biography = ?, company = ?, job_title = ?, headshot_asset_id = ?

@@ -191,6 +191,33 @@ export function isEmptyFilter(filter: PublicFeedFilter | null | undefined): bool
   return !filter || (!filter.track && !filter.day);
 }
 
+// ---------------------------------------------------------------------------
+// Field-visibility toggles (workplan 14, F3/D6): the SSR handler
+// (apps/api/src/routes/landing.tsx parsePageOptions) parses
+// ?show_abstract=0 / ?show_speakers=0 / ?show_room=0 / ?show_track=0 off the
+// query string and rides them through EventPageOptions exactly like `filter`
+// does. Every field defaults to shown (true) — the object is only non-empty
+// when at least one flag was explicitly turned off, so a bare public page
+// carries no `show` at all and every widget's default read (`fieldVisible`)
+// resolves to true.
+// ---------------------------------------------------------------------------
+
+export interface FieldVisibility {
+  /** Session description / abstract text. Default true. */
+  abstract?: boolean;
+  /** Speaker line (including the "Speaker TBA" placeholder). Default true. */
+  speakers?: boolean;
+  /** Room name/chip. Default true. */
+  room?: boolean;
+  /** Track name/chip/badge. Default true. */
+  track?: boolean;
+}
+
+/** Only `false` hides a field — absent/undefined means "shown" (the default). */
+export function fieldVisible(show: FieldVisibility | undefined, key: keyof FieldVisibility): boolean {
+  return show?.[key] !== false;
+}
+
 /**
  * Narrow a feed to the sessions a filter selects, recomputing `days` and
  * `tracks` so the widgets' day tabs and track facets only offer what survives.

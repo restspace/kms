@@ -136,6 +136,10 @@ const ERROR_MESSAGES: Record<string, string> = {
   rung_invalid: 'That escalation rung is not recognised.',
   status_invalid: 'That draft status is not recognised.',
   chase_mode_invalid: 'Chase mode must be "auto" or "assisted".',
+  already_merged: 'One of these contacts has already been merged — reload the duplicates list.',
+  cannot_merge_self: 'A contact cannot be merged into itself.',
+  merge_conflict: 'The merge could not be applied — reload and try again.',
+  loser_id_required: 'The merge needs to know which record to fold in.',
 }
 
 function readableError(code: string): string {
@@ -421,9 +425,14 @@ export const deleteContact = (id: string) =>
  * endpoint adminApi.ts adds alongside the existing headshot-clear-on-delete
  * logic, which itself reuses portal.ts's `saveFile` storage seam.
  */
-export const uploadContactHeadshot = (id: string, file: File) => {
+export const uploadContactHeadshot = (id: string, file: File, eventId?: string | null) => {
   const form = new FormData()
   form.set('headshot', file)
+  // F7: the detail panel can be opened from another accessible event's row in
+  // the All-events grid — the row's own event_id rides along so the pointer
+  // lands on that event's profile, not the session event's (same event-scoping
+  // fix the contacts PUT already carries).
+  if (eventId) form.set('event_id', eventId)
   return request<{ ok: boolean; headshot_asset_id: string }>(`/app/api/contacts/${id}/headshot`, {
     method: 'POST',
     body: form,
@@ -483,9 +492,12 @@ export interface ContactHistoryEvent {
 /** The contact's history across the events this staff session can reach. The
  * server clips it to those — events the caller holds no seat on are absent
  * entirely, not summarised, so nothing here can disclose that they exist. */
-export const getContactHistory = (id: string) =>
+export const getContactHistory = (id: string, eventId?: string | null) =>
   request<{ events: ContactHistoryEvent[]; current_event_id: string }>(
-    `/app/api/contacts/${id}/history`,
+    // F7: the roster guard runs against the row's own event when the panel was
+    // opened from another accessible event's row (All-events grid) — without
+    // it the session-event guard 404s a legitimate read.
+    `/app/api/contacts/${id}/history${eventId ? `?event_id=${encodeURIComponent(eventId)}` : ''}`,
   )
 
 /** Destroy the person org-wide, as distinct from `deleteContact`, which
@@ -495,6 +507,55 @@ export const deleteContactFromOrg = (id: string, confirm = false) =>
   request<{ ok: boolean; events_affected: number }>(
     `/app/api/contacts/${id}/org${confirm ? '?confirm=1' : ''}`,
     { method: 'DELETE' },
+  )
+
+// ---------------------------------------------------------------------------
+// Contact merge (workplan 14 Wave B). Candidates come in two tiers per D2:
+// same normalized email is a strong signal, same normalized full name is weak
+// and needs explicit human confirmation before the merge is offered.
+// ---------------------------------------------------------------------------
+
+/** One side of a candidate pair: identity plus the profile from their most
+ * recent event in the org — the values the side-by-side picker renders. */
+export interface DuplicateContact {
+  id: string
+  email: string
+  first_name: string | null
+  last_name: string | null
+  salutation: string | null
+  honorific: string | null
+  pronouns: string | null
+  gender: string | null
+  mobile_phone: string | null
+  links: string | null
+  created_at: string
+  company: string | null
+  job_title: string | null
+  biography: string | null
+  event_count: number
+}
+
+export interface DuplicatePair {
+  tier: 'strong' | 'weak'
+  /** Ordered oldest-first — the suggested winner leads, matching the 0015
+   * migration's own survivor election; the organizer can flip it. */
+  contacts: [DuplicateContact, DuplicateContact]
+}
+
+export const getDuplicateContacts = () =>
+  request<{ items: DuplicatePair[] }>('/app/api/contacts/duplicates')
+
+/** Merge `loserId` into `winnerId`. `fields` carries the organizer's per-field
+ * picks for conflicting values ('winner' keeps the winner's, 'loser' takes the
+ * loser's); unlisted fields keep the winner's, blanks filled from the loser. */
+export const mergeContacts = (
+  winnerId: string,
+  loserId: string,
+  fields: Record<string, 'winner' | 'loser'>,
+) =>
+  request<{ ok: boolean; winner_id: string; loser_id: string; events_affected: number }>(
+    `/app/api/contacts/${winnerId}/merge`,
+    { method: 'POST', body: JSON.stringify({ loser_id: loserId, fields }) },
   )
 
 // ---------------------------------------------------------------------------
@@ -903,6 +964,30 @@ export interface ContentRevision {
 
 export const getSubmissionRevisions = (submissionId: string) =>
   request<{ items: ContentRevision[] }>(`/app/api/submissions/${submissionId}/revisions`)
+
+/**
+ * One pre-edit snapshot per watched-field edit for a non-submission entity
+ * (Wave E: contact profile fields, event settings). `fields` is the full
+ * watched set as it stood BEFORE the edit, keyed by the corresponding write
+ * surface's own field names, so a restore is literally "send fields back
+ * through the normal PUT/PATCH".
+ */
+export interface EntityRevision {
+  id: string
+  fields: Record<string, string | null>
+  edited_by: string | null
+  edited_by_name: string | null
+  source: 'admin' | 'portal'
+  edited_at: string
+}
+
+export const getContactRevisions = (contactId: string, eventId?: string | null) =>
+  request<{ items: EntityRevision[] }>(
+    `/app/api/contacts/${contactId}/revisions${eventId ? `?event_id=${encodeURIComponent(eventId)}` : ''}`,
+  )
+
+export const getEventRevisions = (eventId: string) =>
+  request<{ items: EntityRevision[] }>(`/app/api/events/${eventId}/revisions`)
 
 export const getEvaluationOverview = () => request<EvaluationOverview>('/app/api/evaluation/overview')
 export const createPlan = (name: string) =>
@@ -1478,6 +1563,18 @@ export const composeMessage = (payload: {
   contact_ids?: string[]
 }) =>
   request<{ ok: boolean; job_id: string; total: number; audience: ComposeAudience }>('/app/api/messaging/compose', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+
+/**
+ * Workplan-14 F2/D3: render (never send) the subject/body a compose would
+ * produce for one recipient, through the server's exact send-time renderer —
+ * used by the compose form's "Preview as…" control so the organiser can see
+ * merge fields resolved before anything goes out.
+ */
+export const previewMessage = (payload: { subject: string; body: string; contact_id: string }) =>
+  request<{ subject: string; body_text: string; body_html: string }>('/app/api/messaging/preview', {
     method: 'POST',
     body: JSON.stringify(payload),
   })

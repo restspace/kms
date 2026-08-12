@@ -1,5 +1,5 @@
 import { useEffect } from 'react'
-import type { PublicRoom, PublicSession, PublicTrack } from '../publicData'
+import { fieldVisible, type FieldVisibility, type PublicRoom, type PublicSession, type PublicTrack } from '../publicData'
 import { toParagraphs } from './richText'
 import { fmtDayLong, fmtTimeRange } from './time'
 
@@ -17,12 +17,15 @@ export function SessionDetailModal({
   roomName,
   trackName,
   tz,
+  show,
   onClose,
 }: {
   session: PublicSession
   roomName: string | null
   trackName: string | null
   tz: string
+  /** Field-visibility toggles (workplan 14, F3/D6); undefined keys default shown. */
+  show?: FieldVisibility
   onClose: () => void
 }) {
   useEffect(() => {
@@ -33,8 +36,15 @@ export function SessionDetailModal({
     return () => window.removeEventListener('keydown', onKey)
   }, [onClose])
 
+  const showAbstract = fieldVisible(show, 'abstract')
+  const showSpeakers = fieldVisible(show, 'speakers')
+  const showRoom = fieldVisible(show, 'room')
+  const showTrack = fieldVisible(show, 'track')
+
   const descriptionParagraphs = session.description ? toParagraphs(session.description) : []
   const speakers = session.speaker_details.length > 0 ? session.speaker_details : null
+  const shownRoomName = showRoom ? roomName : null
+  const shownTrackName = showTrack ? trackName : null
 
   return (
     <div className="session-modal-backdrop" onClick={onClose}>
@@ -52,46 +62,48 @@ export function SessionDetailModal({
         <h2 className="session-modal-title">{session.title}</h2>
         <p className="muted session-modal-meta">
           {fmtDayLong(session.day)} · {fmtTimeRange(session.starts_at, session.ends_at, tz)}
-          {roomName ? ` · ${roomName}` : ''}
+          {shownRoomName ? ` · ${shownRoomName}` : ''}
         </p>
-        {(session.format || trackName) && (
+        {(session.format || shownTrackName) && (
           <p className="muted session-modal-tags">
-            {[session.format, trackName].filter(Boolean).join(' · ')}
+            {[session.format, shownTrackName].filter(Boolean).join(' · ')}
           </p>
         )}
-        {descriptionParagraphs.length > 0 ? (
-          <div className="session-modal-desc">
-            {descriptionParagraphs.map((para, i) => (
-              <p key={i}>{para}</p>
-            ))}
-          </div>
-        ) : (
-          <p className="muted">No description provided.</p>
-        )}
-        {speakers ? (
-          <>
-            <h3>{speakers.length === 1 ? 'Speaker' : 'Speakers'}</h3>
-            <ul className="event-widget-list session-modal-speakers">
-              {speakers.map((sp) => (
-                <li key={sp.id}>
-                  <div className="session-modal-speaker-name">{sp.name}</div>
-                  {(sp.title || sp.company) && (
-                    <div className="muted session-modal-speaker-role">
-                      {[sp.title, sp.company].filter(Boolean).join(' · ')}
-                    </div>
-                  )}
-                </li>
+        {showAbstract &&
+          (descriptionParagraphs.length > 0 ? (
+            <div className="session-modal-desc">
+              {descriptionParagraphs.map((para, i) => (
+                <p key={i}>{para}</p>
               ))}
-            </ul>
-          </>
-        ) : (
-          session.speakers.length > 0 && (
+            </div>
+          ) : (
+            <p className="muted">No description provided.</p>
+          ))}
+        {showSpeakers &&
+          (speakers ? (
             <>
-              <h3>{session.speakers.length === 1 ? 'Speaker' : 'Speakers'}</h3>
-              <p>{session.speakers.join(', ')}</p>
+              <h3>{speakers.length === 1 ? 'Speaker' : 'Speakers'}</h3>
+              <ul className="event-widget-list session-modal-speakers">
+                {speakers.map((sp) => (
+                  <li key={sp.id}>
+                    <div className="session-modal-speaker-name">{sp.name}</div>
+                    {(sp.title || sp.company) && (
+                      <div className="muted session-modal-speaker-role">
+                        {[sp.title, sp.company].filter(Boolean).join(' · ')}
+                      </div>
+                    )}
+                  </li>
+                ))}
+              </ul>
             </>
-          )
-        )}
+          ) : (
+            session.speakers.length > 0 && (
+              <>
+                <h3>{session.speakers.length === 1 ? 'Speaker' : 'Speakers'}</h3>
+                <p>{session.speakers.join(', ')}</p>
+              </>
+            )
+          ))}
       </div>
     </div>
   )

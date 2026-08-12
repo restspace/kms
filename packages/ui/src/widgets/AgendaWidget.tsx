@@ -3,7 +3,9 @@ import {
   agendaIcsUrl,
   applyFeedFilter,
   fetchAgenda,
+  fieldVisible,
   type AgendaFeed,
+  type FieldVisibility,
   type PublicFeedFilter,
   type PublicRoom,
   type PublicSession,
@@ -19,6 +21,8 @@ export interface AgendaWidgetProps {
    * public page, where the widget's own controls stay in charge.
    */
   filter?: PublicFeedFilter
+  /** Field-visibility toggles (workplan 14, F3/D6); undefined keys default shown. */
+  show?: FieldVisibility
 }
 
 // ---------------------------------------------------------------------------
@@ -182,7 +186,11 @@ function rowFor(minutes: number, dayStartMin: number, dayEndMin: number): number
  * one another. The grid scrolls horizontally inside its own container, which
  * is how a 6-room event stays usable on a phone.
  */
-export function AgendaWidget({ eventSlug, filter }: AgendaWidgetProps) {
+export function AgendaWidget({ eventSlug, filter, show }: AgendaWidgetProps) {
+  const showAbstract = fieldVisible(show, 'abstract')
+  const showSpeakers = fieldVisible(show, 'speakers')
+  const showRoom = fieldVisible(show, 'room')
+  const showTrack = fieldVisible(show, 'track')
   const [feed, setFeed] = useState<AgendaFeed | null | undefined>(undefined)
   const [day, setDay] = useState<string | null>(null)
   const [selectedId, setSelectedId] = useState<string | null>(null)
@@ -393,12 +401,12 @@ export function AgendaWidget({ eventSlug, filter }: AgendaWidgetProps) {
                       <span className="ag-block-time">
                         {fmtMinutes(p.startMin)} – {fmtMinutes(p.displayEndMin)}
                       </span>
-                      {track && <span className="ag-block-badge">{track.name}</span>}
+                      {showTrack && track && <span className="ag-block-badge">{track.name}</span>}
                     </span>
                     <span className={durationMin >= 50 ? 'ag-block-title' : 'ag-block-title ag-block-title-one'}>
                       {s.title}
                     </span>
-                    {durationMin >= 60 && s.speakers.length > 0 && (
+                    {showSpeakers && durationMin >= 60 && s.speakers.length > 0 && (
                       <span className="ag-block-speakers">{s.speakers.join(', ')}</span>
                     )}
                     {durationMin >= 80 && s.format && <span className="ag-block-track">{s.format}</span>}
@@ -440,37 +448,46 @@ export function AgendaWidget({ eventSlug, filter }: AgendaWidgetProps) {
               {zone}
             </p>
             <dl className="ag-facts">
-              <dt>Room</dt>
-              <dd>
-                {(selected.room_id ? roomById.get(selected.room_id)?.name : null) ??
-                  'Not yet assigned'}
-              </dd>
+              {showRoom && (
+                <>
+                  <dt>Room</dt>
+                  <dd>
+                    {(selected.room_id ? roomById.get(selected.room_id)?.name : null) ??
+                      'Not yet assigned'}
+                  </dd>
+                </>
+              )}
               <dt>Format</dt>
               <dd>{selected.format ?? '—'}</dd>
-              <dt>Track</dt>
-              <dd>{(selected.track_id ? trackById.get(selected.track_id)?.name : null) ?? '—'}</dd>
+              {showTrack && (
+                <>
+                  <dt>Track</dt>
+                  <dd>{(selected.track_id ? trackById.get(selected.track_id)?.name : null) ?? '—'}</dd>
+                </>
+              )}
               {selected.level && (
                 <>
                   <dt>Level</dt>
                   <dd>{selected.level}</dd>
                 </>
               )}
-              {selected.speakers.length > 0 && (
+              {showSpeakers && selected.speakers.length > 0 && (
                 <>
                   <dt>{selected.speakers.length === 1 ? 'Speaker' : 'Speakers'}</dt>
                   <dd>{selected.speakers.join(', ')}</dd>
                 </>
               )}
             </dl>
-            {descriptionParagraphs.length > 0 ? (
-              <div className="ag-panel-desc">
-                {descriptionParagraphs.map((para, i) => (
-                  <p key={i}>{para}</p>
-                ))}
-              </div>
-            ) : (
-              <p className="muted">No description provided.</p>
-            )}
+            {showAbstract &&
+              (descriptionParagraphs.length > 0 ? (
+                <div className="ag-panel-desc">
+                  {descriptionParagraphs.map((para, i) => (
+                    <p key={i}>{para}</p>
+                  ))}
+                </div>
+              ) : (
+                <p className="muted">No description provided.</p>
+              ))}
           </div>
         </div>
       )}

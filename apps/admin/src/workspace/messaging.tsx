@@ -4,6 +4,7 @@ import {
   getBulkJob,
   getComposeAudiences,
   invitePortal,
+  previewMessage,
   queryResource,
   retryMessage,
   type BulkJobStatus,
@@ -390,14 +391,45 @@ export function ComposeForm({ onSubmit, onCancel, title }: CreateFormProps) {
       .catch(() => setCounts([]))
   }, [])
 
-  // The contact list is only fetched when the organiser actually picks
-  // "Choose recipients" — most sends use a named audience and never need it.
+  // Loaded once, lazily, the first time either "Choose recipients" or the
+  // preview picker below needs a contact to point at — most sends use a
+  // named audience and never touch the multi-select, but the preview control
+  // needs *some* contact list regardless of audience (workplan-14 F2).
+  const [previewNeedsContacts, setPreviewNeedsContacts] = useState(false)
   useEffect(() => {
-    if (audience !== 'selected' || contacts !== null) return
+    if ((audience !== 'selected' && !previewNeedsContacts) || contacts !== null) return
     queryResource<ContactRow>('contacts')({ from: 0, size: 500, filters: {} })
       .then((r) => setContacts(r.items))
       .catch(() => setContacts([]))
-  }, [audience, contacts])
+  }, [audience, contacts, previewNeedsContacts])
+
+  // Preview as <recipient> (workplan-14 F2/D3): rendered server-side through
+  // the exact code path a real send uses, so it can never show something a
+  // send wouldn't actually produce. For the "selected" audience the picker is
+  // scoped to the contacts actually checked; for a named audience (resolved
+  // server-side at send time) there is no client-side membership list to draw
+  // from, so the picker offers any contact on the event and says so.
+  const [previewContactId, setPreviewContactId] = useState('')
+  const [previewResult, setPreviewResult] = useState<{ subject: string; body_text: string; body_html: string } | null>(null)
+  const [previewBusy, setPreviewBusy] = useState(false)
+  const [previewError, setPreviewError] = useState<string | null>(null)
+  const previewCandidates =
+    audience === 'selected' ? (contacts ?? []).filter((c) => selectedIds.includes(c.id)) : (contacts ?? [])
+
+  const runPreview = async () => {
+    if (!previewContactId) return
+    setPreviewBusy(true)
+    setPreviewError(null)
+    try {
+      const r = await previewMessage({ subject: subject.trim(), body: body.trim(), contact_id: previewContactId })
+      setPreviewResult(r)
+    } catch (err) {
+      setPreviewResult(null)
+      setPreviewError(err instanceof Error ? err.message : 'The preview could not be rendered.')
+    } finally {
+      setPreviewBusy(false)
+    }
+  }
 
   const countFor = (key: Exclude<ComposeAudience, 'selected'>): number | null =>
     counts?.find((c) => c.audience === key)?.count ?? null
@@ -543,7 +575,10 @@ export function ComposeForm({ onSubmit, onCancel, title }: CreateFormProps) {
             id="compose-subject"
             type="text"
             value={subject}
-            onChange={(e) => setSubject((e.target as HTMLInputElement).value)}
+            onChange={(e) => {
+              setSubject((e.target as HTMLInputElement).value)
+              setPreviewResult(null)
+            }}
           />
         </div>
 
@@ -553,7 +588,10 @@ export function ComposeForm({ onSubmit, onCancel, title }: CreateFormProps) {
             id="compose-body"
             rows={12}
             value={body}
-            onChange={(e) => setBody((e.target as HTMLTextAreaElement).value)}
+            onChange={(e) => {
+              setBody((e.target as HTMLTextAreaElement).value)
+              setPreviewResult(null)
+            }}
           />
           <p className="record-form-help">
             Merge fields are filled in per recipient:{' '}
@@ -565,6 +603,71 @@ export function ComposeForm({ onSubmit, onCancel, title }: CreateFormProps) {
             ))}
             . Line breaks are kept; HTML is not interpreted.
           </p>
+        </div>
+
+        <div className="record-form-field">
+          <label htmlFor="compose-preview-contact">Preview as</label>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+            <select
+              id="compose-preview-contact"
+              value={previewContactId}
+              onFocus={() => setPreviewNeedsContacts(true)}
+              onChange={(e) => {
+                setPreviewContactId((e.target as HTMLSelectElement).value)
+                setPreviewResult(null)
+                setPreviewError(null)
+              }}
+            >
+              <option value="">
+                {contacts === null ? 'Loading recipients…' : previewCandidates.length === 0 ? 'No recipients yet' : 'Choose a recipient…'}
+              </option>
+              {previewCandidates.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {[c.first_name, c.last_name].filter(Boolean).join(' ') || c.email} — {c.email}
+                </option>
+              ))}
+            </select>
+            <button
+              type="button"
+              disabled={!previewContactId || !subject.trim() || !body.trim() || previewBusy}
+              onClick={() => void runPreview()}
+            >
+              {previewBusy ? 'Rendering…' : 'Preview'}
+            </button>
+          </div>
+          {audience !== 'selected' && (
+            <p className="record-form-help">
+              Shows how the message would render for any contact on this event — the{' '}
+              {AUDIENCE_LABELS[audience]} audience itself is only resolved when you send.
+            </p>
+          )}
+          {previewError && (
+            <p role="alert" className="compose-note-error">
+              {previewError}
+            </p>
+          )}
+          {previewResult && (
+            <div style={{ margin: '6px 0', padding: 10, borderRadius: 6, background: 'rgba(127, 127, 127, 0.08)' }}>
+              <strong>{previewResult.subject}</strong>
+              <pre
+                style={{
+                  whiteSpace: 'pre-wrap',
+                  overflowWrap: 'anywhere',
+                  fontFamily: 'inherit',
+                  fontSize: 13,
+                  marginTop: 6,
+                }}
+              >
+                {previewResult.body_text}
+              </pre>
+              <details>
+                <summary style={{ cursor: 'pointer', fontSize: 12 }}>HTML source</summary>
+                <pre style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', fontSize: 11, maxHeight: 240, overflow: 'auto' }}>
+                  {previewResult.body_html}
+                </pre>
+              </details>
+            </div>
+          )}
         </div>
       </div>
       <div className="record-form-actions">

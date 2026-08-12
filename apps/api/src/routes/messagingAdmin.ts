@@ -17,7 +17,7 @@ import { DEFAULT_TEMPLATES } from '@kms/email';
 import type { Actor } from '@kms/core';
 import type { AccessEnv } from '../access';
 import { getRevalidatedPrivilegedSession } from '../session';
-import { deliverEmail, sendTemplated, type OutboxEmailPayload } from '../mailer';
+import { deliverEmail, renderTemplatedPreview, sendTemplated, type OutboxEmailPayload } from '../mailer';
 import { sweepBulkJobs } from '../jobs/bulkJobs';
 import { mintToken, sha256hex } from '../tokens';
 
@@ -325,6 +325,73 @@ messagingAdminRoutes.get('/compose/audiences', async (c) => {
     })),
   );
   return c.json({ items, merge_fields: COMPOSE_MERGE_FIELDS });
+});
+
+/**
+ * POST /app/api/messaging/preview { subject, body, contact_id } →
+ *   { subject, body_text, body_html }
+ *
+ * Workplan-14 F2/D3: a compose could only be verified by actually sending
+ * it. This renders the exact same (subject, body) pair for one recipient
+ * through `renderTemplatedPreview` (mailer.ts) — the identical override →
+ * theme → `renderTemplate` steps `expandCompose` runs before `queueTemplated`
+ * writes message_log — so nothing here can drift from what a real send would
+ * produce. The recipient context (first_name/company/portal_url/…) is built
+ * the same way `expandCompose` builds it (jobs/bulkJobs.ts); compose has no
+ * first-class "template" concept to pick from (the organiser always supplies
+ * ad-hoc subject/body), so there is no template picker here — see D3's "if
+ * more than one template matches the context" clause, which is N/A for this
+ * flow.
+ */
+messagingAdminRoutes.post('/preview', async (c) => {
+  const session = c.get('session');
+  const db = c.env.DB;
+  const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+  const subject = typeof body.subject === 'string' ? body.subject : '';
+  const messageBody = typeof body.body === 'string' ? body.body : '';
+  const contactId = typeof body.contact_id === 'string' ? body.contact_id : '';
+  if (!subject.trim()) return c.json({ error: 'subject_required' }, 400);
+  if (!messageBody.trim()) return c.json({ error: 'body_required' }, 400);
+  if (!contactId) return c.json({ error: 'contact_id_required' }, 400);
+
+  const [event, recipients] = await Promise.all([
+    db.prepare('SELECT id, name, slug FROM events WHERE id = ?').bind(session.eventId).first<{ id: string; name: string; slug: string }>(),
+    // `resolveAudience('selected', …)` is the same event_contacts-scoped
+    // lookup `compose` and `expandCompose` use — a contact not on this event
+    // (or on someone else's event entirely) resolves to no rows, same
+    // tenancy guard as every other route here.
+    resolveAudience(db, session.eventId, 'selected', [contactId]),
+  ]);
+  if (!event) return c.json({ error: 'not_found' }, 404);
+  const recipient = recipients[0];
+  if (!recipient) return c.json({ error: 'contact_not_found' }, 404);
+
+  // Mirrors expandCompose's recipientContext exactly (jobs/bulkJobs.ts) so a
+  // preview and the message that later lands in message_log are built from
+  // the same inputs, not just rendered by the same function.
+  const fullName = [recipient.first_name, recipient.last_name].filter(Boolean).join(' ') || recipient.email;
+  const recipientContext = {
+    first_name: recipient.first_name ?? 'there',
+    last_name: recipient.last_name ?? '',
+    full_name: fullName,
+    email: recipient.email,
+    company: recipient.company ?? '',
+    job_title: recipient.job_title ?? '',
+  };
+  const rendered = await renderTemplatedPreview(db, {
+    templateKey: 'compose',
+    eventId: session.eventId,
+    template: { subject, body: composeBodyToHtml(messageBody) },
+    context: {
+      ...recipientContext,
+      speaker: recipientContext,
+      contact: recipientContext,
+      event: { name: event.name },
+      portal_url: `${c.env.APP_URL}/portal/${event.slug}`,
+    },
+  });
+  if (!rendered) return c.json({ error: 'template_disabled' }, 409);
+  return c.json(rendered);
 });
 
 /**

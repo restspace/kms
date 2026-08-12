@@ -499,6 +499,123 @@ describe('sweepBulkJobs / compose', () => {
 });
 
 // ---------------------------------------------------------------------------
+// POST /app/api/messaging/preview (workplan-14 F2/D3): per-recipient
+// pre-send preview, rendered through the exact same code path a real send
+// uses (mailer.ts renderTemplatedPreview shares resolveOverride/loadTheme/
+// renderTemplate with queueTemplated). The key guarantee under test: preview
+// output must byte-equal what actually lands on the message_log row once the
+// same subject/body is sent to the same recipient.
+// ---------------------------------------------------------------------------
+
+describe('POST /app/api/messaging/preview', () => {
+  it('byte-equals the body later persisted by a real send to the same recipient', async () => {
+    await clearPendingJobs();
+    const eventId = await createEvent({ name: 'PreviewConf' });
+    const admin = await staffSession(eventId);
+    const grace = await createContact(eventId, {
+      email: 'grace-preview@example.com',
+      first_name: 'Grace',
+      last_name: 'Hopper',
+    });
+
+    const subject = 'Hello {{first_name}}, welcome to {{event.name}}';
+    const messageBody = 'Hi {{first_name}} {{last_name}},\n\nSee you at {{event.name}}.';
+
+    const previewRes = await SELF.fetch(
+      'https://example.com/app/api/messaging/preview',
+      post(admin.cookie, { subject, body: messageBody, contact_id: grace }),
+    );
+    expect(previewRes.status).toBe(200);
+    const preview = (await previewRes.json()) as { subject: string; body_text: string; body_html: string };
+    expect(preview.subject).toBe('Hello Grace, welcome to PreviewConf');
+    expect(preview.body_text).toContain('Hi Grace Hopper,');
+    expect(preview.body_text).not.toContain('{{');
+
+    // Now actually send the same subject/body to the same recipient and
+    // compare the persisted row (0029 columns) to the preview above.
+    const composeRes = await SELF.fetch(
+      'https://example.com/app/api/messaging/compose',
+      post(admin.cookie, { subject, body: messageBody, audience: 'selected', contact_ids: [grace] }),
+    );
+    const { job_id: jobId } = (await composeRes.json()) as { job_id: string };
+    await settleJob(jobId);
+
+    const row = await env.DB.prepare(
+      'SELECT subject, body_html, body_text FROM message_log WHERE bulk_job_id = ?',
+    ).bind(jobId).first<{ subject: string; body_html: string; body_text: string }>();
+    expect(row?.subject).toBe(preview.subject);
+    expect(row?.body_text).toBe(preview.body_text);
+    expect(row?.body_html).toBe(preview.body_html);
+  });
+
+  it('requires subject, body and contact_id', async () => {
+    const eventId = await createEvent();
+    const admin = await staffSession(eventId);
+    const target = await createContact(eventId, { email: 'preview-target@example.com' });
+
+    const noSubject = await SELF.fetch(
+      'https://example.com/app/api/messaging/preview',
+      post(admin.cookie, { subject: '  ', body: 'Body', contact_id: target }),
+    );
+    expect(noSubject.status).toBe(400);
+    expect(((await noSubject.json()) as { error: string }).error).toBe('subject_required');
+
+    const noBody = await SELF.fetch(
+      'https://example.com/app/api/messaging/preview',
+      post(admin.cookie, { subject: 'Hi', body: '', contact_id: target }),
+    );
+    expect(noBody.status).toBe(400);
+    expect(((await noBody.json()) as { error: string }).error).toBe('body_required');
+
+    const noContact = await SELF.fetch(
+      'https://example.com/app/api/messaging/preview',
+      post(admin.cookie, { subject: 'Hi', body: 'Body' }),
+    );
+    expect(noContact.status).toBe(400);
+    expect(((await noContact.json()) as { error: string }).error).toBe('contact_id_required');
+  });
+
+  it('404s a contact from another event, and a nonexistent contact', async () => {
+    const eventId = await createEvent();
+    const otherEvent = await createEvent({ slug: `preview-other-${crypto.randomUUID().slice(0, 8)}` });
+    const admin = await staffSession(eventId);
+    const foreign = await createContact(otherEvent, { email: 'preview-foreign@example.com' });
+
+    const foreignRes = await SELF.fetch(
+      'https://example.com/app/api/messaging/preview',
+      post(admin.cookie, { subject: 'Hi', body: 'Body', contact_id: foreign }),
+    );
+    expect(foreignRes.status).toBe(404);
+    expect(((await foreignRes.json()) as { error: string }).error).toBe('contact_not_found');
+
+    const missingRes = await SELF.fetch(
+      'https://example.com/app/api/messaging/preview',
+      post(admin.cookie, { subject: 'Hi', body: 'Body', contact_id: 'not-a-real-id' }),
+    );
+    expect(missingRes.status).toBe(404);
+  });
+
+  it('is forbidden to a reviewer and requires authentication', async () => {
+    const eventId = await createEvent();
+    const target = await createContact(eventId, { email: 'preview-auth@example.com' });
+    const reviewer = await staffSession(eventId, 'reviewer');
+
+    const forbidden = await SELF.fetch(
+      'https://example.com/app/api/messaging/preview',
+      post(reviewer.cookie, { subject: 'Hi', body: 'Body', contact_id: target }),
+    );
+    expect(forbidden.status).toBe(403);
+
+    const anon = await SELF.fetch('https://example.com/app/api/messaging/preview', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ subject: 'Hi', body: 'Body', contact_id: target }),
+    });
+    expect(anon.status).toBe(401);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // POST /app/api/messaging/messages/:id/retry (2026-08-12 sweep, defect 3)
 // ---------------------------------------------------------------------------
 

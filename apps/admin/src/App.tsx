@@ -42,7 +42,7 @@ import {
 import { buildWorkspaceExportUrl, downloadFilesBundle } from './api'
 import { normalizeXHandleToUrl } from '@kms/core'
 import { appAlert, appConfirm, ModalDialog } from './components/dialogs'
-import { RecordFormActionableError } from './components/RecordForm'
+import { RecordFormActionableError, type FormWarningResult } from './components/RecordForm'
 import { TaskCreateForm } from './workspace/TaskCreateForm'
 import { CreateEventDialog } from './components/CreateEventDialog'
 import { FormsSection } from './forms/FormsSection'
@@ -77,7 +77,9 @@ import {
   DeleteFromOrgButton,
   openContactPicker,
 } from './workspace/contactOrg'
+import { openDuplicatesPanel } from './workspace/contactMerge'
 import { HeadshotUploadControl } from './workspace/headshotUpload'
+import { ContactProfileHistory } from './workspace/entityHistory'
 import { resolveTargetEventId } from './utils/importTarget'
 import {
   EventFilterSelect,
@@ -879,6 +881,21 @@ export function buildWorkspaceConfig(
     },
   }
 
+  /**
+   * Workplan 14 Wave B (D1/D2): the merge remedy for the duplicates the
+   * advisory warning can only point at. Org-scoped like the picker above —
+   * candidates come from the whole organisation, in the server's two tiers
+   * (same email = strong, same name = weak, human-confirmed in the panel).
+   */
+  const duplicatesAction = {
+    id: 'contact-duplicates',
+    label: '⧉ DUPLICATES',
+    title: 'Review possible duplicate contacts and merge each pair into one record',
+    onClick: ({ reload }: { reload: () => void }) => {
+      openDuplicatesPanel({ onMerged: reload })
+    },
+  }
+
   /** Cross-event provenance column; hidden on mobile where width is scarce. */
   const eventColumn = { field: 'event_name', header: 'Event', width: '140px', sortable: false, mobileHidden: true }
   // SPK-15: the grid/detail item needs `cf__<key>` flat keys so a subsequent
@@ -906,7 +923,7 @@ export function buildWorkspaceConfig(
    * legitimate namesakes exist — and any lookup failure stays silent: an
    * advisory must never break the form.
    */
-  const speakerDuplicateNameWarning = async (data: Record<string, unknown>): Promise<string | null> => {
+  const speakerDuplicateNameWarning = async (data: Record<string, unknown>): Promise<FormWarningResult> => {
     const first = typeof data.first_name === 'string' ? data.first_name.trim() : ''
     const last = typeof data.last_name === 'string' ? data.last_name.trim() : ''
     if (!first && !last) return null
@@ -922,11 +939,22 @@ export function buildWorkspaceConfig(
         () => [] as OrgContactRow[],
       ),
     ])
+    // Workplan 14 Wave B (D1): the warning banner is the merge tool's entry
+    // point — "Merge instead?" opens the Duplicates panel, where any existing
+    // same-name/same-email pairs can be reviewed and folded together rather
+    // than a third record being created on top of them.
+    const mergeAction = { label: 'Merge instead?', onClick: () => openDuplicatesPanel() }
     if (hasSameNameContact(rosterRows, first, last)) {
-      return `A contact named “${fullName}” already exists in your events — saving will create a second record with the same name. Check the Speakers list (or “＋ EXISTING”) before saving.`
+      return {
+        message: `A contact named “${fullName}” already exists in your events — saving will create a second record with the same name. Check the Speakers list (or “＋ EXISTING”) before saving.`,
+        action: mergeAction,
+      }
     }
     if (hasSameNameContact(orgRows, first, last)) {
-      return `A contact named “${fullName}” already exists in this organisation — “＋ EXISTING” adds them to this event without creating a duplicate.`
+      return {
+        message: `A contact named “${fullName}” already exists in this organisation — “＋ EXISTING” adds them to this event without creating a duplicate.`,
+        action: mergeAction,
+      }
     }
     return null
   }
@@ -1031,7 +1059,19 @@ export function buildWorkspaceConfig(
             * the product's single deliberately org-wide read, clipped
             * server-side to events the caller holds a seat on.
             */}
-          <ContactCrossEventHistory contactId={item.id} />
+          <ContactCrossEventHistory contactId={item.id} eventId={item.event_id} />
+          {/*
+            * Wave E (workplan 14, D8): profile edit history — the same
+            * ContentHistorySection the submission panel mounts, configured for
+            * this event_contacts row (the row's own event, matching where the
+            * contacts PUT writes). Restore goes back through updateContact,
+            * which snapshots the replaced values itself.
+            */}
+          <ContactProfileHistory
+            contactId={item.id}
+            eventId={item.event_id}
+            onRestored={(fields) => onItemSaved?.({ ...item, ...fields })}
+          />
           {/*
             * SPK-06: the organiser can now put a known contact into the speaker
             * portal directly. Deliberately outside the `onEdit` guard — inviting
@@ -1067,7 +1107,7 @@ export function buildWorkspaceConfig(
     // by their assignee/recipient FK) narrow Speakers to that person.
     globalFilterReceives: { submission_id: 'submission_id', contact_id: 'contact_id' },
     exportConfig: exportFor('contacts'),
-    toolbarActions: [addExistingContactAction, importAction('contacts', 'speakers')],
+    toolbarActions: [addExistingContactAction, duplicatesAction, importAction('contacts', 'speakers')],
     schema: {
       ...speakerSchema,
       properties: { ...speakerSchema.properties, ...customFieldSchemaProperties(contactFields) },

@@ -45,7 +45,21 @@ describe('GET /embed.js', () => {
     expect(js).toContain("d.event");
     expect(js).toContain("d.widget");
     // Every option the admin generator can emit must be honoured here.
-    for (const attr of ['header', 'accent', 'track', 'day', 'height']) {
+    for (const attr of [
+      'header',
+      'accent',
+      'track',
+      'day',
+      'height',
+      'showAbstract',
+      'showSpeakers',
+      'showRoom',
+      'showTrack',
+      'font',
+      'radius',
+      'spacing',
+      'muted',
+    ]) {
       expect(js).toContain(`d.${attr}`);
     }
     // The embedded page is asked for embed mode and nothing else.
@@ -283,5 +297,66 @@ describe('public page query parameters', () => {
     const html = await (await SELF.fetch(`${ORIGIN}/e/${slug}/agenda`)).text();
     expect(html).not.toContain('"options"');
     expect(html).toContain('aria-label="Event sections"');
+  });
+
+  it('carries field-visibility toggles into the bootstrap, defaulting to shown', async () => {
+    const html = await (
+      await SELF.fetch(`${ORIGIN}/e/${slug}/agenda?show_abstract=0&show_speakers=0&show_room=0&show_track=0`)
+    ).text();
+    expect(html).toContain('"show":{"abstract":false,"speakers":false,"room":false,"track":false}');
+  });
+
+  it('omits `show` entirely when every toggle is left at its default', async () => {
+    const html = await (await SELF.fetch(`${ORIGIN}/e/${slug}/agenda`)).text();
+    expect(html).not.toContain('"show"');
+  });
+
+  it('ignores field-visibility toggles on a non-filterable page', async () => {
+    const html = await (await SELF.fetch(`${ORIGIN}/e/${slug}/speakers?show_abstract=0`)).text();
+    expect(html).not.toContain('"show"');
+  });
+
+  it('accepts allowlisted theme tokens and drops everything else', async () => {
+    const html = await (
+      await SELF.fetch(`${ORIGIN}/e/${slug}/agenda?font=serif&radius=8&spacing=roomy&muted=%23667788`)
+    ).text();
+    expect(html).toContain('"theme":{"font":"serif","radius":8,"spacing":"roomy","muted":"#667788"}');
+    expect(html).toContain('--font-ui:');
+    expect(html).toContain('--radius:8px;');
+    expect(html).toContain('--text-muted:#667788;');
+  });
+
+  it('rejects a font not in the preset list', async () => {
+    const html = await (await SELF.fetch(`${ORIGIN}/e/${slug}/agenda?font=ComicSans`)).text();
+    // Trailing colon: the JSON key form, not the substring "font" that also
+    // appears (unquoted) inside CSS property names like font-family.
+    expect(html).not.toContain('"font":');
+    expect(html).not.toContain('ComicSans');
+  });
+
+  it('rejects a spacing preset not on the allowlist', async () => {
+    const html = await (await SELF.fetch(`${ORIGIN}/e/${slug}/agenda?spacing=huge`)).text();
+    expect(html).not.toContain('"spacing":');
+  });
+
+  it('rejects an out-of-range or non-numeric radius', async () => {
+    const tooBig = await (await SELF.fetch(`${ORIGIN}/e/${slug}/agenda?radius=999`)).text();
+    expect(tooBig).not.toContain('"radius":');
+    const nonNumeric = await (await SELF.fetch(`${ORIGIN}/e/${slug}/agenda?radius=8px;}body{display:none`)).text();
+    expect(nonNumeric).not.toContain('"radius":');
+    expect(nonNumeric).not.toContain('display:none');
+  });
+
+  it('rejects a muted colour that is not a plain hex, so nothing escapes the CSS rule', async () => {
+    const html = await (await SELF.fetch(`${ORIGIN}/e/${slug}/agenda?muted=red;}body{display:none`)).text();
+    // Trailing colon: the JSON key form, not the substring `"muted"` that also
+    // appears (as an unrelated CSS class) in `<p class="muted">`.
+    expect(html).not.toContain('"muted":');
+    expect(html).not.toContain('display:none');
+  });
+
+  it('keeps only the valid theme tokens when the request mixes good and bad ones', async () => {
+    const html = await (await SELF.fetch(`${ORIGIN}/e/${slug}/agenda?font=serif&spacing=bogus&radius=1000`)).text();
+    expect(html).toContain('"theme":{"font":"serif"}');
   });
 });

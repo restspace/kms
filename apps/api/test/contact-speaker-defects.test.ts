@@ -7,6 +7,7 @@
 import { SELF, env } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
 import { jsonReq, seedContact, seedEvent, seedEventUser, seedStaff } from './fixtures-admin';
+import { fileFrom, pngBytes } from './fixtures-portal';
 
 const api = (path: string, cookie: string, body?: unknown, method = 'POST') =>
   SELF.fetch(`https://example.com/app/api${path}`, jsonReq(cookie, body, method));
@@ -80,6 +81,97 @@ describe('PUT /app/api/contacts/:id persists edits', () => {
     const admin = await seedStaff(eventA, 'admin');
     const speaker = await seedContact(foreign, { email: 'foreign@example.com' });
     const res = await api(`/contacts/${speaker}`, admin.cookie, { company: 'X', event_id: foreign }, 'PUT');
+    expect(res.status).toBe(403);
+  });
+});
+
+/** Two events in one org; the staff member holds writer seats (and roster
+ * membership, which getAccessibleEvents requires) on both, the speaker sits
+ * only on event B — the exact shape the "All events" grid produces while the
+ * session cookie stays bound to event A. */
+async function seedCrossEventPair() {
+  const eventA = await seedEvent();
+  const org = await env.DB.prepare('SELECT org_id FROM events WHERE id = ?').bind(eventA).first<{ org_id: string }>();
+  const eventB = await seedEvent({ org_id: org!.org_id });
+  const admin = await seedStaff(eventA, 'admin');
+  await seedEventUser(eventB, admin.contactId, 'admin');
+  await env.DB.prepare(
+    "INSERT INTO event_contacts (event_id, contact_id, added_at, source) VALUES (?, ?, ?, 'admin')",
+  ).bind(eventB, admin.contactId, '2026-08-01T00:00:00Z').run();
+  const speaker = await seedContact(eventB, { email: 'cross-event@example.com', first_name: 'Only', last_name: 'OnB' });
+  return { eventA, eventB, admin, speaker };
+}
+
+// F7 (workplan 14): the headshot POST and the detail panel's sub-reads were
+// still pinned to the session cookie's event — the same mistargeting class
+// fixed for the contacts PUT above (commit b815e77), just untouched because it
+// wasn't in the defect list.
+describe('POST /app/api/contacts/:id/headshot event scoping (F7)', () => {
+  const upload = (cookie: string, contactId: string, eventId?: string) => {
+    const form = new FormData();
+    form.set('headshot', fileFrom(pngBytes(), 'headshot.png', 'image/png'));
+    if (eventId) form.set('event_id', eventId);
+    return SELF.fetch(`https://example.com/app/api/contacts/${contactId}/headshot`, {
+      method: 'POST',
+      headers: { cookie },
+      body: form,
+    });
+  };
+
+  it('writes to the row\'s own event when the body names one (All-events grid)', async () => {
+    const { eventB, admin, speaker } = await seedCrossEventPair();
+
+    // Session cookie is bound to event A. Without an event_id the write cannot
+    // find the membership and must NOT answer 200.
+    const blind = await upload(admin.cookie, speaker);
+    expect(blind.status).toBe(404);
+
+    const scoped = await upload(admin.cookie, speaker, eventB);
+    expect(scoped.status).toBe(200);
+    const body = (await scoped.json()) as { headshot_asset_id: string };
+
+    // The pointer landed on event B's profile row, and the asset itself
+    // belongs to event B, not the session's event.
+    const row = await env.DB.prepare(
+      'SELECT headshot_asset_id FROM event_contacts WHERE event_id = ? AND contact_id = ?',
+    ).bind(eventB, speaker).first<{ headshot_asset_id: string | null }>();
+    expect(row?.headshot_asset_id).toBe(body.headshot_asset_id);
+    const asset = await env.DB.prepare('SELECT event_id FROM file_assets WHERE id = ?')
+      .bind(body.headshot_asset_id).first<{ event_id: string }>();
+    expect(asset?.event_id).toBe(eventB);
+  });
+
+  it('refuses an event_id outside the caller\'s seats', async () => {
+    const eventA = await seedEvent();
+    const foreign = await seedEvent(); // different org, no seat
+    const admin = await seedStaff(eventA, 'admin');
+    const speaker = await seedContact(foreign, { email: 'foreign-headshot@example.com' });
+    const res = await upload(admin.cookie, speaker, foreign);
+    expect(res.status).toBe(403);
+  });
+});
+
+describe('GET /app/api/contacts/:id/history event scoping (F7)', () => {
+  it('honours the row\'s event_id for the roster guard (All-events grid)', async () => {
+    const { eventB, admin, speaker } = await seedCrossEventPair();
+
+    // Blind read against the session's event: the speaker has no row there.
+    const blind = await api(`/contacts/${speaker}/history`, admin.cookie, undefined, 'GET');
+    expect(blind.status).toBe(404);
+
+    const scoped = await api(`/contacts/${speaker}/history?event_id=${eventB}`, admin.cookie, undefined, 'GET');
+    expect(scoped.status).toBe(200);
+    const body = (await scoped.json()) as { events: Array<{ event_id: string }>; current_event_id: string };
+    expect(body.current_event_id).toBe(eventB);
+    expect(body.events.some((e) => e.event_id === eventB)).toBe(true);
+  });
+
+  it('refuses an event_id outside the caller\'s seats', async () => {
+    const eventA = await seedEvent();
+    const foreign = await seedEvent();
+    const admin = await seedStaff(eventA, 'admin');
+    const speaker = await seedContact(foreign, { email: 'foreign-history@example.com' });
+    const res = await api(`/contacts/${speaker}/history?event_id=${foreign}`, admin.cookie, undefined, 'GET');
     expect(res.status).toBe(403);
   });
 });

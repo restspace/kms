@@ -16,6 +16,7 @@ import {
 import { DesktopOnlyNotice } from '@kms/ui/desktop-only'
 import { isoToLocalInput, localInputToIso } from '../utils/dates'
 import { EFFECTIVE_STATUS_LABEL, effectiveFormStatus } from './formStatus'
+import { ALL_PARTICIPANT_ROLES, DEFAULT_PARTICIPANT_ROLES } from '@kms/core'
 
 /**
  * Form builder wizard (docs/04 §2): left rail of steps, content pane, sticky
@@ -37,7 +38,12 @@ const STEPS = [
 
 type StepKey = (typeof STEPS)[number]['key']
 
-const ALL_ROLES = ['speaker', 'co-speaker', 'moderator', 'panelist'] as const
+// F10 (eval sweep note): the panel used to only offer a 4-role subset and
+// seeded brand-new forms with a speaker-only literal, out of step with
+// @kms/core's ALL_PARTICIPANT_ROLES/DEFAULT_PARTICIPANT_ROLES (the same
+// widened vocabulary the ParticipantsEditor and form-submission default now
+// use). Both now come from core so the panel and the default stay in sync.
+const ALL_ROLES = ALL_PARTICIPANT_ROLES
 
 interface RoleRow {
   role: string
@@ -1188,7 +1194,7 @@ function RoutingPanel({ form, patch, meta, questions }: {
 function RolesPanel({ form, patch }: { form: FormRow; patch: (c: Partial<FormRow>) => void }) {
   const configured: RoleRow[] = useMemo(() => {
     let parsed = form.participant_roles ?? []
-    if (parsed.length === 0) parsed = [{ role: 'speaker', min: 1, max: null }]
+    if (parsed.length === 0) parsed = DEFAULT_PARTICIPANT_ROLES
     return ALL_ROLES.map((role) => {
       const found = parsed.find((p) => p.role === role)
       return { role, enabled: Boolean(found), min: found?.min ?? 0, max: found?.max ?? null }

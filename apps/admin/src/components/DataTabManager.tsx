@@ -4,7 +4,7 @@ import { breakpoints } from '@kms/theme';
 import { DataList, ColumnDefinition, DataListQuery, DataSourceParams, DataSourceResult } from './DataList';
 import { appAlert, ModalDialog } from './dialogs';
 import type { DataListExportConfig, DataListFastAddConfig, DataListFilterConfig, DataListRowDragConfig, DataListRowDropConfig, DataListSummaryDataSource, DataListToolbarAction } from './DataList';
-import { RecordForm } from './RecordForm';
+import { RecordForm, type FormWarningResult } from './RecordForm';
 import { ContextMenu, type ContextMenuOption } from './ContextMenu';
 import { generateRandomId, toReadableText } from '../utility';
 import { clampSplitRatioForWidth } from './splitRatio';
@@ -408,7 +408,7 @@ export interface TabConfig<T = any> {
    * debounced, as the values change and shows the returned message above the
    * fields; it never gates saving. Not used by custom createComponents.
    */
-  formWarning?: (data: Record<string, any>) => Promise<string | null>;
+  formWarning?: (data: Record<string, any>) => Promise<FormWarningResult>;
   /**
    * Optional handler to delete a record. When provided, edit forms receive an onDelete callback.
    * The handler should confirm with the user and return true if the record was deleted.

@@ -840,14 +840,39 @@ function renderEventPage(title: string, data: EventPageBootstrap): string {
  *                       postMessage to the framing page (see /embed.js)
  *   ?track=<id|name>    sessions / agenda / schedule
  *   ?day=YYYY-MM-DD     sessions / agenda / schedule
+ *   ?show_abstract=0    sessions / agenda / schedule — field-visibility (F3/D6)
+ *   ?show_speakers=0    sessions / agenda / schedule
+ *   ?show_room=0        sessions / agenda / schedule
+ *   ?show_track=0       sessions / agenda / schedule
+ *   ?font=serif         preset theme token (F3/D5) — allowlisted, see below
+ *   ?radius=8           preset theme token, 0-32
+ *   ?spacing=roomy       preset theme token
+ *   ?muted=%23667        preset theme token, validated hex like accent
  *
  * Filtering itself happens client-side over the same agenda.json payload
  * (packages/ui applyFeedFilter), so the feeds and their cache keys are
  * unchanged and an unknown track simply renders an empty page.
+ *
+ * Theming (F3/D5) is deliberately NOT free-form CSS: `accent` above is the
+ * one colour that was ever allowed to ride raw in a query param, and only
+ * because it is regex-validated as a bare hex triple/sextet before it ever
+ * touches a stylesheet. `font`/`radius`/`spacing`/`muted` get the identical
+ * treatment — a closed allowlist checked here, then mapped to concrete CSS
+ * text by fixed lookup tables in packages/ui (EventPage.tsx) that never
+ * interpolate the raw param. Anything not in the allowlist is dropped, not
+ * echoed back or partially applied.
  */
 const ACCENT_RE = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
 const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
+const RADIUS_RE = /^\d{1,2}$/;
+const FONT_PRESETS: ReadonlySet<string> = new Set(['sans', 'serif', 'mono']);
+const SPACING_PRESETS: ReadonlySet<string> = new Set(['compact', 'cozy', 'roomy']);
 const FILTERABLE: ReadonlySet<EventPageKind> = new Set(['sessions', 'agenda', 'schedule']);
+
+/** `?param=0`/`false`/`off` -> explicitly hidden; anything else leaves the field at its default (shown). */
+function isOff(value: string | null): boolean {
+  return value === '0' || value === 'false' || value === 'off';
+}
 
 export function parsePageOptions(url: string, kind: EventPageKind): EventPageOptions | undefined {
   const q = new URL(url).searchParams;
@@ -869,7 +894,33 @@ export function parsePageOptions(url: string, kind: EventPageKind): EventPageOpt
     if (track) filter.track = track.slice(0, 120);
     if (day && DAY_RE.test(day)) filter.day = day;
     if (filter.track || filter.day) options.filter = filter;
+
+    // Field-visibility toggles (F3/D6): default shown, so `show` is only
+    // attached when at least one field was explicitly turned off — a bare
+    // page keeps carrying no `options.show` at all, same convention as `filter`.
+    const show: EventPageOptions['show'] = {};
+    if (isOff(q.get('show_abstract'))) show.abstract = false;
+    if (isOff(q.get('show_speakers'))) show.speakers = false;
+    if (isOff(q.get('show_room'))) show.room = false;
+    if (isOff(q.get('show_track'))) show.track = false;
+    if (Object.keys(show).length > 0) options.show = show;
   }
+
+  // Theme tokens (F3/D5): every field validated independently, so an
+  // invalid one is dropped without discarding the valid ones alongside it.
+  const theme: NonNullable<EventPageOptions['theme']> = {};
+  const font = (q.get('font') ?? '').trim();
+  if (FONT_PRESETS.has(font)) theme.font = font as 'sans' | 'serif' | 'mono';
+  const radiusRaw = (q.get('radius') ?? '').trim();
+  if (RADIUS_RE.test(radiusRaw)) {
+    const radius = Number(radiusRaw);
+    if (radius >= 0 && radius <= 32) theme.radius = radius;
+  }
+  const spacing = (q.get('spacing') ?? '').trim();
+  if (SPACING_PRESETS.has(spacing)) theme.spacing = spacing as 'compact' | 'cozy' | 'roomy';
+  const muted = (q.get('muted') ?? '').trim();
+  if (muted && ACCENT_RE.test(muted)) theme.muted = muted;
+  if (Object.keys(theme).length > 0) options.theme = theme;
 
   return Object.keys(options).length > 0 ? options : undefined;
 }

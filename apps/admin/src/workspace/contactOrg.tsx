@@ -223,7 +223,17 @@ const fmtDate = (iso: string | null | undefined): string => {
  * same reason `SpeakerSessions` has one: a failed fetch that renders as "no
  * history" is indistinguishable from a genuinely new speaker.
  */
-export function ContactCrossEventHistory({ contactId }: { contactId: string }) {
+export function ContactCrossEventHistory({
+  contactId,
+  eventId,
+}: {
+  contactId: string
+  /** The row's own event (F7): the All-events grid opens this panel from rows
+   * belonging to other accessible events, where the server's session-event
+   * roster guard would 404 — the row's event_id is what the guard should run
+   * against. Omitted → the session's event, as before. */
+  eventId?: string | null
+}) {
   const [state, setState] = useState<
     | { status: 'loading' }
     | { status: 'error'; message: string }
@@ -236,7 +246,7 @@ export function ContactCrossEventHistory({ contactId }: { contactId: string }) {
     setState({ status: 'loading' })
     void (async () => {
       try {
-        const res = await getContactHistory(contactId)
+        const res = await getContactHistory(contactId, eventId)
         if (!cancelled) {
           setState({ status: 'ready', events: res.events, currentEventId: res.current_event_id })
         }
@@ -252,7 +262,7 @@ export function ContactCrossEventHistory({ contactId }: { contactId: string }) {
     return () => {
       cancelled = true
     }
-  }, [contactId, reloadToken])
+  }, [contactId, eventId, reloadToken])
 
   if (state.status === 'loading') {
     return (

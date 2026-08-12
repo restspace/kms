@@ -38,7 +38,10 @@ export function HeadshotUploadControl({
     setBusy(true)
     setError(null)
     try {
-      const r = await uploadContactHeadshot(item.id, file)
+      // F7: the row's own event_id rides along so a panel opened from another
+      // accessible event's row (All-events grid) lands the pointer on THAT
+      // event's profile, not the session event's.
+      const r = await uploadContactHeadshot(item.id, file, item.event_id)
       onUpdated(r.headshot_asset_id)
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'The headshot could not be uploaded.')

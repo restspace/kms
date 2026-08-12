@@ -19,7 +19,6 @@ import {
   updateSubmissionParticipantRole,
   updateSubmissionStatus,
   type ContactRow,
-  type ContentRevision,
   type RoomRow,
   type SubmissionComment,
   type SubmissionDetail,
@@ -610,24 +609,77 @@ export function ParticipantsEditor({
  * normal updateSubmission PUT, which itself snapshots the current content
  * first — so a restore is traceable and reversible too.
  */
+/** A pre-edit snapshot, normalised to the field-map shape whatever the entity
+ * (a submission revision's dedicated title/description columns become
+ * `fields.title` / `fields.description`). */
+export interface GenericRevision {
+  id: string
+  fields: Record<string, string | null>
+  edited_by_name: string | null
+  source: 'admin' | 'portal'
+  edited_at: string
+}
+
+/** Wave E (workplan 14, D8): what makes one entity type's history different —
+ * everything else (list, snapshot expansion, restore-with-confirm) is shared. */
+export interface EntityHistoryConfig {
+  /** Remount/reload identity — the effect keys on this, not on the (fresh
+   * every render) config object itself. */
+  cacheKey: string
+  load: () => Promise<GenericRevision[]>
+  /** Write the snapshot back through the entity's normal update surface —
+   * which snapshots the replaced values itself, keeping restores reversible. */
+  restore: (fields: Record<string, string | null>) => Promise<void>
+  /** [field key, label] in display order. */
+  fieldLabels: Array<[string, string]>
+  /** For the confirm prompt: "Restore <noun> as they were…". */
+  noun: string
+  emptyText: string
+}
+
+const submissionHistoryConfig = (submissionId: string): EntityHistoryConfig => ({
+  cacheKey: `submission:${submissionId}`,
+  load: () =>
+    getSubmissionRevisions(submissionId).then((r) =>
+      r.items.map(({ title, description, ...rest }) => ({ ...rest, fields: { title, description } })),
+    ),
+  restore: (fields) =>
+    updateSubmission(submissionId, { title: fields.title, description: fields.description }).then(() => undefined),
+  fieldLabels: [
+    ['title', 'Title'],
+    ['description', 'Description'],
+  ],
+  noun: 'the title and description',
+  emptyText: 'No content edits recorded — the title and description are as first submitted.',
+})
+
 export function ContentHistorySection({
   submissionId,
+  entity,
   onRestored,
 }: {
-  submissionId: string
-  /** Refresh the host panel after a restore lands. */
-  onRestored?: () => void | Promise<void>
+  /** The original submission flavour — mutually exclusive with `entity`. */
+  submissionId?: string
+  /** Any other entity type (contact profile, event settings — Wave E). */
+  entity?: EntityHistoryConfig
+  /** Refresh the host panel after a restore lands; receives the fields the
+   * restore wrote back, for hosts that patch their row in place. */
+  onRestored?: (fields: Record<string, string | null>) => void | Promise<void>
 }) {
-  const [items, setItems] = useState<ContentRevision[] | null>(null)
+  const cfg = submissionId !== undefined ? submissionHistoryConfig(submissionId) : entity
+  const [items, setItems] = useState<GenericRevision[] | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [openId, setOpenId] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [note, setNote] = useState<string | null>(null)
 
   const load = () =>
-    getSubmissionRevisions(submissionId)
-      .then((r) => setItems(r.items))
-      .catch((e: unknown) => setError(e instanceof Error ? e.message : 'Failed to load history'))
+    cfg
+      ? cfg
+          .load()
+          .then((r) => setItems(r))
+          .catch((e: unknown) => setError(e instanceof Error ? e.message : 'Failed to load history'))
+      : Promise.resolve()
 
   useEffect(() => {
     setItems(null)
@@ -636,20 +688,22 @@ export function ContentHistorySection({
     setOpenId(null)
     void load()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [submissionId])
+  }, [cfg?.cacheKey])
 
-  const restore = async (rev: ContentRevision) => {
+  if (!cfg) return null
+
+  const restore = async (rev: GenericRevision) => {
     const ok = await appConfirm(
-      `Restore the title and description as they were before the edit on ${fmtDateTime(rev.edited_at)}? The current content is kept in the history.`,
+      `Restore ${cfg.noun} as they were before the edit on ${fmtDateTime(rev.edited_at)}? The current content is kept in the history.`,
     )
     if (!ok) return
     setBusy(true)
     setError(null)
     try {
-      await updateSubmission(submissionId, { title: rev.title, description: rev.description })
+      await cfg.restore(rev.fields)
       setNote('Restored. The replaced content was added to the history.')
       await load()
-      await onRestored?.()
+      await onRestored?.(rev.fields)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Restore failed')
     } finally {
@@ -665,9 +719,7 @@ export function ContentHistorySection({
       {error && <p className="file-error" role="alert">{error}</p>}
       {note && <p className="file-empty" role="status">{note}</p>}
       {!items && !error && <p className="file-empty">Loading…</p>}
-      {items && items.length === 0 && (
-        <p className="file-empty">No content edits recorded — the title and description are as first submitted.</p>
-      )}
+      {items && items.length === 0 && <p className="file-empty">{cfg.emptyText}</p>}
       {items?.map((rev) => (
         <div className="file-chain" key={rev.id}>
           <div className="file-chain-head">
@@ -682,21 +734,22 @@ export function ContentHistorySection({
               type="button"
               disabled={busy}
               onClick={() => void restore(rev)}
-              title="Put the title and description back to how they were before this edit"
+              title={`Put ${cfg.noun} back to how they were before this edit`}
             >
               Restore
             </button>
           </div>
           {openId === rev.id && (
             <dl>
-              <DetailPair term="Title">{rev.title}</DetailPair>
-              {rev.description ? (
-                <DetailPair term="Description">
-                  <span style={{ whiteSpace: 'pre-line' }}>{htmlToText(rev.description)}</span>
+              {cfg.fieldLabels.map(([key, label]) => (
+                <DetailPair term={label} key={key}>
+                  {rev.fields[key] ? (
+                    <span style={{ whiteSpace: 'pre-line' }}>{htmlToText(rev.fields[key] as string)}</span>
+                  ) : (
+                    '(empty)'
+                  )}
                 </DetailPair>
-              ) : (
-                <DetailPair term="Description">(empty)</DetailPair>
-              )}
+              ))}
             </dl>
           )}
         </div>

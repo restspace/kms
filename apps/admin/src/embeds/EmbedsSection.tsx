@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { Me } from '../api'
+import { embedDataAttrs, embedPageParams, type EmbedFieldToggles, type EmbedThemeInput } from './embedOptions.logic'
 import './embeds.css'
 
 /**
@@ -113,6 +114,9 @@ export function EmbedsSection({ me }: { me: Me }) {
  */
 const DEFAULT_EMBED_ACCENT = '#2c4a73'
 
+/** Prefill for the muted-colour override picker — the token layer's --text-muted. */
+const DEFAULT_EMBED_MUTED = '#6b6259'
+
 
   const [widget, setWidget] = useState<WidgetKey>('agenda')
   const [format, setFormat] = useState<FormatKey>('script')
@@ -123,6 +127,22 @@ const DEFAULT_EMBED_ACCENT = '#2c4a73'
   const [day, setDay] = useState(ALL)
   const [height, setHeight] = useState('600')
   const [copied, setCopied] = useState<string | null>(null)
+
+  // Content field-visibility toggles (workplan 14, F3/D6): default shown,
+  // same as the public page itself when no ?show_*= is present at all.
+  const [showAbstract, setShowAbstract] = useState(true)
+  const [showSpeakers, setShowSpeakers] = useState(true)
+  const [showRoom, setShowRoom] = useState(true)
+  const [showTrack, setShowTrack] = useState(true)
+
+  // Theme tokens (F3/D5) — a fixed allowlist, not free-form CSS. '' means "no
+  // override", matching what the SSR validator (parsePageOptions) treats as
+  // absent.
+  const [font, setFont] = useState<EmbedThemeInput['font']>('')
+  const [radius, setRadius] = useState('')
+  const [spacing, setSpacing] = useState<EmbedThemeInput['spacing']>('')
+  const [useMuted, setUseMuted] = useState(false)
+  const [muted, setMuted] = useState(DEFAULT_EMBED_MUTED)
 
   // Track/day choices come from the public feed itself, so the picker can only
   // ever offer filters the published agenda actually contains.
@@ -165,17 +185,20 @@ const DEFAULT_EMBED_ACCENT = '#2c4a73'
   const effTrack = filterable ? track : ALL
   const effDay = filterable ? day : ALL
 
-  /** Query string for the public page (?embed / header / accent / filters). */
+  const toggles: EmbedFieldToggles = { showAbstract, showSpeakers, showRoom, showTrack }
+  const theme: EmbedThemeInput = { font, radius, spacing, useMuted, muted }
+
+  /**
+   * Query string for the public page (?embed / header / accent / filters /
+   * field-visibility toggles / theme tokens) — one builder (embedOptions.logic)
+   * shared with the <script> snippet below, so the two cannot express the
+   * same choice two different ways (the EMB-15 defect this pattern already
+   * fixed for track/day).
+   */
   const pageQuery = useMemo(() => {
-    const p = new URLSearchParams()
-    if (format === 'script' || format === 'iframe') p.set('embed', '1')
-    if (!showHeader) p.set('header', '0')
-    if (useAccent && accent) p.set('accent', accent)
-    if (effTrack) p.set('track', effTrack)
-    if (effDay) p.set('day', effDay)
-    const s = p.toString()
+    const s = embedPageParams({ format, showHeader, useAccent, accent, track: effTrack, day: effDay, toggles, theme }).toString()
     return s ? `?${s}` : ''
-  }, [format, showHeader, useAccent, accent, effTrack, effDay])
+  }, [format, showHeader, useAccent, accent, effTrack, effDay, showAbstract, showSpeakers, showRoom, showTrack, font, radius, spacing, useMuted, muted])
 
   const pageUrl = `${origin}/e/${encodeURIComponent(slug)}/${widget}${pageQuery}`
 
@@ -221,10 +244,12 @@ const DEFAULT_EMBED_ACCENT = '#2c4a73'
         `        data-event="${attr(slug)}"`,
         `        data-widget="${attr(widget)}"`,
       ]
-      if (!showHeader) lines.push('        data-header="0"')
-      if (useAccent && accent) lines.push(`        data-accent="${attr(accent)}"`)
-      if (effTrack) lines.push(`        data-track="${attr(effTrack)}"`)
-      if (effDay) lines.push(`        data-day="${attr(effDay)}"`)
+      // Derived from the same params as pageQuery (embedOptions.logic), so a
+      // data-* attribute here can never disagree with the direct link's query
+      // param for the identical option.
+      for (const [attrName, value] of embedDataAttrs({ format, showHeader, useAccent, accent, track: effTrack, day: effDay, toggles, theme })) {
+        lines.push(`        data-${attrName}="${attr(value)}"`)
+      }
       if (height.trim()) lines.push(`        data-height="${attr(height.trim())}"`)
       return `${lines.join('\n')}></script>`
     }
@@ -238,7 +263,31 @@ const DEFAULT_EMBED_ACCENT = '#2c4a73'
       ].join('\n')
     }
     return feedUrl
-  }, [format, origin, slug, widget, showHeader, useAccent, accent, effTrack, effDay, height, pageUrl, feedUrl, me.event.name, def.label])
+  }, [
+    format,
+    origin,
+    slug,
+    widget,
+    showHeader,
+    useAccent,
+    accent,
+    effTrack,
+    effDay,
+    showAbstract,
+    showSpeakers,
+    showRoom,
+    showTrack,
+    font,
+    radius,
+    spacing,
+    useMuted,
+    muted,
+    height,
+    pageUrl,
+    feedUrl,
+    me.event.name,
+    def.label,
+  ])
 
   const previewUrl = pageUrl
 
@@ -350,6 +399,112 @@ const DEFAULT_EMBED_ACCENT = '#2c4a73'
                 />
               </div>
             )}
+          </fieldset>
+
+          <fieldset className="embeds-field">
+            <legend>Theme</legend>
+            <p className="muted embeds-note">
+              A fixed set of tokens, not free-form CSS — each is validated the same way the accent colour is.
+            </p>
+            <label className="embeds-label" htmlFor="embeds-font">
+              Font
+            </label>
+            <select
+              id="embeds-font"
+              value={font}
+              onChange={(e) => setFont(e.currentTarget.value as typeof font)}
+            >
+              <option value="">Default</option>
+              <option value="sans">Sans-serif</option>
+              <option value="serif">Serif</option>
+              <option value="mono">Monospace</option>
+            </select>
+            <label className="embeds-label" htmlFor="embeds-radius">
+              Corner radius (px, 0-32)
+            </label>
+            <input
+              id="embeds-radius"
+              type="number"
+              min="0"
+              max="32"
+              placeholder="Default"
+              value={radius}
+              onChange={(e) => setRadius(e.currentTarget.value)}
+            />
+            <label className="embeds-label" htmlFor="embeds-spacing">
+              Density
+            </label>
+            <select
+              id="embeds-spacing"
+              value={spacing}
+              onChange={(e) => setSpacing(e.currentTarget.value as typeof spacing)}
+            >
+              <option value="">Default</option>
+              <option value="compact">Compact</option>
+              <option value="cozy">Cozy</option>
+              <option value="roomy">Roomy</option>
+            </select>
+            <label className="embeds-check">
+              <input
+                type="checkbox"
+                checked={useMuted}
+                onChange={(e) => setUseMuted(e.currentTarget.checked)}
+              />
+              Override the muted text colour
+            </label>
+            {useMuted && (
+              <div className="embeds-accent">
+                <input
+                  type="color"
+                  value={muted}
+                  aria-label="Muted text colour"
+                  onChange={(e) => setMuted(e.currentTarget.value)}
+                />
+                <input
+                  type="text"
+                  className="embeds-accent-hex"
+                  value={muted}
+                  aria-label="Muted text colour hex"
+                  onChange={(e) => setMuted(e.currentTarget.value)}
+                />
+              </div>
+            )}
+          </fieldset>
+
+          <fieldset className="embeds-field">
+            <legend>Content</legend>
+            <label className="embeds-check">
+              <input
+                type="checkbox"
+                checked={showAbstract}
+                onChange={(e) => setShowAbstract(e.currentTarget.checked)}
+              />
+              Show session abstracts
+            </label>
+            <label className="embeds-check">
+              <input
+                type="checkbox"
+                checked={showSpeakers}
+                onChange={(e) => setShowSpeakers(e.currentTarget.checked)}
+              />
+              Show speakers
+            </label>
+            <label className="embeds-check">
+              <input
+                type="checkbox"
+                checked={showRoom}
+                onChange={(e) => setShowRoom(e.currentTarget.checked)}
+              />
+              Show room
+            </label>
+            <label className="embeds-check">
+              <input
+                type="checkbox"
+                checked={showTrack}
+                onChange={(e) => setShowTrack(e.currentTarget.checked)}
+              />
+              Show track
+            </label>
           </fieldset>
 
           <fieldset className="embeds-field" disabled={!filterable}>

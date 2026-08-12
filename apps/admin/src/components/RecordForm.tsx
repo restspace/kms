@@ -49,10 +49,19 @@ export interface RecordFormProps {
   /**
    * Non-blocking advisory check, re-run (debounced) as the values change.
    * Returns a message to show above the fields — e.g. "a contact with this
-   * name already exists" — or null. Never prevents saving.
+   * name already exists" — or null. May instead return `{ message, action }`
+   * to render a recovery button beside the text (workplan 14: the duplicate
+   * warning's "Merge instead?" entry point). Never prevents saving.
    */
-  formWarning?: (value: Record<string, any>) => Promise<string | null>;
+  formWarning?: (value: Record<string, any>) => Promise<FormWarningResult>;
 }
+
+/** What `formWarning` may resolve to: nothing, a plain message, or a message
+ * with an inline action (same shape as RecordFormActionableError's action). */
+export type FormWarningResult =
+  | string
+  | { message: string; action?: { label: string; onClick: () => void } }
+  | null;
 
 interface PropertySchema {
   type?: string;
@@ -136,7 +145,7 @@ export const RecordForm: React.FC<RecordFormProps> = ({
   // form). Debounced so typing doesn't fire a request per keystroke; a stale
   // response is dropped rather than overwriting a fresher one. Purely
   // informational — the save button is never gated on it.
-  const [warning, setWarning] = useState<string | null>(null);
+  const [warning, setWarning] = useState<FormWarningResult>(null);
   const warningRunRef = useRef(0);
   const valueSignature = stableSerialize(value);
   useEffect(() => {
@@ -387,7 +396,16 @@ export const RecordForm: React.FC<RecordFormProps> = ({
       )}
       {warning && (
         <div className="record-form-warning" role="status">
-          <span>{warning}</span>
+          <span>{typeof warning === 'string' ? warning : warning.message}</span>
+          {typeof warning !== 'string' && warning.action && (
+            <button
+              type="button"
+              className="record-form-warning-action"
+              onClick={warning.action.onClick}
+            >
+              {warning.action.label}
+            </button>
+          )}
         </div>
       )}
       <div className="record-form-fields">

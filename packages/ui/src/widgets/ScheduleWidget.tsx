@@ -3,7 +3,9 @@ import {
   agendaIcsUrl,
   applyFeedFilter,
   fetchAgenda,
+  fieldVisible,
   type AgendaFeed,
+  type FieldVisibility,
   type PublicFeedFilter,
   type PublicSession,
 } from '../publicData'
@@ -24,6 +26,8 @@ export interface ScheduleWidgetProps {
    * public page, where the widget's own controls stay in charge.
    */
   filter?: PublicFeedFilter
+  /** Field-visibility toggles (workplan 14, F3/D6); undefined keys default shown. */
+  show?: FieldVisibility
 }
 
 const MY_SCHEDULE = '__mine__'
@@ -122,6 +126,7 @@ function SessionCard({
   trackName,
   tz,
   starred,
+  show,
   onToggleStar,
   onOpen,
 }: {
@@ -130,10 +135,15 @@ function SessionCard({
   trackName: string | null
   tz: string
   starred: boolean
+  show?: FieldVisibility
   onToggleStar: () => void
   onOpen: () => void
 }) {
   const [expanded, setExpanded] = useState(false)
+  const showAbstract = fieldVisible(show, 'abstract')
+  const showSpeakers = fieldVisible(show, 'speakers')
+  const showRoom = fieldVisible(show, 'room')
+  const showTrack = fieldVisible(show, 'track')
   const description = stripHtml(session.description ?? '')
   const isLong = description.length > DESC_TRUNCATE_AT
   const shownDescription =
@@ -160,14 +170,14 @@ function SessionCard({
           </h3>
           <div className="schedule-card-tags">
             {session.format && <span className="schedule-tag schedule-tag-format">{session.format}</span>}
-            {trackName && <span className="schedule-tag schedule-tag-track">{trackName}</span>}
+            {showTrack && trackName && <span className="schedule-tag schedule-tag-track">{trackName}</span>}
           </div>
         </div>
         <div className="muted schedule-card-meta">
           {fmtTimeRange(session.starts_at, session.ends_at, tz)}
-          {roomName ? ` · ${roomName}` : ''}
+          {showRoom && roomName ? ` · ${roomName}` : ''}
         </div>
-        {shownDescription && (
+        {showAbstract && shownDescription && (
           <p className="schedule-card-desc">
             {shownDescription}
             {isLong && (
@@ -182,21 +192,22 @@ function SessionCard({
             )}
           </p>
         )}
-        {session.speaker_details.length > 0 ? (
-          <div className="schedule-card-speakers muted">
-            {session.speaker_details.map((sp, i) => (
-              <span key={sp.id}>
-                {i > 0 ? ', ' : ''}
-                {sp.name}
-                {(sp.title || sp.company) && ` — ${[sp.title, sp.company].filter(Boolean).join(', ')}`}
-              </span>
-            ))}
-          </div>
-        ) : (
-          session.speakers.length > 0 && (
-            <div className="schedule-card-speakers muted">{session.speakers.join(', ')}</div>
-          )
-        )}
+        {showSpeakers &&
+          (session.speaker_details.length > 0 ? (
+            <div className="schedule-card-speakers muted">
+              {session.speaker_details.map((sp, i) => (
+                <span key={sp.id}>
+                  {i > 0 ? ', ' : ''}
+                  {sp.name}
+                  {(sp.title || sp.company) && ` — ${[sp.title, sp.company].filter(Boolean).join(', ')}`}
+                </span>
+              ))}
+            </div>
+          ) : (
+            session.speakers.length > 0 && (
+              <div className="schedule-card-speakers muted">{session.speakers.join(', ')}</div>
+            )
+          ))}
       </div>
     </li>
   )
@@ -210,7 +221,7 @@ function SessionCard({
  * the full published agenda (server-generated .ics) and a client-built .ics
  * of just the starred sessions.
  */
-export function ScheduleWidget({ eventSlug, filter }: ScheduleWidgetProps) {
+export function ScheduleWidget({ eventSlug, filter, show }: ScheduleWidgetProps) {
   const [feed, setFeed] = useState<AgendaFeed | null | undefined>(undefined)
   const [activeDay, setActiveDay] = useState<string | null>(null)
   const [query, setQuery] = useState('')
@@ -400,6 +411,7 @@ export function ScheduleWidget({ eventSlug, filter }: ScheduleWidgetProps) {
               trackName={s.track_id ? tracksById.get(s.track_id)?.name ?? null : null}
               tz={feed.event.timezone}
               starred={starred.has(s.id)}
+              show={show}
               onToggleStar={() => toggleStar(s.id)}
               onOpen={() => setOpenSessionId(s.id)}
             />
@@ -417,6 +429,7 @@ export function ScheduleWidget({ eventSlug, filter }: ScheduleWidgetProps) {
               roomName={roomName}
               trackName={trackName}
               tz={feed.event.timezone}
+              show={show}
               onClose={() => setOpenSessionId(null)}
             />
           )

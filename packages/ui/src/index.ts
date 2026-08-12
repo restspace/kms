@@ -9,7 +9,7 @@ export type { DesktopOnlyNoticeProps, DesktopOnlyNoticeAction } from './DesktopO
 export { EventShell, eventShellCss } from './EventShell'
 export type { EventShellNavItem, EventShellProps } from './EventShell'
 export { EventPage, EMBED_RESIZE_SCRIPT } from './EventPage'
-export type { EventPageKind, EventPageBootstrap, EventPageOptions } from './EventPage'
+export type { EventPageKind, EventPageBootstrap, EventPageOptions, EmbedTheme } from './EventPage'
 export {
   applyFeedFilter,
   isEmptyFilter,
@@ -19,6 +19,7 @@ export {
   agendaJsonUrl,
   speakersJsonUrl,
   agendaIcsUrl,
+  fieldVisible,
 } from './publicData'
 export type {
   PublicFeedFilter,
@@ -30,4 +31,5 @@ export type {
   PublicSpeaker,
   PublicSpeakerSession,
   SpeakersFeed,
+  FieldVisibility,
 } from './publicData'

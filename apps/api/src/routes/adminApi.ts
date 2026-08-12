@@ -14,7 +14,14 @@ import { sha256Hex } from '../hashing';
 import { accessibleEventIds, accessibleEvents, isWriter, requireEventAccess, type AccessEnv } from '../access';
 import { toCsv, toXlsx } from '../export';
 import { decodeCursor, encodeCursor, keysetWhere } from '../cursor';
-import { bumpEventRevision, getEventRevision } from '../revision';
+import {
+  bumpEventRevision,
+  entityRevisionInsert,
+  getEventRevision,
+  listEntityRevisions,
+  watchedFieldsChanged,
+} from '../revision';
+import { loadAuthorName } from '../submissionComments';
 import { createSessionToken, getRevalidatedPrivilegedSession, setSessionCookie, type SessionPayload } from '../session';
 import { IMAGE_TYPES, MAX_HEADSHOT_BYTES, saveFile } from '../filestore';
 import { appendUploadVersion } from '../fileVersions';
@@ -1022,6 +1029,12 @@ const CONTACT_PROFILE_FIELDS: readonly string[] = [
   'biography', 'headshot_asset_id', 'company', 'job_title', 'notes',
 ];
 
+// Wave E (workplan 14, D8): the profile fields whose pre-edit values are
+// snapshotted into content_revisions (entity_type 'contact'). `notes` is
+// organiser-only scratch and `headshot_asset_id` is a pointer, not content —
+// neither is history the way a rewritten biography is.
+const CONTACT_REVISION_FIELDS: readonly string[] = ['biography', 'company', 'job_title'];
+
 /** A pickContactFields() result split into the two tables' column maps. */
 function splitContactFields(fields: Record<string, string | null>): {
   identity: Record<string, string | null>;
@@ -1220,6 +1233,38 @@ adminApiRoutes.put('/contacts/:id', async (c) => {
   // must never again be returned for a write that touched nothing.
   let identityIdx = -1;
   let profileIdx = -1;
+  // Wave E (workplan 14, D8): snapshot the PRE-edit profile fields before the
+  // event_contacts UPDATE lands, batched with it, exactly as evaluation.ts
+  // does for submission title/description — and against the SAME
+  // event-scoped row this PUT writes (`eventId`, the row's own event, not
+  // blindly the session's). Only when a watched field actually changes; a
+  // notes/headshot/identity-only PUT leaves no profile content to have
+  // "reverted".
+  if (CONTACT_REVISION_FIELDS.some((k) => k in profile)) {
+    const before = await c.env.DB.prepare(
+      'SELECT biography, company, job_title FROM event_contacts WHERE event_id = ? AND contact_id = ?',
+    )
+      .bind(eventId, id)
+      .first<Record<string, string | null>>();
+    if (before && watchedFieldsChanged(before, profile, CONTACT_REVISION_FIELDS)) {
+      statements.push(
+        entityRevisionInsert(c.env.DB, {
+          eventId,
+          entityType: 'contact',
+          entityId: id,
+          payload: {
+            biography: before.biography,
+            company: before.company,
+            job_title: before.job_title,
+          },
+          editedBy: session.contactId,
+          editedByName: await loadAuthorName(c.env.DB, session.contactId),
+          source: 'admin',
+          editedAt: ts,
+        }),
+      );
+    }
+  }
   if (identityCols.length > 0) {
     // Editing identity here edits it for every event in the org — that is what
     // the merge means, not a leak. The EXISTS repeats the roster check as this
@@ -1388,6 +1433,10 @@ adminApiRoutes.get('/contacts/org-search', async (c) => {
               ORDER BY ec.added_at DESC LIMIT 1) AS job_title
        FROM contacts c
       WHERE c.org_id = ?1
+        -- Merge tombstones (0030) have no event_contacts rows at all, so this
+        -- no-membership picker is exactly where they would resurface without
+        -- an explicit filter.
+        AND c.merged_into IS NULL
         AND NOT EXISTS (SELECT 1 FROM event_contacts ec
                          WHERE ec.contact_id = c.id AND ec.event_id = ?2)
         AND (?3 = '' OR c.first_name LIKE ?4 OR c.last_name LIKE ?4 OR c.email LIKE ?4)
@@ -1465,15 +1514,29 @@ adminApiRoutes.get('/contacts/:id/history', async (c) => {
   const id = c.req.param('id');
   const db = c.env.DB;
 
+  // F7 (workplan 14): the detail panel can be opened from ANOTHER accessible
+  // event's row in the "All events" grid, where the session's event holds no
+  // membership for this contact and the guard below would 404 a perfectly
+  // legitimate read. The row's own event (?event_id=, echoed by the panel) is
+  // honoured, guarded against the caller's seats — a read, so any seat role
+  // qualifies; session.eventId stays the default.
+  let eventId = session.eventId;
+  const requestedEventId = c.req.query('event_id');
+  if (requestedEventId && requestedEventId !== session.eventId) {
+    const seat = await requireEventAccess(c, requestedEventId);
+    if (!seat) return c.json({ error: 'forbidden' }, 403);
+    eventId = requestedEventId;
+  }
+
   // Ordinary event guard first, identical to the headshot route's: the panel
-  // opens off this event's roster, so a contact with no row here is absent.
+  // opens off that event's roster, so a contact with no row there is absent.
   const onRoster = await db
     .prepare(
       `SELECT c.id FROM contacts c
          JOIN event_contacts ec ON ec.contact_id = c.id AND ec.event_id = ?
         WHERE c.id = ?`,
     )
-    .bind(session.eventId, id)
+    .bind(eventId, id)
     .first();
   if (!onRoster) return c.json({ error: 'not_found' }, 404);
 
@@ -1561,7 +1624,38 @@ adminApiRoutes.get('/contacts/:id/history', async (c) => {
   const events = [...groups.values()].sort((a, b) =>
     (b.event_starts_at ?? '').localeCompare(a.event_starts_at ?? ''),
   );
-  return c.json({ events, current_event_id: session.eventId });
+  return c.json({ events, current_event_id: eventId });
+});
+
+// GET /contacts/:id/revisions — profile history (Wave E, workplan 14 D8): the
+// contact-flavoured sibling of GET /submissions/:id/revisions. Newest first;
+// each row is the full pre-edit snapshot of biography/company/job_title
+// (parsed out of content_revisions.payload as `fields`). Per-event, like the
+// profile itself: ?event_id targets another event's row the same way the
+// contacts PUT does (grid rows come from every accessible event), guarded by
+// the caller's seat there; default is the session's event. Writer seats only,
+// matching the admin-only rule the submissions listing enforces.
+adminApiRoutes.get('/contacts/:id/revisions', async (c) => {
+  const session = c.get('session');
+  const id = c.req.param('id');
+  let eventId = session.eventId;
+  const queryEventId = c.req.query('event_id');
+  if (queryEventId && queryEventId !== session.eventId) {
+    const seat = await requireEventAccess(c, queryEventId);
+    if (!seat || !isWriter(seat.role)) return c.json({ error: 'forbidden' }, 403);
+    eventId = queryEventId;
+  } else if (!isWriter(session.role)) {
+    return c.json({ error: 'forbidden' }, 403);
+  }
+
+  const onRoster = await c.env.DB.prepare(
+    'SELECT 1 AS ok FROM event_contacts WHERE event_id = ? AND contact_id = ?',
+  )
+    .bind(eventId, id)
+    .first();
+  if (!onRoster) return c.json({ error: 'not_found' }, 404);
+
+  return c.json({ items: await listEntityRevisions(c.env.DB, eventId, 'contact', id) });
 });
 
 // DELETE /contacts/:id/org — destroy the PERSON, as opposed to DELETE
@@ -1700,6 +1794,22 @@ adminApiRoutes.post('/contacts/:id/headshot', async (c) => {
   const id = c.req.param('id');
   const db = c.env.DB;
 
+  const body = await c.req.parseBody();
+
+  // F7 (workplan 14): same defect class as the fixed contacts PUT — the "All
+  // events" grid opens the detail panel from ANOTHER accessible event's row,
+  // and writing this pointer to the session's event either 404s or lands the
+  // photo on the wrong event's profile. The row's own event_id (a plain form
+  // field beside the file, echoed by the panel) is the write target, guarded
+  // against the caller's writer seats; session.eventId stays the default so
+  // every existing caller is unaffected.
+  let eventId = session.eventId;
+  if (typeof body.event_id === 'string' && body.event_id !== '' && body.event_id !== session.eventId) {
+    const seat = await requireEventAccess(c, body.event_id);
+    if (!seat || !isWriter(seat.role)) return c.json({ error: 'forbidden' }, 403);
+    eventId = body.event_id;
+  }
+
   // The join to event_contacts is the tenancy guard: a contact with no row for
   // this event is not on its roster and must read as absent.
   const exists = await db
@@ -1708,16 +1818,15 @@ adminApiRoutes.post('/contacts/:id/headshot', async (c) => {
          JOIN event_contacts ec ON ec.contact_id = c.id AND ec.event_id = ?
         WHERE c.id = ?`,
     )
-    .bind(session.eventId, id)
+    .bind(eventId, id)
     .first<{ id: string }>();
   if (!exists) return c.json({ error: 'not_found' }, 404);
 
-  const body = await c.req.parseBody();
   const upload = body.headshot;
   if (!(upload instanceof File) || upload.size === 0) return c.json({ error: 'file_required' }, 400);
 
   const saved = await saveFile(c.env, {
-    eventId: session.eventId,
+    eventId,
     uploadedByContactId: session.contactId,
     file: upload,
     maxBytes: MAX_HEADSHOT_BYTES,
@@ -1725,23 +1834,459 @@ adminApiRoutes.post('/contacts/:id/headshot', async (c) => {
   });
   if ('error' in saved) return c.json({ error: saved.error }, 400);
 
-  const fileRequestId = await ensureHeadshotFileRequestId(db, session.eventId);
+  const fileRequestId = await ensureHeadshotFileRequestId(db, eventId);
   await appendUploadVersion(
     db,
     { fileRequestId, contactId: id, submissionId: null },
     { assetId: saved.id, uploadedAt: new Date().toISOString() },
   );
 
-  // The headshot is an event-scoped asset, so its pointer lives on this event's
+  // The headshot is an event-scoped asset, so its pointer lives on that event's
   // event_contacts row; contacts.updated_at still moves so the grid re-reads.
-  await db.batch([
+  const results = await db.batch([
     db.prepare('UPDATE event_contacts SET headshot_asset_id = ? WHERE event_id = ? AND contact_id = ?')
-      .bind(saved.id, session.eventId, id),
+      .bind(saved.id, eventId, id),
     db.prepare('UPDATE contacts SET updated_at = ? WHERE id = ?')
       .bind(new Date().toISOString(), id),
   ]);
-  await bumpEventRevision(c.env, session.eventId);
+  // The roster check above can race a concurrent detach — a write that touched
+  // no row must not answer 200 (the PUT's own zero-row rule, F7).
+  if ((results[0]?.meta.changes ?? 0) === 0) return c.json({ error: 'not_found' }, 404);
+  await bumpEventRevision(c.env, eventId);
   return c.json({ ok: true, headshot_asset_id: saved.id });
+});
+
+// ---------------------------------------------------------------------------
+// Contact merge (workplan 14 Wave B, decisions D1/D2).
+//
+// The 0015 migration merged duplicates the machine could prove (same org, same
+// email) and left `_contact_merge_map` as the audit. What it could not touch —
+// two records for the same person under different emails, or names the import
+// 409 guard didn't exist to prevent — is an ORGANIZER's call: candidates are
+// listed in two tiers (same normalized email = strong, same normalized name =
+// weak, the same tiers the agenda conflict engine uses), never auto-merged,
+// and the merge endpoint applies the 0015 repoint treatment to one explicit
+// pair with the organizer's per-field picks.
+// ---------------------------------------------------------------------------
+
+/** Identity fields (on `contacts`) a merge pick may resolve. */
+const MERGE_IDENTITY_FIELDS = [
+  'email', 'first_name', 'last_name', 'salutation', 'honorific',
+  'pronouns', 'gender', 'mobile_phone', 'links',
+] as const;
+
+/** Per-event profile fields (on `event_contacts`) a merge pick may resolve. */
+const MERGE_PROFILE_FIELDS = [
+  'biography', 'headshot_asset_id', 'company', 'job_title', 'notes',
+] as const;
+
+const MERGE_FIELD_SET = new Set<string>([...MERGE_IDENTITY_FIELDS, ...MERGE_PROFILE_FIELDS]);
+
+/** Upper bound on candidate pairs per tier — a review list, not a report. */
+const DUPLICATE_PAIR_LIMIT = 50;
+
+/** The columns the side-by-side field picker renders for one candidate:
+ * identity off `contacts` plus the profile from their most recent event in the
+ * org (the same "what you're about to get" row org-search shows). */
+const DUPLICATE_DETAIL_SQL = `
+  SELECT c.id, c.email, c.first_name, c.last_name, c.salutation, c.honorific,
+         c.pronouns, c.gender, c.mobile_phone, c.links, c.created_at,
+         (SELECT ec.company FROM event_contacts ec
+            JOIN events e ON e.id = ec.event_id
+           WHERE ec.contact_id = c.id AND e.org_id = c.org_id
+           ORDER BY ec.added_at DESC LIMIT 1) AS company,
+         (SELECT ec.job_title FROM event_contacts ec
+            JOIN events e ON e.id = ec.event_id
+           WHERE ec.contact_id = c.id AND e.org_id = c.org_id
+           ORDER BY ec.added_at DESC LIMIT 1) AS job_title,
+         (SELECT ec.biography FROM event_contacts ec
+            JOIN events e ON e.id = ec.event_id
+           WHERE ec.contact_id = c.id AND e.org_id = c.org_id
+           ORDER BY ec.added_at DESC LIMIT 1) AS biography,
+         (SELECT COUNT(*) FROM event_contacts ec WHERE ec.contact_id = c.id) AS event_count`;
+
+// GET /contacts/duplicates — candidate pairs for the Duplicates panel, per D2:
+// same normalized (trim/lowercase) email is a STRONG signal (only reachable
+// through whitespace variants, since 0015's unique index is on lower(email)
+// un-trimmed); same normalized full name with different emails is WEAK and the
+// UI must demand explicit human confirmation before merging one — legitimate
+// namesakes exist, which is exactly why there is no auto-merge. Tombstoned
+// contacts (0030) are excluded on both sides. Read-only, so no writer gate;
+// the merge POST below carries that.
+adminApiRoutes.get('/contacts/duplicates', async (c) => {
+  const db = c.env.DB;
+  const orgId = await sessionOrgId(c);
+  if (!orgId) return c.json({ error: 'not_found' }, 404);
+
+  const pairWhere = `a.org_id = ?1 AND b.org_id = ?1 AND b.id > a.id
+        AND a.merged_into IS NULL AND b.merged_into IS NULL`;
+  const [strong, weak] = await db.batch<{ a_id: string; b_id: string }>([
+    db.prepare(
+      `SELECT a.id AS a_id, b.id AS b_id
+         FROM contacts a JOIN contacts b
+           ON lower(trim(a.email)) = lower(trim(b.email))
+        WHERE ${pairWhere}
+        ORDER BY a.created_at, a.id LIMIT ${DUPLICATE_PAIR_LIMIT}`,
+    ).bind(orgId),
+    db.prepare(
+      `SELECT a.id AS a_id, b.id AS b_id
+         FROM contacts a JOIN contacts b
+           ON lower(trim(COALESCE(a.first_name, '') || ' ' || COALESCE(a.last_name, '')))
+            = lower(trim(COALESCE(b.first_name, '') || ' ' || COALESCE(b.last_name, '')))
+        WHERE ${pairWhere}
+          AND trim(COALESCE(a.first_name, '') || COALESCE(a.last_name, '')) <> ''
+          AND lower(trim(a.email)) <> lower(trim(b.email))
+        ORDER BY a.created_at, a.id LIMIT ${DUPLICATE_PAIR_LIMIT}`,
+    ).bind(orgId),
+  ]);
+
+  const pairs = [
+    ...(strong?.results ?? []).map((p) => ({ ...p, tier: 'strong' as const })),
+    ...(weak?.results ?? []).map((p) => ({ ...p, tier: 'weak' as const })),
+  ];
+  const ids = [...new Set(pairs.flatMap((p) => [p.a_id, p.b_id]))];
+  const details = new Map<string, Record<string, unknown>>();
+  if (ids.length > 0) {
+    const marks = ids.map(() => '?').join(', ');
+    const { results } = await db
+      .prepare(`${DUPLICATE_DETAIL_SQL} FROM contacts c WHERE c.org_id = ? AND c.id IN (${marks})`)
+      .bind(orgId, ...ids)
+      .all<Record<string, unknown>>();
+    for (const row of results) details.set(String(row.id), row);
+  }
+
+  // Each pair is ordered oldest-first — the 0015 survivor election's rule —
+  // so the UI's default winner suggestion matches what the migration would
+  // have chosen; the organizer can still flip it.
+  const items = pairs
+    .map((p) => {
+      const a = details.get(p.a_id);
+      const b = details.get(p.b_id);
+      if (!a || !b) return null;
+      const ordered =
+        String(a.created_at ?? '') <= String(b.created_at ?? '') ? [a, b] : [b, a];
+      return { tier: p.tier, contacts: ordered };
+    })
+    .filter((p) => p !== null);
+  return c.json({ items });
+});
+
+// POST /contacts/:id/merge { loser_id, fields: { <field>: 'winner'|'loser' } }
+//
+// :id is the WINNER. Org-scoped (both people must belong to the session
+// event's organisation — another org's contact reads as absent) and
+// writer-gated. Every FK that references the loser is repointed at the winner
+// in one D1 batch (one transaction), following 0015's playbook: tables whose
+// uniqueness includes the contact drop the loser's colliding rows first, the
+// rest are plain total repoints. The loser is TOMBSTONED (merged_into, D1),
+// never deleted; its email is rewritten to a per-id sentinel so the org-wide
+// unique index is freed and no future create/import can resurrect the
+// tombstone by address (the original is preserved in the audit snapshot).
+//
+// `fields` carries the organizer's per-field picks. Identity picks rewrite
+// the winner's `contacts` row. Profile picks apply where BOTH people hold an
+// event_contacts row for the same event (the collision the PK would reject):
+// picked-from-loser columns take the loser's value, the rest keep the
+// winner's, filled from the loser's where the winner's is blank. Events only
+// the loser attended keep their own profile values, repointed wholesale.
+adminApiRoutes.post('/contacts/:id/merge', async (c) => {
+  const session = c.get('session');
+  if (!isWriter(session.role)) return c.json({ error: 'forbidden' }, 403);
+  const db = c.env.DB;
+  const winnerId = c.req.param('id');
+
+  const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+  const loserId = typeof body.loser_id === 'string' ? body.loser_id : '';
+  if (!loserId) return c.json({ error: 'loser_id_required' }, 400);
+  if (loserId === winnerId) return c.json({ error: 'cannot_merge_self' }, 400);
+
+  const picks: Record<string, 'winner' | 'loser'> = {};
+  if (body.fields !== undefined) {
+    if (typeof body.fields !== 'object' || body.fields === null || Array.isArray(body.fields)) {
+      return c.json({ error: 'invalid_fields' }, 400);
+    }
+    for (const [key, value] of Object.entries(body.fields as Record<string, unknown>)) {
+      if (!MERGE_FIELD_SET.has(key)) return c.json({ error: 'unknown_field', field: key }, 400);
+      if (value !== 'winner' && value !== 'loser') return c.json({ error: 'invalid_pick', field: key }, 400);
+      picks[key] = value;
+    }
+  }
+
+  const orgId = await sessionOrgId(c);
+  if (!orgId) return c.json({ error: 'not_found' }, 404);
+
+  // org_id is the tenancy guard on both fetches: a contact belonging to a
+  // different organisation reads as absent, so cross-org merges are refused
+  // without disclosing that the id exists.
+  const [winner, loser] = await Promise.all([
+    db.prepare('SELECT * FROM contacts WHERE id = ? AND org_id = ?').bind(winnerId, orgId).first<Record<string, unknown>>(),
+    db.prepare('SELECT * FROM contacts WHERE id = ? AND org_id = ?').bind(loserId, orgId).first<Record<string, unknown>>(),
+  ]);
+  if (!winner || !loser) return c.json({ error: 'not_found' }, 404);
+  if (winner.merged_into || loser.merged_into) return c.json({ error: 'already_merged' }, 409);
+
+  const [winnerEvents, loserEvents] = await Promise.all([
+    db.prepare('SELECT * FROM event_contacts WHERE contact_id = ?').bind(winnerId).all<Record<string, unknown>>(),
+    db.prepare('SELECT * FROM event_contacts WHERE contact_id = ?').bind(loserId).all<Record<string, unknown>>(),
+  ]);
+  const winnerByEvent = new Map(winnerEvents.results.map((r) => [String(r.event_id), r]));
+
+  const ts = new Date().toISOString();
+  const statements: D1PreparedStatement[] = [];
+
+  // -- 1. Uniqueness-bearing tables: resolve collisions, then repoint. In every
+  //       statement ?1 = loser, ?2 = winner. The DELETEs remove only the
+  //       loser's rows whose logical key the winner already holds — the exact
+  //       rows the repoint UPDATE's constraint would reject.
+
+  // event_users — PRIMARY KEY (event_id, contact_id). Keep the strongest role
+  // (0015's rule): where both hold a seat on the same event, the winner's row
+  // is upgraded to the loser's role first if that role outranks it.
+  statements.push(
+    db.prepare(
+      `UPDATE event_users
+          SET role = (SELECT l.role FROM event_users l
+                       WHERE l.event_id = event_users.event_id AND l.contact_id = ?1)
+        WHERE contact_id = ?2
+          AND EXISTS (SELECT 1 FROM event_users l
+                       WHERE l.event_id = event_users.event_id AND l.contact_id = ?1
+                         AND (CASE l.role WHEN 'owner' THEN 0 WHEN 'admin' THEN 1 ELSE 2 END)
+                           < (CASE event_users.role WHEN 'owner' THEN 0 WHEN 'admin' THEN 1 ELSE 2 END))`,
+    ).bind(loserId, winnerId),
+    db.prepare(
+      `DELETE FROM event_users
+        WHERE contact_id = ?1
+          AND EXISTS (SELECT 1 FROM event_users w
+                       WHERE w.event_id = event_users.event_id AND w.contact_id = ?2)`,
+    ).bind(loserId, winnerId),
+    db.prepare('UPDATE event_users SET contact_id = ?2 WHERE contact_id = ?1').bind(loserId, winnerId),
+  );
+
+  // contact_tags — PRIMARY KEY (contact_id, tag_id).
+  statements.push(
+    db.prepare(
+      `DELETE FROM contact_tags
+        WHERE contact_id = ?1
+          AND EXISTS (SELECT 1 FROM contact_tags w
+                       WHERE w.contact_id = ?2 AND w.tag_id = contact_tags.tag_id)`,
+    ).bind(loserId, winnerId),
+    db.prepare('UPDATE contact_tags SET contact_id = ?2 WHERE contact_id = ?1').bind(loserId, winnerId),
+  );
+
+  // submission_participants — UNIQUE (submission_id, contact_id, role).
+  statements.push(
+    db.prepare(
+      `DELETE FROM submission_participants
+        WHERE contact_id = ?1
+          AND EXISTS (SELECT 1 FROM submission_participants w
+                       WHERE w.contact_id = ?2
+                         AND w.submission_id = submission_participants.submission_id
+                         AND w.role = submission_participants.role)`,
+    ).bind(loserId, winnerId),
+    db.prepare('UPDATE submission_participants SET contact_id = ?2 WHERE contact_id = ?1').bind(loserId, winnerId),
+  );
+
+  // review_assignments — UNIQUE (plan_id, submission_id, reviewer_contact_id).
+  // Dropping a loser assignment SET-NULLs its reviews.assignment_id (0001),
+  // so the review itself survives and is repointed below.
+  statements.push(
+    db.prepare(
+      `DELETE FROM review_assignments
+        WHERE reviewer_contact_id = ?1
+          AND EXISTS (SELECT 1 FROM review_assignments w
+                       WHERE w.reviewer_contact_id = ?2
+                         AND w.plan_id = review_assignments.plan_id
+                         AND w.submission_id = review_assignments.submission_id)`,
+    ).bind(loserId, winnerId),
+    db.prepare('UPDATE review_assignments SET reviewer_contact_id = ?2 WHERE reviewer_contact_id = ?1').bind(loserId, winnerId),
+  );
+
+  // task_assignments — UNIQUE (task_id, contact_id, COALESCE(submission_id, '')) (0005).
+  statements.push(
+    db.prepare(
+      `DELETE FROM task_assignments
+        WHERE contact_id = ?1
+          AND EXISTS (SELECT 1 FROM task_assignments w
+                       WHERE w.contact_id = ?2
+                         AND w.task_id = task_assignments.task_id
+                         AND COALESCE(w.submission_id, '') = COALESCE(task_assignments.submission_id, ''))`,
+    ).bind(loserId, winnerId),
+    db.prepare('UPDATE task_assignments SET contact_id = ?2 WHERE contact_id = ?1').bind(loserId, winnerId),
+  );
+
+  // calendar_invites — UNIQUE (session_id, contact_id).
+  statements.push(
+    db.prepare(
+      `DELETE FROM calendar_invites
+        WHERE contact_id = ?1
+          AND EXISTS (SELECT 1 FROM calendar_invites w
+                       WHERE w.contact_id = ?2 AND w.session_id = calendar_invites.session_id)`,
+    ).bind(loserId, winnerId),
+    db.prepare('UPDATE calendar_invites SET contact_id = ?2 WHERE contact_id = ?1').bind(loserId, winnerId),
+  );
+
+  // contact_field_values — PRIMARY KEY (contact_id, field_id).
+  statements.push(
+    db.prepare(
+      `DELETE FROM contact_field_values
+        WHERE contact_id = ?1
+          AND EXISTS (SELECT 1 FROM contact_field_values w
+                       WHERE w.contact_id = ?2 AND w.field_id = contact_field_values.field_id)`,
+    ).bind(loserId, winnerId),
+    db.prepare('UPDATE contact_field_values SET contact_id = ?2 WHERE contact_id = ?1').bind(loserId, winnerId),
+  );
+
+  // evaluation_plan_reviewers — PRIMARY KEY (plan_id, contact_id).
+  statements.push(
+    db.prepare(
+      `DELETE FROM evaluation_plan_reviewers
+        WHERE contact_id = ?1
+          AND EXISTS (SELECT 1 FROM evaluation_plan_reviewers w
+                       WHERE w.contact_id = ?2 AND w.plan_id = evaluation_plan_reviewers.plan_id)`,
+    ).bind(loserId, winnerId),
+    db.prepare('UPDATE evaluation_plan_reviewers SET contact_id = ?2 WHERE contact_id = ?1').bind(loserId, winnerId),
+  );
+
+  // -- 2. No contact-bearing uniqueness: plain total repoints (0015's second
+  //       group, plus the contact-id columns added since — submission_comments
+  //       0018, event_contacts.arrival_marked_by 0019, chase_drafts 0022,
+  //       content_revisions 0023, and the bare-id actor columns bulk_jobs
+  //       0011 / import_batches 0020).
+  for (const [table, column] of [
+    ['portal_accounts', 'contact_id'],
+    ['submissions', 'submitter_contact_id'],
+    ['reviews', 'reviewer_contact_id'],
+    ['portal_form_responses', 'contact_id'],
+    ['file_request_uploads', 'contact_id'],
+    ['file_assets', 'uploaded_by_contact_id'],
+    ['message_log', 'contact_id'],
+    ['api_tokens', 'created_by_contact_id'],
+    ['auth_tokens', 'contact_id'],
+    ['file_comments', 'author_contact_id'],
+    ['submission_comments', 'author_contact_id'],
+    ['content_revisions', 'edited_by'],
+    ['chase_drafts', 'contact_id'],
+    ['event_contacts', 'arrival_marked_by'],
+    ['bulk_jobs', 'created_by'],
+    ['import_batches', 'created_by'],
+  ] as const) {
+    statements.push(db.prepare(`UPDATE ${table} SET ${column} = ?2 WHERE ${column} = ?1`).bind(loserId, winnerId));
+  }
+
+  // file_request_uploads chains are keyed (file_request_id, contact_id,
+  // submission_id) with version/is_current materialised (0007) — the repoint
+  // above can fuse a winner chain and a loser chain for the same request, so
+  // the winner's chains are renumbered with 0007's own backfill technique.
+  statements.push(
+    db.prepare(
+      `UPDATE file_request_uploads
+          SET version = (SELECT COUNT(*) FROM file_request_uploads p
+                          WHERE p.file_request_id = file_request_uploads.file_request_id
+                            AND p.contact_id = file_request_uploads.contact_id
+                            AND COALESCE(p.submission_id, '') = COALESCE(file_request_uploads.submission_id, '')
+                            AND (p.uploaded_at < file_request_uploads.uploaded_at
+                              OR (p.uploaded_at = file_request_uploads.uploaded_at AND p.id <= file_request_uploads.id)))
+        WHERE contact_id = ?2`,
+    ).bind(loserId, winnerId),
+    db.prepare(
+      `UPDATE file_request_uploads
+          SET is_current = CASE WHEN version = (SELECT MAX(p.version) FROM file_request_uploads p
+                                                 WHERE p.file_request_id = file_request_uploads.file_request_id
+                                                   AND p.contact_id = file_request_uploads.contact_id
+                                                   AND COALESCE(p.submission_id, '') = COALESCE(file_request_uploads.submission_id, ''))
+                            THEN 1 ELSE 0 END
+        WHERE contact_id = ?2`,
+    ).bind(loserId, winnerId),
+  );
+
+  // -- 3. event_contacts — PRIMARY KEY (event_id, contact_id). Colliding
+  //       events (both on the roster) fold the loser's profile into the
+  //       winner's row per the picks; the rest repoint wholesale, keeping
+  //       their own per-event profile values.
+  for (const loserRow of loserEvents.results) {
+    const winnerRow = winnerByEvent.get(String(loserRow.event_id));
+    if (!winnerRow) continue;
+    const merged = MERGE_PROFILE_FIELDS.map((field) =>
+      picks[field] === 'loser' ? loserRow[field] : winnerRow[field] ?? loserRow[field],
+    );
+    statements.push(
+      db.prepare(
+        `UPDATE event_contacts SET ${MERGE_PROFILE_FIELDS.map((f) => `${f} = ?`).join(', ')}
+          WHERE event_id = ? AND contact_id = ?`,
+      ).bind(...merged, loserRow.event_id, winnerId),
+      db.prepare('DELETE FROM event_contacts WHERE event_id = ? AND contact_id = ?').bind(loserRow.event_id, loserId),
+    );
+  }
+  statements.push(db.prepare('UPDATE event_contacts SET contact_id = ?2 WHERE contact_id = ?1').bind(loserId, winnerId));
+
+  // -- 4. Tombstone the loser (D1: recorded, not deleted). The email sentinel
+  //       frees the org-wide unique index — without it the address would stay
+  //       claimed forever, and a future POST/import with it would attach to
+  //       (and silently resurrect) the tombstone. `merged_into IS NULL` in the
+  //       WHERE makes a raced double-merge touch zero rows, which is checked
+  //       after the batch.
+  const tombstoneIdx = statements.length;
+  statements.push(
+    db.prepare(
+      `UPDATE contacts SET merged_into = ?, email = ?, updated_at = ?
+        WHERE id = ? AND org_id = ? AND merged_into IS NULL`,
+    ).bind(winnerId, `merged-${loserId}@tombstone.invalid`, ts, loserId, orgId),
+  );
+
+  // -- 5. The winner's identity per the picks. The loser's ORIGINAL values
+  //       (fetched above, before the sentinel rewrite) are what a 'loser'
+  //       pick takes.
+  const identityCols = MERGE_IDENTITY_FIELDS.filter((f) => picks[f] === 'loser');
+  statements.push(
+    identityCols.length > 0
+      ? db.prepare(
+          `UPDATE contacts SET ${identityCols.map((f) => `${f} = ?`).join(', ')}, updated_at = ? WHERE id = ?`,
+        ).bind(...identityCols.map((f) => loser[f]), ts, winnerId)
+      : db.prepare('UPDATE contacts SET updated_at = ? WHERE id = ?').bind(ts, winnerId),
+  );
+
+  // -- 6. The audit row. field_resolution preserves the picks AND the loser's
+  //       pre-merge values — the only remaining record of them (the 0015
+  //       principle: every repoint recorded, reversible in principle).
+  statements.push(
+    db.prepare(
+      `INSERT INTO contact_merges (id, org_id, winner_contact_id, loser_contact_id, actor, field_resolution, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    ).bind(
+      crypto.randomUUID(),
+      orgId,
+      winnerId,
+      loserId,
+      session.contactId,
+      JSON.stringify({
+        picks,
+        loser_snapshot: {
+          identity: Object.fromEntries(MERGE_IDENTITY_FIELDS.map((f) => [f, loser[f] ?? null])),
+          events: loserEvents.results.map((r) => ({
+            event_id: r.event_id,
+            ...Object.fromEntries(MERGE_PROFILE_FIELDS.map((f) => [f, r[f] ?? null])),
+          })),
+        },
+      }),
+      ts,
+    ),
+  );
+
+  let results: D1Result[];
+  try {
+    results = await db.batch(statements);
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    return c.json({ error: 'merge_conflict', detail }, 409);
+  }
+  if ((results[tombstoneIdx]?.meta.changes ?? 0) === 0) return c.json({ error: 'already_merged' }, 409);
+
+  const affected = new Set<string>([
+    ...winnerEvents.results.map((r) => String(r.event_id)),
+    ...loserEvents.results.map((r) => String(r.event_id)),
+  ]);
+  for (const eventId of affected) await bumpEventRevision(c.env, eventId);
+  return c.json({ ok: true, winner_id: winnerId, loser_id: loserId, events_affected: affected.size });
 });
 
 // ---------------------------------------------------------------------------
@@ -2706,6 +3251,31 @@ function pickEventFields(
   return { values };
 }
 
+// Wave E (workplan 14, D8): the events columns whose pre-edit values make up a
+// 'settings' revision snapshot. `theme` is the description's storage column
+// (0001_init.sql — events has no `description`); agenda_published is workflow,
+// not settings content, and stays unwatched.
+const SETTINGS_REVISION_COLS: readonly string[] = [
+  'name', 'slug', 'type', 'website_url', 'location', 'timezone', 'theme', 'starts_at', 'ends_at',
+];
+
+/** watchedFieldsChanged with one wrinkle: starts_at/ends_at compare as
+ * instants, so re-sending the same date in a different ISO rendering (with or
+ * without milliseconds) is still a no-op, not a phantom history row. */
+function settingsChanged(before: Record<string, string | null>, incoming: Record<string, unknown>): boolean {
+  return SETTINGS_REVISION_COLS.some((k) => {
+    if (!(k in incoming)) return false;
+    const a = before[k];
+    const b = incoming[k];
+    if ((k === 'starts_at' || k === 'ends_at') && typeof a === 'string' && typeof b === 'string') {
+      const pa = Date.parse(a);
+      const pb = Date.parse(b);
+      if (!Number.isNaN(pa) && !Number.isNaN(pb)) return pa !== pb;
+    }
+    return watchedFieldsChanged(before, incoming, [k]);
+  });
+}
+
 interface NamedRow {
   name: string;
   extra: string | number | null;
@@ -2871,13 +3441,57 @@ adminApiRoutes.patch('/events/:id', async (c) => {
 
   const cols = Object.keys(values);
   if (cols.length === 0) return c.json({ error: 'nothing_to_update' }, 400);
-  try {
-    const result = await c.env.DB.prepare(
-      `UPDATE events SET ${cols.map((k) => `${k} = ?`).join(', ')}, updated_at = ? WHERE id = ?`,
+  const ts = new Date().toISOString();
+  const statements: D1PreparedStatement[] = [];
+  // Wave E (workplan 14, D8): settings history. Snapshot the full watched set
+  // PRE-edit into content_revisions (entity_type 'settings', entity_id = the
+  // event) whenever this patch actually changes one of them — batched with the
+  // UPDATE, same discipline as the submission/contact paths. agenda_published
+  // is deliberately unwatched: the go-live toggle is workflow, not settings
+  // content, and would bury real edits under publish flips.
+  if (SETTINGS_REVISION_COLS.some((k) => k in values)) {
+    const before = await c.env.DB.prepare(
+      `SELECT ${SETTINGS_REVISION_COLS.join(', ')} FROM events WHERE id = ?`,
     )
-      .bind(...cols.map((k) => values[k]), new Date().toISOString(), eventId)
-      .run();
-    if (result.meta.changes === 0) return c.json({ error: 'not_found' }, 404);
+      .bind(eventId)
+      .first<Record<string, string | null>>();
+    if (before && settingsChanged(before, values)) {
+      statements.push(
+        entityRevisionInsert(c.env.DB, {
+          eventId,
+          entityType: 'settings',
+          entityId: eventId,
+          // Keyed by the PATCH surface's own field names (`description`, not
+          // the legacy `theme` column) so a restore is literally "send this
+          // payload back through the same PATCH".
+          payload: {
+            name: before.name,
+            slug: before.slug,
+            type: before.type,
+            website_url: before.website_url,
+            location: before.location,
+            timezone: before.timezone,
+            description: before.theme,
+            starts_at: before.starts_at,
+            ends_at: before.ends_at,
+          },
+          editedBy: session.contactId,
+          editedByName: await loadAuthorName(c.env.DB, session.contactId),
+          source: 'admin',
+          editedAt: ts,
+        }),
+      );
+    }
+  }
+  statements.push(
+    c.env.DB.prepare(
+      `UPDATE events SET ${cols.map((k) => `${k} = ?`).join(', ')}, updated_at = ? WHERE id = ?`,
+    ).bind(...cols.map((k) => values[k]), ts, eventId),
+  );
+  try {
+    const results = await c.env.DB.batch(statements);
+    const updateResult = results[results.length - 1];
+    if (!updateResult || updateResult.meta.changes === 0) return c.json({ error: 'not_found' }, 404);
   } catch (err) {
     const message = err instanceof Error ? err.message : '';
     if (message.includes('UNIQUE')) return c.json({ error: 'slug_taken' }, 409);
@@ -2885,6 +3499,22 @@ adminApiRoutes.patch('/events/:id', async (c) => {
   }
   await bumpEventRevision(c.env, eventId);
   return c.json({ ok: true });
+});
+
+/**
+ * GET /app/api/events/:id/revisions — settings history (Wave E), the
+ * settings-flavoured sibling of GET /submissions/:id/revisions: newest first,
+ * each row the full pre-edit snapshot of the watched settings fields (parsed
+ * out of the payload column as `fields`). Writer seats only, matching the
+ * admin-only rule the submissions listing enforces.
+ */
+adminApiRoutes.get('/events/:id/revisions', async (c) => {
+  const session = c.get('session');
+  const eventId = c.req.param('id');
+  const seat = await requireEventAccess(c, eventId);
+  if (!seat && eventId !== session.eventId) return c.json({ error: 'event_not_accessible' }, 403);
+  if (!isWriter(seat?.role ?? session.role)) return c.json({ error: 'forbidden' }, 403);
+  return c.json({ items: await listEntityRevisions(c.env.DB, eventId, 'settings', eventId) });
 });
 
 // GET /app/api/events — the workspace Events tab (W2-E): the org's
