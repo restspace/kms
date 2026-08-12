@@ -10,7 +10,7 @@ import { Hono } from 'hono';
 import type { Context } from 'hono';
 import { computeConflicts } from '@kms/core';
 import type { AgendaRoomInput } from '@kms/core';
-import type { AccessEnv } from '../access';
+import { isWriter, type AccessEnv } from '../access';
 import { sweepBulkJobs } from '../jobs/bulkJobs';
 import { getEventRevision } from '../revision';
 import { loadIgnored, loadSessions, toEngineInput } from './agenda';
@@ -501,6 +501,199 @@ dashboardRoutes.get('/', async (c) => {
 
   const payload = await dashboardPayload(c);
   if (!payload) return c.json({ error: 'not_found' }, 404);
+  await c.env.KV.put(cacheKey, JSON.stringify(payload), { expirationTtl: DASHBOARD_CACHE_TTL_SECONDS })
+    .catch(() => {});
+  return c.json(payload);
+});
+
+// ---------------------------------------------------------------------------
+// Org-wide dashboard (GET /app/api/dashboard/org)
+//
+// The board above is one event; this one is the organisation the session's
+// event belongs to. Scope is deliberately EVERY event in the org, not just the
+// events this staff email holds a seat on — same call the contacts
+// org-search endpoint already makes (adminApi.ts: `contacts.org_id` is the
+// tenancy guard, membership is not). The role guard is what keeps that honest:
+// only a writer seat (owner/admin) may read it.
+// ---------------------------------------------------------------------------
+
+const ORG_TOP_COMPANIES = 8;
+const NEW_CONTACT_WINDOW_DAYS = 30;
+
+export interface OrgDashboardEventRow {
+  id: string;
+  name: string;
+  slug: string;
+  starts_at: string;
+  ends_at: string;
+  agenda_published: number;
+  submissions: number;
+  accepted: number;
+  scheduled: number;
+}
+
+export interface OrgDashboardPayload {
+  now: string;
+  org: { id: string; name: string };
+  kpis: {
+    total_contacts: number;
+    new_contacts_30d: number;
+    contacts_on_events: number;
+    contacts_no_event: number;
+    returning_speakers: number;
+    events: number;
+  };
+  top_companies: Array<{ company: string; n: number }>;
+  events: OrgDashboardEventRow[];
+}
+
+/** One revision string covering every event in scope — the same shape
+ * adminApi.ts's `scopeRevision` builds for the workspace totals cache.
+ * Replicated rather than imported: adminApi.ts imports *this* file, so the
+ * dependency has to run one way. */
+async function orgRevision(env: ApiEnv['Bindings'], eventIds: string[]): Promise<string> {
+  const revisions = await Promise.all(eventIds.map((id) => getEventRevision(env, id)));
+  return revisions.join('|');
+}
+
+async function orgDashboardPayload(
+  db: D1Database,
+  org: { id: string; name: string },
+): Promise<OrgDashboardPayload> {
+  const now = new Date().toISOString();
+  const since = new Date(Date.now() - NEW_CONTACT_WINDOW_DAYS * 86_400_000).toISOString();
+
+  const [contactStats, returningRow, companyRows, eventRows] = await Promise.all([
+    // Merge tombstones (0030) carry no event_contacts rows, so they would land
+    // squarely in `contacts_no_event` without the explicit filter — same
+    // reasoning as GET /contacts/org-search.
+    db.prepare(
+      `SELECT COUNT(*) AS total,
+              SUM(CASE WHEN c.created_at >= ?2 THEN 1 ELSE 0 END) AS new_30d,
+              SUM(CASE WHEN EXISTS (SELECT 1 FROM event_contacts ec
+                                     JOIN events e ON e.id = ec.event_id
+                                    WHERE ec.contact_id = c.id AND e.org_id = c.org_id)
+                       THEN 1 ELSE 0 END) AS on_events
+       FROM contacts c
+       WHERE c.org_id = ?1 AND c.merged_into IS NULL`,
+    ).bind(org.id, since).first<{ total: number; new_30d: number | null; on_events: number | null }>(),
+    // "Returning speaker" = related to submissions at 2+ distinct events in the
+    // org, counting BOTH roles (submitter and participant) — the looser
+    // participant-based definition. The UNION dedupes a contact who is both
+    // submitter and participant on the same event, so the event count is honest.
+    db.prepare(
+      `SELECT COUNT(*) AS n FROM (
+         SELECT x.contact_id
+         FROM (
+           SELECT s.submitter_contact_id AS contact_id, s.event_id
+           FROM submissions s JOIN events e ON e.id = s.event_id
+           WHERE e.org_id = ?1 AND s.submitter_contact_id IS NOT NULL
+           UNION
+           SELECT sp.contact_id, s2.event_id
+           FROM submission_participants sp
+           JOIN submissions s2 ON s2.id = sp.submission_id
+           JOIN events e2 ON e2.id = s2.event_id
+           WHERE e2.org_id = ?1
+         ) x
+         JOIN contacts c ON c.id = x.contact_id AND c.merged_into IS NULL
+         GROUP BY x.contact_id
+         HAVING COUNT(DISTINCT x.event_id) >= 2
+       )`,
+    ).bind(org.id).first<{ n: number }>(),
+    // Company lives on event_contacts, not contacts (0015), so a person has one
+    // per event. Each contact contributes their MOST RECENT non-blank one — the
+    // same "latest membership by added_at" rule the org-search picker uses to
+    // preview a contact's company — and blanks drop out entirely rather than
+    // shadowing an older employer.
+    db.prepare(
+      `SELECT company, COUNT(*) AS n FROM (
+         SELECT (SELECT ec.company FROM event_contacts ec
+                   JOIN events e ON e.id = ec.event_id
+                  WHERE ec.contact_id = c.id AND e.org_id = c.org_id
+                    AND ec.company IS NOT NULL AND TRIM(ec.company) != ''
+                  ORDER BY ec.added_at DESC LIMIT 1) AS company
+         FROM contacts c
+         WHERE c.org_id = ?1 AND c.merged_into IS NULL
+       ) WHERE company IS NOT NULL
+       GROUP BY company ORDER BY n DESC, company LIMIT ?2`,
+    ).bind(org.id, ORG_TOP_COMPANIES).all<{ company: string; n: number }>(),
+    // accepted/scheduled keep the per-event funnel's semantics verbatim (the
+    // `funnelRow` query above): received excludes drafts, scheduled means an
+    // accepted submission that owns both a slot and a room.
+    db.prepare(
+      `SELECT e.id, e.name, e.slug, e.starts_at, e.ends_at, e.agenda_published,
+              (SELECT COUNT(*) FROM submissions s
+                WHERE s.event_id = e.id AND s.status != 'draft') AS submissions,
+              (SELECT COUNT(*) FROM submissions s
+                WHERE s.event_id = e.id AND s.status = 'accepted') AS accepted,
+              (SELECT COUNT(*) FROM submissions s
+                WHERE s.event_id = e.id AND s.status = 'accepted'
+                  AND s.starts_at IS NOT NULL AND s.room_id IS NOT NULL) AS scheduled
+       FROM events e
+       WHERE e.org_id = ?1
+       ORDER BY e.starts_at DESC, e.name`,
+    ).bind(org.id).all<OrgDashboardEventRow>(),
+  ]);
+
+  const total = contactStats?.total ?? 0;
+  const onEvents = contactStats?.on_events ?? 0;
+
+  return {
+    now,
+    org,
+    kpis: {
+      total_contacts: total,
+      new_contacts_30d: contactStats?.new_30d ?? 0,
+      contacts_on_events: onEvents,
+      contacts_no_event: total - onEvents,
+      returning_speakers: returningRow?.n ?? 0,
+      events: eventRows.results.length,
+    },
+    top_companies: companyRows.results,
+    events: eventRows.results,
+  };
+}
+
+// GET /app/api/dashboard/org — organisation-wide roll-up: contact KPIs, top
+// employers, one row per event. Cached exactly like the per-event board, with
+// the revision widened to cover the whole org (every event's revision joined).
+//
+// Caveat worth knowing before trusting the cache: an event revision is bumped
+// by *event-scoped* writes. Contact creation through POST /contacts does bump
+// (it attaches the person to the session's event), but a contact edited or
+// created with no event attachment at all — an org-only row, an import that
+// never lands a membership — moves `total_contacts`/`contacts_no_event`
+// without moving any event revision. That is what DASHBOARD_CACHE_TTL_SECONDS
+// is for here; no new org-level revision machinery is introduced for it.
+dashboardRoutes.get('/org', async (c) => {
+  const session = c.get('session');
+  // Reviewers are already refused by the /app/api guard (admin.view), which
+  // never lets a reviewer past /app/api/review/*. This is the same explicit
+  // floor chase.ts keeps: an org-wide roll-up is a writer surface, so a
+  // read-only seat gets 403 here regardless of how it arrived.
+  if (!isWriter(session.role)) return c.json({ error: 'forbidden' }, 403);
+
+  const org = await c.env.DB.prepare(
+    `SELECT o.id, o.name FROM organisations o
+      JOIN events e ON e.org_id = o.id
+     WHERE e.id = ?`,
+  ).bind(session.eventId).first<{ id: string; name: string }>();
+  if (!org) return c.json({ error: 'not_found' }, 404);
+
+  const eventIds = await c.env.DB.prepare('SELECT id FROM events WHERE org_id = ? ORDER BY id')
+    .bind(org.id)
+    .all<{ id: string }>();
+  const revision = await orgRevision(c.env, eventIds.results.map((r) => r.id));
+  const etag = `"o${revision}"`;
+  c.header('ETag', etag);
+  c.header('Cache-Control', 'no-cache');
+  if (c.req.header('if-none-match') === etag) return c.body(null, 304);
+
+  const cacheKey = `dash-org:${org.id}:${revision}`;
+  const cached = await c.env.KV.get<OrgDashboardPayload>(cacheKey, 'json').catch(() => null);
+  if (cached) return c.json({ ...cached, now: new Date().toISOString() });
+
+  const payload = await orgDashboardPayload(c.env.DB, org);
   await c.env.KV.put(cacheKey, JSON.stringify(payload), { expirationTtl: DASHBOARD_CACHE_TTL_SECONDS })
     .catch(() => {});
   return c.json(payload);

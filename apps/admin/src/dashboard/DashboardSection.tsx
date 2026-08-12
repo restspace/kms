@@ -1,11 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   fetchDashboard,
+  fetchOrgDashboard,
   getBulkJob,
   remindTasks,
   type DashboardNudge,
   type DashboardPayload,
+  type OrgDashboardPayload,
 } from '../api'
+import { useEventScopeOptional, type EventFilter } from '../eventScope'
 import { fmtDateInTz } from '../utils/dates'
 import { ChaseInboxPanel, ChaseModeBanner } from './ChaseInbox'
 import './dashboard.css'
@@ -15,6 +18,12 @@ import './dashboard.css'
  * Submissions Pipeline — over one polled payload. Every row and nudge
  * deep-links to the screen that resolves it (the M5 stretch): navigation goes
  * up through onNavigate so App can pre-seed the workspace or agenda.
+ *
+ * CRM-12: those three are per-event. When the sidebar filter says "All
+ * events" the section swaps them for a single Organisation board over
+ * /app/api/dashboard/org — the org-wide contact/company/event roll-up the
+ * per-event payload can't express. The per-event boards (and their local
+ * state) are untouched; picking a concrete event brings them straight back.
  */
 
 export type AppNavTarget =
@@ -28,6 +37,13 @@ export type AppNavTarget =
       seedFilters?: Partial<Record<'speakers' | 'submissions' | 'tasks' | 'messages', Record<string, unknown>>>
       /** Chip label shown while the seed is active. */
       label?: string
+      /**
+       * Event filter to land on (`?ev=`): 'all' for the org directory, an id
+       * for one event. Emitted by the Organisation board's click-throughs;
+       * the section also applies it itself via the event scope, so a host
+       * that ignores this field still navigates correctly.
+       */
+      ev?: EventFilter
     }
 
 const POLL_MS = 15_000
@@ -53,6 +69,24 @@ const fmtDay = (iso: string): string =>
   new Date(`${iso}T12:00:00Z`).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
 
 const statusLabelText = (s: string): string => s.replace(/_/g, ' ')
+
+/**
+ * Org board dates: the event rows carry no timezone (they span the whole
+ * organisation), so the date part is read literally — midday UTC keeps the
+ * calendar day stable either side of the date line.
+ */
+const fmtEventDay = (iso: string): string => {
+  const day = iso.slice(0, 10)
+  const d = new Date(`${day}T12:00:00Z`)
+  if (Number.isNaN(d.getTime())) return iso
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' })
+}
+
+const fmtEventRange = (starts: string, ends: string): string => {
+  const from = fmtEventDay(starts)
+  const to = fmtEventDay(ends)
+  return from === to ? from : `${from} – ${to}`
+}
 
 /** Contact-anchored seeds: every workspace tab narrows to this speaker. */
 const speakerSeeds = (contactId: string) => ({
@@ -169,7 +203,13 @@ function PacingChart({ pacing }: { pacing: DashboardPayload['forms']['pacing'] }
 // --- the section ------------------------------------------------------------
 
 export function DashboardSection({ onNavigate }: { onNavigate: (target: AppNavTarget) => void }) {
+  // Optional so the section still renders standalone in tests: no provider
+  // means no "All events" filter, which is the per-event board as before.
+  const scope = useEventScopeOptional()
+  const orgMode = scope?.filter === 'all'
+
   const [data, setData] = useState<DashboardPayload | null>(null)
+  const [orgData, setOrgData] = useState<OrgDashboardPayload | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [board, setBoard] = useState<BoardKey>('today')
   const [todayTab, setTodayTab] = useState<TodayTab>('forms')
@@ -178,20 +218,39 @@ export function DashboardSection({ onNavigate }: { onNavigate: (target: AppNavTa
   const [note, setNote] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const etagRef = useRef<string | null>(null)
+  const orgEtagRef = useRef<string | null>(null)
+
+  // Which mode a request was issued in. Flipping the filter starts a new
+  // generation, so a response still in flight from the old one is dropped
+  // rather than repainting (or erroring over) the board that replaced it.
+  const genRef = useRef(0)
+  useEffect(() => { genRef.current += 1 }, [orgMode])
 
   const load = useCallback(async (force = false) => {
+    const gen = genRef.current
     try {
-      const result = await fetchDashboard(force ? null : etagRef.current)
-      if (result.fresh) {
-        setData(result.payload)
-        etagRef.current = result.etag
+      if (orgMode) {
+        const result = await fetchOrgDashboard(force ? null : orgEtagRef.current)
+        if (gen !== genRef.current) return
+        if (result.fresh) {
+          setOrgData(result.payload)
+          orgEtagRef.current = result.etag
+        }
+      } else {
+        const result = await fetchDashboard(force ? null : etagRef.current)
+        if (gen !== genRef.current) return
+        if (result.fresh) {
+          setData(result.payload)
+          etagRef.current = result.etag
+        }
       }
       setUpdatedAt(Date.now())
       setError(null)
     } catch (err) {
+      if (gen !== genRef.current) return
       setError(err instanceof Error ? err.message : 'Failed to load the dashboard')
     }
-  }, [])
+  }, [orgMode])
 
   // Polling (sweep item 16, client half): a self-rescheduling timeout rather
   // than setInterval so each tick can (a) skip entirely while the tab is
@@ -351,18 +410,62 @@ export function DashboardSection({ onNavigate }: { onNavigate: (target: AppNavTa
     onNavigate({ view: 'workspace', tab, seedFilters: speakerSeeds(contactId), label: name })
   }, [onNavigate])
 
-  if (error && !data) {
+  /**
+   * Org-board click-through. `ev` travels on the nav target for the host, and
+   * is applied here through the event scope as well — `setFilter` is what
+   * writes `?ev=` (and, for a concrete event, rebinds the session cookie), so
+   * the deep link lands on the right scope without App having to learn a new
+   * field first.
+   */
+  const openOrg = useCallback((target: Extract<AppNavTarget, { view: 'workspace' }>) => {
+    if (target.ev && scope && scope.filter !== target.ev) scope.setFilter(target.ev)
+    onNavigate(target)
+  }, [onNavigate, scope])
+
+  const active = orgMode ? orgData : data
+  if (error && !active) {
     return <div className="db-shell"><div className="db-error">{error}</div></div>
   }
-  if (!data) {
+  if (!active) {
     return <div className="db-shell"><div className="db-loading">Loading dashboard…</div></div>
   }
 
   const nowDate = new Date()
-  const daysToEvent = Math.ceil((Date.parse(data.event.starts_at) - nowDate.getTime()) / 86_400_000)
   const hour = nowDate.getHours()
   const greeting = hour < 12 ? 'Good morning' : hour < 18 ? 'Good afternoon' : 'Good evening'
   const agoSec = updatedAt === null ? 0 : Math.max(0, Math.round((Date.now() - updatedAt) / 1000))
+  const freshness = (
+    <div className="db-freshness" title="Polled every 15 seconds; unchanged data costs a 304.">
+      updated {agoSec < 3 ? 'just now' : `${agoSec}s ago`}
+    </div>
+  )
+
+  // Org mode: one board, no per-event switcher (Today/Tracking/Pipeline are
+  // all event-scoped). The per-event boards' own state is left alone, so
+  // switching back restores whichever board and tab was last open.
+  if (orgMode && orgData) {
+    return (
+      <div className="db-shell">
+        <header className="db-header">
+          <div>
+            <div className="db-kicker">
+              {nowDate.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' }).toUpperCase()}
+              {' · ALL EVENTS'}
+            </div>
+            <h1>{greeting} — {orgData.org.name}</h1>
+          </div>
+          {freshness}
+        </header>
+        <OrgBoard data={orgData} onOpen={openOrg} />
+      </div>
+    )
+  }
+
+  if (!data) {
+    return <div className="db-shell"><div className="db-loading">Loading dashboard…</div></div>
+  }
+
+  const daysToEvent = Math.ceil((Date.parse(data.event.starts_at) - nowDate.getTime()) / 86_400_000)
 
   return (
     <div className="db-shell">
@@ -374,9 +477,7 @@ export function DashboardSection({ onNavigate }: { onNavigate: (target: AppNavTa
           </div>
           <h1>{greeting} — {data.event.name}</h1>
         </div>
-        <div className="db-freshness" title="Polled every 15 seconds; unchanged data costs a 304.">
-          updated {agoSec < 3 ? 'just now' : `${agoSec}s ago`}
-        </div>
+        {freshness}
       </header>
 
       <nav className="db-switcher" aria-label="Dashboards">
@@ -782,6 +883,123 @@ function TrackingBoard({ data, busy, onRemind, onSpeaker, onNavigate }: {
                     <td>
                       <button disabled={busy} onClick={() => onRemind([row.assignment_id])}>Send reminder</button>
                     </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </section>
+      </div>
+    </>
+  )
+}
+
+// --- Organisation (CRM-12) --------------------------------------------------
+
+/**
+ * The all-events board: who is in the contact database, which companies they
+ * come from, and how every event in the organisation is tracking. Each figure
+ * deep-links into the org directory (the workspace with `?ev=all`) using the
+ * server's filter keys — `events: 'none'` for contacts attached to no event,
+ * `company` for one employer.
+ */
+function OrgBoard({ data, onOpen }: {
+  data: OrgDashboardPayload
+  onOpen: (target: Extract<AppNavTarget, { view: 'workspace' }>) => void
+}) {
+  const k = data.kpis
+  return (
+    <>
+      <p className="db-board-desc">
+        Everyone in {data.org.name}, across all {k.events} event{k.events === 1 ? '' : 's'}. Pick an event in the
+        sidebar for the Today, Speaker Tracking and Submissions Pipeline boards.
+      </p>
+      <div className="db-kpis">
+        <button
+          className="db-kpi db-kpi-status"
+          title="Open the contact directory across every event"
+          onClick={() => onOpen({ view: 'workspace', tab: 'speakers', ev: 'all', label: 'All contacts' })}
+        >
+          <div className="db-kpi-value">{k.total_contacts}</div>
+          <div className="db-kpi-label">Total contacts</div>
+          <div className="db-kpi-sub">+{k.new_contacts_30d} in last 30 days</div>
+        </button>
+        <div className="db-kpi" title="Contacts attached to at least one event">
+          <div className="db-kpi-value">{k.contacts_on_events}</div>
+          <div className="db-kpi-label">On events</div>
+        </div>
+        <button
+          className="db-kpi db-kpi-status"
+          title="Open the contacts attached to no event"
+          onClick={() =>
+            onOpen({
+              view: 'workspace',
+              tab: 'speakers',
+              ev: 'all',
+              seedFilters: { speakers: { events: 'none' } },
+              label: 'No event',
+            })
+          }
+        >
+          <div className="db-kpi-value">{k.contacts_no_event}</div>
+          <div className="db-kpi-label">No event</div>
+        </button>
+        <div className="db-kpi" title="Submitted or presented at two or more events">
+          <div className="db-kpi-value">{k.returning_speakers}</div>
+          <div className="db-kpi-label">Returning speakers</div>
+        </div>
+        <div className="db-kpi">
+          <div className="db-kpi-value">{k.events}</div>
+          <div className="db-kpi-label">Events</div>
+        </div>
+      </div>
+
+      <div className="db-grid">
+        <section className="db-card db-span3">
+          <h3>Top companies</h3>
+          <BarList
+            color="var(--chart-1)"
+            rows={data.top_companies.map((c) => ({ key: c.company, label: c.company, value: c.n }))}
+            onRowClick={(company) =>
+              onOpen({
+                view: 'workspace',
+                tab: 'speakers',
+                ev: 'all',
+                seedFilters: { speakers: { company } },
+                label: company,
+              })
+            }
+          />
+        </section>
+        <section className="db-card db-span3">
+          <h3>Events</h3>
+          {data.events.length === 0 && <div className="db-empty">No events yet.</div>}
+          {data.events.length > 0 && (
+            <table className="db-table">
+              <thead>
+                <tr>
+                  <th>Event</th><th>Dates</th><th>Agenda</th>
+                  <th>Submissions</th><th>Accepted</th><th>Scheduled</th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.events.map((ev) => (
+                  <tr
+                    key={ev.id}
+                    className="clickable"
+                    title="Open this event's submissions"
+                    onClick={() => onOpen({ view: 'workspace', tab: 'submissions', ev: ev.id, label: ev.name })}
+                  >
+                    <td className="db-td-title">{ev.name}</td>
+                    <td>{fmtEventRange(ev.starts_at, ev.ends_at)}</td>
+                    <td>
+                      <span className={`status-chip status-${ev.agenda_published ? 'accepted' : 'draft'}`}>
+                        {ev.agenda_published ? 'published' : 'draft'}
+                      </span>
+                    </td>
+                    <td>{ev.submissions}</td>
+                    <td>{ev.accepted}</td>
+                    <td>{ev.scheduled}</td>
                   </tr>
                 ))}
               </tbody>

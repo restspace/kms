@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import type { DataListFilterProps } from '../components/DataList'
 import type { CreateFormProps } from '../components/DataTabManager'
 import { appConfirm } from '../components/dialogs'
@@ -248,6 +248,118 @@ export function ConfirmationChipsFilter({ filters, setFilters }: DataListFilterP
       <button className={active === 'awaiting' ? 'active' : ''} aria-pressed={active === 'awaiting'} onClick={() => choose('awaiting')}>
         Awaiting
       </button>
+    </div>
+  )
+}
+
+/**
+ * CRM-02: a debounced text box for one server-side substring filter
+ * (`company` / `job_title`). Typing must not fire a query per keystroke, and
+ * the committed value has to survive DataList handing back a fresh `filters`
+ * object — so the input holds its own draft and only syncs down from
+ * `filters` when the committed value changes underneath it (a Clear Filters
+ * press, or a URL-restored seed).
+ */
+function TextFilterInput({
+  label,
+  filterKey,
+  filters,
+  setFilters,
+}: {
+  label: string
+  filterKey: string
+  filters: Record<string, unknown>
+  setFilters: DataListFilterProps<Record<string, unknown>>['setFilters']
+}) {
+  const committed = typeof filters[filterKey] === 'string' ? (filters[filterKey] as string) : ''
+  const [draft, setDraft] = useState(committed)
+  const lastCommitted = useRef(committed)
+  useEffect(() => {
+    if (committed !== lastCommitted.current) {
+      lastCommitted.current = committed
+      setDraft(committed)
+    }
+  }, [committed])
+  const commit = (value: string) => {
+    if (value === lastCommitted.current) return
+    lastCommitted.current = value
+    setFilters((prev) => ({ ...prev, [filterKey]: value }))
+  }
+  useEffect(() => {
+    if (draft === lastCommitted.current) return
+    const handle = window.setTimeout(() => commit(draft), 400)
+    return () => window.clearTimeout(handle)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [draft])
+  return (
+    <input
+      className="contact-attr-filter"
+      type="search"
+      value={draft}
+      aria-label={`${label} filter`}
+      placeholder={label}
+      title={`Substring match on ${label.toLowerCase()}`}
+      onChange={(e) => setDraft((e.target as HTMLInputElement).value)}
+      onBlur={() => commit(draft)}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault()
+          commit(draft)
+        }
+      }}
+      style={{ width: 130 }}
+    />
+  )
+}
+
+/**
+ * The Speakers tab's filter row, in both of that tab's modes (CRM-01/02).
+ *
+ * Event mode is the roster: the confirmation chips as before, plus the two
+ * attribute boxes. Org mode ("All events" in the sidebar) is the organisation's
+ * contact directory — one row per person, people on no event included — where
+ * `confirmation` is a per-event concept with no answer, so its chips are hidden
+ * and the membership select takes their place. All three extra filters are
+ * plain server filter keys ANDed with the header search box server-side.
+ */
+export function ContactsFilter({
+  filters,
+  setFilters,
+  orgMode = false,
+  events = [],
+}: DataListFilterProps<Record<string, unknown>> & {
+  orgMode?: boolean
+  events?: Array<{ id: string; name: string }>
+}) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 6 }}>
+      {!orgMode && (
+        <ConfirmationChipsFilter
+          filters={filters as Record<string, string>}
+          setFilters={setFilters as DataListFilterProps<Record<string, string>>['setFilters']}
+          resetFilters={() => setFilters((prev) => ({ ...prev, confirmation: '' }))}
+        />
+      )}
+      <TextFilterInput label="Company" filterKey="company" filters={filters} setFilters={setFilters} />
+      <TextFilterInput label="Job title" filterKey="job_title" filters={filters} setFilters={setFilters} />
+      {orgMode && (
+        <select
+          aria-label="Events filter"
+          title="Narrow the directory by event membership"
+          value={typeof filters.events === 'string' ? filters.events : ''}
+          onChange={(e) => {
+            const value = (e.target as HTMLSelectElement).value
+            setFilters((prev) => ({ ...prev, events: value }))
+          }}
+        >
+          <option value="">Any events</option>
+          <option value="any">On some event</option>
+          <option value="none">On no event</option>
+          {events.map((e) => (
+            <option key={e.id} value={e.id}>{e.name}</option>
+          ))}
+        </select>
+      )}
     </div>
   )
 }

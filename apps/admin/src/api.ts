@@ -50,6 +50,10 @@ export interface ContactRow {
    * 'awaiting' (a participant somewhere, none confirmed), or null/absent
    * when the contact is not a submission participant at all. */
   confirmation?: 'confirmed' | 'awaiting' | null
+  /** Org mode (CRM-01): number of event memberships. Absent in event mode. */
+  event_count?: number
+  /** Org mode: JSON string array of member event names, most recent first. */
+  events_json?: string | null
   created_at: string
   updated_at: string
 }
@@ -405,6 +409,20 @@ export const queryResource =
     request<DataSourceResult<T>>(`/app/api/${resource}/query`, {
       method: 'POST',
       body: JSON.stringify(params),
+    })
+
+/**
+ * Org-mode variant (CRM-01): same generic query endpoint with `scope: 'org'`
+ * folded into the body — one row per contact across the whole organisation,
+ * including contacts on no event. `filters.event_id` is ignored server-side
+ * in this mode, so a stale event filter can never narrow the directory.
+ */
+export const queryContactsOrg =
+  <T>() =>
+  (params: DataSourceParams): Promise<DataSourceResult<T>> =>
+    request<DataSourceResult<T>>('/app/api/contacts/query', {
+      method: 'POST',
+      body: JSON.stringify({ ...params, scope: 'org' }),
     })
 
 export const createContact = (data: Record<string, unknown>) =>
@@ -1180,6 +1198,55 @@ export async function fetchDashboard(
   }
   if (!res.ok) throw new ApiError(`The server rejected the request (HTTP ${res.status}).`, res.status)
   return { fresh: true, payload: (await res.json()) as DashboardPayload, etag: res.headers.get('etag') }
+}
+
+/** One event row on the org dashboard (dashboard.ts's OrgDashboardEventRow). */
+export interface OrgDashboardEventRow {
+  id: string
+  name: string
+  slug: string
+  starts_at: string
+  ends_at: string
+  agenda_published: number
+  /** status != 'draft' */
+  submissions: number
+  accepted: number
+  /** accepted AND scheduled into a room/time */
+  scheduled: number
+}
+
+/** GET /app/api/dashboard/org (CRM-12) — org-wide, all events in the org. */
+export interface OrgDashboardPayload {
+  now: string
+  org: { id: string; name: string }
+  kpis: {
+    total_contacts: number
+    new_contacts_30d: number
+    contacts_on_events: number
+    contacts_no_event: number
+    /** submitter or participant in >= 2 distinct events */
+    returning_speakers: number
+    events: number
+  }
+  top_companies: Array<{ company: string; n: number }>
+  /** starts_at DESC, then name */
+  events: OrgDashboardEventRow[]
+}
+
+/** ETag-aware poll for the org board, mirroring fetchDashboard. */
+export async function fetchOrgDashboard(
+  etag: string | null,
+): Promise<{ fresh: true; payload: OrgDashboardPayload; etag: string | null } | { fresh: false }> {
+  const res = await fetch('/app/api/dashboard/org', {
+    headers: { accept: 'application/json', ...(etag ? { 'if-none-match': etag } : {}) },
+  })
+  if (res.status === 304) return { fresh: false }
+  if (res.status === 401) {
+    window.location.assign('/app')
+    throw new ApiError('Signed out', 401)
+  }
+  if (!res.ok) throw new ApiError(`The server rejected the request (HTTP ${res.status}).`, res.status)
+  return { fresh: true, payload: (await res.json()) as OrgDashboardPayload, etag: res.headers.get('etag') }
 }
 
 export const remindTasks = (assignmentIds?: string[]) =>

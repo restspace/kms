@@ -86,7 +86,7 @@ adminApiRoutes.get('/meta', (c) => {
     resources,
     conventions: {
       scope:
-        'Queries span every event in the organisation where this staff email holds a seat; every row carries event_id and event_name. Pass filters.event_id to narrow to one (403 outside the accessible set).',
+        'Queries span every event in the organisation where this staff email holds a seat; every row carries event_id and event_name. Pass filters.event_id to narrow to one (403 outside the accessible set). contacts also accepts a top-level scope:"org" on the query body — the organisation\'s contact directory, one row per person (memberships folded into event_count/events_json, profile columns taken from the most recent membership, event_id/event_name/custom_fields_json/confirmation null, people on no roster at all included). filters.event_id is ignored in that mode.',
       pagination:
         'from/size offset paging and cursor keyset paging both work. Cursor mode ignores from, returns next_cursor, and answers 400 { error: "invalid_cursor" } for a tampered value.',
       errors: 'Non-2xx responses carry { error: <machine_code> }; validation failures add errors: [{ question_id, code, message }].',
@@ -163,6 +163,12 @@ export interface QueryBody {
   /** Keyset mode (sweep item P2-18): '' asks for the first page, an opaque
    * cursor asks for the page after it. Absent = classic from/offset paging. */
   cursor?: string;
+  /** 'org' asks the contacts resource for the ORGANISATION's directory — one
+   * row per person, membership-less people included — instead of the default
+   * per-event-membership roster. Ignored for every other resource, and absent
+   * on every non-SPA caller (exports, /api/v1), which therefore never change
+   * shape. See CONTACTS_ORG_SPEC. */
+  scope?: 'org';
 }
 
 /** Thrown for client-fixable query problems; routes map `code` to a 4xx body. */
@@ -208,6 +214,12 @@ const asText = (value: unknown): string | null =>
 const eq = (expr: string): FilterBuilder => (value) => {
   const v = asText(value);
   return v === null ? null : { sql: `${expr} = ?`, params: [v] };
+};
+
+/** Substring `expr LIKE %value%` filter (CRM-02's attribute filters). */
+const like = (expr: string): FilterBuilder => (value) => {
+  const v = asText(value);
+  return v === null ? null : { sql: `${expr} LIKE ?`, params: [`%${v}%`] };
 };
 
 const SUBMISSION_STATUSES = new Set([
@@ -298,6 +310,16 @@ const RESOURCE_SPECS: Record<string, Omit<ResourceDef, 'fromSql'>> = {
         };
       },
       contact_id: eq('c.id'),
+      // CRM-02: attribute filters over the profile columns. Event mode reads
+      // this event's own answer (ec.*); org mode swaps in the most-recent
+      // membership's (CONTACTS_ORG_RESOURCE below), so the client sends the
+      // same filter name in both modes.
+      company: like('ec.company'),
+      job_title: like('ec.job_title'),
+      // Org mode only (`events` is a per-contact tally that only exists once a
+      // row is one PERSON): a no-op here rather than an unknown-filter silence,
+      // so it still documents itself through GET /meta.
+      events: () => null,
       // SPK-04: roster filter mirroring the `confirmation` column above —
       // kept as its own EXISTS pair rather than wrapping the column expression
       // so it stays sargable (no correlated subquery inside a WHERE on a
@@ -341,6 +363,12 @@ const RESOURCE_SPECS: Record<string, Omit<ResourceDef, 'fromSql'>> = {
       submission_id:
         'Contacts related to this submission: its participants (any role) or its submitter.',
       contact_id: 'Exactly this contact. The global anchor filter uses this.',
+      company:
+        "Substring match on company — this event's answer normally, the most recent membership's under scope:'org'.",
+      job_title:
+        "Substring match on job title — this event's answer normally, the most recent membership's under scope:'org'.",
+      events:
+        "Membership tally, scope:'org' only (ignored otherwise): none → nobody's roster, any → at least one roster, or an event id → on that event's roster (an id outside the organisation matches nothing).",
       confirmation:
         "confirmed → has a submission_participants row with confirmed_at set. awaiting → is a participant somewhere but none of those rows are confirmed. Not a participant at all is neither (its `confirmation` column reads null) and this filter never matches it.",
       missing_assets:
@@ -726,6 +754,118 @@ export const RESOURCES: Record<string, ResourceDef> = Object.fromEntries(
   ]),
 );
 
+// ---------------------------------------------------------------------------
+// Contacts, org mode (`scope: 'org'` on the query body) — the org-level contact
+// directory. The registry's contacts resource is a ROSTER: it starts
+// `FROM contacts c JOIN event_contacts ec`, so it yields one row per event
+// membership and a person on nobody's roster does not exist. The directory asks
+// the other question — who does this ORGANISATION know — so it starts from
+// `contacts` alone (org_id has owned the tenancy since 0015, and it is the same
+// predicate GET /contacts/org-search uses) and folds the memberships back in as
+// columns: event_count, events_json, and the profile fields.
+//
+// SPA-only by construction: it is reachable solely through POST
+// /:resource/query with scope:'org'. The exports and /api/v1 build QueryBody
+// literals with no `scope`, so both keep the roster shape byte for byte.
+const CONTACTS_ORG_SPEC: Omit<ResourceDef, 'fromSql'> = {
+  // Most-recent-membership wins for the profile columns (the same rule
+  // contacts.attachToEvent seeds a new roster row by, and the same rule the
+  // org-search picker previews). The join condition picks the winning row by
+  // event_id — an ORDER BY … LIMIT 1 subquery rather than `MAX(added_at)` with
+  // bare columns, which SQLite allows but leaves ambiguous across ties, and
+  // with a second sort key so a tie is still deterministic.
+  baseFrom: `FROM contacts c
+             LEFT JOIN event_contacts m
+               ON m.contact_id = c.id
+              AND m.event_id = (SELECT ec2.event_id FROM event_contacts ec2
+                                 WHERE ec2.contact_id = c.id
+                                 ORDER BY ec2.added_at DESC, ec2.event_id DESC
+                                 LIMIT 1)`,
+  // event_id/event_name stay in the row shape (NULL) so one grid can render
+  // both modes; custom_fields_json and confirmation are per-event concepts with
+  // no org-level answer at all, and read NULL rather than an arbitrary event's.
+  selectSql: `SELECT c.*,
+        NULL AS event_id, NULL AS event_name,
+        NULL AS custom_fields_json, NULL AS confirmation,
+        m.company, m.job_title, m.biography, m.notes, m.headshot_asset_id,
+        m.added_at, m.source, m.extra,
+        (SELECT COUNT(*) FROM event_contacts ec WHERE ec.contact_id = c.id) AS event_count,
+        (SELECT json_group_array(ev.name ORDER BY ec.added_at DESC, ec.event_id DESC)
+           FROM event_contacts ec JOIN events ev ON ev.id = ec.event_id
+          WHERE ec.contact_id = c.id) AS events_json`,
+  // The scope predicate queryResource builds from this is `c.org_id IN (?)`,
+  // bound with the session event's organisation — the tenancy guard, exactly as
+  // on /contacts/org-search.
+  eventExpr: 'c.org_id',
+  idExpr: 'c.id',
+  defaultCursorSort: { field: 'last_name', direction: 'asc' },
+  sortable: {
+    first_name: 'c.first_name',
+    last_name: 'c.last_name',
+    email: 'c.email',
+    company: 'm.company',
+    job_title: 'm.job_title',
+    created_at: 'c.created_at',
+  },
+  defaultSort: 'c.last_name ASC, c.first_name ASC',
+  filters: {
+    q: (value) => {
+      const v = asText(value);
+      if (v === null) return null;
+      const pattern = `%${v}%`;
+      return {
+        sql: '(c.first_name LIKE ? OR c.last_name LIKE ? OR c.email LIKE ? OR m.company LIKE ?)',
+        params: [pattern, pattern, pattern, pattern],
+      };
+    },
+    contact_id: eq('c.id'),
+    company: like('m.company'),
+    job_title: like('m.job_title'),
+    submission_id: (value) => {
+      const v = asText(value);
+      if (v === null) return null;
+      return {
+        sql: `(EXISTS (SELECT 1 FROM submission_participants sp
+                       WHERE sp.contact_id = c.id AND sp.submission_id = ?)
+               OR EXISTS (SELECT 1 FROM submissions s
+                          WHERE s.id = ? AND s.submitter_contact_id = c.id))`,
+        params: [v, v],
+      };
+    },
+    events: (value) => {
+      const v = asText(value);
+      if (v === null) return null;
+      const membership = 'SELECT 1 FROM event_contacts ec WHERE ec.contact_id = c.id';
+      if (v === 'none') return { sql: `NOT EXISTS (${membership})`, params: [] };
+      if (v === 'any') return { sql: `EXISTS (${membership})`, params: [] };
+      // A specific event: joined to `events` and checked against the contact's
+      // own org, so an id from another organisation matches nothing rather than
+      // leaking whether it exists.
+      return {
+        sql: `EXISTS (SELECT 1 FROM event_contacts ec JOIN events ev ON ev.id = ec.event_id
+                       WHERE ec.contact_id = c.id AND ec.event_id = ? AND ev.org_id = c.org_id)`,
+        params: [v],
+      };
+    },
+  },
+  // Served through GET /meta from the roster spec's filterDocs (this def is not
+  // in RESOURCES); the org-only wording lives there.
+  filterDocs: {},
+};
+
+const CONTACTS_ORG_RESOURCE: ResourceDef = {
+  ...CONTACTS_ORG_SPEC,
+  fromSql: `${CONTACTS_ORG_SPEC.baseFrom} WHERE ${CONTACTS_ORG_SPEC.eventExpr} = ?`,
+};
+
+/**
+ * Merge tombstones (0030) keep their `contacts` row and lose every membership,
+ * so the roster query drops them through its join while the directory — which
+ * deliberately keeps the membership-less — would resurrect them. Same explicit
+ * filter /contacts/org-search carries, for the same reason.
+ */
+const ORG_CONTACT_LIVE = 'c.merged_into IS NULL';
+
 export function parseQueryBody(raw: unknown): QueryBody {
   const body = (raw ?? {}) as Record<string, unknown>;
   const from = Number.isInteger(body.from) && (body.from as number) >= 0 ? (body.from as number) : 0;
@@ -739,7 +879,10 @@ export function parseQueryBody(raw: unknown): QueryBody {
     sort = { field: s.field, direction: s.direction };
   }
   const cursor = typeof body.cursor === 'string' ? body.cursor : undefined;
-  return { from, size, filters, sort, cursor };
+  // Only the one value is recognised; anything else (including 'event') is the
+  // default per-event mode, so a typo can never silently widen visibility.
+  const scope = body.scope === 'org' ? ('org' as const) : undefined;
+  return { from, size, filters, sort, cursor, scope };
 }
 
 /** Stable stringify (sorted keys) so an identical filter set hashes identically. */
@@ -755,6 +898,11 @@ export interface QueryOptions {
   kv?: KVNamespace;
   revision?: string;
   resource?: string;
+  /** Extra parameterless WHERE conjunct, ANDed straight after the scope
+   * predicate (the contacts directory's merge-tombstone filter). Callers that
+   * omit it — every one but that branch — build exactly the SQL they did
+   * before. Anything value-bearing belongs in `filters`, not here. */
+  extraWhere?: string;
 }
 
 export interface QueryResult {
@@ -785,6 +933,7 @@ export async function queryResource(
   // event, and the workspace spans the accessible set (never more).
   const where: string[] = [`${def.eventExpr} IN (${eventIds.map(() => '?').join(', ')})`];
   const params: unknown[] = [...eventIds];
+  if (opts.extraWhere) where.push(opts.extraWhere);
   for (const [key, value] of Object.entries(filters)) {
     const builder = def.filters[key];
     if (!builder) continue; // unknown filter names are ignored, never interpolated
@@ -918,15 +1067,39 @@ adminApiRoutes.post('/:resource/query', async (c) => {
   if (!def) return c.json({ error: 'unknown_resource' }, 404);
 
   const body = parseQueryBody(await c.req.json().catch(() => ({})));
-  const scope = await resolveQueryScope(c, body.filters, { staffOnly: STAFF_ONLY_RESOURCES.has(resource) });
+
+  // Org mode: the contacts directory (CONTACTS_ORG_SPEC). Its population is the
+  // organisation, resolved from the session's event exactly as
+  // /contacts/org-search resolves it — never from the request — so
+  // `filters.event_id` has nothing to narrow and is IGNORED here (documented in
+  // filterDocs/meta) rather than 400ing a client that left a stale value on.
+  // Reviewer seats never arrive: the router guard above already answers 403 for
+  // anything outside /review/*, and the writer check restates that line locally
+  // so this branch is safe wherever it is called from.
+  const orgMode = body.scope === 'org' && resource === 'contacts';
+  let orgId: string | null = null;
+  if (orgMode) {
+    if (!isWriter(c.get('session').role)) return c.json({ error: 'forbidden' }, 403);
+    orgId = await sessionOrgId(c);
+    if (!orgId) return c.json({ error: 'not_found' }, 404);
+  }
+
+  const scope = orgMode
+    ? { ids: [] as string[] }
+    : await resolveQueryScope(c, body.filters, { staffOnly: STAFF_ONLY_RESOURCES.has(resource) });
   if ('forbidden' in scope) return c.json({ error: 'event_not_accessible' }, 403);
 
   try {
-    const result = await queryResource(c.env.DB, def, scope.ids, body, {
-      kv: c.env.KV,
-      revision: await scopeRevision(c.env, scope.ids),
-      resource,
-    });
+    // Org mode skips the count cache deliberately: its key is (resource, event
+    // ids, filters, event revision), and an org-wide total moves with events
+    // this session may hold no seat on — a revision that would never bump.
+    const result = orgMode
+      ? await queryResource(c.env.DB, CONTACTS_ORG_RESOURCE, [orgId!], body, { extraWhere: ORG_CONTACT_LIVE })
+      : await queryResource(c.env.DB, def, scope.ids, body, {
+          kv: c.env.KV,
+          revision: await scopeRevision(c.env, scope.ids),
+          resource,
+        });
     return c.json(result);
   } catch (err) {
     if (err instanceof QueryError) return c.json({ error: err.code }, 400);
@@ -1219,6 +1392,28 @@ adminApiRoutes.post('/contacts', async (c) => {
   if (!fields.email) return c.json({ error: 'email_required' }, 400);
   const { identity, profile } = splitContactFields(fields);
 
+  // Org-level creation (the contact directory's "+ New", where no event is
+  // chosen): create the person the organisation knows and STOP — no
+  // event_contacts row, so they show up in scope:'org' listings with
+  // event_count 0 and on nobody's roster until an explicit
+  // POST /contacts/:id/attach. Signalled by `no_event: true`, with
+  // `event_id: null` accepted as the same thing because the edit form already
+  // round-trips an `event_id` (PUT /contacts/:id reads it) and "no event" is
+  // the natural null of that key. Absent → the event-scoped behaviour below,
+  // unchanged.
+  const noEvent = body.no_event === true || ('event_id' in body && body.event_id === null);
+  // The five profile columns and the custom fields are properties of a
+  // MEMBERSHIP (0015 / 0009): with no event_contacts row they have nowhere to
+  // land, so refusing beats accepting the write and dropping it silently.
+  if (noEvent) {
+    const stranded = Object.entries(profile)
+      .filter(([, v]) => v !== null && v !== '')
+      .map(([k]) => k);
+    const customs = body.custom_fields;
+    if (customs && typeof customs === 'object' && Object.keys(customs).length > 0) stranded.push('custom_fields');
+    if (stranded.length > 0) return c.json({ error: 'event_required_for_profile', fields: stranded }, 400);
+  }
+
   const orgId = await sessionOrgId(c);
   if (!orgId) return c.json({ error: 'not_found' }, 404);
 
@@ -1229,6 +1424,10 @@ adminApiRoutes.post('/contacts', async (c) => {
   // 409 the grid turns into a "show me the existing record" recovery.
   const existing = await createDb(db).contacts.getByEmail(orgId, fields.email);
   if (existing) {
+    // Org-level create has no membership to add, so an identity the org already
+    // holds is the duplicate outright — same 409 (and same existing_id recovery
+    // hook) one event further out.
+    if (noEvent) return c.json({ error: 'email_exists', existing_id: existing.id }, 409);
     const onRoster = await db
       .prepare('SELECT 1 AS ok FROM event_contacts WHERE event_id = ? AND contact_id = ?')
       .bind(session.eventId, existing.id)
@@ -1239,7 +1438,9 @@ adminApiRoutes.post('/contacts', async (c) => {
   const id = existing?.id ?? crypto.randomUUID();
   // Validated before the insert, not after: a bad custom-field value must
   // never leave a contact half-created.
-  const fieldOps = await prepareContactFieldValueOps(db, session.eventId, id, body.custom_fields);
+  const fieldOps: { ops: D1PreparedStatement[]; error?: string; field?: string } = noEvent
+    ? { ops: [] }
+    : await prepareContactFieldValueOps(db, session.eventId, id, body.custom_fields);
   if (fieldOps.error) return c.json({ error: fieldOps.error, field: fieldOps.field }, 400);
 
   const ts = new Date().toISOString();
@@ -1267,6 +1468,23 @@ adminApiRoutes.post('/contacts', async (c) => {
     const message = err instanceof Error ? err.message : '';
     if (message.includes('UNIQUE')) return c.json({ error: 'email_exists', existing_id: await findContactIdByEmail(c, fields.email) }, 409);
     throw err;
+  }
+
+  // Org-level create stops at the identity: no membership, no event revision to
+  // bump (no event list changed), and the response carries the same keys as the
+  // event-scoped one with every membership-owned column null, so one client
+  // form can post either way and read the answer the same.
+  if (noEvent) {
+    const row = await db
+      .prepare(
+        `SELECT c.*, NULL AS event_id, NULL AS biography, NULL AS headshot_asset_id,
+                NULL AS company, NULL AS job_title, NULL AS notes, NULL AS added_at,
+                NULL AS source, NULL AS extra, NULL AS custom_fields_json
+           FROM contacts c WHERE c.id = ?`,
+      )
+      .bind(id)
+      .first();
+    return c.json(row, 201);
   }
 
   // Membership is its own row: creating the identity without attaching it would

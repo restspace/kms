@@ -152,6 +152,15 @@
   margin-top: 0.1rem;
 }
 
+/* Secondary line under a KPI ("+N in last 30 days" on the org board). */
+.db-kpi-sub {
+  font-family: var(--font-display);
+  font-style: italic;
+  font-size: var(--text-caption);
+  color: var(--text-faint);
+  margin-top: 0.15rem;
+}
+
 /* Also check */
 
 .db-nudges {

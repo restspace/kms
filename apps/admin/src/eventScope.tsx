@@ -1,5 +1,6 @@
 import { createContext, useContext } from 'react'
 import type { Me, MeEvent } from './api'
+import { useRoute } from './router'
 
 /**
  * Event scope (workspace redesign): the SPA holds *two* related notions of
@@ -8,8 +9,9 @@ import type { Me, MeEvent } from './api'
  *  - `filter`  — the workspace query dimension. `'all'` spans every event the
  *                signed-in staff email can reach; an id narrows to one. Lives
  *                in the URL (`?ev=`), never touches the session cookie.
- *  - `currentEvent` — the event the per-event surfaces (Dashboard, Forms,
- *                Evaluation, Agenda, Settings) are bound to. That binding is
+ *  - `currentEvent` — the event the per-event surfaces (Forms, Evaluation,
+ *                Agenda, Settings, and the Dashboard's three event boards)
+ *                are bound to. That binding is
  *                server-side, in the session cookie, so changing it means
  *                awaiting `switchEvent`; the sections are remounted by key
  *                afterwards rather than reloading the page.
@@ -103,14 +105,22 @@ export function EventFilterChip({ scope }: { scope: EventScopeValue }) {
 /**
  * "Event: <name>" line for the per-event surfaces, so it stays unambiguous
  * which event they show while the workspace filter says "All events".
+ *
+ * CRM-12: the Dashboard is no longer one of them — on "All events" it renders
+ * the org-wide board and names the organisation in its own header, so the note
+ * is suppressed there rather than captioning an org roll-up with one event's
+ * name. Every other per-event surface (Forms, Evaluation, Embeds, Settings)
+ * still gets it, and the hint now speaks for the screen it is attached to.
  */
 export function EventScopeNote({ scope }: { scope: EventScopeValue }) {
+  const route = useRoute()
+  if (scope.filter === 'all' && route.v === 'dashboard') return null
   return (
     <div className="section-event-note">
       Event: <strong>{scope.currentEvent.name}</strong>
       {scope.filter === 'all' && (
         <span className="section-event-note-hint">
-          — the workspace filter spans all events; these screens always show the current one
+          — the workspace filter spans all events; this screen is bound to one, and shows the current one
         </span>
       )}
     </div>

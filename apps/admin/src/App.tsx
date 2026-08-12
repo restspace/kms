@@ -1,5 +1,11 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { DataTabManager, TabConfig, type CreateFormProps, type GlobalFilterChangeEvent } from './components/DataTabManager'
+import {
+  DataTabManager,
+  TabConfig,
+  type CreateFormProps,
+  type GlobalFilterChangeEvent,
+  type TabExternalActions,
+} from './components/DataTabManager'
 import type {
   DataSourceParams,
   DataSourceResult,
@@ -16,6 +22,7 @@ import {
   getSubmissionDetail,
   listContactFields,
   listRooms,
+  queryContactsOrg,
   queryResource,
   searchOrgContacts,
   sendDecisions,
@@ -55,7 +62,7 @@ import { ReviewerWorkspace } from './review/ReviewerWorkspace'
 import { EmbedsSection } from './embeds/EmbedsSection'
 import {
   BulkBar,
-  ConfirmationChipsFilter,
+  ContactsFilter,
   SubmissionDetailPanel,
   SubmissionEditForm,
   SubmissionsFilter,
@@ -523,6 +530,62 @@ const unflattenContactLinks = (data: Record<string, unknown>): Record<string, un
 }
 
 /**
+ * CRM-01: the identity half of `speakerSchema`. Company/job title/biography/
+ * internal notes and the per-event custom fields are properties of a
+ * MEMBERSHIP (0015), so an org-level create — someone the organisation knows
+ * who is on no event — has nowhere to put them and the API answers 400
+ * `event_required_for_profile` if they are sent. Offering only the fields that
+ * can be saved beats offering fields that silently can't.
+ */
+const ORG_CONTACT_IDENTITY_FIELDS = [
+  'first_name',
+  'last_name',
+  'email',
+  'mobile_phone',
+  'pronouns',
+  ...SOCIAL_LINK_FORM_FIELDS.map(([control]) => control),
+] as const
+
+const orgContactSchema = {
+  type: 'object',
+  required: ['email'],
+  properties: Object.fromEntries(
+    ORG_CONTACT_IDENTITY_FIELDS.map((key) => [
+      key,
+      (speakerSchema.properties as Record<string, unknown>)[key],
+    ]),
+  ),
+}
+
+/**
+ * Strips a form payload down to what `contacts` (the org-level identity table)
+ * actually owns. RecordForm submits the whole seeded record, not just the
+ * fields its schema rendered, so an org-mode edit would otherwise carry the
+ * grid's coalesced company/job title/bio — values read from the person's most
+ * RECENT membership — into whichever event the PUT happens to write. That is
+ * the silent-edit-loss shape the contacts PUT already guards against
+ * server-side; this keeps the org form from creating it in the first place.
+ */
+const identityFieldsOnly = (data: Record<string, unknown>): Record<string, unknown> => {
+  const out: Record<string, unknown> = {}
+  for (const key of ['email', 'first_name', 'last_name', 'mobile_phone', 'pronouns', 'links']) {
+    if (key in data) out[key] = data[key]
+  }
+  return out
+}
+
+/** `events_json` (a JSON array of event names, most recent first) → names. */
+const parseEventNames = (json: string | null | undefined): string[] => {
+  if (!json) return []
+  try {
+    const parsed = JSON.parse(json)
+    return Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === 'string') : []
+  } catch {
+    return []
+  }
+}
+
+/**
  * SPK-15: per-event custom fields on speaker/contact records. RecordForm's
  * static JSON-Schema can express these cleanly (a select is just an enum, a
  * multiline field is `format: 'textarea'`) as long as each one gets its own
@@ -685,7 +748,11 @@ async function loadWorkspaceRecord(
   contactFieldDefs: ContactFieldDef[] = [],
 ): Promise<unknown | null> {
   if (tab === 'speakers') {
-    const result = await queryResource<ContactRow>('contacts')({
+    // Same split as the tab's own dataSource (buildScopedSources): without an
+    // event the lookup has to run in org mode, or a `?rec=` naming someone on
+    // no event at all resolves to nothing and the deep link silently drops.
+    const query = eventFilterId ? queryResource<ContactRow>('contacts') : queryContactsOrg<ContactRow>()
+    const result = await query({
       from: 0,
       size: 1,
       filters: { contact_id: id, ...(eventFilterId ? { event_id: eventFilterId } : {}) },
@@ -734,7 +801,11 @@ function buildScopedSources(eventFilterId: string | null): ScopedSources {
       base({ ...params, filters: { ...params.filters, event_id: eventFilterId } })
   }
   return {
-    contacts: scoped<ContactRow>('contacts'),
+    // CRM-01: with no event chosen the Speakers tab stops being a pooled
+    // roster (one row per membership, nobody who is on no event) and becomes
+    // the ORGANISATION's contact directory — one row per person, memberships
+    // folded into event_count/events_json. Concrete-event mode is untouched.
+    contacts: eventFilterId ? scoped<ContactRow>('contacts') : queryContactsOrg<ContactRow>(),
     submissions: scoped('submissions'),
     reviews: scoped<ReviewRow>('reviews'),
     comments: scoped<CommentListRow>('comments'),
@@ -818,7 +889,22 @@ export function buildWorkspaceConfig(
   onSelectEvent: (eventId: string) => void,
   contactFields: ContactFieldDef[],
   eventFilterId: string | null,
+  /** CRM-01: the org's accessible events, for the directory's Events filter.
+   * Optional so existing callers (and App.filesOpenDetails.test) are unchanged. */
+  accessibleEvents: Array<{ id: string; name: string }> = [],
 ): Record<string, TabConfig> {
+  // CRM-01: "All events" turns the Speakers tab into the org contact directory.
+  const orgMode = eventFilterId === null
+  /**
+   * The Speakers tab's own create-tab opener, handed over by DataTabManager
+   * (TabConfig.registerTabActions) once its list tab exists. Held here rather
+   * than in App because the only caller is a toolbar button on the same
+   * config; the closure lives exactly as long as the config object does.
+   */
+  let speakerTabActions: TabExternalActions | null = null
+  const registerSpeakerTabActions = (actions: TabExternalActions | null) => {
+    speakerTabActions = actions
+  }
   // Export buttons (M6): each tab downloads its current view — active filters
   // and anchor included — through the workspace export endpoint, which scopes
   // exactly like the grid: the sidebar's event filter rides along as an
@@ -887,6 +973,23 @@ export function buildWorkspaceConfig(
    * candidates come from the whole organisation, in the server's two tiers
    * (same email = strong, same name = weak, human-confirmed in the panel).
    */
+  /**
+   * CRM-01: org mode's replacement for "＋ EXISTING". Attaching someone to
+   * "the current event" is meaningless while the workspace spans every event,
+   * so the directory offers the other half instead — a person the organisation
+   * knows who is on no event at all. The form it opens is identity-only
+   * (`orgContactSchema` below); the server rejects profile fields on an
+   * event-less create outright, because they live on a membership.
+   */
+  const newOrgContactAction = {
+    id: 'new-org-contact',
+    label: '＋ NEW CONTACT',
+    title: 'Add someone to the organisation without putting them on an event',
+    onClick: () => {
+      speakerTabActions?.openCreateTab({ title: 'New contact' })
+    },
+  }
+
   const duplicatesAction = {
     id: 'contact-duplicates',
     label: '⧉ DUPLICATES',
@@ -952,7 +1055,9 @@ export function buildWorkspaceConfig(
     }
     if (hasSameNameContact(orgRows, first, last)) {
       return {
-        message: `A contact named “${fullName}” already exists in this organisation — “＋ EXISTING” adds them to this event without creating a duplicate.`,
+        message: orgMode
+          ? `A contact named “${fullName}” already exists in this organisation — saving will create a second record for the same person.`
+          : `A contact named “${fullName}” already exists in this organisation — “＋ EXISTING” adds them to this event without creating a duplicate.`,
         action: mergeAction,
       }
     }
@@ -969,10 +1074,22 @@ export function buildWorkspaceConfig(
     // `confirmation` derived column — confirmed/awaiting/null, null covering
     // both "not a participant" and the seed default before any filter chip
     // is chosen).
+    // CRM-02: `company` / `job_title` are substring filters the contacts
+    // resource understands in BOTH modes; `events` is org-only (a per-contact
+    // membership tally, and a no-op server-side on the roster). They are
+    // ordinary filter keys, so they AND with the header search box and ride
+    // the same seed/restore path as `confirmation`.
     filterConfig: {
-      initialFilters: { confirmation: '', ...(seeds.speakers ?? {}) },
-      defaultFilters: { confirmation: '' },
-      FilterComponent: ConfirmationChipsFilter,
+      initialFilters: {
+        confirmation: '',
+        company: '',
+        job_title: '',
+        ...(orgMode ? { events: '' } : {}),
+        ...(seeds.speakers ?? {}),
+      },
+      defaultFilters: { confirmation: '', company: '', job_title: '', ...(orgMode ? { events: '' } : {}) },
+      FilterComponent: ContactsFilter,
+      filterProps: { orgMode, events: accessibleEvents },
     },
     columns: [
       { field: 'first_name', header: 'First name', sortable: true },
@@ -980,21 +1097,46 @@ export function buildWorkspaceConfig(
       { field: 'email', header: 'Email', width: '1.5fr', sortable: true, mobileRow: 2 },
       { field: 'company', header: 'Company', sortable: true },
       { field: 'job_title', header: 'Job title', mobileHidden: true },
-      {
-        field: 'confirmation',
-        header: 'Confirmation',
-        width: '120px',
-        mobileHidden: true,
-        render: (value: string | null) =>
-          value === 'confirmed' ? (
-            <span className="status-chip status-accepted">Confirmed</span>
-          ) : value === 'awaiting' ? (
-            <span className="status-chip status-pending">Awaiting</span>
-          ) : (
-            <span style={{ color: 'var(--text-faint)' }}>—</span>
-          ),
-      },
-      eventColumn,
+      // Org mode answers "how many of our events is this person on", which is
+      // the directory's whole point; `confirmation` and `event_name` are
+      // per-event columns that read null on every row there, so they go.
+      ...(orgMode
+        ? [
+            {
+              field: 'event_count',
+              header: 'Events',
+              width: '120px',
+              sortable: false,
+              mobileHidden: true,
+              render: (value: number | null, item: ContactRow) => {
+                const names = parseEventNames(item.events_json)
+                const count = typeof value === 'number' ? value : names.length
+                if (count === 0) return <span style={{ color: 'var(--text-faint)' }}>No events</span>
+                return (
+                  <span className="status-chip" title={names.join('\n')}>
+                    {count === 1 ? names[0] ?? '1 event' : `${count} events`}
+                  </span>
+                )
+              },
+            } as const,
+          ]
+        : [
+            {
+              field: 'confirmation',
+              header: 'Confirmation',
+              width: '120px',
+              mobileHidden: true,
+              render: (value: string | null) =>
+                value === 'confirmed' ? (
+                  <span className="status-chip status-accepted">Confirmed</span>
+                ) : value === 'awaiting' ? (
+                  <span className="status-chip status-pending">Awaiting</span>
+                ) : (
+                  <span style={{ color: 'var(--text-faint)' }}>—</span>
+                ),
+            } as const,
+            eventColumn,
+          ]),
     ],
     detailComponent: ({ item, onClose, onEdit, onItemSaved }) => {
       const customValues = parseContactFieldValues(item.custom_fields_json)
@@ -1002,6 +1144,9 @@ export function buildWorkspaceConfig(
       // reads/writes, surfaced read-only here (edited via the `link_*` form
       // fields — see speakerSchema / unflattenContactLinks above).
       const socialLinks = parseContactFieldValues(item.links)
+      // Org mode: the row is a person, not a membership, so `event_id` is null
+      // and the events line comes from the folded-in `events_json` instead.
+      const eventNames = parseEventNames(item.events_json)
       return (
         <div className="detail-panel">
           <div className="detail-panel-head">
@@ -1014,18 +1159,35 @@ export function buildWorkspaceConfig(
                 * generic RecordForm schema with no room for a file control,
                 * so this lives here instead — same reasoning as
                 * PortalInviteButton living outside the form further down.
+                * Hidden in org mode: the headshot pointer is an event_contacts
+                * column, and the row here carries no event to write it to.
                 */}
-              <HeadshotUploadControl
-                item={item}
-                onUpdated={(headshot_asset_id) => onItemSaved?.({ ...item, headshot_asset_id })}
-              />
+              {!orgMode && (
+                <HeadshotUploadControl
+                  item={item}
+                  onUpdated={(headshot_asset_id) => onItemSaved?.({ ...item, headshot_asset_id })}
+                />
+              )}
             </div>
           </div>
           <dl>
             <dt>Email</dt><dd>{item.email}</dd>
             {item.mobile_phone && <><dt>Mobile</dt><dd>{item.mobile_phone}</dd></>}
             {item.pronouns && <><dt>Pronouns</dt><dd>{item.pronouns}</dd></>}
-            {item.event_name && <><dt>Event</dt><dd>{item.event_name}</dd></>}
+            {orgMode ? (
+              <>
+                <dt>Events</dt>
+                <dd>
+                  {eventNames.length === 0 ? (
+                    <span style={{ color: 'var(--text-faint)' }}>On no event yet</span>
+                  ) : (
+                    eventNames.join(' · ')
+                  )}
+                </dd>
+              </>
+            ) : (
+              item.event_name && <><dt>Event</dt><dd>{item.event_name}</dd></>
+            )}
             {contactFields.map((def) =>
               customValues[def.key] ? (
                 <Fragment key={def.id}>
@@ -1065,19 +1227,28 @@ export function buildWorkspaceConfig(
             * the product's single deliberately org-wide read, clipped
             * server-side to events the caller holds a seat on.
             */}
-          <ContactCrossEventHistory contactId={item.id} eventId={item.event_id} />
+          {/* Keyed off the contact id, so it works for a directory row too —
+            * except for someone on no event at all, where the endpoint's
+            * roster guard has nothing to check them against and there is no
+            * history to show either way. */}
+          {(!orgMode || eventNames.length > 0) && (
+            <ContactCrossEventHistory contactId={item.id} eventId={item.event_id} />
+          )}
           {/*
             * Wave E (workplan 14, D8): profile edit history — the same
             * ContentHistorySection the submission panel mounts, configured for
             * this event_contacts row (the row's own event, matching where the
             * contacts PUT writes). Restore goes back through updateContact,
-            * which snapshots the replaced values itself.
+            * which snapshots the replaced values itself. Org mode has no such
+            * row (profile history is per-event), so it is not offered there.
             */}
-          <ContactProfileHistory
-            contactId={item.id}
-            eventId={item.event_id}
-            onRestored={(fields) => onItemSaved?.({ ...item, ...fields })}
-          />
+          {!orgMode && (
+            <ContactProfileHistory
+              contactId={item.id}
+              eventId={item.event_id}
+              onRestored={(fields) => onItemSaved?.({ ...item, ...fields })}
+            />
+          )}
           {/*
             * SPK-06: the organiser can now put a known contact into the speaker
             * portal directly. Deliberately outside the `onEdit` guard — inviting
@@ -1113,11 +1284,48 @@ export function buildWorkspaceConfig(
     // by their assignee/recipient FK) narrow Speakers to that person.
     globalFilterReceives: { submission_id: 'submission_id', contact_id: 'contact_id' },
     exportConfig: exportFor('contacts'),
-    toolbarActions: [addExistingContactAction, duplicatesAction, importAction('contacts', 'speakers')],
-    schema: {
-      ...speakerSchema,
-      properties: { ...speakerSchema.properties, ...customFieldSchemaProperties(contactFields) },
-    },
+    // "＋ EXISTING" attaches to *the current event*, which has no meaning while
+    // the workspace spans every event; the directory offers "＋ NEW CONTACT"
+    // there instead. Duplicates is already org-wide, and IMPORT keeps its own
+    // "pick a single event first" explanation (see importAction).
+    toolbarActions: [
+      orgMode ? newOrgContactAction : addExistingContactAction,
+      duplicatesAction,
+      importAction('contacts', 'speakers'),
+    ],
+    registerTabActions: orgMode ? registerSpeakerTabActions : undefined,
+    schema: orgMode
+      ? orgContactSchema
+      : {
+          ...speakerSchema,
+          properties: { ...speakerSchema.properties, ...customFieldSchemaProperties(contactFields) },
+        },
+    // Same identity-only shape on edit: the grid's company/job title/bio in org
+    // mode are the person's MOST RECENT membership's answer, and the contacts
+    // PUT writes profile columns to the event it is aimed at — rendering them
+    // here would invite copying one event's profile onto another.
+    editSchema: orgMode ? orgContactSchema : undefined,
+    /**
+     * Org mode edit gate. PUT /contacts/:id joins event_contacts for the event
+     * it writes (the session's, since a directory row carries no event_id), so
+     * a person who is not on that event — including anyone on no event at all —
+     * cannot be saved through it, identity fields included. Blocking up front
+     * beats a form that 404s on Save. `events_json` carries names rather than
+     * ids, so the membership test is by name against the session's event.
+     */
+    getEditAccess: orgMode
+      ? (item: ContactRow) => {
+          const names = parseEventNames(item.events_json)
+          if (names.includes(currentEventName)) return true
+          return {
+            allowed: false,
+            message:
+              names.length === 0
+                ? `${contactName(item)} is not on any event yet. Add them to an event (“＋ EXISTING” with that event picked in the sidebar) before editing their details.`
+                : `${contactName(item)} is on ${names.join(', ')}, not on ${currentEventName}. Pick one of their events in the sidebar to edit them.`,
+          }
+        }
+      : undefined,
     formWarning: speakerDuplicateNameWarning,
     // F13: a duplicate email is a validation rule worth keeping, but the
     // form used to be a dead end — the organiser had no way back to the
@@ -1127,8 +1335,16 @@ export function buildWorkspaceConfig(
     // to open (consistent with the importer's fill-blanks-only merge: never
     // clobber, always land the organiser on the real record instead).
     onUpsert: async (data, existing?: ContactRow) => {
-      const payload = splitCustomFieldsFromFormData(unflattenContactLinks(data), contactFields)
+      // Org mode posts identity only, both ways: `no_event: true` on create is
+      // what tells the API to make the person without a membership (profile
+      // fields there are a 400), and `identityFieldsOnly` on update keeps
+      // RecordForm's whole-record submit from smuggling the coalesced profile
+      // columns into whichever event the PUT lands on.
+      const payload = orgMode
+        ? identityFieldsOnly(unflattenContactLinks(data))
+        : splitCustomFieldsFromFormData(unflattenContactLinks(data), contactFields)
       try {
+        if (orgMode && !existing) return await createContact({ ...payload, no_event: true })
         return existing ? await updateContact(existing.id, payload) : await createContact(payload)
       } catch (err) {
         if (
@@ -1146,16 +1362,21 @@ export function buildWorkspaceConfig(
         throw err
       }
     },
-    onDelete: async (item) => {
-      const confirmed = await appConfirm(
-        `Delete ${contactName(item)}? Their submissions remain, unattributed; ` +
-          'their participant links, reviews and task assignments are removed.',
-        { title: 'Delete contact', confirmLabel: 'Delete', danger: true },
-      )
-      if (!confirmed) return false
-      await deleteContact(item.id)
-      return true
-    },
+    // Delete here DETACHES from the session's event — a meaningless (and
+    // silently wrong-event) action from a directory row, whose detail panel
+    // still offers the org-wide "Delete from organisation" instead.
+    onDelete: orgMode
+      ? undefined
+      : async (item) => {
+          const confirmed = await appConfirm(
+            `Delete ${contactName(item)}? Their submissions remain, unattributed; ` +
+              'their participant links, reviews and task assignments are removed.',
+            { title: 'Delete contact', confirmLabel: 'Delete', danger: true },
+          )
+          if (!confirmed) return false
+          await deleteContact(item.id)
+          return true
+        },
   }
 
   const submissions: TabConfig<SubmissionRow & { rating: number | null; notified_at: string | null; review_count: number }> = {
@@ -2057,6 +2278,20 @@ export default function App() {
   // that costs — a several-second cross-tab reset/refetch jitter).
   const scopedSources = useMemo(() => buildScopedSources(eventFilterId), [eventFilterId])
 
+  // CRM-02: options for the directory's Events filter. Keyed on a serialised
+  // signature, not on `me.events`' identity — every /api/me re-read allocates a
+  // fresh array, and depending on it would rebuild the whole workspace config
+  // (and with it every grid's dataSource) for no change at all.
+  const eventOptionsSignature = useMemo(
+    () => stableStringify((me?.events ?? []).map((e) => [e.id, e.name])),
+    [me?.events],
+  )
+  const eventOptions = useMemo(
+    () => (me?.events ?? []).map((e) => ({ id: e.id, name: e.name })),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [eventOptionsSignature],
+  )
+
   const openCreateEvent = useCallback(() => setCreateEventOpen(true), [])
 
   // Events tab row click (manual-QA item 1): moves the workspace event filter
@@ -2081,6 +2316,7 @@ export default function App() {
         onSelectEvent,
         contactFields,
         eventFilterId,
+        eventOptions,
       ),
     [
       handleChecklist,
@@ -2093,6 +2329,7 @@ export default function App() {
       openCreateEvent,
       onSelectEvent,
       contactFields,
+      eventOptions,
     ],
   )
 
@@ -2574,6 +2811,23 @@ export default function App() {
               onActiveTabChange={handleActiveTabChange}
               onSelectionChange={handleWorkspaceSelection}
               onGlobalFilterChange={setWsGlobalFilter}
+              // CRM-01: the tab label stays "Speakers", but on "All events"
+              // that tab is not a roster — it is the organisation's contact
+              // directory. Naming it in the header chip slot (the same chip
+              // styling EventFilterChip uses) makes the surface legible
+              // without renaming a tab the URL and deep links refer to.
+              headerTrailing={
+                filter === 'all' && (route.tab ?? 'speakers') === 'speakers' ? (
+                  <span
+                    className="event-filter-chip all"
+                    role="status"
+                    title="One row per person across the whole organisation, including contacts on no event"
+                  >
+                    <span className="event-filter-chip-label">Contacts</span>
+                    all events
+                  </span>
+                ) : undefined
+              }
               searchValue={route.q ?? ''}
               onSearchChange={handleSearchChange}
             />
