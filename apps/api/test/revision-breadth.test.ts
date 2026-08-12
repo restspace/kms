@@ -87,6 +87,8 @@ describe('contact profile revisions (PUT /app/api/contacts/:id)', () => {
       biography: 'Original bio.',
       company: 'Original Co',
       job_title: 'Original title',
+      // SPK-04: speaker_status joined the watched set — unset here, so null.
+      speaker_status: null,
     });
   });
 
@@ -166,6 +168,7 @@ describe('contact profile revisions (PUT /app/api/contacts/:id)', () => {
       biography: 'Original bio.',
       company: 'Original Co',
       job_title: 'Original title',
+      speaker_status: null,
     });
 
     // Restore = the normal PUT with the snapshot's fields (self-snapshotting).

@@ -170,7 +170,7 @@ landingRoutes.get('/', async (c) => {
       'KMS — event knowledge management',
       `<h1>KMS — ${esc(logins.eventName)}</h1>
 <p>A speaker and session management system: call for papers, review and scoring, agenda,
-speaker comms. Pick a door — no password required, the sign-in link is shown on the next page.</p>
+speaker comms. Pick a door — the sign-in link is shown on the next page. Fixture passwords also work: admin demo-admin-pass, speaker demo-speaker-pass.</p>
 ${adminBlock}
 ${speakerBlock}
 ${resetBlock}
@@ -304,7 +304,7 @@ async function loadAgendaFeed(db: D1Database, slug: string) {
       .prepare(
         `SELECT id, code, title, description, format, level, capacity, track_id, room_id, starts_at, ends_at
          FROM submissions
-         WHERE event_id = ? AND status = 'accepted' AND content_approved = 1 AND starts_at IS NOT NULL AND ends_at IS NOT NULL
+         WHERE event_id = ? AND status = 'accepted' AND content_approved = 1 AND starts_at IS NOT NULL AND ends_at IS NOT NULL AND pencilled_at IS NULL
          ORDER BY starts_at, code`,
       )
       .bind(event.id)
@@ -335,7 +335,7 @@ async function loadAgendaFeed(db: D1Database, slug: string) {
          JOIN submissions s ON s.id = sp.submission_id
          LEFT JOIN event_contacts ec ON ec.contact_id = c.id AND ec.event_id = ?1
          WHERE s.event_id = ?1 AND s.status = 'accepted' AND s.content_approved = 1
-           AND s.starts_at IS NOT NULL AND s.ends_at IS NOT NULL
+           AND s.starts_at IS NOT NULL AND s.ends_at IS NOT NULL AND s.pencilled_at IS NULL
          ORDER BY sp.position`,
       )
       .bind(event.id)
@@ -473,7 +473,7 @@ landingRoutes.get('/e/:slug/speakers.json', async (c) => {
        LEFT JOIN event_contacts ec ON ec.contact_id = c.id AND ec.event_id = ?1
        LEFT JOIN rooms r ON r.id = s.room_id
        WHERE s.event_id = ?1 AND s.status = 'accepted' AND s.content_approved = 1
-         AND s.starts_at IS NOT NULL AND s.ends_at IS NOT NULL
+         AND s.starts_at IS NOT NULL AND s.ends_at IS NOT NULL AND s.pencilled_at IS NULL
        ORDER BY sp.position`,
     )
     .bind(event.id)
@@ -602,7 +602,7 @@ async function buildAgendaIcsBody(db: D1Database, slug: string): Promise<string 
       .prepare(
         `SELECT id, code, title, description, starts_at, ends_at, room_id
          FROM submissions
-         WHERE event_id = ? AND status = 'accepted' AND content_approved = 1 AND starts_at IS NOT NULL AND ends_at IS NOT NULL
+         WHERE event_id = ? AND status = 'accepted' AND content_approved = 1 AND starts_at IS NOT NULL AND ends_at IS NOT NULL AND pencilled_at IS NULL
          ORDER BY starts_at, code`,
       )
       .bind(event.id)
@@ -629,7 +629,7 @@ async function buildAgendaIcsBody(db: D1Database, slug: string): Promise<string 
          JOIN contacts c ON c.id = sp.contact_id
          JOIN submissions s ON s.id = sp.submission_id
          WHERE s.event_id = ? AND s.status = 'accepted' AND s.content_approved = 1
-           AND s.starts_at IS NOT NULL AND s.ends_at IS NOT NULL
+           AND s.starts_at IS NOT NULL AND s.ends_at IS NOT NULL AND s.pencilled_at IS NULL
          ORDER BY sp.position`,
       )
       .bind(event.id)

@@ -215,7 +215,10 @@ describe('assignment strategies', () => {
       workload: Array<{ plan_id: string; contact_id: string; assigned: number; completed: number }>;
       stats: Array<{ plan_id: string; submissions: number }>;
     };
-    expect(overview.pool).toContainEqual({ plan_id: planId, contact_id: reviewer.contactId });
+    // ABS-06 added max_assignments (NULL = uncapped) to every pool row.
+    expect(overview.pool).toContainEqual(
+      expect.objectContaining({ plan_id: planId, contact_id: reviewer.contactId }),
+    );
     expect(overview.workload.find((w) => w.plan_id === planId)).toMatchObject({
       contact_id: reviewer.contactId, assigned: 1, completed: 0,
     });

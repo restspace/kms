@@ -51,11 +51,16 @@ export function mapSubmission(row: Row): Fields {
     Capacity: n(row.capacity),
     Speaker: s(row.speaker_name),
     'Speaker Email': s(row.speaker_email),
-    Rating: averageRating(row.rating_cache),
+    // rating_normalized (sync.ts's selectSql) is the scale-aware mean —
+    // averageRating over the raw rating_cache stays as a fallback for a
+    // caller/test that queries submissions without that computed column.
+    Rating: roundRating(n(row.rating_normalized)) ?? averageRating(row.rating_cache),
     Notes: s(row.notes),
     Event: s(row.event_name),
   };
 }
+
+const roundRating = (v: number | null): number | null => (v === null ? null : Math.round(v * 100) / 100);
 
 /** Mean across every plan's cached mean in rating_cache `{ "<plan_id>": 4.2 }`. */
 export function averageRating(ratingCache: unknown): number | null {

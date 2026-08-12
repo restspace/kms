@@ -9,9 +9,12 @@ import {
 } from '@kms/core'
 import {
   addAgendaSession,
+  autoScheduleSessions,
+  confirmPlacements,
   getAgenda,
   getBulkJob,
   removeSessionSpeaker,
+  scheduleBatch,
   scheduleSession,
   sendScheduleConfirmations,
   setAgendaPublished,
@@ -31,6 +34,8 @@ import { RoomsBoard } from './RoomsBoard'
 import { TimeGrid, type DropPreview, type GridColumn } from './TimeGrid'
 import { Tray } from './Tray'
 import {
+  AGENDA_DAY_END_MIN,
+  AGENDA_DAY_START_MIN,
   durationMinutes,
   eventDays,
   fmtDay,
@@ -61,8 +66,10 @@ const VIEWS: Array<{ key: AgendaView; label: string }> = [
   { key: 'conflicts', label: 'Conflicts' },
 ]
 
-const DAY_START_MIN = 6 * 60
-const DAY_END_MIN = 20 * 60
+// The schedulable window, shared with the Worker's auto-schedule assistant so
+// it never proposes a slot this grid cannot draw (@kms/core agendaTime).
+const DAY_START_MIN = AGENDA_DAY_START_MIN
+const DAY_END_MIN = AGENDA_DAY_END_MIN
 
 /**
  * The one Tier C screen that gates in JS rather than with display:none.
@@ -76,10 +83,18 @@ const COMPACT_MEDIA_QUERY = `(max-width: ${breakpoints.compact}px)`
 /** Grid modes; `list` and `conflicts` stay usable at every width. */
 const GRID_VIEWS: AgendaView[] = ['day', 'week', 'month', 'rooms']
 
-interface UndoEntry {
+interface UndoSingle {
   id: string
   prev: { starts_at: string | null; ends_at: string | null; room_id: string | null }
 }
+
+/**
+ * Undo is per-change, and one auto-place is *one* change however many
+ * sessions it moved — reverting it forty rows at a time (forty payloads,
+ * forty revision bumps) would be neither atomic nor fast, so a batch entry
+ * carries every session's previous slot and reverts through one call.
+ */
+type UndoEntry = UndoSingle | { batch: UndoSingle[] }
 
 interface Toast {
   message: string
@@ -368,9 +383,24 @@ export function AgendaSection({
 
   /** Drop this session's newest undo entry — the server never took the change. */
   const dropUndo = useCallback((id: string) => {
-    const index = undoStack.current.map((e) => e.id).lastIndexOf(id)
+    // Only single-session entries are dropped this way: a batch is undone (or
+    // not) as a whole, and one failed row inside it does not invalidate it.
+    const index = undoStack.current.map((e) => ('id' in e ? e.id : null)).lastIndexOf(id)
     if (index >= 0) undoStack.current.splice(index, 1)
   }, [])
+
+  /** Put a whole auto-placement back where it came from, in one write. */
+  const undoBatch = useCallback(
+    (batch: UndoSingle[]) => {
+      void queue.enqueue('agenda', () => scheduleBatch(batch.map(({ id, prev }) => ({ id, ...prev }))), {
+        apply: (p) => {
+          applyPayload(p)
+          showToast({ message: 'Auto-placement undone' })
+        },
+      })
+    },
+    [applyPayload, queue, showToast],
+  )
 
   const commitSchedule = useCallback(
     (
@@ -416,7 +446,9 @@ export function AgendaSection({
 
         const undo = () => {
           const entry = undoStack.current.pop()
-          if (entry) commitSchedule(entry.id, entry.prev, { pushUndo: false, label: 'Undone' })
+          if (!entry) return
+          if ('id' in entry) commitSchedule(entry.id, entry.prev, { pushUndo: false, label: 'Undone' })
+          else undoBatch(entry.batch)
         }
         showToast({
           message:
@@ -440,7 +472,7 @@ export function AgendaSection({
         })
       })()
     },
-    [applyPayload, askNotify, dropUndo, putSchedule, queue, showToast, tz, withLocalConflicts],
+    [applyPayload, askNotify, dropUndo, putSchedule, queue, showToast, tz, undoBatch, withLocalConflicts],
   )
 
   // ⌘Z / Ctrl+Z reverts the last scheduling change (docs/07 §3).
@@ -452,13 +484,14 @@ export function AgendaSection({
         const entry = undoStack.current.pop()
         if (entry) {
           e.preventDefault()
-          commitSchedule(entry.id, entry.prev, { pushUndo: false, label: 'Undone' })
+          if ('id' in entry) commitSchedule(entry.id, entry.prev, { pushUndo: false, label: 'Undone' })
+          else undoBatch(entry.batch)
         }
       }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [commitSchedule])
+  }, [commitSchedule, undoBatch])
 
   const patchFrom = useCallback(
     (day: string, startMin: number, durationMin: number, roomId: string | null) => ({
@@ -515,12 +548,24 @@ export function AgendaSection({
     () => filteredSessions.filter((s) => s.starts_at === null),
     [filteredSessions],
   )
+  // Pencilled = "a time, but nothing anyone has agreed to yet": either the
+  // room is still missing, or the auto-schedule assistant proposed the slot
+  // and it has not been confirmed (AIA-08).
   const pencilledCount = useMemo(
-    () => filteredSessions.filter((s) => s.starts_at !== null && s.room_id === null).length,
+    () =>
+      filteredSessions.filter((s) => s.starts_at !== null && (s.room_id === null || s.pencilled_at !== null))
+        .length,
     [filteredSessions],
   )
+  /** Auto-placed sessions awaiting an organiser's yes — the Confirm button's subject. */
+  const provisionalCount = useMemo(
+    () => filteredSessions.filter((s) => s.pencilled_at !== null).length,
+    [filteredSessions],
+  )
+  // A pencilled session is invisible to the invite send (the server excludes
+  // it), so it must not be counted as pending here either.
   const pendingConfirmations = useMemo(
-    () => (data?.sessions ?? []).filter((s) => s.starts_at !== null && s.invited === 0).length,
+    () => (data?.sessions ?? []).filter((s) => s.starts_at !== null && s.pencilled_at === null && s.invited === 0).length,
     [data],
   )
   const errorCount = liveConflicts.filter((c) => c.severity === 'error').length
@@ -666,6 +711,53 @@ export function AgendaSection({
     tick()
   }
 
+  /**
+   * AIA-08: hand the whole tray to the assistant. Placements come back
+   * *pencilled* — they are on the board, but out of every public feed, the
+   * speaker portal and the invite send until Confirm placements (or a manual
+   * drag) accepts them. The tray's previous slots are captured first so the
+   * whole run is one undo entry.
+   */
+  const autoPlace = () => {
+    const current = dataRef.current
+    if (!current) return
+    const prevById = new Map(
+      current.sessions
+        .filter((s) => s.starts_at === null)
+        .map((s) => [s.id, { starts_at: s.starts_at, ends_at: s.ends_at, room_id: s.room_id }] as const),
+    )
+    setBusy(true)
+    void queue
+      .enqueue('agenda', () => autoScheduleSessions(), {
+        apply: (p) => {
+          applyPayload(p)
+          const items = p.placements
+            .map((pl) => {
+              const prev = prevById.get(pl.id)
+              return prev ? { id: pl.id, prev } : undefined
+            })
+            .filter((e): e is UndoSingle => e !== undefined)
+          if (items.length > 0) undoStack.current.push({ batch: items })
+          const skippedNote =
+            p.skipped.length > 0 ? ` · ${p.skipped.length} could not be placed` : ''
+          showToast({
+            message: `${p.placed} session${p.placed === 1 ? '' : 's'} pencilled in${skippedNote}`,
+            ...(items.length > 0
+              ? {
+                  undo: () => {
+                    const entry = undoStack.current.pop()
+                    if (!entry) return
+                    if ('id' in entry) commitSchedule(entry.id, entry.prev, { pushUndo: false, label: 'Undone' })
+                    else undoBatch(entry.batch)
+                  },
+                }
+              : {}),
+          })
+        },
+      })
+      .finally(() => setBusy(false))
+  }
+
   const sendConfirmations = () => {
     if (jobTimer.current !== null) window.clearTimeout(jobTimer.current)
     setBusy(true)
@@ -735,6 +827,26 @@ export function AgendaSection({
           >
             Manage rooms &amp; tracks
           </button>
+          <button
+            type="button"
+            disabled={busy || unscheduled.length === 0}
+            title="Place every unscheduled session into a free slot (pencilled — review, then Confirm)"
+            onClick={autoPlace}
+          >
+            Auto-place ({unscheduled.length})
+          </button>
+          {provisionalCount > 0 && (
+            <button
+              type="button"
+              disabled={busy}
+              title="Accept every auto-placed slot — they become part of the published agenda"
+              onClick={() =>
+                runAction(() => confirmPlacements(), (p) => `${p.confirmed} placements confirmed`)
+              }
+            >
+              Confirm placements ({provisionalCount})
+            </button>
+          )}
           <button
             disabled={busy || jobActive || pendingConfirmations === 0}
             title="Email calendar invites for every scheduled session that has none yet"

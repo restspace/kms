@@ -31,6 +31,7 @@ import { createDb } from '@kms/db';
 import { Page, SubmitPage, type SubmitBootstrap, type SubmitViewer } from '@kms/ui';
 import type { AppEnv } from '../env';
 import { attemptImmediate, prepareTemplated, sendTemplated, type PreparedEmail } from '../mailer';
+import { buildPortalParticipantStatements } from '../participants';
 import { bumpEventRevision } from '../revision';
 import { isSubmissionCodeCollision, nextSessionCodeSql, peekNextSessionCode } from '../sessionCode';
 import { createSessionToken, getSession, setSessionCookie, type SessionPayload } from '../session';
@@ -1404,115 +1405,29 @@ submitRoutes.post('/:slug/:formId/submit', async (c) => {
     }
 
     // Participants: contacts are upserted *inside* the transaction, then the
-    // participant rows resolve their contact ids from the same batch.
+    // participant rows resolve their contact ids from the same batch. The
+    // per-participant 4-statement block (contact upsert, event_contacts
+    // attach-and-seed, bio merge, submission_participants insert) is shared
+    // with the portal's co-author routes — see ../participants.ts.
     statements.push(db.prepare('DELETE FROM submission_participants WHERE submission_id = ?').bind(newId));
     let position = 1;
     for (const p of participants) {
       const own = p.identity.email === submitterContact.email;
-      const orNull = (v: string) => (v === '' ? null : v);
-      // A submitter may initialise a new co-speaker record, but must not
-      // overwrite another existing speaker's self-managed profile by knowing
-      // only their email address — hence the two COALESCE orders. Since 0015
-      // the same rule has to hold across two tables: identity on `contacts`,
-      // biography on this event's `event_contacts` row.
-      const identityMerge = own
-        ? `first_name = COALESCE(excluded.first_name, contacts.first_name),
-           last_name = COALESCE(excluded.last_name, contacts.last_name),
-           mobile_phone = COALESCE(excluded.mobile_phone, contacts.mobile_phone)`
-        : `first_name = COALESCE(contacts.first_name, excluded.first_name),
-           last_name = COALESCE(contacts.last_name, excluded.last_name),
-           mobile_phone = COALESCE(contacts.mobile_phone, excluded.mobile_phone)`;
-      // Same rule, applied twice: `seedBio` orders the typed biography against
-      // the profile carried over from another event in the org, `bioMerge`
-      // orders it against the one already stored for THIS event.
-      const seedBio = own ? 'COALESCE(?3, prev.biography)' : 'COALESCE(prev.biography, ?3)';
-      const bioMerge = own ? 'COALESCE(?3, biography)' : 'COALESCE(biography, ?3)';
       statements.push(
-        db
-          .prepare(
-            `INSERT INTO contacts (id, org_id, email, first_name, last_name, mobile_phone, created_at, updated_at)
-             VALUES (?1, (SELECT org_id FROM events WHERE id = ?2), ?3, ?4, ?5, ?6, ?7, ?7)
-             ON CONFLICT (org_id, lower(email)) DO UPDATE SET ${identityMerge}, updated_at = ?7`,
-          )
-          .bind(
-            crypto.randomUUID(),
-            ctx.event.id,
-            p.identity.email,
-            orNull(p.identity.first_name),
-            orNull(p.identity.last_name),
-            orNull(p.identity.mobile_phone),
-            ts,
-          ),
-      );
-      // Attach-and-seed, the SQL twin of db.contacts.attachToEvent (the helper
-      // itself cannot be called here — every write in this endpoint is one
-      // batch). A speaker returning from another event in the org is matched
-      // by the statement above and picks their newest profile up here rather
-      // than starting blank; the headshot is never seeded, it is an
-      // event-scoped asset. `prev` excludes this event so the seed can never
-      // read back the row being written.
-      //
-      // DO NOTHING, not DO UPDATE: the merge below has to compare the typed
-      // biography against the stored one, and a seeded `excluded` would let
-      // another event's bio win that comparison.
-      statements.push(
-        db
-          .prepare(
-            `INSERT INTO event_contacts
-               (event_id, contact_id, biography, company, job_title, added_at, source)
-             SELECT ?1, c.id, ${seedBio}, prev.company, prev.job_title, ?4, 'cfp'
-               FROM contacts c
-               JOIN events ev ON ev.id = ?1
-               LEFT JOIN event_contacts prev
-                 ON prev.contact_id = c.id
-                AND prev.event_id = (SELECT p2.event_id FROM event_contacts p2
-                                       JOIN events pe ON pe.id = p2.event_id
-                                      WHERE p2.contact_id = c.id
-                                        AND p2.event_id <> ?1
-                                        AND pe.org_id = ev.org_id
-                                      ORDER BY p2.added_at DESC LIMIT 1)
-              WHERE c.org_id = ev.org_id AND lower(c.email) = ?2
-             ON CONFLICT (event_id, contact_id) DO NOTHING`,
-          )
-          .bind(ctx.event.id, p.identity.email, orNull(p.identity.biography), ts),
-      );
-      // The profile half of the same two-COALESCE rule. The row is guaranteed
-      // to exist by the statement above, so this is an UPDATE rather than a
-      // second upsert.
-      statements.push(
-        db
-          .prepare(
-            `UPDATE event_contacts SET biography = ${bioMerge}
-              WHERE event_id = ?1
-                AND contact_id = (SELECT c.id FROM contacts c
-                                   WHERE c.org_id = (SELECT org_id FROM events WHERE id = ?1)
-                                     AND lower(c.email) = ?2)`,
-          )
-          .bind(ctx.event.id, p.identity.email, orNull(p.identity.biography)),
-      );
-      statements.push(
-        db
-          .prepare(
-            `INSERT INTO submission_participants
-               (id, submission_id, contact_id, role, position, is_primary_contact, confirmed_at, answers_json,
-                title_at_time, org_at_time)
-             SELECT ?1, ?2, c.id, ?3, ?4, ?5, ?6, ?7, ec.job_title, ec.company FROM contacts c
-             JOIN event_contacts ec ON ec.contact_id = c.id AND ec.event_id = ?8
-             WHERE c.org_id = (SELECT org_id FROM events WHERE id = ?8)
-               AND lower(c.email) = ?9
-               AND EXISTS (SELECT 1 FROM submissions s WHERE s.id = ?2)`,
-          )
-          .bind(
-            crypto.randomUUID(),
-            newId,
-            p.role,
-            position,
-            own ? 1 : 0,
-            own ? ts : null,
-            JSON.stringify(p.answers),
-            ctx.event.id,
-            p.identity.email,
-          ),
+        ...buildPortalParticipantStatements(db, {
+          eventId: ctx.event.id,
+          submissionId: newId,
+          email: p.identity.email,
+          firstName: p.identity.first_name,
+          lastName: p.identity.last_name,
+          mobilePhone: p.identity.mobile_phone,
+          biography: p.identity.biography,
+          role: p.role,
+          position,
+          ts,
+          own,
+          answersJson: JSON.stringify(p.answers),
+        }),
       );
       position += 1;
     }

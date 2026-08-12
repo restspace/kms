@@ -54,6 +54,11 @@ export interface ContactRow {
   event_count?: number
   /** Org mode: JSON string array of member event names, most recent first. */
   events_json?: string | null
+  /** SPK-04: the settable speaker workflow status — a hand-set value on
+   * event_contacts.speaker_status, or when unset the server's own
+   * confirmed/awaiting_reply derivation (same signal as `confirmation`
+   * above, under the new vocabulary's spelling). Null when neither applies. */
+  speaker_status?: string | null
   created_at: string
   updated_at: string
 }
@@ -253,6 +258,53 @@ export const updateTrack = (id: string, data: Record<string, unknown>) =>
   request<TrackRow>(`/app/api/tracks/${id}`, { method: 'PUT', body: JSON.stringify(data) })
 export const deleteTrack = (id: string) =>
   request<{ ok: boolean }>(`/app/api/tracks/${id}`, { method: 'DELETE' })
+
+// ---------------------------------------------------------------------------
+// Saved Speaker-roster segments (CRM-09). kind 'dynamic' stores the filter
+// object the grid was showing (`filters`); kind 'curated' freezes an explicit
+// id list (`member_ids`).
+// ---------------------------------------------------------------------------
+
+export interface SegmentRow {
+  id: string
+  event_id: string
+  name: string
+  kind: 'dynamic' | 'curated'
+  filters: string | null
+  member_ids: string | null
+  created_at: string
+}
+
+export const listContactSegments = () => request<{ items: SegmentRow[] }>('/app/api/contact-segments')
+export const createContactSegment = (data: { name: string; kind: 'dynamic' | 'curated'; filters?: Record<string, unknown> | null; member_ids?: string[] | null }) =>
+  request<SegmentRow>('/app/api/contact-segments', { method: 'POST', body: JSON.stringify(data) })
+export const updateContactSegment = (id: string, data: Record<string, unknown>) =>
+  request<SegmentRow>(`/app/api/contact-segments/${id}`, { method: 'PUT', body: JSON.stringify(data) })
+export const deleteContactSegment = (id: string) =>
+  request<{ ok: boolean }>(`/app/api/contact-segments/${id}`, { method: 'DELETE' })
+
+// ---------------------------------------------------------------------------
+// Speaker-status options (SPK-04): per-event extensions to the built-in
+// speaker_status vocabulary (prospect/invited/awaiting_reply/confirmed/
+// declined). Same rooms/tracks CRUD shape; `key` is derived server-side from
+// `label` on create and immutable thereafter.
+// ---------------------------------------------------------------------------
+
+export interface SpeakerStatusOption {
+  id: string
+  event_id: string
+  key: string
+  label: string
+  position: number
+}
+
+export const listSpeakerStatuses = () => request<{ items: SpeakerStatusOption[] }>('/app/api/speaker-statuses')
+export const createSpeakerStatus = (data: { label: string }) =>
+  request<SpeakerStatusOption>('/app/api/speaker-statuses', { method: 'POST', body: JSON.stringify(data) })
+export const updateSpeakerStatus = (id: string, data: { label: string }) =>
+  request<SpeakerStatusOption>(`/app/api/speaker-statuses/${id}`, { method: 'PUT', body: JSON.stringify(data) })
+export const deleteSpeakerStatus = (id: string) =>
+  request<{ ok: boolean }>(`/app/api/speaker-statuses/${id}`, { method: 'DELETE' })
 
 // ---------------------------------------------------------------------------
 // Contact custom fields (SPK-15): per-event field definitions for the
@@ -1019,7 +1071,15 @@ export const updateCriterion = (id: string, patch: Record<string, unknown>) =>
 export const deleteCriterion = (id: string) =>
   request<{ ok: boolean }>(`/app/api/evaluation/criteria/${id}`, { method: 'DELETE' })
 export const assignReviewers = (planId: string, body: Record<string, unknown>) =>
-  request<{ ok: boolean; total_assignments: number; submissions: number }>(
+  request<{
+    ok: boolean
+    total_assignments: number
+    created: number
+    submissions: number
+    /** ABS-06: submissions that got fewer reviewers than requested because
+     *  the remaining candidates were all at their per-round cap. */
+    unassigned: Array<{ submission_id: string; short: number }>
+  }>(
     `/app/api/evaluation/plans/${planId}/assign`,
     { method: 'POST', body: JSON.stringify(body) },
   )
@@ -1054,6 +1114,8 @@ export interface AgendaSessionRow {
   room_id: string | null
   starts_at: string | null
   ends_at: string | null
+  /** Set while an auto-scheduled placement is still awaiting confirmation (AIA-08) */
+  pencilled_at: string | null
   updated_at: string
   /** 1 when a live METHOD:REQUEST calendar invite exists */
   invited: number
@@ -1102,6 +1164,30 @@ export const scheduleSession = (id: string, body: SchedulePatch) =>
   request<AgendaPayload & { ok: boolean; notified: number }>(`/app/api/agenda/sessions/${id}/schedule`, {
     method: 'PUT',
     body: JSON.stringify(body),
+  })
+/** AIA-08: place every tray session into a free slot, pencilled for review. */
+export const autoScheduleSessions = () =>
+  request<
+    AgendaPayload & {
+      ok: boolean
+      placed: number
+      placements: Array<{ id: string; starts_at: string; ends_at: string; room_id: string }>
+      skipped: Array<{ id: string; reason: string }>
+    }
+  >('/app/api/agenda/auto-schedule', { method: 'POST', body: JSON.stringify({}) })
+/** Accept every pencilled placement — they become publishable immediately. */
+export const confirmPlacements = () =>
+  request<AgendaPayload & { ok: boolean; confirmed: number }>('/app/api/agenda/confirm-placements', {
+    method: 'POST',
+    body: JSON.stringify({}),
+  })
+/** Many schedule writes in one call — what undoing a whole auto-place needs. */
+export const scheduleBatch = (
+  items: Array<{ id: string; starts_at: string | null; ends_at: string | null; room_id: string | null }>,
+) =>
+  request<AgendaPayload & { ok: boolean; updated: number }>('/app/api/agenda/schedule-batch', {
+    method: 'POST',
+    body: JSON.stringify({ items }),
   })
 export const addAgendaSession = (body: Record<string, unknown>) =>
   request<AgendaPayload & { ok: boolean; id: string }>('/app/api/agenda/sessions', {

@@ -8,8 +8,11 @@ import type { Context } from 'hono';
 import { createDb } from '@kms/db';
 import {
   discardHiddenAnswers,
+  isValidEmailShape,
   isValidUrlShape,
+  MAX_PARTICIPANTS_PER_SUBMISSION,
   normalizeXHandleToUrl,
+  parseParticipantRoles,
   redactInternal,
   sanitizeRichHtml,
   validateAnswers,
@@ -17,6 +20,7 @@ import {
   type AnswerValue,
   type Answers,
   type Event,
+  type ParticipantRoleConfig,
   type QuestionDef,
 } from '@kms/core';
 import type { AppEnv } from '../env';
@@ -31,6 +35,7 @@ import {
 } from '../filestore';
 import { attemptImmediate, prepareTemplated, sendTemplated, type PreparedEmail } from '../mailer';
 import { bumpEventRevision, entityRevisionInsert, watchedFieldsChanged } from '../revision';
+import { buildPortalParticipantStatements, snapshotParticipantsRevision } from '../participants';
 import { loadQuestions } from './formsAdmin';
 import { isFormClosed, normaliseTrackAnswers, storableAnswers, synthesizeAnswersFromColumns } from './submit';
 import { clearSessionCookie, getSession, type SessionPayload } from '../session';
@@ -326,18 +331,79 @@ function fieldErrorHtml(errors: FieldError[], key: string): string {
 // Context middleware: event + session + contact, or the login page
 // ---------------------------------------------------------------------------
 
-function loginPage(event: Event): string {
+/** Shell for the two unauthenticated portal cards (sign in, sign up). */
+function portalAuthPage(event: Event, title: string, body: string): string {
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Sign in — ${esc(event.name)}</title><style>${PORTAL_CSS}</style></head><body><div class="wrap" style="max-width:480px">
-<div class="card"><h2>${esc(event.name)}</h2>
-<p>Enter your email address and we will send you a sign-in link — no password needed.</p>
+<title>${esc(title)} — ${esc(event.name)}</title><style>${PORTAL_CSS}</style></head><body><div class="wrap" style="max-width:480px">
+${body}
+</div></body></html>`;
+}
+
+/**
+ * Portal sign-in. The magic link stays first and is still the primary path;
+ * a password is the shortcut for people who set one up. `opts` re-renders the
+ * page after a failed POST /auth/login (auth.ts) with the address preserved.
+ */
+export function loginPage(event: Event, opts?: { error?: string; email?: string }): string {
+  const error = opts?.error ? `<p class="field-err">${esc(opts.error)}</p>` : '';
+  const email = esc(opts?.email ?? '');
+  return portalAuthPage(
+    event,
+    'Sign in',
+    `<div class="card"><h2>${esc(event.name)}</h2>
+<p>Enter your email address and we will send you a sign-in link.</p>
 <form method="post" action="/auth/request">
 <label for="email">Email address</label>
-<input type="email" id="email" name="email" required autocomplete="email" placeholder="you@example.com">
+<input type="email" id="email" name="email" required autocomplete="email" placeholder="you@example.com" value="${email}">
 <input type="hidden" name="event_slug" value="${esc(event.slug)}">
 <p><button type="submit">Email me a sign-in link</button></p>
-</form></div></div></body></html>`;
+</form></div>
+<div class="card"><h2>Or sign in with a password</h2>
+${error}
+<form method="post" action="/auth/login">
+<label for="pw-email">Email address</label>
+<input type="email" id="pw-email" name="email" required autocomplete="email" placeholder="you@example.com" value="${email}">
+<label for="pw-password">Password</label>
+<input type="password" id="pw-password" name="password" required autocomplete="current-password">
+<input type="hidden" name="event_slug" value="${esc(event.slug)}">
+<p><button type="submit">Sign in</button></p>
+</form>
+<p class="muted">First time? <a href="/portal/${esc(event.slug)}/signup">Create a password</a> — we'll email you a confirmation link.</p>
+</div>`,
+  );
 }
+
+/** Portal sign-up: choose a password, then prove the mailbox by magic link. */
+export function signupPage(event: Event, opts?: { error?: string; email?: string }): string {
+  const error = opts?.error ? `<p class="field-err">${esc(opts.error)}</p>` : '';
+  return portalAuthPage(
+    event,
+    'Create a password',
+    `<div class="card"><h2>Create a password</h2>
+<p>Choose a password for <strong>${esc(event.name)}</strong>. We will email you a link to confirm it before it works.</p>
+${error}
+<form method="post" action="/auth/signup">
+<label for="su-email">Email address</label>
+<input type="email" id="su-email" name="email" required autocomplete="email" placeholder="you@example.com" value="${esc(opts?.email ?? '')}">
+<label for="su-password">Password</label>
+<input type="password" id="su-password" name="password" required minlength="8" autocomplete="new-password">
+<p class="muted">At least 8 characters.</p>
+<input type="hidden" name="event_slug" value="${esc(event.slug)}">
+<p><button type="submit">Create password</button></p>
+</form>
+<p class="muted"><a href="/portal/${esc(event.slug)}">Back to sign in</a></p>
+</div>`,
+  );
+}
+
+// GET /portal/:slug/signup — unauthenticated by design (it is the page you
+// reach when you have no session yet), so it is registered ahead of every
+// loadPortalCtx-guarded route below.
+portalRoutes.get('/:slug/signup', async (c) => {
+  const event = await createDb(c.env.DB).events.getBySlug(c.req.param('slug') ?? '');
+  if (!event) return c.html('<h1>Event not found</h1>', 404);
+  return c.html(signupPage(event));
+});
 
 async function loadPortalCtx(c: Context<AppEnv>): Promise<PortalCtx | Response> {
   const slug = c.req.param('slug') ?? '';
@@ -572,8 +638,15 @@ portalRoutes.get('/:slug/submissions/:id', async (c) => {
   // predicate) so a speaker never sees a time the public agenda doesn't
   // also show yet. Accepted-but-not-yet-scheduled gets a "Scheduling TBC"
   // line instead; non-accepted statuses show neither.
+  // `pencilled_at != null` means the auto-schedule assistant proposed this
+  // slot and no organiser has confirmed it yet (AIA-08) — the public feed
+  // excludes it, so the portal must too, or a speaker would read a time that
+  // is still being moved around. Those fall through to "Scheduling TBC".
   const isScheduled =
-    submission.status === 'accepted' && submission.starts_at != null && submission.ends_at != null;
+    submission.status === 'accepted' &&
+    submission.starts_at != null &&
+    submission.ends_at != null &&
+    submission.pencilled_at == null;
   const schedulingHtml =
     ctx.event.agenda_published === 1 && isScheduled
       ? `<dt>When</dt><dd>${esc(fmtDateRange(String(submission.starts_at), String(submission.ends_at), ctx.event.timezone))}</dd>${
@@ -1742,6 +1815,72 @@ function editControlHtml(q: QuestionDef, value: AnswerValue, errors: FieldError[
   }
 }
 
+/** One roster row as the edit page's Participants card needs it. */
+interface EditParticipantRow {
+  id: string;
+  contact_id: string;
+  first_name: string | null;
+  last_name: string | null;
+  email: string;
+  role: string;
+  is_primary_contact: number;
+}
+
+/**
+ * Participants card (ABS-11): the roster, each removable row's own tiny
+ * confirm-then-POST form, and an "Add co-author" form \u2014 everything the
+ * organiser-side ParticipantsEditor offers, minus role reordering, scoped to
+ * what a speaker should be able to do to their own submission. Hidden add
+ * form once the roster is already at MAX_PARTICIPANTS_PER_SUBMISSION, same
+ * cap submit.tsx and the admin endpoint both enforce server-side.
+ */
+function participantsCardHtml(
+  ctx: PortalCtx,
+  submission: EditableSubmissionRow,
+  participants: EditParticipantRow[],
+  roleConfig: ParticipantRoleConfig[],
+): string {
+  const base = `/portal/${esc(ctx.event.slug)}`;
+  const detail = `${base}/submissions/${esc(submission.id)}`;
+  const rows = participants
+    .map((p) => {
+      const name = [p.first_name, p.last_name].filter(Boolean).join(' ') || p.email;
+      const removable = p.is_primary_contact !== 1 && p.contact_id !== ctx.contactId;
+      const removeForm = removable
+        ? `<form method="post" action="${detail}/edit/participants/${esc(p.id)}/remove" onsubmit="return confirm('Remove this participant?')" style="display:inline"><button class="danger" type="submit">Remove</button></form>`
+        : '';
+      return `<div class="vrow"><span>${esc(name)}</span><span class="vtag">${esc(p.role)}</span>${
+        p.is_primary_contact === 1 ? '<span class="muted small">primary contact</span>' : ''
+      }${removeForm}</div>`;
+    })
+    .join('');
+
+  const atCap = participants.length >= MAX_PARTICIPANTS_PER_SUBMISSION;
+  const roleOptions = roleConfig
+    .map(
+      (cfg) =>
+        `<option value="${esc(cfg.role)}"${cfg.role === 'co-author' ? ' selected' : ''}>${esc(
+          cfg.role.replace(/-/g, ' ').replace(/\b\w/g, (ch) => ch.toUpperCase()),
+        )}</option>`,
+    )
+    .join('');
+  const addForm = atCap
+    ? `<p class="small muted">This submission has reached the maximum of ${MAX_PARTICIPANTS_PER_SUBMISSION} participants.</p>`
+    : `<form method="post" action="${detail}/edit/participants/add" style="margin-top:.6rem">
+<label for="p_first">First name</label><input type="text" id="p_first" name="p_first" required>
+<label for="p_last">Last name</label><input type="text" id="p_last" name="p_last" required>
+<label for="p_email">Email address</label><input type="email" id="p_email" name="p_email" required>
+<label for="p_role">Role</label><select id="p_role" name="p_role">${roleOptions}</select>
+<p style="margin-top:.6rem"><button type="submit">Add co-author</button></p>
+</form>`;
+
+  return `<div class="card"><h2>Participants</h2>
+<div class="vlist">${rows}</div>
+<h3 style="margin:1rem 0 .3rem;font-size:.9rem">Add co-author</h3>
+${addForm}
+</div>`;
+}
+
 function editPageHtml(
   ctx: PortalCtx,
   submission: EditableSubmissionRow,
@@ -1749,6 +1888,8 @@ function editPageHtml(
   answers: Answers,
   errors: FieldError[],
   flash: string | null,
+  participants: EditParticipantRow[],
+  roleConfig: ParticipantRoleConfig[],
 ): string {
   const base = `/portal/${esc(ctx.event.slug)}`;
   const detail = `${base}/submissions/${esc(submission.id)}`;
@@ -1766,6 +1907,7 @@ ${questions.map((q) => editControlHtml(q, answers[q.id], errors, visible.has(q.i
 <a class="btn secondary" style="margin-left:.5rem" href="${detail}">Cancel</a></p>
 </form>
 </div>
+${participantsCardHtml(ctx, submission, participants, roleConfig)}
 ${editVisibilityScript(questions)}`,
     flash,
   );
@@ -1956,12 +2098,45 @@ async function prepareAdminUpdateEmails(
   return prepared;
 }
 
+/** The submission's roster, as the edit page's Participants card needs it. */
+async function loadEditParticipants(c: Context<AppEnv>, submissionId: string): Promise<EditParticipantRow[]> {
+  const { results } = await c.env.DB.prepare(
+    `SELECT sp.id, sp.contact_id, c.first_name, c.last_name, c.email, sp.role, sp.is_primary_contact
+     FROM submission_participants sp JOIN contacts c ON c.id = sp.contact_id
+     WHERE sp.submission_id = ? ORDER BY sp.position`,
+  )
+    .bind(submissionId)
+    .all<EditParticipantRow>();
+  return results;
+}
+
+/** The role vocabulary this submission's form offers, same fallback as submit.tsx. */
+async function loadParticipantRoleConfig(
+  c: Context<AppEnv>,
+  formId: string | null,
+  eventId: string,
+): Promise<ParticipantRoleConfig[]> {
+  if (!formId) return parseParticipantRoles(null);
+  const form = await c.env.DB.prepare('SELECT participant_roles FROM submission_forms WHERE id = ? AND event_id = ?')
+    .bind(formId, eventId)
+    .first<{ participant_roles: string | null }>();
+  return parseParticipantRoles(form?.participant_roles ?? null);
+}
+
 /** Shared guard for both edit routes: 404 when it is not theirs, 403 when locked. */
 async function resolveEditTarget(
   c: Context<AppEnv>,
   ctx: PortalCtx,
   id: string,
-): Promise<{ submission: EditableSubmissionRow; questions: QuestionDef[] } | Response> {
+): Promise<
+  | {
+      submission: EditableSubmissionRow;
+      questions: QuestionDef[];
+      participants: EditParticipantRow[];
+      roleConfig: ParticipantRoleConfig[];
+    }
+  | Response
+> {
   const submission = await loadOwnSubmission(c, ctx, id);
   if (!submission) {
     return c.html(
@@ -2006,7 +2181,11 @@ async function resolveEditTarget(
       403,
     );
   }
-  return { submission, questions };
+  const [participants, roleConfig] = await Promise.all([
+    loadEditParticipants(c, submission.id),
+    loadParticipantRoleConfig(c, submission.form_id, ctx.event.id),
+  ]);
+  return { submission, questions, participants, roleConfig };
 }
 
 /**
@@ -2038,7 +2217,9 @@ portalRoutes.get('/:slug/submissions/:id/edit', async (c) => {
     await loadSubmissionAnswers(c, target.submission.id),
     target.submission,
   );
-  return c.html(editPageHtml(ctx, target.submission, target.questions, answers, [], flashOf(c)));
+  return c.html(
+    editPageHtml(ctx, target.submission, target.questions, answers, [], flashOf(c), target.participants, target.roleConfig),
+  );
 });
 
 portalRoutes.post('/:slug/submissions/:id/edit', async (c) => {
@@ -2048,7 +2229,7 @@ portalRoutes.post('/:slug/submissions/:id/edit', async (c) => {
   const id = c.req.param('id');
   const target = await resolveEditTarget(c, ctx, id);
   if (target instanceof Response) return target;
-  const { submission, questions } = target;
+  const { submission, questions, participants, roleConfig } = target;
 
   const body = await c.req.parseBody({ all: true });
   const existing = await loadSubmissionAnswers(c, submission.id);
@@ -2061,7 +2242,9 @@ portalRoutes.post('/:slug/submissions/:id/edit', async (c) => {
     key: e.question_id,
     message: e.message,
   }));
-  if (errors.length > 0) return c.html(editPageHtml(ctx, submission, questions, answers, errors, null), 400);
+  if (errors.length > 0) {
+    return c.html(editPageHtml(ctx, submission, questions, answers, errors, null, participants, roleConfig), 400);
+  }
 
   const kept = discardHiddenAnswers(questions, answers);
   const sys = editSystemColumns(questions, kept);
@@ -2140,6 +2323,142 @@ portalRoutes.post('/:slug/submissions/:id/edit', async (c) => {
   for (const email of emails) await attemptImmediate(c, email);
 
   return c.redirect(`${base}/submissions/${id}?m=${encodeURIComponent('Submission updated.')}`);
+});
+
+// POST /:slug/submissions/:id/edit/participants/add — ABS-11: a speaker adds
+// a co-author to their own submission. Same gate as the edit form itself
+// (resolveEditTarget: 404 not theirs, 403 locked/closed), plus the
+// participant-shaped checks the CFP wizard already enforces (submit.tsx) so
+// a co-author added here is indistinguishable from one added at submit time.
+portalRoutes.post('/:slug/submissions/:id/edit/participants/add', async (c) => {
+  const ctx = await loadPortalCtx(c);
+  if (ctx instanceof Response) return ctx;
+  const base = `/portal/${ctx.event.slug}`;
+  const id = c.req.param('id');
+  const editUrl = `${base}/submissions/${id}/edit`;
+  const target = await resolveEditTarget(c, ctx, id);
+  if (target instanceof Response) return target;
+  const { submission, roleConfig } = target;
+  const fail = (msg: string) => c.redirect(`${editUrl}?m=${encodeURIComponent(`!${msg}`)}`);
+
+  const body = await c.req.parseBody();
+  const firstName = typeof body.p_first === 'string' ? body.p_first.trim() : '';
+  const lastName = typeof body.p_last === 'string' ? body.p_last.trim() : '';
+  const email = typeof body.p_email === 'string' ? body.p_email.trim().toLowerCase() : '';
+  const role = typeof body.p_role === 'string' ? body.p_role : '';
+
+  if (!firstName || !lastName) return fail('First and last name are required.');
+  if (!isValidEmailShape(email)) return fail('Enter a valid email address.');
+  const allowedRoles = new Set<string>(roleConfig.map((cfg) => cfg.role));
+  if (!allowedRoles.has(role)) return fail('Choose a valid role.');
+
+  // No-write pre-checks: the cap and the duplicate lookup both fail the
+  // request before anything is built, matching the "flash error, no write"
+  // shape every other validation failure on this route takes.
+  const countRow = await c.env.DB.prepare(
+    'SELECT COUNT(*) AS n FROM submission_participants WHERE submission_id = ?',
+  )
+    .bind(submission.id)
+    .first<{ n: number }>();
+  if ((countRow?.n ?? 0) >= MAX_PARTICIPANTS_PER_SUBMISSION) {
+    return fail(`This submission already has the maximum of ${MAX_PARTICIPANTS_PER_SUBMISSION} participants.`);
+  }
+  const dup = await c.env.DB.prepare(
+    `SELECT 1 FROM submission_participants sp JOIN contacts c ON c.id = sp.contact_id
+     WHERE sp.submission_id = ? AND lower(c.email) = lower(?)`,
+  )
+    .bind(submission.id, email)
+    .first();
+  if (dup) return fail('That person is already a participant on this submission.');
+
+  const posRow = await c.env.DB.prepare(
+    'SELECT COALESCE(MAX(position), -1) AS max_position FROM submission_participants WHERE submission_id = ?',
+  )
+    .bind(submission.id)
+    .first<{ max_position: number }>();
+  const nextPosition = (posRow?.max_position ?? -1) + 1;
+
+  const ts = new Date().toISOString();
+  // Snapshot-before-change ordering (evaluation.ts's admin add route): the
+  // revision has to read the roster BEFORE this participant lands on it.
+  const snapshotStmt = await snapshotParticipantsRevision(c.env.DB, {
+    eventId: ctx.event.id,
+    submissionId: submission.id,
+    editedBy: ctx.contactId,
+    editedByName: displayName(ctx.contact),
+    editedAt: ts,
+    source: 'portal',
+  });
+  const participantStmts = buildPortalParticipantStatements(c.env.DB, {
+    eventId: ctx.event.id,
+    submissionId: submission.id,
+    email,
+    firstName,
+    lastName,
+    role,
+    position: nextPosition,
+    ts,
+    own: false,
+  });
+  await c.env.DB.batch([snapshotStmt, ...participantStmts]);
+  await bumpEventRevision(c.env, ctx.event.id);
+  return c.redirect(`${editUrl}?m=${encodeURIComponent('Co-author added.')}`);
+});
+
+// POST /:slug/submissions/:id/edit/participants/:pid/remove — the other half
+// of ABS-11. A participant can never remove the submission's primary
+// contact or their own row this way (that is what Withdraw is for), and the
+// tenancy subquery keeps a foreign event's participant id from resolving
+// here at all (evaluation.ts's organiser DELETE route uses the same guard).
+portalRoutes.post('/:slug/submissions/:id/edit/participants/:pid/remove', async (c) => {
+  const ctx = await loadPortalCtx(c);
+  if (ctx instanceof Response) return ctx;
+  const base = `/portal/${ctx.event.slug}`;
+  const id = c.req.param('id');
+  const pid = c.req.param('pid');
+  const editUrl = `${base}/submissions/${id}/edit`;
+  const target = await resolveEditTarget(c, ctx, id);
+  if (target instanceof Response) return target;
+  const { submission } = target;
+
+  // No-write pre-check, same shape as the add route: a row that is the
+  // primary contact, the acting speaker's own membership, or simply not
+  // found/foreign is refused before any statement is built, rather than
+  // batching a snapshot for a delete that will not happen.
+  const removable = await c.env.DB.prepare(
+    `SELECT sp.id FROM submission_participants sp
+     JOIN submissions s ON s.id = sp.submission_id
+     WHERE sp.id = ? AND sp.submission_id = ? AND sp.is_primary_contact = 0 AND sp.contact_id != ?
+       AND s.event_id = ?`,
+  )
+    .bind(pid, submission.id, ctx.contactId, ctx.event.id)
+    .first();
+  if (!removable) {
+    return c.redirect(`${editUrl}?m=${encodeURIComponent('!That participant could not be removed.')}`);
+  }
+
+  const ts = new Date().toISOString();
+  const snapshotStmt = await snapshotParticipantsRevision(c.env.DB, {
+    eventId: ctx.event.id,
+    submissionId: submission.id,
+    editedBy: ctx.contactId,
+    editedByName: displayName(ctx.contact),
+    editedAt: ts,
+    source: 'portal',
+  });
+  const deleteStmt = c.env.DB.prepare(
+    `DELETE FROM submission_participants
+     WHERE id = ? AND submission_id = ? AND is_primary_contact = 0 AND contact_id != ?
+       AND submission_id IN (SELECT id FROM submissions WHERE event_id = ?)`,
+  ).bind(pid, submission.id, ctx.contactId, ctx.event.id);
+
+  const results = await c.env.DB.batch([snapshotStmt, deleteStmt]);
+  const deleteResult = results[1] as D1Result<unknown> | undefined;
+  if (!deleteResult || deleteResult.meta.changes === 0) {
+    return c.redirect(`${editUrl}?m=${encodeURIComponent('!That participant could not be removed.')}`);
+  }
+  await bumpEventRevision(c.env, ctx.event.id);
+  return c.redirect(`${editUrl}?m=${encodeURIComponent('Participant removed.')}`);
 });
 
 // ---------------------------------------------------------------------------

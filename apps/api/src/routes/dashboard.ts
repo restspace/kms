@@ -118,6 +118,9 @@ export async function speakerTracking(
                 WHERE fa.event_id = ?1 AND u.is_current = 1
                   AND u.file_request_id != ('file-request-headshots-' || ?1)
                 GROUP BY u.contact_id) up ON up.contact_id = c.id
+     -- This is the submission-participant confirmation signal, unrelated to
+     -- CRM's hand-set event_contacts.speaker_status (SPK-04): that is a
+     -- separate, organiser-declared fact and is deliberately not read here.
      LEFT JOIN (SELECT DISTINCT sp2.contact_id
                 FROM submission_participants sp2
                 JOIN submissions s2 ON s2.id = sp2.submission_id

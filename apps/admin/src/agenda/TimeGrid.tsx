@@ -2,7 +2,14 @@ import { useEffect, useRef, useState } from 'react'
 import type { AgendaSessionRow } from '../api'
 import { getDrag, setDrag } from './dragState'
 import { navigate } from '../router'
-import { classifySchedule, durationMinutes, fmtMinutes, snapTo, utcToLocal } from './timeUtils'
+import {
+  AGENDA_SLOT_STEP_MIN,
+  classifySchedule,
+  durationMinutes,
+  fmtMinutes,
+  snapTo,
+  utcToLocal,
+} from './timeUtils'
 
 /**
  * Vertical time grid (docs/07 §2): Day view (columns = rooms or tracks) and
@@ -11,7 +18,7 @@ import { classifySchedule, durationMinutes, fmtMinutes, snapTo, utcToLocal } fro
  * conflict — dropping is still allowed, the session just gets flagged.
  */
 
-export const DROP_SNAP_MIN = 15
+export const DROP_SNAP_MIN = AGENDA_SLOT_STEP_MIN
 export const RESIZE_SNAP_MIN = 5
 
 export interface GridColumn {

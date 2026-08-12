@@ -252,6 +252,50 @@ export function ConfirmationChipsFilter({ filters, setFilters }: DataListFilterP
   )
 }
 
+/** SPK-04 built-in speaker_status vocabulary, in chip display order. */
+const SPEAKER_STATUS_BUILTIN_CHIPS: ReadonlyArray<{ key: string; label: string }> = [
+  { key: 'prospect', label: 'Prospect' },
+  { key: 'invited', label: 'Invited' },
+  { key: 'awaiting_reply', label: 'Awaiting reply' },
+  { key: 'confirmed', label: 'Confirmed' },
+  { key: 'declined', label: 'Declined' },
+]
+
+/**
+ * Roster filter for the Speakers tab's settable `speaker_status` column
+ * (SPK-04): the five built-in statuses plus this event's custom options
+ * (`filterProps={{ options }}`, fetched once alongside contactFields — see
+ * buildWorkspaceConfig), or "All" (no filter). Supersedes ConfirmationChipsFilter
+ * on the Speakers tab; that component stays exported for anywhere still
+ * reading the older `confirmation` column.
+ */
+export function SpeakerStatusChipsFilter({
+  filters,
+  setFilters,
+  options = [],
+}: DataListFilterProps<Record<string, string>> & { options?: Array<{ key: string; label: string }> }) {
+  const active = filters.speaker_status ?? ''
+  const choose = (value: string) => setFilters((prev) => ({ ...prev, speaker_status: value }))
+  const chips = [...SPEAKER_STATUS_BUILTIN_CHIPS, ...options]
+  return (
+    <div className="chip-filter" role="group" aria-label="Speaker status filter">
+      <button className={active === '' ? 'active' : ''} aria-pressed={active === ''} onClick={() => choose('')}>
+        All
+      </button>
+      {chips.map((chip) => (
+        <button
+          key={chip.key}
+          className={active === chip.key ? 'active' : ''}
+          aria-pressed={active === chip.key}
+          onClick={() => choose(chip.key)}
+        >
+          {chip.label}
+        </button>
+      ))}
+    </div>
+  )
+}
+
 /**
  * CRM-02: a debounced text box for one server-side substring filter
  * (`company` / `job_title`). Typing must not fire a query per keystroke, and
@@ -327,17 +371,21 @@ export function ContactsFilter({
   setFilters,
   orgMode = false,
   events = [],
+  statusOptions = [],
 }: DataListFilterProps<Record<string, unknown>> & {
   orgMode?: boolean
   events?: Array<{ id: string; name: string }>
+  /** SPK-04: this event's custom speaker_status options for the chips row. */
+  statusOptions?: Array<{ key: string; label: string }>
 }) {
   return (
     <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 6 }}>
       {!orgMode && (
-        <ConfirmationChipsFilter
+        <SpeakerStatusChipsFilter
           filters={filters as Record<string, string>}
           setFilters={setFilters as DataListFilterProps<Record<string, string>>['setFilters']}
-          resetFilters={() => setFilters((prev) => ({ ...prev, confirmation: '' }))}
+          resetFilters={() => setFilters((prev) => ({ ...prev, speaker_status: '' }))}
+          options={statusOptions}
         />
       )}
       <TextFilterInput label="Company" filterKey="company" filters={filters} setFilters={setFilters} />

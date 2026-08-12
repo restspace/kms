@@ -23,6 +23,7 @@ import {
 } from '../revision';
 import { loadAuthorName } from '../submissionComments';
 import { createSessionToken, getRevalidatedPrivilegedSession, setSessionCookie, type SessionPayload } from '../session';
+import { hashPassword, MIN_PASSWORD_LENGTH } from '../password';
 import { IMAGE_TYPES, MAX_HEADSHOT_BYTES, saveFile } from '../filestore';
 import { appendUploadVersion } from '../fileVersions';
 import { formsAdminRoutes } from './formsAdmin';
@@ -272,7 +273,18 @@ const RESOURCE_SPECS: Record<string, Omit<ResourceDef, 'fromSql'>> = {
            WHEN EXISTS (SELECT 1 FROM submission_participants sp JOIN submissions s ON s.id = sp.submission_id
                          WHERE sp.contact_id = c.id AND s.event_id = ec.event_id) THEN 'awaiting'
            ELSE NULL
-         END) AS confirmation`,
+         END) AS confirmation,
+        -- SPK-04: the settable speaker workflow status. ec.speaker_status wins
+        -- when set; otherwise this derives the same confirmed/awaiting_reply
+        -- read the (published, untouched) confirmation column above already
+        -- computes, just under the new vocabulary's spelling.
+        COALESCE(ec.speaker_status, CASE
+           WHEN EXISTS (SELECT 1 FROM submission_participants sp JOIN submissions s ON s.id = sp.submission_id
+                         WHERE sp.contact_id = c.id AND s.event_id = ec.event_id AND sp.confirmed_at IS NOT NULL) THEN 'confirmed'
+           WHEN EXISTS (SELECT 1 FROM submission_participants sp JOIN submissions s ON s.id = sp.submission_id
+                         WHERE sp.contact_id = c.id AND s.event_id = ec.event_id) THEN 'awaiting_reply'
+           ELSE NULL
+         END) AS speaker_status`,
     eventExpr: 'ec.event_id',
     idExpr: 'c.id',
     defaultCursorSort: { field: 'last_name', direction: 'asc' },
@@ -357,6 +369,46 @@ const RESOURCE_SPECS: Record<string, Omit<ResourceDef, 'fromSql'>> = {
               params: [],
             }
           : null,
+      // CRM-09: a saved segment narrows the roster to its membership — dynamic
+      // segments re-derive that membership from the frozen filter object at
+      // save time (member_ids), so the read side never has to re-run the
+      // original filter query.
+      segment_id: (value) => {
+        const v = asText(value);
+        if (v === null) return null;
+        return {
+          sql: `c.id IN (SELECT je.value FROM contact_segments cs, json_each(COALESCE(cs.member_ids,'[]')) je WHERE cs.id = ? AND cs.event_id = ec.event_id)`,
+          params: [v],
+        };
+      },
+      // CRM-09: the explicit-id-list counterpart to segment_id, used directly
+      // by the "save segment" flow to preview a curated segment before it is
+      // persisted (and by the segment's own POST/PUT to snapshot membership).
+      contact_ids: (value) => {
+        if (!Array.isArray(value)) return null;
+        const ids = value.filter((x): x is string => typeof x === 'string').slice(0, 500);
+        if (ids.length === 0) return null;
+        return { sql: `c.id IN (${ids.map(() => '?').join(', ')})`, params: ids };
+      },
+      // SPK-04: filters on the same COALESCE(ec.speaker_status, derived) read
+      // as the `speaker_status` column above, so an explicit status always
+      // beats the derivation and an unset one still falls back to it. No
+      // vocabulary check here (unlike the write path) — an unrecognised value
+      // is simply a filter nothing matches, same as any other exact filter.
+      speaker_status: (value) => {
+        const v = asText(value);
+        if (v === null || v.length === 0 || v.length > 40) return null;
+        return {
+          sql: `COALESCE(ec.speaker_status, CASE
+                  WHEN EXISTS (SELECT 1 FROM submission_participants sp JOIN submissions s ON s.id = sp.submission_id
+                                WHERE sp.contact_id = c.id AND s.event_id = ec.event_id AND sp.confirmed_at IS NOT NULL) THEN 'confirmed'
+                  WHEN EXISTS (SELECT 1 FROM submission_participants sp JOIN submissions s ON s.id = sp.submission_id
+                                WHERE sp.contact_id = c.id AND s.event_id = ec.event_id) THEN 'awaiting_reply'
+                  ELSE NULL
+                END) = ?`,
+          params: [v],
+        };
+      },
     },
     filterDocs: {
       q: 'Free-text match over first name, last name, email and company.',
@@ -373,6 +425,10 @@ const RESOURCE_SPECS: Record<string, Omit<ResourceDef, 'fromSql'>> = {
         "confirmed → has a submission_participants row with confirmed_at set. awaiting → is a participant somewhere but none of those rows are confirmed. Not a participant at all is neither (its `confirmation` column reads null) and this filter never matches it.",
       missing_assets:
         'true → accepted speakers missing a biography or headshot (the programme-completeness list).',
+      segment_id: 'Members of this saved segment (CRM-09), by id.',
+      contact_ids: 'Exactly these contact ids (up to 500) — an explicit-list filter, e.g. previewing a curated segment before saving it.',
+      speaker_status:
+        "Exact speaker_status (SPK-04): a hand-set value on the roster row, or when unset the same confirmed/awaiting_reply derivation the `speaker_status` column reads. No vocabulary check — an unrecognised value just matches nothing.",
     },
   },
 
@@ -393,8 +449,21 @@ const RESOURCE_SPECS: Record<string, Omit<ResourceDef, 'fromSql'>> = {
                 -- 0012 a submission can sit in a round it was never routed to,
                 -- and filtering on that column blanked the Ratings column for
                 -- exactly those (reviews recorded, nothing shown).
-                (SELECT ROUND(AVG(r.weighted_total), 2) FROM reviews r
-                 WHERE r.submission_id = s.id) AS rating,
+                --
+                -- Rating normalization: a raw AVG(weighted_total) pools rounds
+                -- on different scoring_scale_min/max as if they were the same
+                -- unit — a 9/10 and a 4/5 are both "near the top" but pool to
+                -- a meaningless 6.5. Each plan's mean is first mapped onto a
+                -- common 1-5 display scale (1 + (avg - min) * 4 / (max - min)),
+                -- then those normalized per-plan means are themselves averaged.
+                -- For the common case of a single 1-5 plan this is numerically
+                -- identical to the old raw average: 1 + (avg - 1) * 4 / 4 = avg.
+                (SELECT ROUND(AVG(plan_avg), 2) FROM (
+                   SELECT 1 + (AVG(r.weighted_total) - p.scoring_scale_min) * 4.0
+                            / (p.scoring_scale_max - p.scoring_scale_min) AS plan_avg
+                   FROM reviews r JOIN evaluation_plans p ON p.id = r.plan_id
+                   WHERE r.submission_id = s.id AND r.weighted_total IS NOT NULL
+                   GROUP BY r.plan_id)) AS rating,
                 (SELECT COUNT(*) FROM reviews r
                  WHERE r.submission_id = s.id) AS review_count`,
     sortable: {
@@ -418,7 +487,15 @@ const RESOURCE_SPECS: Record<string, Omit<ResourceDef, 'fromSql'>> = {
       // legacy `evaluation_plan_id` one, keeps the sort in step with the
       // `rating` column above for submissions scored in a round they were
       // never routed to; no cache entry (never scored) still sorts as NULL.
-      rating: `(SELECT AVG(je.value) FROM json_each(COALESCE(s.rating_cache, '{}')) je)`,
+      //
+      // Each cached value is a raw plan-scale mean, so it is normalized onto
+      // the same 1-5 display scale as the `rating` column above before being
+      // averaged — otherwise a submission scored only in a 0-10 round would
+      // sort as if it scored ~2x a submission scored in a 1-5 round. A
+      // single-plan 1-5 event is numerically unchanged (see comment above).
+      rating: `(SELECT AVG(1 + (je.value - p.scoring_scale_min) * 4.0 / (p.scoring_scale_max - p.scoring_scale_min))
+                FROM json_each(COALESCE(s.rating_cache, '{}')) je
+                JOIN evaluation_plans p ON p.id = je.key)`,
     },
     defaultSort: 's.created_at DESC',
     filters: {
@@ -1295,7 +1372,7 @@ adminApiRoutes.get('/:resource/export', async (c) => {
 // strips it from every speaker-facing read.
 const CONTACT_FIELDS = [
   'email', 'first_name', 'last_name', 'company', 'job_title',
-  'mobile_phone', 'biography', 'pronouns', 'notes',
+  'mobile_phone', 'biography', 'pronouns', 'notes', 'speaker_status',
 ] as const;
 
 // 0015 split the speaker form across two tables: identity (email, names,
@@ -1303,15 +1380,17 @@ const CONTACT_FIELDS = [
 // the person appears in, while these five are this event's own answer and live
 // on its `event_contacts` row. Every write below routes its columns through
 // splitContactFields so neither table is handed a column it no longer has.
+// speaker_status (SPK-04) joins them: it is also an event_contacts column.
 const CONTACT_PROFILE_FIELDS: readonly string[] = [
-  'biography', 'headshot_asset_id', 'company', 'job_title', 'notes',
+  'biography', 'headshot_asset_id', 'company', 'job_title', 'notes', 'speaker_status',
 ];
 
 // Wave E (workplan 14, D8): the profile fields whose pre-edit values are
 // snapshotted into content_revisions (entity_type 'contact'). `notes` is
 // organiser-only scratch and `headshot_asset_id` is a pointer, not content —
-// neither is history the way a rewritten biography is.
-const CONTACT_REVISION_FIELDS: readonly string[] = ['biography', 'company', 'job_title'];
+// neither is history the way a rewritten biography is. speaker_status (SPK-04)
+// is a hand-set fact worth the same "what did it used to say" trail.
+const CONTACT_REVISION_FIELDS: readonly string[] = ['biography', 'company', 'job_title', 'speaker_status'];
 
 /** A pickContactFields() result split into the two tables' column maps. */
 function splitContactFields(fields: Record<string, string | null>): {
@@ -1363,6 +1442,20 @@ function pickContactFields(raw: unknown): Record<string, string | null> {
   return out;
 }
 
+// SPK-04: the built-in speaker_status vocabulary. An event can extend it with
+// its own speaker_status_options rows (validateSpeakerStatus checks both).
+const SPEAKER_STATUS_BUILTINS = new Set(['prospect', 'invited', 'awaiting_reply', 'confirmed', 'declined']);
+
+/** True when `value` is a built-in speaker_status or one of this event's custom options. Null/undefined is not validated here — pickContactFields already turned "" into null, and a null write means "unset", which is always allowed. */
+async function isValidSpeakerStatus(db: D1Database, eventId: string, value: string): Promise<boolean> {
+  if (SPEAKER_STATUS_BUILTINS.has(value)) return true;
+  const row = await db
+    .prepare('SELECT 1 AS ok FROM speaker_status_options WHERE event_id = ? AND key = ?')
+    .bind(eventId, value)
+    .first();
+  return !!row;
+}
+
 /**
  * F13: the contacts UNIQUE (org_id, lower(email)) violation is caught by
  * matching the D1 error text, not a pre-check — so the offending row's id has
@@ -1390,6 +1483,9 @@ adminApiRoutes.post('/contacts', async (c) => {
   const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
   const fields = pickContactFields(body);
   if (!fields.email) return c.json({ error: 'email_required' }, 400);
+  if (fields.speaker_status && !(await isValidSpeakerStatus(db, session.eventId, fields.speaker_status))) {
+    return c.json({ error: 'invalid_speaker_status' }, 400);
+  }
   const { identity, profile } = splitContactFields(fields);
 
   // Org-level creation (the contact directory's "+ New", where no event is
@@ -1531,6 +1627,10 @@ adminApiRoutes.put('/contacts/:id', async (c) => {
     eventId = body.event_id;
   }
 
+  if (fields.speaker_status && !(await isValidSpeakerStatus(c.env.DB, eventId, fields.speaker_status))) {
+    return c.json({ error: 'invalid_speaker_status' }, 400);
+  }
+
   // Custom-field writes need the contact to be on this event's roster even when
   // no fixed field changed (the UPDATEs below would otherwise be skipped, and
   // with them the only check that the id belongs to this event). The join to
@@ -1565,7 +1665,7 @@ adminApiRoutes.put('/contacts/:id', async (c) => {
   // "reverted".
   if (CONTACT_REVISION_FIELDS.some((k) => k in profile)) {
     const before = await c.env.DB.prepare(
-      'SELECT biography, company, job_title FROM event_contacts WHERE event_id = ? AND contact_id = ?',
+      'SELECT biography, company, job_title, speaker_status FROM event_contacts WHERE event_id = ? AND contact_id = ?',
     )
       .bind(eventId, id)
       .first<Record<string, string | null>>();
@@ -1579,6 +1679,7 @@ adminApiRoutes.put('/contacts/:id', async (c) => {
             biography: before.biography,
             company: before.company,
             job_title: before.job_title,
+            speaker_status: before.speaker_status,
           },
           editedBy: session.contactId,
           editedByName: await loadAuthorName(c.env.DB, session.contactId),
@@ -1979,6 +2080,50 @@ adminApiRoutes.get('/contacts/:id/revisions', async (c) => {
   if (!onRoster) return c.json({ error: 'not_found' }, 404);
 
   return c.json({ items: await listEntityRevisions(c.env.DB, eventId, 'contact', id) });
+});
+
+// PUT /contacts/:id/password — staff set a password for someone on this
+// event's roster (support path: a speaker who cannot receive mail). Writer
+// seats only, and it writes the ACTIVE pair directly — an organiser saying so
+// is the proof of identity here, so there is nothing to confirm by email; any
+// pending sign-up of theirs is discarded in the same statement.
+adminApiRoutes.put('/contacts/:id/password', async (c) => {
+  const session = c.get('session');
+  if (!isWriter(session.role)) return c.json({ error: 'forbidden' }, 403);
+  const id = c.req.param('id');
+
+  const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+  const password = typeof body.password === 'string' ? body.password : '';
+  if (password.length < MIN_PASSWORD_LENGTH) return c.json({ error: 'password_too_short' }, 400);
+
+  // Same roster join the other contact-scoped routes guard with: off-roster
+  // (or another org's) contact reads as absent.
+  const onRoster = await c.env.DB.prepare(
+    `SELECT c.id FROM contacts c
+       JOIN event_contacts ec ON ec.contact_id = c.id AND ec.event_id = ?
+      WHERE c.id = ?`,
+  )
+    .bind(session.eventId, id)
+    .first();
+  if (!onRoster) return c.json({ error: 'not_found' }, 404);
+
+  const { hash, salt, iterations } = await hashPassword(password);
+  const ts = new Date().toISOString();
+  await c.env.DB.prepare(
+    `INSERT INTO auth_credentials (contact_id, password_hash, salt, iterations, algo, set_at, created_at)
+     VALUES (?1, ?2, ?3, ?4, 'pbkdf2-sha256', ?5, ?5)
+     ON CONFLICT (contact_id) DO UPDATE SET
+       password_hash = excluded.password_hash,
+       salt          = excluded.salt,
+       iterations    = excluded.iterations,
+       set_at        = excluded.set_at,
+       pending_hash  = NULL,
+       pending_salt  = NULL`,
+  )
+    .bind(id, hash, salt, iterations, ts)
+    .run();
+
+  return c.json({ ok: true });
 });
 
 // DELETE /contacts/:id/org — destroy the PERSON, as opposed to DELETE
@@ -2383,6 +2528,18 @@ adminApiRoutes.post('/contacts/:id/merge', async (c) => {
                        WHERE w.event_id = event_users.event_id AND w.contact_id = ?2)`,
     ).bind(loserId, winnerId),
     db.prepare('UPDATE event_users SET contact_id = ?2 WHERE contact_id = ?1').bind(loserId, winnerId),
+  );
+
+  // auth_credentials — PRIMARY KEY (contact_id) (0032). The winner's own
+  // password wins: dropping the loser's row is the only safe resolution, since
+  // there is no meaningful way to "merge" two hashes.
+  statements.push(
+    db.prepare(
+      `DELETE FROM auth_credentials
+        WHERE contact_id = ?1
+          AND EXISTS (SELECT 1 FROM auth_credentials w WHERE w.contact_id = ?2)`,
+    ).bind(loserId, winnerId),
+    db.prepare('UPDATE auth_credentials SET contact_id = ?2 WHERE contact_id = ?1').bind(loserId, winnerId),
   );
 
   // contact_tags — PRIMARY KEY (contact_id, tag_id).
@@ -3230,6 +3387,129 @@ adminApiRoutes.delete('/tracks/:id', async (c) => {
 });
 
 // ---------------------------------------------------------------------------
+// Saved Speaker-roster segments (CRM-09). Mirrors the rooms/tracks CRUD shape
+// above. Segments never surface in the portal, embed or dashboard caches —
+// they are a workspace-only view over the roster — so writes here do NOT call
+// bumpEventRevision.
+// ---------------------------------------------------------------------------
+
+const SEGMENT_NAME_MAX_CHARS = 120;
+const SEGMENT_KINDS = new Set(['dynamic', 'curated']);
+const SEGMENT_MEMBER_IDS_MAX = 500;
+
+interface SegmentFields {
+  values: {
+    name?: string;
+    kind?: string;
+    filters?: string | null;
+    member_ids?: string | null;
+  };
+  error?: string;
+}
+
+function pickSegmentFields(raw: unknown, { requireName }: { requireName: boolean }): SegmentFields {
+  const body = (raw ?? {}) as Record<string, unknown>;
+  const values: SegmentFields['values'] = {};
+  const fail = (error: string): SegmentFields => ({ values: {}, error });
+
+  if (requireName || 'name' in body) {
+    const name = typeof body.name === 'string' ? body.name.trim() : '';
+    if (!name || name.length > SEGMENT_NAME_MAX_CHARS) return fail('name_required');
+    values.name = name;
+  }
+  if (requireName || 'kind' in body) {
+    const kind = typeof body.kind === 'string' ? body.kind : 'dynamic';
+    if (!SEGMENT_KINDS.has(kind)) return fail('invalid_kind');
+    values.kind = kind;
+  }
+  if ('filters' in body) {
+    const v = body.filters;
+    if (v === null || v === undefined) values.filters = null;
+    else if (typeof v === 'object' && !Array.isArray(v)) values.filters = JSON.stringify(v);
+    else return fail('invalid_filters');
+  }
+  if ('member_ids' in body) {
+    const v = body.member_ids;
+    if (v === null || v === undefined) values.member_ids = null;
+    else if (
+      Array.isArray(v) &&
+      v.length <= SEGMENT_MEMBER_IDS_MAX &&
+      v.every((x) => typeof x === 'string')
+    ) {
+      values.member_ids = JSON.stringify(v);
+    } else return fail('invalid_member_ids');
+  }
+  return { values };
+}
+
+const segmentRow = (db: D1Database, id: string, eventId: string) =>
+  db.prepare(
+    'SELECT id, event_id, name, kind, filters, member_ids, created_by, created_at, updated_at FROM contact_segments WHERE id = ? AND event_id = ?',
+  )
+    .bind(id, eventId)
+    .first();
+
+// GET /app/api/contact-segments — the event's saved segments, name order.
+adminApiRoutes.get('/contact-segments', async (c) => {
+  const session = c.get('session');
+  const { results } = await c.env.DB.prepare(
+    'SELECT id, event_id, name, kind, filters, member_ids, created_by, created_at, updated_at FROM contact_segments WHERE event_id = ? ORDER BY name',
+  )
+    .bind(session.eventId)
+    .all();
+  return c.json({ items: results });
+});
+
+adminApiRoutes.post('/contact-segments', async (c) => {
+  const session = c.get('session');
+  if (!isWriter(session.role)) return c.json({ error: 'forbidden' }, 403);
+  const { values, error } = pickSegmentFields(await c.req.json().catch(() => ({})), { requireName: true });
+  if (error) return c.json({ error }, 400);
+
+  const id = crypto.randomUUID();
+  const ts = new Date().toISOString();
+  await c.env.DB.prepare(
+    `INSERT INTO contact_segments (id, event_id, name, kind, filters, member_ids, created_by, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  )
+    .bind(id, session.eventId, values.name, values.kind ?? 'dynamic', values.filters ?? null, values.member_ids ?? null, session.contactId, ts, ts)
+    .run();
+  return c.json(await segmentRow(c.env.DB, id, session.eventId), 201);
+});
+
+adminApiRoutes.put('/contact-segments/:id', async (c) => {
+  const session = c.get('session');
+  if (!isWriter(session.role)) return c.json({ error: 'forbidden' }, 403);
+  const id = c.req.param('id');
+  const { values, error } = pickSegmentFields(await c.req.json().catch(() => ({})), { requireName: false });
+  if (error) return c.json({ error }, 400);
+
+  const cols = Object.keys(values);
+  if (cols.length > 0) {
+    const result = await c.env.DB.prepare(
+      `UPDATE contact_segments SET ${cols.map((k) => `${k} = ?`).join(', ')}, updated_at = ? WHERE id = ? AND event_id = ?`,
+    )
+      .bind(...cols.map((k) => (values as Record<string, unknown>)[k]), new Date().toISOString(), id, session.eventId)
+      .run();
+    if (result.meta.changes === 0) return c.json({ error: 'not_found' }, 404);
+  }
+  const row = await segmentRow(c.env.DB, id, session.eventId);
+  if (!row) return c.json({ error: 'not_found' }, 404);
+  return c.json(row);
+});
+
+adminApiRoutes.delete('/contact-segments/:id', async (c) => {
+  const session = c.get('session');
+  if (!isWriter(session.role)) return c.json({ error: 'forbidden' }, 403);
+  const id = c.req.param('id');
+  const result = await c.env.DB.prepare('DELETE FROM contact_segments WHERE id = ? AND event_id = ?')
+    .bind(id, session.eventId)
+    .run();
+  if (result.meta.changes === 0) return c.json({ error: 'not_found' }, 404);
+  return c.json({ ok: true });
+});
+
+// ---------------------------------------------------------------------------
 // Contact custom fields (SPK-15): per-event field definitions for the
 // Speakers tab (settings-card CRUD), plus the values store the contacts
 // endpoints below read/write. Mirrors the rooms/tracks CRUD shape above —
@@ -3437,7 +3717,7 @@ async function contactWithCustomFields(
   return db
     .prepare(
       `SELECT c.*, ec.event_id, ec.biography, ec.headshot_asset_id, ec.company,
-              ec.job_title, ec.notes, ec.added_at, ec.source, ec.extra,
+              ec.job_title, ec.notes, ec.added_at, ec.source, ec.extra, ec.speaker_status,
         (SELECT json_group_object(d.key, v.value) FROM contact_field_values v
          JOIN contact_field_definitions d ON d.id = v.field_id
          WHERE v.contact_id = c.id AND d.event_id = ec.event_id) AS custom_fields_json
@@ -3448,6 +3728,109 @@ async function contactWithCustomFields(
     .bind(eventId, id)
     .first();
 }
+
+// ---------------------------------------------------------------------------
+// Speaker-status options (SPK-04): per-event extensions to the built-in
+// speaker_status vocabulary (SPEAKER_STATUS_BUILTINS above). Mirrors the
+// rooms/tracks CRUD shape — auto position on create, key derived from the
+// label and immutable thereafter (only the label can be renamed; the key is
+// what's actually stored on event_contacts.speaker_status and read back by
+// isValidSpeakerStatus).
+// ---------------------------------------------------------------------------
+
+const SPEAKER_STATUS_LABEL_MAX_CHARS = 60;
+
+function slugifyStatusKey(label: string): string {
+  return label
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 40);
+}
+
+interface SpeakerStatusOptionFields {
+  values: { label?: string };
+  error?: string;
+}
+
+function pickSpeakerStatusOptionFields(raw: unknown): SpeakerStatusOptionFields {
+  const body = (raw ?? {}) as Record<string, unknown>;
+  const label = typeof body.label === 'string' ? body.label.trim() : '';
+  if (!label) return { values: {}, error: 'label_required' };
+  return { values: { label: label.slice(0, SPEAKER_STATUS_LABEL_MAX_CHARS) } };
+}
+
+const speakerStatusOptionRow = (db: D1Database, id: string, eventId: string) =>
+  db
+    .prepare('SELECT id, event_id, key, label, position FROM speaker_status_options WHERE id = ? AND event_id = ?')
+    .bind(id, eventId)
+    .first();
+
+// GET /app/api/speaker-statuses — the event's custom speaker_status options,
+// position order (the built-ins are not rows here; the client prepends them).
+adminApiRoutes.get('/speaker-statuses', async (c) => {
+  const session = c.get('session');
+  const { results } = await c.env.DB.prepare(
+    'SELECT id, event_id, key, label, position FROM speaker_status_options WHERE event_id = ? ORDER BY position',
+  )
+    .bind(session.eventId)
+    .all();
+  return c.json({ items: results });
+});
+
+adminApiRoutes.post('/speaker-statuses', async (c) => {
+  const session = c.get('session');
+  if (!isWriter(session.role)) return c.json({ error: 'forbidden' }, 403);
+  const { values, error } = pickSpeakerStatusOptionFields(await c.req.json().catch(() => ({})));
+  if (error) return c.json({ error }, 400);
+  const key = slugifyStatusKey(values.label!);
+  if (!key || SPEAKER_STATUS_BUILTINS.has(key)) return c.json({ error: 'invalid_label' }, 400);
+  const collision = await c.env.DB.prepare(
+    'SELECT 1 AS ok FROM speaker_status_options WHERE event_id = ? AND key = ?',
+  )
+    .bind(session.eventId, key)
+    .first();
+  if (collision) return c.json({ error: 'key_exists' }, 400);
+
+  const id = crypto.randomUUID();
+  await c.env.DB.prepare(
+    `INSERT INTO speaker_status_options (id, event_id, key, label, position)
+     SELECT ?1, ?2, ?3, ?4, COALESCE((SELECT MAX(position) + 1 FROM speaker_status_options WHERE event_id = ?2), 0)`,
+  )
+    .bind(id, session.eventId, key, values.label)
+    .run();
+  return c.json(await speakerStatusOptionRow(c.env.DB, id, session.eventId), 201);
+});
+
+adminApiRoutes.put('/speaker-statuses/:id', async (c) => {
+  const session = c.get('session');
+  if (!isWriter(session.role)) return c.json({ error: 'forbidden' }, 403);
+  const id = c.req.param('id');
+  const { values, error } = pickSpeakerStatusOptionFields(await c.req.json().catch(() => ({})));
+  if (error) return c.json({ error }, 400);
+
+  const result = await c.env.DB.prepare(
+    'UPDATE speaker_status_options SET label = ? WHERE id = ? AND event_id = ?',
+  )
+    .bind(values.label, id, session.eventId)
+    .run();
+  if (result.meta.changes === 0) return c.json({ error: 'not_found' }, 404);
+  return c.json(await speakerStatusOptionRow(c.env.DB, id, session.eventId));
+});
+
+adminApiRoutes.delete('/speaker-statuses/:id', async (c) => {
+  const session = c.get('session');
+  if (!isWriter(session.role)) return c.json({ error: 'forbidden' }, 403);
+  const id = c.req.param('id');
+  const result = await c.env.DB.prepare(
+    'DELETE FROM speaker_status_options WHERE id = ? AND event_id = ?',
+  )
+    .bind(id, session.eventId)
+    .run();
+  if (result.meta.changes === 0) return c.json({ error: 'not_found' }, 404);
+  return c.json({ ok: true });
+});
 
 // ---------------------------------------------------------------------------
 // Events: create (FR-EVT-1/2) + patch (agenda publish rides the same route)

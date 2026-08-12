@@ -13,15 +13,21 @@ import { getRevalidatedPrivilegedSession } from '../session';
 
 export const adminRoutes = new Hono<AppEnv>();
 
-function adminLoginPage(events: Event[]): string {
+/**
+ * The unauthenticated /app gate. `error` re-renders it after a failed
+ * POST /auth/login that carried surface=admin (auth.ts), so the password form
+ * reports "invalid email or password" in place rather than on the portal page.
+ */
+export function adminLoginPage(events: Event[], error?: string): string {
   const options = events
     .map((e) => `<option value="${esc(e.slug)}">${esc(e.name)}</option>`)
     .join('');
-  const eventField =
+  const eventField = (id: string) =>
     events.length === 0
       ? '<p class="muted">No events exist yet — seed the database first.</p>'
-      : `<label for="event_slug">Event</label>
-<select id="event_slug" name="event_slug" required>${options}</select>`;
+      : `<label for="${id}">Event</label>
+<select id="${id}" name="event_slug" required>${options}</select>`;
+  const errorHtml = error ? `<p class="field-err">${esc(error)}</p>` : '';
   return page(
     'Admin sign in',
     `<h1>Admin sign in</h1>
@@ -29,8 +35,19 @@ function adminLoginPage(events: Event[]): string {
 <form method="post" action="/auth/request">
   <label for="email">Email address</label>
   <input type="email" id="email" name="email" required autocomplete="email" placeholder="you@example.com">
-  ${eventField}
+  ${eventField('event_slug')}
   <button type="submit">Email me a sign-in link</button>
+</form>
+<h2>Or sign in with a password</h2>
+${errorHtml}
+<form method="post" action="/auth/login">
+  <label for="pw-email">Email address</label>
+  <input type="email" id="pw-email" name="email" required autocomplete="email" placeholder="you@example.com">
+  <label for="pw-password">Password</label>
+  <input type="password" id="pw-password" name="password" required autocomplete="current-password">
+  ${eventField('pw-event-slug')}
+  <input type="hidden" name="surface" value="admin">
+  <button type="submit">Sign in</button>
 </form>`,
   );
 }

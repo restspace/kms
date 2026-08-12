@@ -23,6 +23,7 @@ import {
   listContactFields,
   listRooms,
   queryContactsOrg,
+  listSpeakerStatuses,
   queryResource,
   searchOrgContacts,
   sendDecisions,
@@ -36,6 +37,7 @@ import {
   type MessageRow,
   type OrgContactRow,
   type RoomRow,
+  type SpeakerStatusOption,
   type SubmissionRow,
   type TaskAssignmentRow,
   getFileLibrary,
@@ -85,6 +87,7 @@ import {
   openContactPicker,
 } from './workspace/contactOrg'
 import { openDuplicatesPanel } from './workspace/contactMerge'
+import { openSaveSegmentPanel, openSegmentsPanel } from './workspace/segments'
 import { HeadshotUploadControl } from './workspace/headshotUpload'
 import { ContactProfileHistory } from './workspace/entityHistory'
 import { resolveTargetEventId } from './utils/importTarget'
@@ -254,6 +257,84 @@ const fmtDate = (iso: string | null | undefined): string => {
 
 const contactName = (c: ContactRow): string =>
   [c.first_name, c.last_name].filter(Boolean).join(' ') || c.email
+
+/** SPK-04 built-in speaker_status vocabulary, in select/chip display order —
+ * mirrors extras.tsx's SpeakerStatusChipsFilter list. */
+const SPEAKER_STATUS_BUILTIN_OPTIONS: ReadonlyArray<{ key: string; label: string }> = [
+  { key: 'prospect', label: 'Prospect' },
+  { key: 'invited', label: 'Invited' },
+  { key: 'awaiting_reply', label: 'Awaiting reply' },
+  { key: 'confirmed', label: 'Confirmed' },
+  { key: 'declined', label: 'Declined' },
+]
+
+/** SPK-04: display label for a speaker_status key that isn't one of the
+ * chip-styled built-ins the roster column special-cases (confirmed/declined)
+ * — a built-in's own label, a matching custom option's label, or else the
+ * key itself, underscores turned to spaces and title-cased. */
+function speakerStatusLabel(key: string, options: SpeakerStatusOption[]): string {
+  const builtin = SPEAKER_STATUS_BUILTIN_OPTIONS.find((o) => o.key === key)
+  if (builtin) return builtin.label
+  const custom = options.find((o) => o.key === key)
+  if (custom) return custom.label
+  return key
+    .split('_')
+    .filter(Boolean)
+    .map((word) => word[0]!.toUpperCase() + word.slice(1))
+    .join(' ')
+}
+
+/** SPK-04: the speaker_status <select>, mirroring HeadshotUploadControl's
+ * "outside the generic RecordForm schema, persists immediately" pattern —
+ * RecordForm has no notion of a select whose options are partly server-
+ * extensible (this event's speaker_status_options). */
+function SpeakerStatusControl({
+  item,
+  options,
+  onUpdated,
+}: {
+  item: ContactRow
+  options: SpeakerStatusOption[]
+  onUpdated: (speakerStatus: string | null) => void
+}) {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const onChange = async (value: string) => {
+    setBusy(true)
+    setError(null)
+    try {
+      // F7 (same reasoning as HeadshotUploadControl): the row's own
+      // event_id, so a panel opened from another accessible event's row
+      // (All-events grid) writes THAT event's membership row, not the
+      // session event's.
+      await updateContact(item.id, { speaker_status: value || null, event_id: item.event_id })
+      onUpdated(value || null)
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'The status could not be saved.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="speaker-status-control">
+      <label>
+        Status{' '}
+        <select value={item.speaker_status ?? ''} disabled={busy} onChange={(e) => void onChange(e.currentTarget.value)}>
+          <option value="">—</option>
+          {SPEAKER_STATUS_BUILTIN_OPTIONS.map((o) => (
+            <option key={o.key} value={o.key}>{o.label}</option>
+          ))}
+          {options.map((o) => (
+            <option key={o.id} value={o.key}>{o.label}</option>
+          ))}
+        </select>
+      </label>
+      {error && <span className="settings-error" role="alert">{error}</span>}
+    </div>
+  )
+}
 
 /**
  * Contacts-hygiene item 4: `POST /submit/:slug/:formId/account` (submit.tsx)
@@ -892,6 +973,7 @@ export function buildWorkspaceConfig(
   /** CRM-01: the org's accessible events, for the directory's Events filter.
    * Optional so existing callers (and App.filesOpenDetails.test) are unchanged. */
   accessibleEvents: Array<{ id: string; name: string }> = [],
+  speakerStatusOptions: SpeakerStatusOption[] = [],
 ): Record<string, TabConfig> {
   // CRM-01: "All events" turns the Speakers tab into the org contact directory.
   const orgMode = eventFilterId === null
@@ -999,6 +1081,31 @@ export function buildWorkspaceConfig(
     },
   }
 
+  /**
+   * CRM-09: freeze the roster's checked rows (curated) or its live filters
+   * (dynamic) as a named segment. `ctx.filters` is the same live query the
+   * export buttons build their URL from (DataListToolbarAction's doc
+   * comment) — exactly the filter object a dynamic segment should replay.
+   */
+  const saveSegmentAction = {
+    id: 'save-segment',
+    label: '☆ SAVE SEGMENT',
+    title: 'Save the checked rows, or the current filters, as a named segment',
+    onClick: ({ filters, checkedIds }: { filters: Record<string, unknown>; checkedIds: string[] }) => {
+      openSaveSegmentPanel({ filters, checkedIds })
+    },
+  }
+
+  /** CRM-09: browse/open/delete saved segments. */
+  const segmentsAction = {
+    id: 'segments',
+    label: '☰ SEGMENTS',
+    title: 'Open a saved segment or delete one',
+    onClick: () => {
+      openSegmentsPanel()
+    },
+  }
+
   /** Cross-event provenance column; hidden on mobile where width is scarce. */
   const eventColumn = { field: 'event_name', header: 'Event', width: '140px', sortable: false, mobileHidden: true }
   // SPK-15: the grid/detail item needs `cf__<key>` flat keys so a subsequent
@@ -1069,27 +1176,32 @@ export function buildWorkspaceConfig(
     dataSource: speakersDataSource,
     getItemId: (item) => item.id,
     getItemTitle: contactName,
-    // SPK-04: roster filter/column mirroring the dashboard's per-submission
-    // Confirmed/Awaiting split, but at the contact level (adminApi.ts's
-    // `confirmation` derived column — confirmed/awaiting/null, null covering
-    // both "not a participant" and the seed default before any filter chip
-    // is chosen).
+    // SPK-04: roster filter/column on the settable `speaker_status` column
+    // (adminApi.ts's COALESCE(ec.speaker_status, <confirmed/awaiting_reply
+    // derivation>) — a hand-set value wins, an unset one falls back to the
+    // same signal the old `confirmation` column read, just under the new
+    // vocabulary's spelling). ConfirmationChipsFilter/the `confirmation`
+    // column stay available (extras.tsx) for anywhere still reading that.
     // CRM-02: `company` / `job_title` are substring filters the contacts
     // resource understands in BOTH modes; `events` is org-only (a per-contact
     // membership tally, and a no-op server-side on the roster). They are
     // ordinary filter keys, so they AND with the header search box and ride
-    // the same seed/restore path as `confirmation`.
+    // the same seed/restore path as `speaker_status`.
     filterConfig: {
       initialFilters: {
-        confirmation: '',
+        speaker_status: '',
         company: '',
         job_title: '',
         ...(orgMode ? { events: '' } : {}),
         ...(seeds.speakers ?? {}),
       },
-      defaultFilters: { confirmation: '', company: '', job_title: '', ...(orgMode ? { events: '' } : {}) },
+      defaultFilters: { speaker_status: '', company: '', job_title: '', ...(orgMode ? { events: '' } : {}) },
       FilterComponent: ContactsFilter,
-      filterProps: { orgMode, events: accessibleEvents },
+      filterProps: {
+        orgMode,
+        events: accessibleEvents,
+        statusOptions: speakerStatusOptions.map((o) => ({ key: o.key, label: o.label })),
+      },
     },
     columns: [
       { field: 'first_name', header: 'First name', sortable: true },
@@ -1098,7 +1210,7 @@ export function buildWorkspaceConfig(
       { field: 'company', header: 'Company', sortable: true },
       { field: 'job_title', header: 'Job title', mobileHidden: true },
       // Org mode answers "how many of our events is this person on", which is
-      // the directory's whole point; `confirmation` and `event_name` are
+      // the directory's whole point; `speaker_status` and `event_name` are
       // per-event columns that read null on every row there, so they go.
       ...(orgMode
         ? [
@@ -1122,15 +1234,17 @@ export function buildWorkspaceConfig(
           ]
         : [
             {
-              field: 'confirmation',
-              header: 'Confirmation',
-              width: '120px',
+              field: 'speaker_status',
+              header: 'Status',
+              width: '140px',
               mobileHidden: true,
               render: (value: string | null) =>
                 value === 'confirmed' ? (
                   <span className="status-chip status-accepted">Confirmed</span>
-                ) : value === 'awaiting' ? (
-                  <span className="status-chip status-pending">Awaiting</span>
+                ) : value === 'declined' ? (
+                  <span className="status-chip status-declined">Declined</span>
+                ) : value ? (
+                  <span className="status-chip status-pending">{speakerStatusLabel(value, speakerStatusOptions)}</span>
                 ) : (
                   <span style={{ color: 'var(--text-faint)' }}>—</span>
                 ),
@@ -1166,6 +1280,16 @@ export function buildWorkspaceConfig(
                 <HeadshotUploadControl
                   item={item}
                   onUpdated={(headshot_asset_id) => onItemSaved?.({ ...item, headshot_asset_id })}
+                />
+              )}
+              {/* SPK-04: speaker_status is an event_contacts column, so the
+                * control is event-mode only for the same reason as the
+                * headshot uploader above. */}
+              {!orgMode && (
+                <SpeakerStatusControl
+                  item={item}
+                  options={speakerStatusOptions}
+                  onUpdated={(speaker_status) => onItemSaved?.({ ...item, speaker_status })}
                 />
               )}
             </div>
@@ -1287,10 +1411,12 @@ export function buildWorkspaceConfig(
     // "＋ EXISTING" attaches to *the current event*, which has no meaning while
     // the workspace spans every event; the directory offers "＋ NEW CONTACT"
     // there instead. Duplicates is already org-wide, and IMPORT keeps its own
-    // "pick a single event first" explanation (see importAction).
+    // "pick a single event first" explanation (see importAction). Segments
+    // (CRM-09) are event-scoped rows, so their two actions are event-mode only.
     toolbarActions: [
       orgMode ? newOrgContactAction : addExistingContactAction,
       duplicatesAction,
+      ...(orgMode ? [] : [saveSegmentAction, segmentsAction]),
       importAction('contacts', 'speakers'),
     ],
     registerTabActions: orgMode ? registerSpeakerTabActions : undefined,
@@ -2147,6 +2273,17 @@ export default function App() {
       .catch(() => {})
   }, [me?.event.id])
 
+  // SPK-04: this event's custom speaker_status options, fetched once
+  // alongside contactFields above — same reasoning, same reload story
+  // (Settings' "Speaker statuses" card writes these live).
+  const [speakerStatusOptions, setSpeakerStatusOptions] = useState<SpeakerStatusOption[]>([])
+  useEffect(() => {
+    if (!me) return
+    listSpeakerStatuses()
+      .then((r) => setSpeakerStatusOptions(r.items))
+      .catch(() => {})
+  }, [me?.event.id])
+
   const refreshMe = useCallback(async () => {
     const m = await getMe()
     setMe(m)
@@ -2317,6 +2454,7 @@ export default function App() {
         contactFields,
         eventFilterId,
         eventOptions,
+        speakerStatusOptions,
       ),
     [
       handleChecklist,
@@ -2330,6 +2468,7 @@ export default function App() {
       onSelectEvent,
       contactFields,
       eventOptions,
+      speakerStatusOptions,
     ],
   )
 

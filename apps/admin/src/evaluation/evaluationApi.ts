@@ -35,6 +35,9 @@ const ERRORS: Record<string, string> = {
   reviewers_required: 'Tick at least one reviewer before assigning.',
   invalid_reviewer: 'One of those reviewers is no longer seated on this event.',
   invalid_anonymise_submitters: 'The anonymise setting could not be read — reload and try again.',
+  invalid_scale: 'Scale must be whole numbers, min below max, spanning at most 20 points.',
+  scale_locked_reviews_exist: 'Reviews have already been recorded on this round — the scale can no longer change.',
+  invalid_max_assignments: 'The reviewer cap must be a whole number of 1 or more (or blank for no cap).',
 }
 
 export interface PlanSubmissionRow {
@@ -106,10 +109,20 @@ export const sendReviewerSigninLink = (contactId: string) =>
  * reviewer used to be local state only — `assign` inserts pool rows and
  * nothing ever deleted one, so a removal came back on the next reload.
  */
-export const addPlanReviewer = (planId: string, contactId: string) =>
-  request<{ ok: boolean; plan_id: string; contact_id: string }>(
+/**
+ * ABS-06: `maxAssignments` is omitted entirely for a plain tick-into-pool
+ * (leaves any existing cap untouched, server-side), `null` to explicitly
+ * clear a cap back to uncapped, or a whole number >= 1 to set/replace one.
+ */
+export const addPlanReviewer = (planId: string, contactId: string, maxAssignments?: number | null) =>
+  request<{ ok: boolean; plan_id: string; contact_id: string; max_assignments: number | null }>(
     `/app/api/evaluation/plans/${planId}/reviewers`,
-    { method: 'POST', body: JSON.stringify({ contact_id: contactId }) },
+    {
+      method: 'POST',
+      body: JSON.stringify(
+        maxAssignments === undefined ? { contact_id: contactId } : { contact_id: contactId, max_assignments: maxAssignments },
+      ),
+    },
   )
 
 export const removePlanReviewer = (planId: string, contactId: string) =>

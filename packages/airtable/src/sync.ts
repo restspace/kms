@@ -61,7 +61,18 @@ export const SYNC_TABLES: SyncTableConfig[] = [
     airtableTable: 'Submissions',
     selectSql: `SELECT s.*, e.name AS event_name, t.name AS track_name, r.name AS room_name,
                        TRIM(COALESCE(c.first_name, '') || ' ' || COALESCE(c.last_name, '')) AS speaker_name,
-                       c.email AS speaker_email
+                       c.email AS speaker_email,
+                       -- Rating normalization (same fix as adminApi.ts's
+                       -- submissions 'rating' column/sort): rating_cache holds
+                       -- each plan's raw mean on that plan's own
+                       -- scoring_scale_min/max, so pooling it as-is mixes
+                       -- units across rounds on different scales. Map each
+                       -- cached value onto a common 1-5 display scale before
+                       -- averaging; a single 1-5 plan is numerically unchanged
+                       -- (1 + (avg - 1) * 4 / 4 = avg).
+                       (SELECT AVG(1 + (je.value - p.scoring_scale_min) * 4.0 / (p.scoring_scale_max - p.scoring_scale_min))
+                        FROM json_each(COALESCE(s.rating_cache, '{}')) je
+                        JOIN evaluation_plans p ON p.id = je.key) AS rating_normalized
                 FROM submissions s
                 JOIN events e ON e.id = s.event_id
                 LEFT JOIN tracks t ON t.id = s.track_id

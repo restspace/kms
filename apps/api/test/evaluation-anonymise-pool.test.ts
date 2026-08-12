@@ -201,7 +201,10 @@ describe('reviewer pool membership', () => {
       jsonReq(admin.cookie, { contact_id: reviewer.contactId }),
     );
     expect(res.status).toBe(201);
-    expect((await overview(admin.cookie)).pool).toContainEqual({ plan_id: planId, contact_id: reviewer.contactId });
+    // ABS-06 added max_assignments (NULL = uncapped) to every pool row.
+    expect((await overview(admin.cookie)).pool).toContainEqual(
+      expect.objectContaining({ plan_id: planId, contact_id: reviewer.contactId }),
+    );
     const assignments = await env.DB
       .prepare('SELECT COUNT(*) AS n FROM review_assignments WHERE plan_id = ?')
       .bind(planId)
