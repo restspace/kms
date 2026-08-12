@@ -12,6 +12,7 @@ import { createDb } from '@kms/db';
 import type { AppEnv, Env } from '../env';
 import { sha256Hex } from '../hashing';
 import { accessibleEventIds, accessibleEvents, isWriter, requireEventAccess, type AccessEnv } from '../access';
+import { toCsv, toXlsx } from '../export';
 import { decodeCursor, encodeCursor, keysetWhere } from '../cursor';
 import { bumpEventRevision, getEventRevision } from '../revision';
 import { createSessionToken, getRevalidatedPrivilegedSession, setSessionCookie, type SessionPayload } from '../session';
@@ -891,6 +892,74 @@ adminApiRoutes.post('/:resource/query', async (c) => {
     // instead of a renderable error. Surface it as structured JSON instead
     // (manual review: workspace item lists dying with no message).
     console.error(`POST /${resource}/query failed`, err);
+    const message = err instanceof Error ? err.message : 'unknown_error';
+    return c.json({ error: 'query_failed', message }, 500);
+  }
+});
+
+/** Row ceiling shared with the REST export (restApi.ts EXPORT_MAX_ROWS). */
+const WORKSPACE_EXPORT_MAX_ROWS = 10000;
+
+// GET /app/api/:resource/export?format=csv|xlsx&<filters>&sort=[-]field
+// Workspace-scoped counterpart of the REST API's single-event export: same
+// registry (filters, sortable whitelist, toCsv/toXlsx), but scoped the way
+// the grids are — every accessible event by default, narrowed by an explicit
+// `event_id` param. This is what makes "All events" exports cover exactly
+// what the grid shows instead of silently falling back to one event.
+adminApiRoutes.get('/:resource/export', async (c) => {
+  const resource = c.req.param('resource');
+  const def = RESOURCES[resource];
+  if (!def) return c.json({ error: 'unknown_resource' }, 404);
+
+  const filters: Record<string, unknown> = {};
+  // `event_id` is not a registry filter — resolveQueryScope consumes it (and
+  // queryResource ignores it), exactly as on the POST query path.
+  for (const name of [...Object.keys(def.filters), 'event_id']) {
+    const value = c.req.query(name);
+    if (value !== undefined && value !== '') filters[name] = value;
+  }
+  const scope = await resolveQueryScope(c, filters, { staffOnly: STAFF_ONLY_RESOURCES.has(resource) });
+  if ('forbidden' in scope) return c.json({ error: 'event_not_accessible' }, 403);
+
+  let sort: QueryBody['sort'];
+  const sortRaw = c.req.query('sort');
+  if (sortRaw) {
+    const desc = sortRaw.startsWith('-');
+    const field = desc ? sortRaw.slice(1) : sortRaw;
+    if (def.sortable[field]) sort = { field, direction: desc ? 'desc' : 'asc' };
+  }
+
+  try {
+    const { items } = await queryResource(c.env.DB, def, scope.ids, {
+      from: 0,
+      size: WORKSPACE_EXPORT_MAX_ROWS,
+      filters,
+      sort,
+    });
+    const format = c.req.query('format') === 'xlsx' ? 'xlsx' : 'csv';
+    const scopeName =
+      scope.ids.length === 1
+        ? ((
+            await c.env.DB.prepare(`SELECT slug FROM events WHERE id = ?`)
+              .bind(scope.ids[0])
+              .first<{ slug: string }>()
+          )?.slug ?? scope.ids[0])
+        : 'all-events';
+    const stamp = new Date().toISOString().slice(0, 10);
+    const filename = `${scopeName}-${resource}-${stamp}.${format}`;
+    if (format === 'xlsx') {
+      return c.body(toXlsx(items, resource) as unknown as ArrayBuffer, 200, {
+        'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        'Content-Disposition': `attachment; filename="${filename}"`,
+      });
+    }
+    return c.body(toCsv(items), 200, {
+      'Content-Type': 'text/csv; charset=utf-8',
+      'Content-Disposition': `attachment; filename="${filename}"`,
+    });
+  } catch (err) {
+    if (err instanceof QueryError) return c.json({ error: err.code }, 400);
+    console.error(`GET /${resource}/export failed`, err);
     const message = err instanceof Error ? err.message : 'unknown_error';
     return c.json({ error: 'query_failed', message }, 500);
   }

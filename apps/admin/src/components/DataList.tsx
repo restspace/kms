@@ -292,8 +292,8 @@ export interface DataListExportConfig {
   ) => string;
   /**
    * Optional title attribute for the export buttons, overriding the default
-   * "Export the current view as CSV/XLSX" tooltip. Useful for a caveat such
-   * as "cross-event export not yet available — exports the current event only".
+   * "Export the current view as CSV/XLSX" tooltip. Useful for a caveat the
+   * default wording doesn't cover (e.g. a row-count ceiling).
    */
   title?: string;
 }

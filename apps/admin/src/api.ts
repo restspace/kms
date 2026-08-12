@@ -1152,13 +1152,36 @@ export function buildExportUrl(
   filters: Record<string, unknown>,
   sort?: { field: string; direction: 'asc' | 'desc' },
 ): string {
+  return `/api/v1/events/${eventId}/${resource}/export?${exportParams(format, filters, sort)}`
+}
+
+/**
+ * Export URL against the workspace query endpoint's export twin
+ * (GET /app/api/:resource/export). Scoped the way the grids are: pass an
+ * `event_id` filter to narrow to one event; omit it and the file spans every
+ * accessible event — the "All events" export the REST endpoint cannot do.
+ */
+export function buildWorkspaceExportUrl(
+  resource: 'contacts' | 'submissions' | 'tasks' | 'messages' | 'reviews' | 'comments',
+  format: 'csv' | 'xlsx',
+  filters: Record<string, unknown>,
+  sort?: { field: string; direction: 'asc' | 'desc' },
+): string {
+  return `/app/api/${resource}/export?${exportParams(format, filters, sort)}`
+}
+
+function exportParams(
+  format: 'csv' | 'xlsx',
+  filters: Record<string, unknown>,
+  sort?: { field: string; direction: 'asc' | 'desc' },
+): string {
   const params = new URLSearchParams({ format })
   for (const [key, value] of Object.entries(filters)) {
     if (value === undefined || value === null || value === '' || value === false) continue
     params.set(key, String(value))
   }
   if (sort) params.set('sort', sort.direction === 'desc' ? `-${sort.field}` : sort.field)
-  return `/api/v1/events/${eventId}/${resource}/export?${params.toString()}`
+  return params.toString()
 }
 
 export const getReviewQueue = () => request<ReviewQueue>('/app/api/review/queue')

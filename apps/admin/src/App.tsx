@@ -37,7 +37,7 @@ import {
   type ReviewRow,
   type CommentListRow,
 } from './api'
-import { buildExportUrl, downloadFilesBundle } from './api'
+import { buildWorkspaceExportUrl, downloadFilesBundle } from './api'
 import { normalizeXHandleToUrl } from '@kms/core'
 import { appAlert, appConfirm, ModalDialog } from './components/dialogs'
 import { RecordFormActionableError } from './components/RecordForm'
@@ -796,17 +796,18 @@ export function buildWorkspaceConfig(
   eventFilterId: string | null,
 ): Record<string, TabConfig> {
   // Export buttons (M6): each tab downloads its current view — active filters
-  // and anchor included — through the public REST API's export endpoint.
-  // KNOWN LIMITATION: the export endpoint is single-event, so with the filter
-  // on "All events" the download covers the *current* event only.
+  // and anchor included — through the workspace export endpoint, which scopes
+  // exactly like the grid: the sidebar's event filter rides along as an
+  // `event_id` param, and "All events" sends none, so the file spans every
+  // accessible event just as the rows on screen do.
   const exportFor = (resource: 'contacts' | 'submissions' | 'tasks' | 'messages' | 'reviews' | 'comments') => ({
     buildUrl: (format: 'csv' | 'xlsx', query: { filters: Record<string, unknown>; sort?: { field: string; direction: 'asc' | 'desc' } }) => {
-      const { event_id: _scopedEvent, ...rest } = query.filters as Record<string, unknown>
-      // Same resolution as the import guard (D3): the sidebar scope is not in
-      // `filters`, so it has to be consulted explicitly. "All events" still
-      // falls back to the session event — the export endpoint is single-event.
-      const eventId = resolveTargetEventId(eventFilterId, query.filters as Record<string, unknown>) ?? currentEventId
-      return buildExportUrl(eventId, resource, format, rest, query.sort)
+      // The sidebar scope is not in `filters` (it's injected by the scoped
+      // dataSource, which DataList never sees), so it has to be added here.
+      // An explicit `event_id` filter (dashboard seeds) wins over the sidebar.
+      const filters = query.filters as Record<string, unknown>
+      const scoped = filters.event_id || !eventFilterId ? filters : { ...filters, event_id: eventFilterId }
+      return buildWorkspaceExportUrl(resource, format, scoped, query.sort)
     },
   })
   /**
