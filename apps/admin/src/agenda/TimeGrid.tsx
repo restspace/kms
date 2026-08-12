@@ -37,6 +37,8 @@ interface TimeGridProps {
   columnOf: (s: AgendaSessionRow) => string | null
   conflictLevel: (id: string) => 'error' | 'warning' | null
   conflictTitle: (id: string) => string
+  /** One-line human message for a conflicted session, rendered inside the block. */
+  conflictNote?: (id: string) => string
   trackColor: (s: AgendaSessionRow) => string | null
   onDrop: (id: string, column: GridColumn, startMin: number, durationMin: number) => void
   onResize: (id: string, durationMin: number) => void
@@ -109,6 +111,8 @@ export const showsSpeakers = (s: AgendaSessionRow, durationMin: number): boolean
 
 const MIN_BLOCK_PX = 36
 const MIN_SPEAKER_BLOCK_PX = 56
+/** Extra floor for the conflict message line (AIA-04) — same 20px as speakers. */
+const CONFLICT_NOTE_PX = 20
 
 /**
  * Rendered box height (the grid maps 1 minute to 1 pixel): the true duration,
@@ -116,9 +120,13 @@ const MIN_SPEAKER_BLOCK_PX = 56
  * 36px, and the speakers line another 20px. Anything that reasons about
  * vertical space (lane assignment as much as the block itself) must use this
  * rather than the raw duration, or a floored block paints over the one below.
+ * A conflicted block carries the warning text as a line of its own, so it
+ * budgets one more row — the message must read without hovering (AIA-04).
  */
-export function blockHeightPx(s: AgendaSessionRow, durationMin: number): number {
-  return Math.max(durationMin, showsSpeakers(s, durationMin) ? MIN_SPEAKER_BLOCK_PX : MIN_BLOCK_PX)
+export function blockHeightPx(s: AgendaSessionRow, durationMin: number, hasConflictNote = false): number {
+  const floor =
+    (showsSpeakers(s, durationMin) ? MIN_SPEAKER_BLOCK_PX : MIN_BLOCK_PX) + (hasConflictNote ? CONFLICT_NOTE_PX : 0)
+  return Math.max(durationMin, floor)
 }
 
 export function TimeGrid({
@@ -130,6 +138,7 @@ export function TimeGrid({
   columnOf,
   conflictLevel,
   conflictTitle,
+  conflictNote,
   trackColor,
   onDrop,
   onResize,
@@ -179,6 +188,9 @@ export function TimeGrid({
     [],
   )
 
+  /** The conflict line a block will render (empty when there is none). */
+  const noteFor = (id: string): string => (conflictLevel(id) ? conflictNote?.(id) ?? '' : '')
+
   const height = dayEndMin - dayStartMin
   const hours: number[] = []
   for (let m = Math.ceil(dayStartMin / 60) * 60; m <= dayEndMin; m += 60) hours.push(m)
@@ -216,7 +228,13 @@ export function TimeGrid({
       // Lanes split on *rendered* extents, not true times: a short block is
       // floored to its content height, so a back-to-back neighbour that is
       // clear in minutes can still collide in pixels.
-      return { session: s, startMin: local.minutes, endMin: local.minutes + blockHeightPx(s, durationMin), lane: 0, lanes: 1 }
+      return {
+        session: s,
+        startMin: local.minutes,
+        endMin: local.minutes + blockHeightPx(s, durationMin, noteFor(s.id) !== ''),
+        lane: 0,
+        lanes: 1,
+      }
     })
     laned.sort((a, b) => a.startMin - b.startMin || b.endMin - a.endMin)
     assignLanes(laned)
@@ -416,6 +434,7 @@ export function TimeGrid({
               const baseDur = durationMinutes(s.starts_at as string, s.ends_at as string)
               const dur = resizing?.id === s.id ? resizing.durationMin : baseDur
               const level = conflictLevel(s.id)
+              const note = level ? conflictNote?.(s.id) ?? '' : ''
               const color = trackColor(s)
               const pencilled = classifySchedule(s) === 'pencilled'
               const { lane, lanes } = laneById.get(s.id) ?? { lane: 0, lanes: 1 }
@@ -433,7 +452,7 @@ export function TimeGrid({
                     // speakers line included — so short sessions render
                     // slightly taller than their slot rather than lose or
                     // slice a row (docs/07 eval fix).
-                    height: blockHeightPx(s, dur),
+                    height: blockHeightPx(s, dur, note !== ''),
                     // Overlapping sessions in the same room/slot split into
                     // side-by-side lanes instead of the CSS default
                     // (`left:3px; right:3px`, i.e. full width) which stacked
@@ -446,7 +465,7 @@ export function TimeGrid({
                   draggable
                   tabIndex={0}
                   role="button"
-                  aria-label={`${s.title}, ${fmtMinutes(local.minutes)}. Press Enter to move.`}
+                  aria-label={`${s.title}, ${fmtMinutes(local.minutes)}.${note ? ` Conflict: ${note}` : ''} Press Enter to move.`}
                   title={conflictTitle(s.id) || `${s.code} · ${s.title}`}
                   onDragStart={(e) => {
                     setDrag({ id: s.id, durationMin: baseDur, fromTray: false })
@@ -468,11 +487,20 @@ export function TimeGrid({
                   }}
                   onDoubleClick={() => onOpenMove(s.id)}
                 >
-                  {level && <span className="tg-block-flag" aria-hidden>⚠</span>}
+                  {level && (
+                    <span className="tg-block-flag" role="img" aria-label={`${level === 'error' ? 'Conflict' : 'Warning'}:`}>
+                      ⚠
+                    </span>
+                  )}
                   <div className="tg-block-time">
                     {fmtMinutes(local.minutes)} – {fmtMinutes(local.minutes + dur)}
                   </div>
                   <div className="tg-block-title">{s.title}</div>
+                  {/* The conflict message reads on the block itself — the
+                      hover title and the Conflicts tab are no longer the only
+                      places it exists (AIA-04). blockHeightPx has budgeted the
+                      row, so it never overflows a short slot. */}
+                  {note !== '' && <div className="tg-block-conflict">{note}</div>}
                   {showsSpeakers(s, dur) && (
                     <div className="tg-block-speakers">{s.speakers.map((sp) => sp.name).join(', ')}</div>
                   )}

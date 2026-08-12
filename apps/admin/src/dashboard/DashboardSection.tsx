@@ -646,6 +646,11 @@ function TrackingBoard({ data, busy, onRemind, onSpeaker, onNavigate }: {
   onNavigate: (t: AppNavTarget) => void
 }) {
   const t = data.tracking
+  // POST /remind now targets every outstanding (not-complete, due-dated)
+  // assignment, not just overdue ones — `remindable_tasks` mirrors that
+  // target set exactly. Cast + fallback so a payload from an older
+  // deploy (field absent) still renders the button off the overdue count.
+  const remindableCount = (t as unknown as { remindable_tasks?: number }).remindable_tasks ?? t.overdue.length
   return (
     <>
       <p className="db-board-desc">
@@ -750,9 +755,9 @@ function TrackingBoard({ data, busy, onRemind, onSpeaker, onNavigate }: {
         <section className="db-card db-span3">
           <div className="db-card-head">
             <h3>Overdue tasks</h3>
-            {t.overdue.length > 0 && (
+            {remindableCount > 0 && (
               <button className="db-primary" disabled={busy} onClick={() => onRemind()}>
-                Remind all ({t.overdue.length})
+                Remind all outstanding ({remindableCount})
               </button>
             )}
           </div>

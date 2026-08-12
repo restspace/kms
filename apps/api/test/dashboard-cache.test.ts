@@ -143,6 +143,34 @@ describe('POST /app/api/dashboard/remind', () => {
     expect(await progressed.json()).toMatchObject({ status: 'running', enqueued: 3, sent: 3, failed: 1 });
   });
 
+  // Bulk reminders used to hard-filter t.due_at < now, so a task due in the
+  // future never showed a "Remind all" control and the endpoint matched
+  // nothing for it. The target set is now every outstanding (not-complete,
+  // due-dated) assignment, overdue or not.
+  it('targets an assignment whose due date is still in the future, not just overdue ones', async () => {
+    const eventId = await seedEvent();
+    const admin = await seedStaff(eventId, 'admin');
+    const speaker = await seedContact(eventId, { email: 'future@example.com' });
+    const task = await seedTask(eventId, { due_at: '2099-01-01T00:00:00Z' });
+    await env.DB.prepare(
+      'INSERT INTO task_assignments (id, task_id, contact_id, status) VALUES (?, ?, ?, \'not_started\')',
+    ).bind(`ta-${crypto.randomUUID().slice(0, 8)}`, task, speaker).run();
+
+    const dash = await getDashboard(admin.cookie);
+    const dashBody = (await dash.json()) as { tracking: { remindable_tasks: number; overdue: unknown[] } };
+    expect(dashBody.tracking.remindable_tasks).toBe(1);
+    expect(dashBody.tracking.overdue).toHaveLength(0);
+
+    const res = await SELF.fetch('https://example.com/app/api/dashboard/remind', jsonReq(admin.cookie, {}));
+    expect(res.status).toBe(202);
+    const body = (await res.json()) as { job_id: string; total: number };
+    expect(body.total).toBe(1);
+
+    const job = await env.DB.prepare('SELECT params_json FROM bulk_jobs WHERE id = ?')
+      .bind(body.job_id).first<{ params_json: string }>();
+    expect(JSON.parse(job!.params_json).assignment_ids).toHaveLength(1);
+  });
+
   it('404s a bulk job from another event', async () => {
     const mine = await seedEvent();
     const theirs = await seedEvent();

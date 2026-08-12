@@ -145,6 +145,55 @@
 .agenda-conflict-chip em { background: var(--danger-soft); color: var(--danger); border: 1px solid var(--danger-border); }
 .agenda-conflict-chip i { background: var(--notice-soft); color: var(--notice-text); border: 1px solid var(--notice-border); }
 
+/* Rooms/tracks are Settings-owned; this is the signpost, not a second editor. */
+.agenda-settings-link {
+  color: var(--accent) !important;
+  border-color: var(--accent-border) !important;
+}
+
+/* Inline conflict strip (AIA-04): the double-booked names read straight off
+   the builder — no hover, no tab switch. Resolution still lives in the tab. */
+.agenda-conflict-strip {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 10px 20px 0;
+  padding: 8px 12px;
+  border: 1px solid var(--notice-border);
+  border-left: 4px solid var(--notice-text);
+  border-radius: var(--radius);
+  background: var(--notice-soft);
+  font-size: var(--text-grid);
+}
+.agenda-conflict-strip.sev-error {
+  border-color: var(--danger-border);
+  border-left-color: var(--danger);
+  background: var(--danger-soft);
+}
+.agenda-conflict-strip.sev-error > .tg-block-flag { color: var(--danger); }
+.agenda-conflict-strip > .tg-block-flag { color: var(--notice-text); line-height: 1.4; }
+.agenda-conflict-strip-list { flex: 1; min-width: 0; }
+.agenda-conflict-strip-list strong {
+  font-family: var(--font-display);
+  font-size: var(--text-label);
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-label);
+}
+.agenda-conflict-strip-list p { margin: 2px 0 0; }
+.agenda-conflict-strip-list p.sev-warning { color: var(--text-secondary); }
+.agenda-conflict-more { color: var(--text-muted); font-size: var(--text-label); }
+.agenda-conflict-strip button {
+  flex-shrink: 0;
+  padding: 4px 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  font-size: var(--text-grid);
+  cursor: pointer;
+}
+.agenda-conflict-strip button:hover { background: var(--surface-hover); }
+
 .agenda-day-switch {
   margin-left: auto;
   display: inline-flex;
@@ -425,6 +474,17 @@
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* Conflict message on the block itself (AIA-04). One line, ellipsized like
+   the title — blockHeightPx budgets exactly one row for it, so it can never
+   spill into the resize handle; the full text stays in the strip and tab. */
+.tg-block-conflict {
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tg-block.conflict-error .tg-block-conflict { color: var(--danger); }
+.tg-block.conflict-warning .tg-block-conflict { color: var(--notice-text); }
 .tg-resize {
   position: absolute;
   left: 0;
@@ -734,7 +794,8 @@
   font-size: var(--text-grid);
   z-index: 60;
 }
-.agenda-toast button {
+.agenda-toast button,
+.agenda-toast-link {
   border: none;
   background: none;
   color: var(--accent);

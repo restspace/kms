@@ -341,8 +341,11 @@ export function MessageDetailPanel({ item }: { item: MessageRow }) {
 // SPK-13: compose
 // ---------------------------------------------------------------------------
 
-const AUDIENCE_LABELS: Record<Exclude<ComposeAudience, 'selected'>, string> = {
+type NamedAudience = Exclude<ComposeAudience, 'selected'>
+
+const AUDIENCE_LABELS: Record<NamedAudience, string> = {
   all_contacts: 'Everyone on this event',
+  roster: 'All contacts on roster',
   speakers: 'Speakers (anyone attached to a submission)',
   accepted_speakers: 'Accepted speakers',
 }
@@ -369,7 +372,7 @@ type ComposePhase =
  * organiser needs.
  */
 export function ComposeForm({ onSubmit, onCancel, title }: CreateFormProps) {
-  const [audience, setAudience] = useState<ComposeAudience>('speakers')
+  const [audience, setAudience] = useState<NamedAudience | 'selected'>('speakers')
   const [counts, setCounts] = useState<ComposeAudienceCount[] | null>(null)
   const [mergeFields, setMergeFields] = useState<MergeField[]>([])
   const [contacts, setContacts] = useState<ContactRow[] | null>(null)
@@ -431,7 +434,7 @@ export function ComposeForm({ onSubmit, onCancel, title }: CreateFormProps) {
     }
   }
 
-  const countFor = (key: Exclude<ComposeAudience, 'selected'>): number | null =>
+  const countFor = (key: NamedAudience): number | null =>
     counts?.find((c) => c.audience === key)?.count ?? null
 
   const recipientCount = audience === 'selected' ? selectedIds.length : countFor(audience)
@@ -528,9 +531,9 @@ export function ComposeForm({ onSubmit, onCancel, title }: CreateFormProps) {
           <select
             id="compose-audience"
             value={audience}
-            onChange={(e) => setAudience((e.target as HTMLSelectElement).value as ComposeAudience)}
+            onChange={(e) => setAudience((e.target as HTMLSelectElement).value as NamedAudience | 'selected')}
           >
-            {(Object.keys(AUDIENCE_LABELS) as Array<Exclude<ComposeAudience, 'selected'>>).map((key) => {
+            {(Object.keys(AUDIENCE_LABELS) as NamedAudience[]).map((key) => {
               const n = countFor(key)
               return (
                 <option key={key} value={key}>

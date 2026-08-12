@@ -31,8 +31,20 @@ interface DemoLogins {
 
 /** Read the demo credentials out of the seeded data rather than hard-coding them. */
 export async function demoLogins(db: D1Database): Promise<DemoLogins | null> {
+  // Prefer the most recently created event that still has an open submission
+  // form — that's the one worth advertising as "Public call for speakers" —
+  // falling back to the most recently created event overall so a fresh
+  // install with no open form yet still resolves to something. A single
+  // query: the CASE pushes rows with no open form to the back before the
+  // created_at tiebreak, so this stays as cheap as the old single-column sort.
   const event = await db
-    .prepare('SELECT id, name, slug FROM events ORDER BY created_at LIMIT 1')
+    .prepare(
+      `SELECT e.id, e.name, e.slug FROM events e
+       ORDER BY
+         (EXISTS (SELECT 1 FROM submission_forms f WHERE f.event_id = e.id AND f.status = 'open')) DESC,
+         e.created_at DESC
+       LIMIT 1`,
+    )
     .first<{ id: string; name: string; slug: string }>();
   if (!event) return null;
 

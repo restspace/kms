@@ -708,6 +708,7 @@ function AddFieldModal({ meta, section, usedFieldIds, onAdd, onClose }: {
   const [type, setType] = useState('text')
   const [optionsText, setOptionsText] = useState('')
   const [maxChars, setMaxChars] = useState('')
+  const [required, setRequired] = useState(false)
 
   const scope = section === 'participant' ? 'contact' : 'submission'
   const candidates = meta.fields.filter(
@@ -733,6 +734,7 @@ function AddFieldModal({ meta, section, usedFieldIds, onAdd, onClose }: {
               disabled={submitted || !label.trim() || (needsOptions && !optionsText.trim())}
               onClick={() =>
                 submitOnce({
+                  required,
                   new_field: {
                     label: label.trim(),
                     type,
@@ -771,6 +773,12 @@ function AddFieldModal({ meta, section, usedFieldIds, onAdd, onClose }: {
             <input type="number" value={maxChars} onChange={(e) => setMaxChars(e.target.value)} />
           </div>
         )}
+        <div className="bfield">
+          <label className="qrequired">
+            <input type="checkbox" checked={required} onChange={(e) => setRequired(e.target.checked)} />
+            Required
+          </label>
+        </div>
       </ModalDialog>
     )
   }

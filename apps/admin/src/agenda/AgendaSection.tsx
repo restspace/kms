@@ -23,6 +23,7 @@ import {
 } from '../api'
 import { DesktopOnlyNotice } from '@kms/ui/desktop-only'
 import { appConfirm } from '../components/dialogs'
+import { navigate } from '../router'
 import { createMutationQueue } from './mutationQueue'
 import { ConflictsView } from './ConflictsView'
 import { AddSessionDialog, MoveDialog } from './dialogs'
@@ -83,6 +84,8 @@ interface UndoEntry {
 interface Toast {
   message: string
   undo?: () => void
+  /** Optional follow-through link (e.g. the public agenda page after publishing). */
+  link?: { href: string; label: string }
 }
 
 const isAgendaView = (value: string | null | undefined): value is AgendaView =>
@@ -215,6 +218,16 @@ export function AgendaSection({
       .catch((e: unknown) => setError(e instanceof Error ? e.message : 'Failed to load the agenda'))
   }, [])
 
+  // Rooms/tracks live in Settings, often edited in another tab or after the
+  // toolbar link above sends the operator there and back. Re-syncing when the
+  // window regains focus keeps the columns honest without a manual reload
+  // (AIA-02); mount already fetches, and AddSessionDialog re-fetches too.
+  useEffect(() => {
+    const onFocus = () => reload()
+    window.addEventListener('focus', onFocus)
+    return () => window.removeEventListener('focus', onFocus)
+  }, [reload])
+
   // Report view/day back to the router (replaceState — these refine the screen
   // rather than navigate). Reporting from an effect keeps every internal
   // setView/setCurDay call site untouched.
@@ -261,6 +274,28 @@ export function AgendaSection({
   const conflictTitle = useCallback(
     (id: string): string => (conflictsBySession.get(id) ?? []).map((c) => `${c.code}: ${c.message}`).join('\n'),
     [conflictsBySession],
+  )
+  /**
+   * The readable half of a conflict, for rendering *inside* the grid block —
+   * `conflictTitle` stays the multi-line hover text with codes, this is the
+   * one line a scheduler reads without hovering or switching tabs (AIA-04).
+   */
+  const conflictNote = useCallback(
+    (id: string): string => {
+      const list = conflictsBySession.get(id) ?? []
+      const first = list[0]
+      if (!first) return ''
+      return list.length > 1 ? `${first.message} (+${list.length - 1} more)` : first.message
+    },
+    [conflictsBySession],
+  )
+  /** Live error/warning conflicts, errors first — the inline strip's source. */
+  const bannerConflicts = useMemo(
+    () =>
+      liveConflicts
+        .filter((c) => c.severity !== 'info')
+        .sort((a, b) => (a.severity === b.severity ? 0 : a.severity === 'error' ? -1 : 1)),
+    [liveConflicts],
   )
   const trackColor = useCallback(
     (s: AgendaSessionRow): string | null => (s.track_id ? trackById.get(s.track_id)?.color ?? null : null),
@@ -584,8 +619,11 @@ export function AgendaSection({
     setData((cur) => (cur === null ? cur : { ...cur, event: { ...cur.event, agenda_published: next ? 1 : 0 } }))
     try {
       await setAgendaPublished(current.event.id, next)
+      // Link the page people actually read, not the JSON feed behind it
+      // (the feed still serves at the same path + `.json`).
       showToast({
-        message: next ? `Agenda published at /e/${current.event.slug}/agenda.json` : 'Agenda unpublished',
+        message: next ? `Agenda published at /e/${current.event.slug}/agenda` : 'Agenda unpublished',
+        ...(next ? { link: { href: `/e/${current.event.slug}/agenda`, label: 'View agenda' } } : {}),
       })
     } catch (e: unknown) {
       showToast({ message: e instanceof Error ? e.message : 'Publishing failed' })
@@ -686,6 +724,17 @@ export function AgendaSection({
               </select>
             </label>
           )}
+          {/* Rooms and tracks are Settings-owned (AIA-02): the builder points
+              at them rather than duplicating the CRUD, and the board re-fetches
+              on the way back so anything added there shows up. */}
+          <button
+            type="button"
+            className="agenda-settings-link"
+            title="Add or edit rooms and tracks in Settings"
+            onClick={() => navigate({ v: 'settings' })}
+          >
+            Manage rooms &amp; tracks
+          </button>
           <button
             disabled={busy || jobActive || pendingConfirmations === 0}
             title="Email calendar invites for every scheduled session that has none yet"
@@ -697,8 +746,8 @@ export function AgendaSection({
             disabled={publishBusy}
             title={
               published
-                ? 'Stop serving the public agenda feed'
-                : 'Publish the agenda to the public feed (/e/slug/agenda.json)'
+                ? 'Stop serving the public agenda page'
+                : 'Publish the agenda to the public page (/e/slug/agenda)'
             }
             onClick={() => void togglePublish()}
           >
@@ -745,6 +794,27 @@ export function AgendaSection({
           </span>
         )}
       </nav>
+
+      {/* Conflicts are named where the schedule is being edited (AIA-04) —
+          the Conflicts tab stays the place to resolve them, but "who is
+          double-booked, and where" no longer costs a hover or a tab switch. */}
+      {view !== 'conflicts' && bannerConflicts.length > 0 && (
+        <div className={`agenda-conflict-strip sev-${errorCount > 0 ? 'error' : 'warning'}`} role="status">
+          <span className="tg-block-flag" aria-hidden>⚠</span>
+          <div className="agenda-conflict-strip-list">
+            <strong>
+              {conflictCount} conflict{conflictCount === 1 ? '' : 's'}
+            </strong>
+            {bannerConflicts.slice(0, 3).map((c) => (
+              <p key={c.signature} className={`sev-${c.severity}`}>{c.message}</p>
+            ))}
+            {bannerConflicts.length > 3 && (
+              <p className="agenda-conflict-more">…and {bannerConflicts.length - 3} more</p>
+            )}
+          </div>
+          <button type="button" onClick={() => setView('conflicts')}>Review conflicts</button>
+        </div>
+      )}
 
       <div className="agenda-body">
         {refuseGrid ? (
@@ -793,6 +863,7 @@ export function AgendaSection({
               }}
               conflictLevel={conflictLevel}
               conflictTitle={conflictTitle}
+              conflictNote={conflictNote}
               trackColor={trackColor}
               onDrop={(id, col, startMin, dur) => {
                 const roomId = groupBy === 'room' ? col.key : sessionById.get(id)?.room_id ?? null
@@ -833,6 +904,7 @@ export function AgendaSection({
               columnOf={sessionDay}
               conflictLevel={conflictLevel}
               conflictTitle={conflictTitle}
+              conflictNote={conflictNote}
               trackColor={trackColor}
               onDrop={(id, col, startMin, dur) =>
                 commitSchedule(id, patchFrom(col.day, startMin, dur, sessionById.get(id)?.room_id ?? null))
@@ -960,6 +1032,11 @@ export function AgendaSection({
       {toast && (
         <div className="agenda-toast" role="status">
           <span>{toast.message}</span>
+          {toast.link && (
+            <a className="agenda-toast-link" href={toast.link.href} target="_blank" rel="noreferrer">
+              {toast.link.label}
+            </a>
+          )}
           {toast.undo && (
             <button
               onClick={() => {

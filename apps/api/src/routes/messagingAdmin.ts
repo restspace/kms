@@ -84,7 +84,8 @@ messagingAdminRoutes.post('/invite-portal', async (c) => {
   });
   await statement.run();
   const hash = await sha256hex(token);
-  const link = `${c.env.APP_URL}/auth/callback?t=${token}`;
+  const origin = c.env.DEV_MODE === 'on' ? new URL(c.req.url).origin : c.env.APP_URL;
+  const link = `${origin}/auth/callback?t=${token}`;
 
   const outcome = await sendTemplated(c, {
     templateKey: 'magic_link',
@@ -132,9 +133,15 @@ export const COMPOSE_MERGE_FIELDS: ReadonlyArray<{ field: string; description: s
   { field: 'portal_url', description: 'Link to the speaker portal' },
 ];
 
-export type ComposeAudience = 'all_contacts' | 'speakers' | 'accepted_speakers' | 'selected';
+export type ComposeAudience = 'all_contacts' | 'roster' | 'speakers' | 'accepted_speakers' | 'selected';
 
-const COMPOSE_AUDIENCES: readonly ComposeAudience[] = ['all_contacts', 'speakers', 'accepted_speakers', 'selected'];
+const COMPOSE_AUDIENCES: readonly ComposeAudience[] = [
+  'all_contacts',
+  'roster',
+  'speakers',
+  'accepted_speakers',
+  'selected',
+];
 
 export interface ComposeRecipient {
   id: string;
@@ -149,6 +156,13 @@ export interface ComposeRecipient {
  * Resolve an audience to a de-duplicated list of contacts in this event.
  *
  *  - `all_contacts`      every contact on the event with an email
+ *  - `roster`            every contact on the event with an email and a name —
+ *                        the full roster reachable regardless of whether
+ *                        they're linked to a submission, so a contact added
+ *                        to the event but never attached to a session (who
+ *                        `speakers` below cannot see) is still reachable by
+ *                        name rather than only through `all_contacts` or a
+ *                        manual multi-select
  *  - `speakers`          anyone attached to a submission (submitter or a
  *                        `submission_participants` row) — the workspace's
  *                        working definition of "speaker"
@@ -177,6 +191,13 @@ export async function resolveAudience(
        FROM event_contacts ec
        JOIN contacts c ON c.id = ec.contact_id`;
   const hasEmail = "c.email IS NOT NULL AND TRIM(c.email) != ''";
+  // Contacts-hygiene item 4: a contact staked out by the public submission
+  // wizard's Account step (submit.tsx) before any name is collected — or
+  // left over from a form that never collects one — can end up on the roster
+  // with a blank name on both columns. That stub is not someone to message;
+  // excluded here the same way the Speakers grid's default view excludes it
+  // (App.tsx's isPlaceholderContact).
+  const hasName = "TRIM(COALESCE(c.first_name, '') || COALESCE(c.last_name, '')) != ''";
   if (audience === 'selected') {
     if (contactIds.length === 0) return [];
     const placeholders = contactIds.map(() => '?').join(', ');
@@ -193,14 +214,14 @@ export async function resolveAudience(
       .all<ComposeRecipient>();
     return results;
   }
+  if (audience === 'roster') {
+    const { results } = await db
+      .prepare(`${select} WHERE ec.event_id = ? AND ${hasEmail} AND ${hasName} ORDER BY c.id`)
+      .bind(eventId)
+      .all<ComposeRecipient>();
+    return results;
+  }
   const statusClause = audience === 'accepted_speakers' ? "AND s.status = 'accepted'" : '';
-  // Contacts-hygiene item 4: a contact staked out by the public submission
-  // wizard's Account step (submit.tsx) before any name is collected — or
-  // left over from a form that never collects one — can be attached to a
-  // submission with a blank name on both columns. That stub is not someone
-  // to message; excluded here the same way the Speakers grid's default view
-  // excludes it (App.tsx's isPlaceholderContact).
-  const hasName = "TRIM(COALESCE(c.first_name, '') || COALESCE(c.last_name, '')) != ''";
   const { results } = await db
     .prepare(
       `${select} WHERE ec.event_id = ?1 AND ${hasEmail} AND ${hasName} AND c.id IN (
@@ -319,7 +340,7 @@ messagingAdminRoutes.get('/compose/audiences', async (c) => {
   const session = c.get('session');
   const db = c.env.DB;
   const items = await Promise.all(
-    (['all_contacts', 'speakers', 'accepted_speakers'] as const).map(async (audience) => ({
+    (['all_contacts', 'roster', 'speakers', 'accepted_speakers'] as const).map(async (audience) => ({
       audience,
       count: (await resolveAudience(db, session.eventId, audience, [])).length,
     })),

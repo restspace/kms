@@ -173,15 +173,19 @@ export function createDb(d1: D1Database): Db {
     },
 
     submissions: {
+      // "Mine" means submitted *or* co-presented: a contact attached as a
+      // participant sees the submission in their portal too. Same condition
+      // the portal's Submissions tab uses, so the home widget can't undercount.
       async listByContact(eventId: string, contactId: string): Promise<SubmissionSummary[]> {
         const { results } = await d1
           .prepare(
             `SELECT id, event_id, code, title, status, format, track_id, submitter_contact_id
-             FROM submissions
-             WHERE event_id = ? AND submitter_contact_id = ?
+             FROM submissions s
+             WHERE event_id = ? AND (submitter_contact_id = ?
+               OR EXISTS (SELECT 1 FROM submission_participants sp WHERE sp.submission_id = s.id AND sp.contact_id = ?))
              ORDER BY created_at DESC`,
           )
-          .bind(eventId, contactId)
+          .bind(eventId, contactId, contactId)
           .all<SubmissionSummary>();
         return results;
       },

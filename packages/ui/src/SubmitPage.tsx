@@ -542,7 +542,7 @@ export function SubmitPage({ data }: { data: SubmitBootstrap }) {
 
   if (data.closed) {
     return (
-      <Wizard title={form.external_title}>
+      <Wizard title={form.external_title} eventName={event.name}>
         <div className="sb-banner">
           {form.status === 'closed'
             ? 'This form is closed — the organisers closed submissions early.'
@@ -557,7 +557,7 @@ export function SubmitPage({ data }: { data: SubmitBootstrap }) {
 
   if (done) {
     return (
-      <Wizard title={form.external_title}>
+      <Wizard title={form.external_title} eventName={event.name}>
         <h2 className="sb-success-head">Submission received — {done.code}</h2>
         {done.message ? (
           <div className="sb-rich" dangerouslySetInnerHTML={{ __html: done.message }} />
@@ -576,7 +576,7 @@ export function SubmitPage({ data }: { data: SubmitBootstrap }) {
   }
 
   return (
-    <Wizard title={form.external_title}>
+    <Wizard title={form.external_title} eventName={event.name}>
       <div className="sb-banner">
         {form.close_at
           ? `Form submissions will be accepted until ${fmtDeadline(form.close_at, event.timezone)}.`
@@ -858,10 +858,25 @@ export function SubmitPage({ data }: { data: SubmitBootstrap }) {
 // Pieces
 // ---------------------------------------------------------------------------
 
-function Wizard({ title, children }: { title: string; children: React.ReactNode }) {
+function Wizard({
+  title,
+  eventName,
+  children,
+}: {
+  title: string
+  eventName?: string
+  children: React.ReactNode
+}) {
+  // CFP defect: a fresh form defaults external_title to its internal name, so
+  // the H1 alone often gives no clue which event the page belongs to (the
+  // event name only ever showed up in the <title>, submit.tsx). An eyebrow
+  // above the H1 makes it visible on the page itself — shown unconditionally
+  // rather than trying to detect when external_title already repeats the
+  // event name, since a duplicate line reads as confirmation, not clutter.
   return (
     <main className="sb-main">
       <style dangerouslySetInnerHTML={{ __html: wizardCss }} />
+      {eventName && <p className="sb-eyebrow">{eventName}</p>}
       <h1>{title}</h1>
       {children}
     </main>
@@ -1132,6 +1147,8 @@ function ParticipantCard({
 
 const wizardCss = `
 .sb-main { max-width: 46rem; margin: 0 auto; padding: 2.5rem 1.5rem 4rem; }
+.sb-eyebrow { margin: 0 0 .35rem; font-size: .8rem; font-weight: 600; letter-spacing: .03em;
+  text-transform: uppercase; color: var(--text-muted); }
 .sb-banner { border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: var(--radius);
   padding: .6rem .9rem; font-size: .9rem; margin: 0 0 1.25rem; }
 .sb-stepper { display: flex; flex-wrap: wrap; gap: .25rem 1rem; list-style: none; padding: 0;

@@ -174,7 +174,7 @@ function SessionCard({
           </div>
         </div>
         <div className="muted schedule-card-meta">
-          {fmtTimeRange(session.starts_at, session.ends_at, tz)}
+          {fmtDayShort(session.day)} · {fmtTimeRange(session.starts_at, session.ends_at, tz)}
           {showRoom && roomName ? ` · ${roomName}` : ''}
         </div>
         {showAbstract && shownDescription && (

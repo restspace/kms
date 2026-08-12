@@ -943,6 +943,110 @@ adminApiRoutes.post('/:resource/query', async (c) => {
 /** Row ceiling shared with the REST export (restApi.ts EXPORT_MAX_ROWS). */
 const WORKSPACE_EXPORT_MAX_ROWS = 10000;
 
+const chunk = <T,>(items: T[], size: number): T[][] => {
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
+  return out;
+};
+
+/** `IN (?, …)` lookup over an arbitrary number of keys, chunked for D1. */
+async function lookupIn<T>(
+  db: D1Database,
+  sql: (placeholders: string) => string,
+  keys: string[],
+  leading: unknown[] = [],
+): Promise<T[]> {
+  const out: T[] = [];
+  for (const group of chunk(keys, 80)) {
+    const { results } = await db
+      .prepare(sql(group.map(() => '?').join(', ')))
+      .bind(...leading, ...group)
+      .all<T>();
+    out.push(...results);
+  }
+  return out;
+}
+
+/**
+ * Export-only readability pass over a page of rows.
+ *
+ * The grid and the JSON list APIs keep the storage shape — `reviews.scores` is
+ * a criterion-id-keyed object there, which is what the SPA and API clients
+ * expect — but a spreadsheet cell full of UUIDs is unreadable, and the
+ * `comment` column is dead weight (0018 moved the reviewer's rationale into
+ * submission_comments; see evaluation.ts's appendRationale). So the export
+ * renders scores as ordered "Criterion: value" pairs and fills `comment` from
+ * that reviewer's latest rationale on the submission.
+ *
+ * Criterion names are looked up per *plan*: two rounds may each have a
+ * "Relevance", so the map is keyed (plan_id, criterion_id), never by name.
+ */
+async function shapeExportRows(
+  db: D1Database,
+  resource: string,
+  items: Record<string, unknown>[],
+): Promise<Record<string, unknown>[]> {
+  if (resource !== 'reviews' || items.length === 0) return items;
+  const text = (v: unknown): string | null => (typeof v === 'string' && v !== '' ? v : null);
+  const uniq = (values: Array<string | null>) => [...new Set(values.filter((v): v is string => v !== null))];
+
+  const criteria = await lookupIn<{ id: string; plan_id: string; name: string }>(
+    db,
+    (p) => `SELECT id, plan_id, name FROM scoring_criteria WHERE plan_id IN (${p}) ORDER BY plan_id, position`,
+    uniq(items.map((r) => text(r.plan_id))),
+  );
+  // Insertion order is criterion position, which is the order the reviewer
+  // scored them in — the readable cell keeps it.
+  const orderedByPlan = new Map<string, Array<{ id: string; name: string }>>();
+  for (const c of criteria) {
+    const list = orderedByPlan.get(c.plan_id) ?? [];
+    list.push({ id: c.id, name: c.name });
+    orderedByPlan.set(c.plan_id, list);
+  }
+
+  const rationales = await lookupIn<{
+    submission_id: string; plan_id: string | null; author_contact_id: string | null; body: string;
+  }>(
+    db,
+    (p) => `SELECT submission_id, plan_id, author_contact_id, body FROM submission_comments
+            WHERE kind = 'rationale' AND submission_id IN (${p}) ORDER BY created_at`,
+    uniq(items.map((r) => text(r.submission_id))),
+  );
+  // Rationale rows are append-only (0018 D4), so the last one written by this
+  // reviewer in this round is the current text.
+  const rationaleByReview = new Map<string, string>();
+  for (const r of rationales) {
+    rationaleByReview.set(`${r.submission_id} ${r.plan_id ?? ''} ${r.author_contact_id ?? ''}`, r.body);
+  }
+
+  return items.map((row) => {
+    const planId = text(row.plan_id) ?? '';
+    const parsed = ((): Record<string, unknown> => {
+      const raw = row.scores;
+      if (typeof raw !== 'string' || raw === '') return {};
+      try {
+        const value = JSON.parse(raw) as unknown;
+        return value !== null && typeof value === 'object' ? (value as Record<string, unknown>) : {};
+      } catch {
+        return {};
+      }
+    })();
+    const ordered = orderedByPlan.get(planId) ?? [];
+    const pairs: string[] = [];
+    for (const criterion of ordered) {
+      if (criterion.id in parsed) pairs.push(`${criterion.name}: ${String(parsed[criterion.id])}`);
+    }
+    // Anything the plan no longer defines (a deleted criterion) still exports,
+    // under its raw key, rather than vanishing from the reviewer's record.
+    const known = new Set(ordered.map((c) => c.id));
+    for (const [key, value] of Object.entries(parsed)) {
+      if (!known.has(key)) pairs.push(`${key}: ${String(value)}`);
+    }
+    const key = `${text(row.submission_id) ?? ''} ${planId} ${text(row.reviewer_contact_id) ?? ''}`;
+    return { ...row, scores: pairs.join('; '), comment: row.comment ?? rationaleByReview.get(key) ?? null };
+  });
+}
+
 // GET /app/api/:resource/export?format=csv|xlsx&<filters>&sort=[-]field
 // Workspace-scoped counterpart of the REST API's single-event export: same
 // registry (filters, sortable whitelist, toCsv/toXlsx), but scoped the way
@@ -973,12 +1077,13 @@ adminApiRoutes.get('/:resource/export', async (c) => {
   }
 
   try {
-    const { items } = await queryResource(c.env.DB, def, scope.ids, {
+    const page = await queryResource(c.env.DB, def, scope.ids, {
       from: 0,
       size: WORKSPACE_EXPORT_MAX_ROWS,
       filters,
       sort,
     });
+    const items = await shapeExportRows(c.env.DB, resource, page.items);
     const format = c.req.query('format') === 'xlsx' ? 'xlsx' : 'csv';
     const scopeName =
       scope.ids.length === 1
@@ -2462,6 +2567,41 @@ async function idsBelongToEvent(
 }
 
 /**
+ * contact_id → the single submission that contact is on in this event, for the
+ * contacts that are on exactly one. Contacts on none, or on several, are absent
+ * from the map: guessing which submission a co-speaker on three of them meant
+ * would be worse than leaving the association open. One grouped query for the
+ * whole target list, not one per contact.
+ */
+async function soleSubmissionByContact(
+  db: D1Database,
+  contactIds: string[],
+  eventId: string,
+): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  if (contactIds.length === 0) return out;
+  // UNION (not UNION ALL) collapses the submitter-who-is-also-a-participant
+  // duplicate, which would otherwise read as two submissions.
+  const rows = await lookupIn<{ contact_id: string; submission_id: string; n: number }>(
+    db,
+    (p) => `SELECT contact_id, MIN(submission_id) AS submission_id, COUNT(*) AS n FROM (
+              SELECT s.submitter_contact_id AS contact_id, s.id AS submission_id
+              FROM submissions s
+              WHERE s.event_id = ? AND s.submitter_contact_id IS NOT NULL
+              UNION
+              SELECT sp.contact_id AS contact_id, sp.submission_id AS submission_id
+              FROM submission_participants sp
+              JOIN submissions ps ON ps.id = sp.submission_id
+              WHERE ps.event_id = ?
+            ) WHERE contact_id IN (${p}) GROUP BY contact_id`,
+    contactIds,
+    [eventId, eventId],
+  );
+  for (const row of rows) if (row.n === 1) out.set(row.contact_id, row.submission_id);
+  return out;
+}
+
+/**
  * Expand the requested targets into (contact_id, submission_id) assignment
  * pairs. `task_assignments.contact_id` is NOT NULL, so a submission target
  * resolves to that submission's people — the explicitly picked contacts when
@@ -2470,6 +2610,7 @@ async function idsBelongToEvent(
 async function expandTaskTargets(
   db: D1Database,
   targets: TaskTargets,
+  eventId: string,
 ): Promise<Array<{ contactId: string; submissionId: string | null }>> {
   const pairs: Array<{ contactId: string; submissionId: string | null }> = [];
   if (targets.submissionIds.length > 0) {
@@ -2491,7 +2632,14 @@ async function expandTaskTargets(
         ).results;
     for (const p of people) pairs.push({ contactId: p.contact_id, submissionId: p.submission_id });
   } else {
-    for (const contactId of targets.contactIds) pairs.push({ contactId, submissionId: null });
+    // A contact-targeted task still belongs in the Files library under the
+    // person's session whenever there is only one it could be: the assignment
+    // keeps submission_id NULL only when the contact is on no submission in
+    // this event, or on several (ambiguous).
+    const sole = await soleSubmissionByContact(db, targets.contactIds, eventId);
+    for (const contactId of targets.contactIds) {
+      pairs.push({ contactId, submissionId: sole.get(contactId) ?? null });
+    }
   }
   return pairs;
 }
@@ -2534,7 +2682,7 @@ adminApiRoutes.post('/tasks', async (c) => {
   // OR IGNORE: 0005_integrity added a unique logical index over
   // (task_id, contact_id, COALESCE(submission_id,'')), and a submission's
   // participant list can legitimately name the same person twice by role.
-  const pairs = await expandTaskTargets(c.env.DB, targets);
+  const pairs = await expandTaskTargets(c.env.DB, targets, session.eventId);
   if (pairs.length > 0) {
     await c.env.DB.batch(
       pairs.map((p) =>
@@ -3317,6 +3465,66 @@ function parseNamedRows(raw: unknown, extraKey: 'capacity' | 'color'): NamedRow[
   return out;
 }
 
+/**
+ * The field library a new event starts with — the docs/04 §2.3–2.4 standard
+ * set, the same shape packages/db/seed/seed.sql installs for the demo event.
+ * Without it a fresh event has an empty `field_definitions` table and the
+ * first form created in it seeds zero questions (formsAdmin.ts builds its
+ * default question set by looking these keys up, skipping the missing ones).
+ *
+ * `track` deliberately carries no options: loadQuestions derives them from the
+ * event's own `tracks` rows on every render (formsAdmin.ts TRACK_FIELD_KEY).
+ * The demo seed's `tags` field is left out here for the opposite reason — its
+ * options are stored, and a brand-new event has no tag vocabulary to store, so
+ * seeding it would put an unanswerable required question on the first form.
+ */
+const DEFAULT_FIELD_DEFINITIONS: ReadonlyArray<{
+  key: string; label: string; type: string; scope: 'submission' | 'contact';
+  options?: Array<{ value: string; label: string }>; maxChars?: number; system?: boolean;
+}> = [
+  // abstract (submission scope)
+  { key: 'title', label: 'Title', type: 'text', scope: 'submission', maxChars: 255, system: true },
+  { key: 'description', label: 'Description', type: 'wysiwyg', scope: 'submission', maxChars: 5000 },
+  {
+    key: 'format', label: 'Format', type: 'dropdown', scope: 'submission',
+    options: ['Keynote', 'Featured Keynote', 'Talk', 'Workshop', 'Panel', 'Lightning Talk']
+      .map((v) => ({ value: v, label: v })),
+  },
+  { key: 'track', label: 'Track', type: 'dropdown', scope: 'submission' },
+  {
+    key: 'level', label: 'Level', type: 'dropdown', scope: 'submission',
+    options: ['Beginner', 'Intermediate', 'Advanced'].map((v) => ({ value: v, label: v })),
+  },
+  {
+    key: 'language', label: 'Language', type: 'dropdown', scope: 'submission',
+    options: ['English', 'Spanish', 'French'].map((v) => ({ value: v, label: v })),
+  },
+  { key: 'capacity', label: 'Capacity', type: 'number', scope: 'submission' },
+  { key: 'ceu_credits', label: 'CEU Credits', type: 'number', scope: 'submission' },
+  { key: 'client_session_id', label: 'Client Session ID', type: 'text', scope: 'submission', maxChars: 255 },
+  // participant (contact scope)
+  { key: 'first_name', label: 'First Name', type: 'text', scope: 'contact', maxChars: 255, system: true },
+  { key: 'last_name', label: 'Last Name', type: 'text', scope: 'contact', maxChars: 255, system: true },
+  { key: 'email', label: 'Email', type: 'email', scope: 'contact', maxChars: 255, system: true },
+  { key: 'mobile_phone', label: 'Mobile Phone', type: 'phone', scope: 'contact' },
+  { key: 'biography', label: 'Biography', type: 'wysiwyg', scope: 'contact', maxChars: 5000 },
+  { key: 'headshot', label: 'Headshot', type: 'file', scope: 'contact' },
+];
+
+/** The seed inserts for one new event's field library (create path only —
+ * `field_definitions` is UNIQUE (event_id, key), and every later write to the
+ * library goes through the field editor). */
+const defaultFieldDefinitionInserts = (db: D1Database, eventId: string): D1PreparedStatement[] =>
+  DEFAULT_FIELD_DEFINITIONS.map((f) =>
+    db.prepare(
+      `INSERT INTO field_definitions (id, event_id, key, label, type, scope, options, max_chars, system)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).bind(
+      crypto.randomUUID(), eventId, f.key, f.label, f.type, f.scope,
+      f.options ? JSON.stringify(f.options) : null, f.maxChars ?? null, f.system ? 1 : 0,
+    ),
+  );
+
 // POST /app/api/events — a new event inside the creator's organisation. The
 // creator lands in it as an owner: contacts are org-level since 0015, so their
 // existing identity is attached to the new event rather than copied into a
@@ -3381,6 +3589,9 @@ adminApiRoutes.post('/events', async (c) => {
         db.prepare('INSERT INTO tracks (id, event_id, name, color, position, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
           .bind(crypto.randomUUID(), id, t.name, t.extra, i, ts),
       ),
+      // Same batch as the event row: an event whose field library never landed
+      // builds its first submission form out of zero questions.
+      ...defaultFieldDefinitionInserts(db, id),
     ]);
   } catch (err) {
     const message = err instanceof Error ? err.message : '';

@@ -18,20 +18,53 @@ export interface SpeakerDetailWidgetProps {
  * session descriptions get elsewhere), and each session shown with its
  * event-local date/time and room, not just a bare title.
  */
+/** bio plain-text length above which the bio truncates and shows "…". */
+const BIO_TRUNCATE_AT = 300
+
 export function SpeakerDetailBody({ speaker, tz }: { speaker: PublicSpeaker; tz: string }) {
+  const [bioExpanded, setBioExpanded] = useState(false)
   const bioParagraphs = speaker.bio ? toParagraphs(speaker.bio) : []
+  const bioText = bioParagraphs.join(' ')
+  const isLongBio = bioText.length > BIO_TRUNCATE_AT
+  const shownBio = isLongBio && !bioExpanded ? `${bioText.slice(0, BIO_TRUNCATE_AT).trimEnd()}…` : null
   return (
     <>
       {bioParagraphs.length > 0 && (
         <div className="speaker-detail-bio">
-          {bioParagraphs.map((para, i) => (
-            <p key={i}>{para}</p>
-          ))}
+          {shownBio !== null ? (
+            <p>
+              {shownBio}
+              <button
+                type="button"
+                className="speaker-detail-showmore"
+                onClick={() => setBioExpanded(true)}
+                aria-expanded={false}
+              >
+                Show more
+              </button>
+            </p>
+          ) : (
+            <>
+              {bioParagraphs.map((para, i) => (
+                <p key={i}>{para}</p>
+              ))}
+              {isLongBio && (
+                <button
+                  type="button"
+                  className="speaker-detail-showmore"
+                  onClick={() => setBioExpanded(false)}
+                  aria-expanded={true}
+                >
+                  Show less
+                </button>
+              )}
+            </>
+          )}
         </div>
       )}
       {speaker.sessions.length > 0 && (
         <>
-          <h3>Sessions</h3>
+          <h3>Sessions ({speaker.sessions.length})</h3>
           <ul className="event-widget-list speaker-detail-sessions">
             {speaker.sessions.map((s) => (
               <li key={s.id}>
@@ -104,6 +137,7 @@ export const speakerDetailCss = `
 .speaker-detail-bio { line-height: 1.6; margin: 1rem 0; }
 .speaker-detail-bio p { margin: 0 0 .75rem; }
 .speaker-detail-bio p:last-child { margin-bottom: 0; }
+.speaker-detail-showmore { margin-left: .35rem; background: none; border: none; padding: 0; color: var(--accent); cursor: pointer; font-size: inherit; text-decoration: underline; }
 .speaker-detail-sessions li { padding: .6rem 0; }
 .speaker-detail-session-title { font-weight: 600; }
 .speaker-detail-session-meta { margin-top: .15rem; font-size: .85rem; }

@@ -1036,6 +1036,12 @@ export function buildWorkspaceConfig(
             <dt>Created</dt><dd>{fmtDate(item.created_at)}</dd>
           </dl>
           {item.biography && <div className="detail-body">{stripHtml(item.biography)}</div>}
+          {item.notes && (
+            <div className="detail-body">
+              <h3>Internal notes</h3>
+              {stripHtml(item.notes)}
+            </div>
+          )}
           {SOCIAL_LINK_FORM_FIELDS.some(([, key]) => socialLinks[key]) && (
             <div className="detail-body">
               <h3>Links</h3>
@@ -1202,15 +1208,16 @@ export function buildWorkspaceConfig(
         sortable: true,
         // First click = decision-meeting agenda (score desc), second click =
         // score ascending (a second click on a sorted column universally reads
-        // as "reverse it" — jumping straight to the coverage sort here made
-        // the Rating column look non-monotonic and shuffled, the 2026-08-12
-        // eval defect), third click = coverage worklist (fewest ratings
-        // first, workplan 13 W2), fourth clears. Rating NULLs (unrated rows)
-        // sort last in BOTH directions server-side (adminApi.ts orderSql).
+        // as "reverse it"), third click clears. A review-count coverage sort
+        // used to sit here as a third step, but it made the Rating column
+        // look non-monotonic/shuffled on that click (2026-08-12 eval defect)
+        // — dropped; if coverage sorting is wanted again it belongs on its
+        // own column/control rather than tacked onto Rating's cycle. Rating
+        // NULLs (unrated rows) sort last in BOTH directions server-side
+        // (adminApi.ts orderSql).
         sortCycle: [
           { field: 'rating', direction: 'desc' },
           { field: 'rating', direction: 'asc' },
-          { field: 'review_count', direction: 'asc' },
         ],
         render: (value: number | null, item) =>
           value === null ? (

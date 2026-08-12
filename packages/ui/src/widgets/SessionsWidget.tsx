@@ -18,7 +18,7 @@ import { SessionDetailModal, roomAndTrackNames } from './SessionDetailModal'
 // EMB-16: times must render in the EVENT's own timezone, matching the agenda
 // grid — not `toLocaleTimeString`'s viewer-local rendering, which is what a
 // raw/unconverted-looking "18:00 – 18:30" turned out to be.
-import { fmtTimeRange } from './time'
+import { fmtDayShort, fmtTimeRange } from './time'
 
 export interface SessionsWidgetProps {
   eventSlug: string
@@ -76,7 +76,7 @@ function SessionCard({
         </div>
       </div>
       <div className="muted sessions-card-meta">
-        {session.day} · {fmtTimeRange(session.starts_at, session.ends_at, tz)}
+        {fmtDayShort(session.day)} · {fmtTimeRange(session.starts_at, session.ends_at, tz)}
         {showRoom && roomName ? ` · ${roomName}` : ''}
       </div>
       {showAbstract && description && (

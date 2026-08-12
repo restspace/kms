@@ -100,4 +100,17 @@ describe('portal uploads on tasks without a file request', () => {
     // comments can attach.
     expect(body.versions.every((v) => v.upload_id !== '')).toBe(true);
   });
+
+  it('the speaker portal lists the versions and comment thread for the synthetic chain', async () => {
+    const assignmentId = await createTaskAssignment(eventId, contactId, { fileRequestId: null });
+    await upload(assignmentId, fileFrom(pdfBytes(), 'deck.pdf', 'application/pdf'));
+    await upload(assignmentId, fileFrom(pdfBytes(), 'deck-v2.pdf', 'application/pdf'));
+
+    const res = await SELF.fetch(`${ORIGIN}/portal/${slug}/tasks`, { headers: { cookie } });
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    expect(html).toContain('2 versions');
+    expect(html).toContain('deck-v2.pdf');
+    expect(html).toContain('No comments yet.');
+  });
 });

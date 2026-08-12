@@ -1536,7 +1536,7 @@ export const invitePortal = (contactId: string) =>
     { method: 'POST', body: JSON.stringify({ contact_id: contactId }) },
   )
 
-export type ComposeAudience = 'all_contacts' | 'speakers' | 'accepted_speakers' | 'selected'
+export type ComposeAudience = 'all_contacts' | 'roster' | 'speakers' | 'accepted_speakers' | 'selected'
 
 export interface ComposeAudienceCount {
   audience: Exclude<ComposeAudience, 'selected'>

@@ -237,9 +237,20 @@ ${body}
 </html>`;
 }
 
+// Speakers never see the internal decision queues. `accept_queue` /
+// `decline_queue` mean "decided but not yet told" (docs/06 §status lifecycle) —
+// the decision only becomes theirs to read when the organiser sends the batch,
+// so both render exactly as `pending` does — label and chip colour alike, since
+// the queue colours (green/amber) would give the decision away on their own.
+const PORTAL_STATUS_ALIAS: Record<string, string> = {
+  accept_queue: 'pending',
+  decline_queue: 'pending',
+};
+
 function statusChipHtml(status: string): string {
-  const label = status.split('_').map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
-  return `<span class="chip st-${esc(status)}"><span class="dot"></span>${esc(label)}</span>`;
+  const shown = PORTAL_STATUS_ALIAS[status] ?? status;
+  const label = shown.split('_').map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+  return `<span class="chip st-${esc(shown)}"><span class="dot"></span>${esc(label)}</span>`;
 }
 
 const fmtDate = (iso: string | null): string => {
@@ -1303,9 +1314,13 @@ async function tasksPageHtml(c: Context<AppEnv>, ctx: PortalCtx, opts: TasksPage
   // keyed by request + contact + submission, matching what the POST appends to.
   const chains = new Map<string, FileChain>();
   for (const t of assignments) {
-    if (t.action_type !== 'file_upload' || !t.file_request_id) continue;
+    if (t.action_type !== 'file_upload') continue;
+    // A task with no file_requests row uploads into the standing per-task
+    // request (`file-request-task-<taskId>`, ensureTaskFileRequestId above) —
+    // read that chain the same way the organiser side does (filesAdmin.ts).
+    const chainRequestId = t.file_request_id ?? `file-request-task-${t.task_id}`;
     const versions = await loadChainVersions(c.env.DB, {
-      fileRequestId: t.file_request_id,
+      fileRequestId: chainRequestId,
       contactId: ctx.contactId,
       submissionId: t.submission_id,
     });

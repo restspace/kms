@@ -174,6 +174,7 @@ async function dashboardPayload(c: Context<ApiEnv>) {
     sessions,
     ignored,
     approvalRows,
+    remindableRow,
   ] = await Promise.all([
     db.prepare('SELECT id, name, slug, timezone, starts_at, ends_at FROM events WHERE id = ?').bind(eventId).first<EventRow>(),
     db.prepare('SELECT status, COUNT(*) AS n FROM submissions WHERE event_id = ? GROUP BY status').bind(eventId).all<{ status: string; n: number }>(),
@@ -275,6 +276,15 @@ async function dashboardPayload(c: Context<ApiEnv>) {
       submission_id: string; code: string; title: string; approval_note: string | null;
       starts_at: string | null; contact_id: string | null; name: string | null; email: string | null;
     }>(),
+    // Matches POST /remind's target set exactly (status != 'complete',
+    // due_at IS NOT NULL, no overdue-only cutoff) so the "Remind all" count
+    // never drifts from what the endpoint will actually queue.
+    db.prepare(
+      `SELECT COUNT(*) AS n
+       FROM task_assignments ta
+       JOIN tasks t ON t.id = ta.task_id
+       WHERE t.event_id = ? AND ta.status != 'complete' AND t.due_at IS NOT NULL`,
+    ).bind(eventId).first<{ n: number }>(),
   ]);
 
   if (!event) return null;
@@ -433,6 +443,7 @@ async function dashboardPayload(c: Context<ApiEnv>) {
         name: fullName(row.name, row.email),
         days_overdue: Math.max(1, Math.floor((Date.parse(now) - Date.parse(row.due_at)) / 86_400_000)),
       })),
+      remindable_tasks: remindableRow?.n ?? 0,
       // Days-until-event ascending: the session's own slot when it has one,
       // the event start otherwise — the soonest exposure sorts first.
       approval_pending: approvalRows.results
@@ -496,7 +507,9 @@ dashboardRoutes.get('/', async (c) => {
 });
 
 // POST /app/api/dashboard/remind { assignment_ids?: string[] } — queue task
-// reminders for overdue assignments; empty/omitted ids means "remind all".
+// reminders for outstanding assignments (not complete, due date set);
+// empty/omitted ids means "remind all". This covers both overdue and
+// not-yet-due tasks — reminders aren't just for lateness.
 // The request no longer sends inline (a big event exceeded the request budget,
 // sweep item P2-19): it snapshots a bulk_jobs row and the cron expander sends
 // in chunks with `bulk:<jobId>:<contactId>` keys, which keeps the per-assignment
@@ -517,13 +530,13 @@ dashboardRoutes.post('/remind', async (c) => {
   if (!event) return c.json({ error: 'not_found' }, 404);
 
   const requestedSet = requested === null ? null : new Set(requested);
-  const overdue = await db.prepare(
+  const outstanding = await db.prepare(
     `SELECT ta.id AS assignment_id
      FROM task_assignments ta
      JOIN tasks t ON t.id = ta.task_id
-     WHERE t.event_id = ? AND ta.status != 'complete' AND t.due_at IS NOT NULL AND t.due_at < ?`,
-  ).bind(session.eventId, now).all<{ assignment_id: string }>();
-  const targets = overdue.results
+     WHERE t.event_id = ? AND ta.status != 'complete' AND t.due_at IS NOT NULL`,
+  ).bind(session.eventId).all<{ assignment_id: string }>();
+  const targets = outstanding.results
     .map((row) => row.assignment_id)
     .filter((id) => requestedSet === null || requestedSet.has(id));
 
