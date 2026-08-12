@@ -57,7 +57,8 @@ interface SpeakerRow {
 }
 
 export interface AgendaSession extends SessionRow {
-  speakers: Array<{ contact_id: string; name: string }>;
+  /** email feeds the conflict engine's duplicate-record fallback (admin-only payload). */
+  speakers: Array<{ contact_id: string; name: string; email: string }>;
 }
 
 const SESSION_SELECT = `
@@ -86,7 +87,7 @@ export async function loadSessions(db: D1Database, eventId: string): Promise<Age
   ]);
   const byId = new Map<string, AgendaSession>(rows.map((r) => [r.id, { ...r, speakers: [] }]));
   for (const sp of speakers) {
-    byId.get(sp.submission_id)?.speakers.push({ contact_id: sp.contact_id, name: sp.name || sp.email });
+    byId.get(sp.submission_id)?.speakers.push({ contact_id: sp.contact_id, name: sp.name || sp.email, email: sp.email });
   }
   return [...byId.values()];
 }

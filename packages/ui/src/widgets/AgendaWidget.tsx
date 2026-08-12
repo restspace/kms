@@ -383,14 +383,25 @@ export function AgendaWidget({ eventSlug, filter }: AgendaWidgetProps) {
                     aria-label={`${s.title}, ${fmtMinutes(p.startMin)} to ${fmtMinutes(p.displayEndMin)}, ${col.label}`}
                     title={`${s.title} — ${fmtMinutes(p.startMin)} – ${fmtMinutes(p.displayEndMin)}`}
                   >
-                    <span className="ag-block-time">
-                      {fmtMinutes(p.startMin)} – {fmtMinutes(p.displayEndMin)}
+                    {/* Track rides the time row as a badge — zero extra height,
+                        so it shows on every block (eval defect: track/format
+                        were absent from the grid entirely). The taller-block
+                        thresholds below are sized so each extra line always
+                        fits inside the block instead of slicing glyphs at the
+                        bottom edge. */}
+                    <span className="ag-block-head">
+                      <span className="ag-block-time">
+                        {fmtMinutes(p.startMin)} – {fmtMinutes(p.displayEndMin)}
+                      </span>
+                      {track && <span className="ag-block-badge">{track.name}</span>}
                     </span>
-                    <span className="ag-block-title">{s.title}</span>
-                    {durationMin >= 40 && s.speakers.length > 0 && (
+                    <span className={durationMin >= 50 ? 'ag-block-title' : 'ag-block-title ag-block-title-one'}>
+                      {s.title}
+                    </span>
+                    {durationMin >= 60 && s.speakers.length > 0 && (
                       <span className="ag-block-speakers">{s.speakers.join(', ')}</span>
                     )}
-                    {durationMin >= 60 && track && <span className="ag-block-track">{track.name}</span>}
+                    {durationMin >= 80 && s.format && <span className="ag-block-track">{s.format}</span>}
                   </button>
                 )
               }),
@@ -501,12 +512,16 @@ const agendaCss = `
 /* min-height: a short-duration slot (a 5-10min grid row) can be shorter than
    one line of title text; without a floor the block clips mid-glyph instead
    of cleanly truncating a whole line. */
-.ag-block { position: relative; z-index: 1; overflow: hidden; display: flex; flex-direction: column; gap: .1rem; align-items: flex-start; text-align: left; margin-block: 1px; padding: .3rem .45rem; font: inherit; font-size: .78rem; line-height: 1.25; cursor: pointer; color: var(--text); border: 1px solid var(--border); border-left: 3px solid var(--ag-track, var(--accent)); border-radius: var(--radius); background: color-mix(in srgb, var(--ag-track, var(--accent)) 10%, var(--surface)); min-height: 1.4em; }
+.ag-block { position: relative; z-index: 1; overflow: hidden; display: flex; flex-direction: column; gap: .05rem; align-items: flex-start; text-align: left; margin-block: 1px; padding: .25rem .45rem; font: inherit; font-size: .78rem; line-height: 1.25; cursor: pointer; color: var(--text); border: 1px solid var(--border); border-left: 3px solid var(--ag-track, var(--accent)); border-radius: var(--radius); background: color-mix(in srgb, var(--ag-track, var(--accent)) 10%, var(--surface)); min-height: 1.4em; }
 .ag-block:hover, .ag-block:focus-visible { border-color: var(--accent); background: color-mix(in srgb, var(--ag-track, var(--accent)) 22%, var(--surface)); }
+.ag-block-head { display: flex; align-items: baseline; gap: .35rem; max-width: 100%; min-width: 0; }
 .ag-block-time { color: var(--text-muted); font-size: .7rem; white-space: nowrap; }
-/* Clamp to two lines with an ellipsis rather than the block's own
-   overflow: hidden cutting a line off mid-character. */
+.ag-block-badge { font-size: .62rem; padding: 0 .4rem; border-radius: 999px; background: color-mix(in srgb, var(--ag-track, var(--accent)) 22%, var(--surface)); color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+/* Clamp with an ellipsis rather than the block's own overflow: hidden cutting
+   a line off mid-character; short blocks (< 50 min of layout height) get one
+   line so the title can never push later lines past the bottom edge. */
 .ag-block-title { font-weight: 600; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.ag-block-title-one { -webkit-line-clamp: 1; }
 .ag-block-speakers, .ag-block-track { color: var(--text-muted); font-size: .7rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
 
 .ag-overlay { position: fixed; inset: 0; z-index: 50; background: var(--scrim); display: flex; align-items: flex-start; justify-content: center; padding: 4vh 1rem; overflow-y: auto; }

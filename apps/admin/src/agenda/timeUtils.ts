@@ -112,6 +112,42 @@ export function durationMinutes(startIso: string, endIso: string): number {
 
 export const snapTo = (minutes: number, step: number): number => Math.round(minutes / step) * step
 
+/** Default block length by format (docs/07 §3 "session's default duration"). */
+const FORMAT_DURATION: Record<string, number> = {
+  workshop: 90,
+  keynote: 45,
+  'featured keynote': 45,
+  panel: 45,
+  'lightning talk': 10,
+}
+
+/** "Lightning Talk (10 min)", "Deep Dive – 75 minutes", "45-min briefing"… */
+const FORMAT_MINUTES_RE = /(\d+)\s*(?:-\s*)?min(?:ute)?s?\b/i
+
+/**
+ * Minutes a session format implies, or null when the format says nothing.
+ * An explicit "(N min)" in the format label wins (eval defect: a
+ * "Lightning Talk (10 min)" was placed as a 30-minute block because the
+ * lookup only knew the bare "Lightning Talk" key); otherwise known format
+ * names match case-insensitively, including as a prefix ("Workshop — hands
+ * on") so decorated labels still get their family's default.
+ */
+export function formatMinutes(format: string | null | undefined): number | null {
+  if (!format) return null
+  const m = FORMAT_MINUTES_RE.exec(format)
+  if (m) {
+    const n = Number(m[1])
+    if (Number.isFinite(n) && n > 0) return n
+  }
+  const key = format.trim().toLowerCase()
+  const exact = FORMAT_DURATION[key]
+  if (exact !== undefined) return exact
+  for (const [name, minutes] of Object.entries(FORMAT_DURATION)) {
+    if (key.startsWith(name)) return minutes
+  }
+  return null
+}
+
 /**
  * Three schedule states (docs/13 W5, D8): Tray (nothing set), Pencilled
  * (time XOR room — "Tuesday morning, somewhere"), Placed (both). No

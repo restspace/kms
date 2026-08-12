@@ -17,6 +17,7 @@ import {
 } from '@kms/ui';
 import type { AppEnv } from '../env';
 import { esc, page } from '../html';
+import { matchTrackIds } from './embed';
 
 export const landingRoutes = new Hono<AppEnv>();
 
@@ -733,6 +734,21 @@ landingRoutes.get('/e/:slug/sessions.xml', async (c) => {
     });
   }
 
+  // Same ?track= / ?day= vocabulary as agenda.xml (routes/embed.ts): the embed
+  // builder appends the filter to this URL too, so honouring it here keeps the
+  // snippet, the direct link and the feed describing the same slice. Track
+  // accepts UUID, name or readable slug.
+  const q = new URL(c.req.url).searchParams;
+  const wantTrack = (q.get('track') ?? '').trim();
+  const wantDay = (q.get('day') ?? '').trim();
+  const trackIds = matchTrackIds(feed.tracks, wantTrack);
+  const visibleSessions = feed.sessions.filter((s) => {
+    if (wantTrack && !(s.track_id !== null && trackIds.has(s.track_id))) return false;
+    if (wantDay && s.day !== wantDay) return false;
+    return true;
+  });
+  const visibleDays = wantTrack || wantDay ? [...new Set(visibleSessions.map((s) => s.day))].sort() : feed.days;
+
   const parts: string[] = ['<?xml version="1.0" encoding="UTF-8"?>'];
   parts.push(
     `<sessions-feed slug="${xmlEscape(feed.event.slug)}" timezone="${xmlEscape(feed.event.timezone)}" generated="${new Date().toISOString()}">`,
@@ -740,13 +756,13 @@ landingRoutes.get('/e/:slug/sessions.xml', async (c) => {
   parts.push(
     `<event>${xmlTag('name', feed.event.name)}${xmlTag('slug', feed.event.slug)}${xmlTag('timezone', feed.event.timezone)}</event>`,
   );
-  parts.push(`<days>${feed.days.map((d) => xmlTag('day', d)).join('')}</days>`);
+  parts.push(`<days>${visibleDays.map((d) => xmlTag('day', d)).join('')}</days>`);
 
   const roomsById = new Map(feed.rooms.map((r) => [r.id, r]));
   const tracksById = new Map(feed.tracks.map((t) => [t.id, t]));
 
   parts.push('<sessions>');
-  for (const s of feed.sessions) {
+  for (const s of visibleSessions) {
     const room = s.room_id ? roomsById.get(s.room_id) ?? null : null;
     const track = s.track_id ? tracksById.get(s.track_id) ?? null : null;
     parts.push(`<session id="${xmlEscape(s.id)}">`);
@@ -890,6 +906,17 @@ function kindTitle(kind: EventPageKind): string {
     case 'gallery': return 'Gallery';
   }
 }
+
+// The event root. /e/:slug used to 404 while /e/:slug/agenda rendered a full
+// site (eval defect) — redirect to the agenda page, which is the natural
+// landing and carries the full nav. Query params (accent/header/embed/track/
+// day) ride along so a filtered/branded root link keeps its options.
+landingRoutes.get('/e/:slug', async (c) => {
+  const event = await lookupEventBySlug(c.env.DB, c.req.param('slug'));
+  if (!event) return c.notFound();
+  const query = new URL(c.req.url).search;
+  return c.redirect(`/e/${encodeURIComponent(event.slug)}/agenda${query}`, 302);
+});
 
 landingRoutes.get('/e/:slug/sessions', async (c) => {
   const event = await lookupEventBySlug(c.env.DB, c.req.param('slug'));

@@ -770,3 +770,29 @@
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
+
+/* Transient export outcome note beside the ↓CSV/↓XLSX buttons: confirms the
+   download (with the served filename) or explains the failure. */
+.data-list-export-notice {
+  align-self: center;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 4px 8px;
+  border-radius: var(--radius);
+  background-color: var(--surface-raised);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-overlay);
+  color: var(--text-muted);
+  max-width: 340px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.data-list-export-notice.ok {
+  color: var(--success, #2e7d32);
+}
+
+.data-list-export-notice.error {
+  color: var(--danger, #c62828);
+}

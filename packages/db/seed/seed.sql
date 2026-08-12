@@ -165,7 +165,7 @@ INSERT INTO scoring_criteria (id, plan_id, name, description, weight, allow_comm
 -- override to the Workshops plan and pick up the Production tag; anything
 -- unmatched falls back to General Review.
 UPDATE submission_forms SET
-  participant_roles = '[{"role":"speaker","min":1,"max":null},{"role":"co-speaker","min":0,"max":3},{"role":"panelist","min":0,"max":5}]',
+  participant_roles = '[{"role":"speaker","min":1,"max":null},{"role":"co-speaker","min":0,"max":3},{"role":"co-author","min":0,"max":null},{"role":"co-presenter","min":0,"max":null},{"role":"panelist","min":0,"max":5}]',
   routing_rules = '{"rules":[
     {"id":"r-tracks","when":{"question_id":"q0000000-0000-4000-8000-000000000005","op":"is_any_of","value":["Agents","Evals","RAG & Retrieval","Infra & Serving","AI in Production"]},"then":{"assign_evaluation_plan_id":"plan0000-0000-4000-8000-000000000001"}},
     {"id":"r-workshops","when":{"question_id":"q0000000-0000-4000-8000-000000000003","op":"equals","value":"Workshop"},"then":{"assign_evaluation_plan_id":"plan0000-0000-4000-8000-000000000002","add_tag_ids":["tag00000-0000-4000-8000-000000000003"]}}
@@ -189,7 +189,7 @@ INSERT INTO submission_forms (
    '<p>Submit a full session proposal for the programme.</p>', 1, 'sessions', 1,
    'open', NULL, 1, 0,
    '<p>Thanks — your session is in.</p>', 1, 1,
-   '[{"role":"speaker","min":1,"max":null}]',
+   '[{"role":"speaker","min":1,"max":null},{"role":"co-speaker","min":0,"max":null},{"role":"co-author","min":0,"max":null},{"role":"co-presenter","min":0,"max":null},{"role":"panelist","min":0,"max":null}]',
    '2026-08-08T12:00:00Z', '2026-08-08T12:00:00Z'),
   ('form0000-0000-4000-8000-000000000003', 'evt00000-0000-4000-8000-000000000001',
    'Lightning Talks', 'Lightning Talks — 5 minutes, big ideas', 'Lightning',

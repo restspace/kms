@@ -128,7 +128,7 @@ function ScoringForm({
   onNext,
 }: {
   assignment: Assignment
-  criteria: Array<{ id: string; name: string; description: string | null; weight: number }>
+  criteria: Array<{ id: string; name: string; description: string | null; weight: number; kind?: string; options?: string | null }>
   participants: Array<{ name: string | null; role: string }> | null
   savedNote: string | null
   onSaved: (note: string) => void
@@ -140,9 +140,12 @@ function ScoringForm({
     () => Array.from({ length: scaleMax - scaleMin + 1 }, (_, i) => scaleMin + i),
     [scaleMin, scaleMax],
   )
-  const [scores, setScores] = useState<Record<string, number>>(() => {
+  // 0026 criterion kinds: 'score' answers are numbers on the plan's scale,
+  // 'choice' answers are one of the criterion's option strings, 'text'
+  // answers are free text (optional, never part of the numeric total).
+  const [scores, setScores] = useState<Record<string, number | string>>(() => {
     try {
-      return assignment.my_scores ? (JSON.parse(String(assignment.my_scores)) as Record<string, number>) : {}
+      return assignment.my_scores ? (JSON.parse(String(assignment.my_scores)) as Record<string, number | string>) : {}
     } catch {
       return {}
     }
@@ -154,7 +157,19 @@ function ScoringForm({
   const anonymised = assignment.anonymise_submitters === 1
   const [formError, setFormError] = useState<string | null>(null)
 
-  const complete = conflict || criteria.every((c) => scores[c.id] !== undefined)
+  const kindOf = (c: { kind?: string }) => c.kind ?? 'score'
+  const optionsOf = (c: { options?: string | null }): string[] => {
+    try {
+      const parsed = JSON.parse(c.options ?? '[]') as unknown
+      return Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === 'string') : []
+    } catch {
+      return []
+    }
+  }
+  // Text criteria are optional; everything scoreable/choosable must be answered.
+  const complete =
+    conflict ||
+    criteria.every((c) => kindOf(c) === 'text' || (scores[c.id] !== undefined && scores[c.id] !== ''))
 
   const save = async (advance: boolean) => {
     setSaving(true)
@@ -217,21 +232,62 @@ function ScoringForm({
       {criteria.map((c) => (
         <div className="score-row" key={c.id}>
           <div className="score-label">
-            {c.name} <span className="score-weight">×{c.weight}</span>
+            {c.name}
+            {kindOf(c) === 'score' && <span className="score-weight"> ×{c.weight}</span>}
           </div>
           {c.description && <div className="score-desc">{c.description}</div>}
-          <div className="score-scale" role="radiogroup" aria-label={c.name}>
-            {scale.map((n) => (
-              <button
-                key={n}
-                className={scores[c.id] === n ? 'selected' : ''}
-                disabled={conflict}
-                onClick={() => setScores((prev) => ({ ...prev, [c.id]: n }))}
-              >
-                {n}
-              </button>
-            ))}
-          </div>
+          {kindOf(c) === 'score' && (
+            <div className="score-scale" role="radiogroup" aria-label={c.name}>
+              {scale.map((n) => (
+                <button
+                  key={n}
+                  className={scores[c.id] === n ? 'selected' : ''}
+                  disabled={conflict}
+                  onClick={() => setScores((prev) => ({ ...prev, [c.id]: n }))}
+                >
+                  {n}
+                </button>
+              ))}
+            </div>
+          )}
+          {kindOf(c) === 'choice' && (
+            <select
+              aria-label={c.name}
+              disabled={conflict}
+              value={typeof scores[c.id] === 'string' ? String(scores[c.id]) : ''}
+              onChange={(e) => {
+                const value = (e.target as HTMLSelectElement).value
+                setScores((prev) => {
+                  const next = { ...prev }
+                  if (value === '') delete next[c.id]
+                  else next[c.id] = value
+                  return next
+                })
+              }}
+            >
+              <option value="">Choose…</option>
+              {optionsOf(c).map((o) => (
+                <option key={o} value={o}>{o}</option>
+              ))}
+            </select>
+          )}
+          {kindOf(c) === 'text' && (
+            <textarea
+              rows={3}
+              aria-label={c.name}
+              disabled={conflict}
+              value={typeof scores[c.id] === 'string' ? String(scores[c.id]) : ''}
+              onChange={(e) => {
+                const value = (e.target as HTMLTextAreaElement).value
+                setScores((prev) => {
+                  const next = { ...prev }
+                  if (value === '') delete next[c.id]
+                  else next[c.id] = value
+                  return next
+                })
+              }}
+            />
+          )}
         </div>
       ))}
 

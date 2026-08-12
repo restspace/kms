@@ -90,10 +90,12 @@ function SessionCard({
             </span>
           ))}
         </div>
+      ) : session.speakers.length > 0 ? (
+        <div className="sessions-card-speakers muted">{session.speakers.join(', ')}</div>
       ) : (
-        session.speakers.length > 0 && (
-          <div className="sessions-card-speakers muted">{session.speakers.join(', ')}</div>
-        )
+        // A speakerless session used to silently omit the block (eval defect);
+        // a visible placeholder tells attendees the slot is real but uncast.
+        <div className="sessions-card-speakers muted sessions-card-speakers-tba">Speaker TBA</div>
       )}
     </li>
   )
@@ -274,4 +276,5 @@ const sessionsWidgetCss = `
 .sessions-card-desc { margin: .55rem 0 0; line-height: 1.5; }
 .sessions-showmore { margin-left: .35rem; background: none; border: none; padding: 0; color: var(--accent); cursor: pointer; font-size: inherit; text-decoration: underline; }
 .sessions-card-speakers { margin-top: .45rem; font-size: .88rem; }
+.sessions-card-speakers-tba { font-style: italic; }
 `

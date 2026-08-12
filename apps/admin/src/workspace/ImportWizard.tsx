@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { DesktopOnlyNotice } from '@kms/ui/desktop-only'
 import { ModalDialog, appConfirm } from '../components/dialogs'
 import {
+  ApiError,
   importBatchReportUrl,
   importCommit,
   importPreviewFile,
@@ -141,18 +142,36 @@ function ImportWizard({ request, onClose }: { request: ImportRequest; onClose: (
   const commit = () => {
     if (!plan) return
     void run(async () => {
-      const res = await importCommit(
-        request.target,
-        request.eventId,
-        plan.headers,
-        plan.rows_raw,
-        plan.mapping,
-        source,
-      )
-      setResult(res.applied)
-      setBatchId(res.batchId)
-      if ((res.applied.total ?? 0) - (res.applied.error ?? 0) - (res.applied.skip ?? 0) > 0) {
-        request.onImported?.()
+      try {
+        const res = await importCommit(
+          request.target,
+          request.eventId,
+          plan.headers,
+          plan.rows_raw,
+          plan.mapping,
+          source,
+          // The dry run the user just confirmed: the server re-plans and
+          // refuses (409 plan_changed) if the data moved underneath it, so a
+          // commit can never silently do something other than the preview.
+          plan.rows.map((row) => row.action),
+        )
+        setResult(res.applied)
+        setBatchId(res.batchId)
+        if ((res.applied.total ?? 0) - (res.applied.error ?? 0) - (res.applied.skip ?? 0) > 0) {
+          request.onImported?.()
+        }
+      } catch (err) {
+        if (err instanceof ApiError && err.details?.error === 'plan_changed') {
+          // Refresh the dry run against the current data and keep the wizard
+          // on the mapping step so the user confirms the NEW plan.
+          setPlan(
+            await importPreviewMapping(request.target, request.eventId, plan.headers, plan.rows_raw, plan.mapping, source),
+          )
+          throw new Error(
+            'The data changed since the dry run, so nothing was imported. The preview below has been refreshed — check it and import again.',
+          )
+        }
+        throw err
       }
     })
   }

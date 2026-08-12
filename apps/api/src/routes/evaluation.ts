@@ -1098,6 +1098,28 @@ evaluationRoutes.put('/evaluation/plans/:id', async (c) => {
   return c.json({ ok: true, plan });
 });
 
+// 0026 — criterion field types. 'score' is the numeric scale row everything
+// predating 0026 already is; 'choice' is a dropdown whose allowed values live
+// in `options` (JSON array of strings); 'text' is a long-text comment field.
+// choice/text never join the weighted numeric aggregate — see the save route.
+const CRITERION_KINDS = new Set(['score', 'choice', 'text']);
+
+/**
+ * Validate a criterion kind + options pair from a request body.
+ * Returns null on a malformed pair; the caller answers 400.
+ */
+function parseCriterionKind(body: Record<string, unknown>): { kind: string; options: string | null } | null {
+  const kind = typeof body.kind === 'string' && body.kind ? body.kind : 'score';
+  if (!CRITERION_KINDS.has(kind)) return null;
+  if (kind !== 'choice') return { kind, options: null };
+  const raw = body.options;
+  const list = Array.isArray(raw)
+    ? raw.filter((v): v is string => typeof v === 'string').map((v) => v.trim()).filter((v) => v !== '')
+    : [];
+  if (list.length < 2) return null; // a dropdown with fewer than two options is not a choice
+  return { kind, options: JSON.stringify(list.slice(0, 50)) };
+}
+
 evaluationRoutes.post('/evaluation/plans/:id/criteria', async (c) => {
   const session = c.get('session');
   const planId = c.req.param('id');
@@ -1108,15 +1130,17 @@ evaluationRoutes.post('/evaluation/plans/:id/criteria', async (c) => {
   const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
   const name = typeof body.name === 'string' && body.name.trim() ? body.name.trim() : 'Criterion';
   const weight = Number(body.weight);
+  const kindSpec = parseCriterionKind(body);
+  if (!kindSpec) return c.json({ error: 'invalid_criterion_kind' }, 400);
   const pos = await c.env.DB.prepare('SELECT COALESCE(MAX(position), 0) + 1 AS n FROM scoring_criteria WHERE plan_id = ?')
     .bind(planId)
     .first<{ n: number }>();
   await c.env.DB.prepare(
-    `INSERT INTO scoring_criteria (id, plan_id, name, description, weight, position)
-     VALUES (?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO scoring_criteria (id, plan_id, name, description, weight, position, kind, options)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
   )
     .bind(crypto.randomUUID(), planId, name, typeof body.description === 'string' ? body.description : null,
-      Number.isFinite(weight) && weight > 0 ? weight : 1, pos?.n ?? 1)
+      Number.isFinite(weight) && weight > 0 ? weight : 1, pos?.n ?? 1, kindSpec.kind, kindSpec.options)
     .run();
   return c.json({ ok: true }, 201);
 });
@@ -1129,6 +1153,12 @@ evaluationRoutes.put('/evaluation/criteria/:id', async (c) => {
   if (typeof body.name === 'string' && body.name.trim()) { sets.push('name = ?'); params.push(body.name.trim()); }
   const weight = Number(body.weight);
   if (Number.isFinite(weight) && weight > 0) { sets.push('weight = ?'); params.push(weight); }
+  if ('kind' in body || 'options' in body) {
+    const kindSpec = parseCriterionKind(body);
+    if (!kindSpec) return c.json({ error: 'invalid_criterion_kind' }, 400);
+    sets.push('kind = ?', 'options = ?');
+    params.push(kindSpec.kind, kindSpec.options);
+  }
   if (sets.length === 0) return c.json({ ok: true });
   const result = await c.env.DB.prepare(
     `UPDATE scoring_criteria SET ${sets.join(', ')}
@@ -1802,7 +1832,7 @@ evaluationRoutes.get('/review/queue', async (c) => {
       const placeholders = planIds.map(() => '?').join(', ');
       const { results } = await db
         .prepare(
-          `SELECT id, name, description, weight, position, plan_id FROM scoring_criteria
+          `SELECT id, name, description, weight, position, kind, options, plan_id FROM scoring_criteria
            WHERE plan_id IN (${placeholders}) ORDER BY plan_id, position`,
         )
         .bind(...planIds)
@@ -1923,23 +1953,52 @@ evaluationRoutes.post('/review/assignments/:id', async (c) => {
   const comment = typeof body.comment === 'string' ? body.comment : '';
 
   const { results: criteria } = await db
-    .prepare('SELECT id, weight FROM scoring_criteria WHERE plan_id = ?')
+    .prepare('SELECT id, weight, kind, options FROM scoring_criteria WHERE plan_id = ?')
     .bind(assignment.plan_id)
-    .all<{ id: string; weight: number }>();
+    .all<{ id: string; weight: number; kind: string; options: string | null }>();
 
+  // 0026 — criterion kinds. Only 'score' rows join the weighted numeric
+  // aggregate; a 'choice' answer must be one of the criterion's options and is
+  // stored as its string; 'text' is an optional free-text answer. The
+  // completeness rule stays "answer everything that can be scored": score and
+  // choice rows are required, text is not.
   const rawScores = (body.scores ?? {}) as Record<string, unknown>;
-  const scores: Record<string, number> = {};
+  const scores: Record<string, number | string> = {};
   let weightedSum = 0;
   let weightTotal = 0;
+  let required = 0;
+  let answered = 0;
   for (const criterion of criteria) {
-    const value = Number(rawScores[criterion.id]);
+    const raw = rawScores[criterion.id];
+    if (criterion.kind === 'text') {
+      if (typeof raw === 'string' && raw.trim() !== '') scores[criterion.id] = raw.trim().slice(0, 2000);
+      continue;
+    }
+    if (criterion.kind === 'choice') {
+      required += 1;
+      let allowed: string[] = [];
+      try {
+        const parsed = JSON.parse(criterion.options ?? '[]') as unknown;
+        if (Array.isArray(parsed)) allowed = parsed.filter((v): v is string => typeof v === 'string');
+      } catch { /* malformed options: nothing is selectable */ }
+      if (raw === undefined || raw === null || raw === '') continue;
+      if (typeof raw !== 'string' || !allowed.includes(raw)) {
+        return c.json({ error: 'invalid_choice', criterion_id: criterion.id }, 400);
+      }
+      scores[criterion.id] = raw;
+      answered += 1;
+      continue;
+    }
+    required += 1;
+    const value = Number(raw);
     if (!Number.isFinite(value)) continue;
     const clamped = Math.min(Math.max(value, assignment.scoring_scale_min), assignment.scoring_scale_max);
     scores[criterion.id] = clamped;
     weightedSum += clamped * criterion.weight;
     weightTotal += criterion.weight;
+    answered += 1;
   }
-  if (!conflict && Object.keys(scores).length < criteria.length) {
+  if (!conflict && answered < required) {
     return c.json({ error: 'all_criteria_required' }, 400);
   }
   const weightedTotal = conflict || weightTotal === 0 ? null : Math.round((weightedSum / weightTotal) * 100) / 100;

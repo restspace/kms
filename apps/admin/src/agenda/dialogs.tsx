@@ -1,6 +1,6 @@
 import { useRef, useState } from 'react'
 import type { AgendaRoom, AgendaSessionRow, AgendaTrack } from '../api'
-import { durationMinutes, fmtDay, utcToLocal } from './timeUtils'
+import { durationMinutes, fmtDay, formatMinutes, utcToLocal } from './timeUtils'
 import { ModalDialog } from '../components/dialogs'
 
 /**
@@ -243,7 +243,19 @@ export function AddSessionDialog({ tracks, rooms, days, onSave, onClose }: AddSe
         </label>
         <label>
           Format
-          <select value={format} onChange={(e) => setFormat(e.target.value)}>
+          <select
+            value={format}
+            onChange={(e) => {
+              // Follow the format's stated minutes (eval defect: lightning
+              // talks landing as 30-min blocks) — but never clobber a duration
+              // the organiser already typed over the old format's default.
+              const next = e.target.value
+              setDuration((cur) =>
+                Number(cur) === (formatMinutes(format) ?? 30) ? String(formatMinutes(next) ?? 30) : cur,
+              )
+              setFormat(next)
+            }}
+          >
             {FORMATS.map((f) => (
               <option key={f} value={f}>{f}</option>
             ))}

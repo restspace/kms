@@ -3,7 +3,7 @@
 // rules live here rather than three times over.
 
 import { describe, expect, it } from 'vitest';
-import { applyFeedFilter, isEmptyFilter, type AgendaFeed, type PublicSession } from './publicData';
+import { applyFeedFilter, isEmptyFilter, trackSlug, type AgendaFeed, type PublicSession } from './publicData';
 
 const session = (over: Partial<PublicSession> & { id: string }): PublicSession => ({
   code: over.id.toUpperCase(),
@@ -64,6 +64,19 @@ describe('applyFeedFilter', () => {
     expect(ids(applyFeedFilter(feed, { track: 'trk-a' }))).toEqual(['a1', 'a2']);
     expect(ids(applyFeedFilter(feed, { track: 'Platform' }))).toEqual(['a1', 'a2']);
     expect(ids(applyFeedFilter(feed, { track: 'platform' }))).toEqual(['a1', 'a2']);
+  });
+
+  it('matches a track by its readable slug (what generated embed links carry)', () => {
+    const slugFeed: AgendaFeed = {
+      ...feed,
+      tracks: [{ id: '1e34aaaa-0000-4000-8000-000000000000', name: 'Platform Engineering', color: null }],
+      sessions: [session({ id: 'p1', track_id: '1e34aaaa-0000-4000-8000-000000000000' })],
+    };
+    expect(trackSlug('Platform Engineering')).toBe('platform-engineering');
+    expect(ids(applyFeedFilter(slugFeed, { track: 'platform-engineering' }))).toEqual(['p1']);
+    // UUID and raw name keep working (back-compat with old links).
+    expect(ids(applyFeedFilter(slugFeed, { track: '1e34aaaa-0000-4000-8000-000000000000' }))).toEqual(['p1']);
+    expect(ids(applyFeedFilter(slugFeed, { track: 'Platform Engineering' }))).toEqual(['p1']);
   });
 
   it('filters by day, and combines day with track', () => {

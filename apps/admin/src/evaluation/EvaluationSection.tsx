@@ -299,12 +299,15 @@ function PlanCard({
   // CFP-11: the demo/dev sign-in link, shown with the reviewer it belongs to.
   const [signin, setSignin] = useState<{ who: string; email: string; link: string } | null>(null)
   // Target for the Copy button's manual-selection fallback (see below).
-  const signinInputRef = useRef<HTMLInputElement | null>(null)
+  const signinCodeRef = useRef<HTMLElement | null>(null)
   const [strategy, setStrategy] = useState<'all' | 'round_robin'>('all')
   const [perSubmission, setPerSubmission] = useState(2)
   const [assigning, setAssigning] = useState(false)
   const [critName, setCritName] = useState('')
   const [critWeight, setCritWeight] = useState('1')
+  // 0026 — criterion field types: numeric scale (default), dropdown, long text.
+  const [critKind, setCritKind] = useState<'score' | 'choice' | 'text'>('score')
+  const [critOptions, setCritOptions] = useState('')
   const [addingCrit, setAddingCrit] = useState(false)
   // Each section reads as a one-line summary until its ✎ opens the editor.
   const [editTiming, setEditTiming] = useState(false)
@@ -325,13 +328,23 @@ function PlanCard({
   const addCrit = () => {
     const name = critName.trim()
     if (!name || addingRef.current) return
+    // A dropdown needs at least two options before it means anything.
+    const options = critOptions.split(',').map((o) => o.trim()).filter(Boolean)
+    if (critKind === 'choice' && options.length < 2) return
     addingRef.current = true
     setAddingCrit(true)
     const weight = Number(critWeight)
     setCritName('')
     setCritWeight('1')
+    setCritOptions('')
+    setCritKind('score')
     run(`${plan.name}: added “${name}”`, () =>
-      addCriterion(plan.id, { name, weight: Number.isFinite(weight) && weight > 0 ? weight : 1 }).finally(() => {
+      addCriterion(plan.id, {
+        name,
+        weight: Number.isFinite(weight) && weight > 0 ? weight : 1,
+        kind: critKind,
+        ...(critKind === 'choice' ? { options } : {}),
+      }).finally(() => {
         addingRef.current = false
         setAddingCrit(false)
       }),
@@ -452,7 +465,11 @@ function PlanCard({
       <div className="eval-inline">
         <strong style={{ fontSize: 12 }}>Criteria</strong>
         <span className="eval-inline-text">
-          {criteria.length > 0 ? criteria.map((c) => `${c.name}: ${c.weight}`).join(', ') : 'None'}
+          {criteria.length > 0
+            ? criteria
+                .map((c) => ((c.kind ?? 'score') === 'score' ? `${c.name}: ${c.weight}` : `${c.name} (${c.kind})`))
+                .join(', ')
+            : 'None'}
         </span>
         <button
           className="fbtn-link eval-editicon"
@@ -469,20 +486,32 @@ function PlanCard({
       {criteria.map((c) => (
         <div className="crit-row" key={c.id}>
           <span className="crit-name">{c.name}</span>
-          <span style={{ color: 'var(--text-faint)', fontSize: 11 }}>weight</span>
-          <input
-            type="number"
-            aria-label={`Weight for ${c.name}`}
-            min={0.5}
-            step={0.5}
-            defaultValue={c.weight}
-            onBlur={(e) => {
-              const w = Number((e.target as HTMLInputElement).value)
-              if (Number.isFinite(w) && w > 0 && w !== c.weight) {
-                run(`${c.name}: weight ${w}`, () => updateCriterion(c.id, { weight: w }))
-              }
-            }}
-          />
+          {(c.kind ?? 'score') === 'score' ? (
+            <>
+              <span style={{ color: 'var(--text-faint)', fontSize: 11 }}>weight</span>
+              <input
+                type="number"
+                aria-label={`Weight for ${c.name}`}
+                min={0.5}
+                step={0.5}
+                defaultValue={c.weight}
+                onBlur={(e) => {
+                  const w = Number((e.target as HTMLInputElement).value)
+                  if (Number.isFinite(w) && w > 0 && w !== c.weight) {
+                    run(`${c.name}: weight ${w}`, () => updateCriterion(c.id, { weight: w }))
+                  }
+                }}
+              />
+            </>
+          ) : (
+            <span style={{ color: 'var(--text-faint)', fontSize: 11 }} title={
+              c.kind === 'choice'
+                ? `Options: ${(() => { try { return (JSON.parse(c.options ?? '[]') as string[]).join(', ') } catch { return '' } })()}`
+                : 'Free-text answer — not part of the numeric score'
+            }>
+              {c.kind === 'choice' ? 'dropdown' : 'long text'}
+            </span>
+          )}
           <button
             className="fbtn-link danger"
             aria-label={`Remove ${c.name}`}
@@ -505,15 +534,44 @@ function PlanCard({
           onChange={(e) => setCritName((e.target as HTMLInputElement).value)}
           onKeyDown={(e) => { if (e.key === 'Enter') addCrit() }}
         />
-        <input
-          aria-label="New criterion weight"
-          type="number"
-          min={0.5}
-          step={0.5}
-          value={critWeight}
-          onChange={(e) => setCritWeight((e.target as HTMLInputElement).value)}
-        />
-        <button className="fbtn-link" disabled={addingCrit || !critName.trim()} onClick={addCrit}>
+        <select
+          aria-label="New criterion type"
+          value={critKind}
+          onChange={(e) => setCritKind((e.target as HTMLSelectElement).value as 'score' | 'choice' | 'text')}
+        >
+          <option value="score">scale</option>
+          <option value="choice">dropdown</option>
+          <option value="text">long text</option>
+        </select>
+        {critKind === 'score' && (
+          <input
+            aria-label="New criterion weight"
+            type="number"
+            min={0.5}
+            step={0.5}
+            value={critWeight}
+            onChange={(e) => setCritWeight((e.target as HTMLInputElement).value)}
+          />
+        )}
+        {critKind === 'choice' && (
+          <input
+            aria-label="New criterion options"
+            placeholder="Options, comma-separated"
+            value={critOptions}
+            onChange={(e) => setCritOptions((e.target as HTMLInputElement).value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') addCrit() }}
+          />
+        )}
+        <button
+          className="fbtn-link"
+          disabled={
+            addingCrit ||
+            !critName.trim() ||
+            (critKind === 'choice' && critOptions.split(',').map((o) => o.trim()).filter(Boolean).length < 2)
+          }
+          title={critKind === 'choice' ? 'A dropdown needs at least two comma-separated options' : undefined}
+          onClick={addCrit}
+        >
           {addingCrit ? 'Adding…' : '+ Add criterion'}
         </button>
       </div>
@@ -585,8 +643,17 @@ function PlanCard({
                             setChosen((prev) =>
                               on ? [...new Set([...prev, r.id])] : prev.filter((id) => id !== r.id),
                             )
+                            // Pooling is not dealing (2026-08-12 eval: a
+                            // reviewer ticked into a second round saw no new
+                            // queue task because Assign was never pressed) —
+                            // say so in the confirmation instead of letting
+                            // the tick read as "they now have the work".
+                            const dealHint =
+                              on && (stats?.submissions ?? 0) > 0
+                                ? ` — now click Assign to deal them the round's ${stats!.submissions} submission(s)`
+                                : ''
                             run(
-                              on ? `${who} added to ${plan.name}` : `${who} removed from ${plan.name}`,
+                              on ? `${who} added to ${plan.name}${dealHint}` : `${who} removed from ${plan.name}`,
                               () =>
                                 (on ? addPlanReviewer(plan.id, r.id) : removePlanReviewer(plan.id, r.id)).catch(
                                   (err: unknown) => {
@@ -624,7 +691,18 @@ function PlanCard({
                         </button>
                       </td>
                       <td>
-                        {load ? `${load.completed}/${load.assigned}` : '—'}
+                        {load ? (
+                          `${load.completed}/${load.assigned}`
+                        ) : chosen.includes(r.id) && (stats?.submissions ?? 0) > 0 ? (
+                          // In the pool but never dealt anything: without this
+                          // the row is indistinguishable from "all done", and
+                          // the reviewer's queue silently stays empty.
+                          <span className="pane-sub" title="In the pool, but no submissions have been dealt to them — click Assign">
+                            not dealt — use Assign
+                          </span>
+                        ) : (
+                          '—'
+                        )}
                         {outstanding > 0 && (
                           <button
                             className="fbtn-link"
@@ -662,15 +740,34 @@ function PlanCard({
             <span className="pane-sub">
               Valid for 15 minutes, single use. Send it to this reviewer — opening it here signs you in as them.
             </span>
-            <div style={{ display: 'flex', gap: 6 }}>
-              <input
-                ref={signinInputRef}
-                readOnly
+            <div style={{ display: 'flex', gap: 6, alignItems: 'flex-start' }}>
+              {/* 2026-08-12 eval: the link used to sit in a truncated one-line
+                  read-only input, so the full URL was neither readable nor
+                  reliably selectable. A wrapping code block shows the whole
+                  URL; user-select:all makes one click select the entire link
+                  for hand-off even where the Copy button's clipboard
+                  permission is refused. */}
+              <code
+                ref={signinCodeRef}
                 aria-label={`Sign-in link for ${signin.who}`}
-                value={signin.link}
-                style={{ flex: 1, fontFamily: 'monospace', fontSize: 11 }}
-                onFocus={(e) => (e.target as HTMLInputElement).select()}
-              />
+                tabIndex={0}
+                style={{
+                  flex: 1,
+                  fontFamily: 'monospace',
+                  fontSize: 11,
+                  lineHeight: 1.5,
+                  wordBreak: 'break-all',
+                  overflowWrap: 'anywhere',
+                  whiteSpace: 'pre-wrap',
+                  userSelect: 'all',
+                  padding: '4px 6px',
+                  border: '1px solid var(--border)',
+                  borderRadius: 4,
+                  background: 'var(--surface-raised)',
+                }}
+              >
+                {signin.link}
+              </code>
               <button
                 className="fbtn-link"
                 onClick={() => {
@@ -684,9 +781,15 @@ function PlanCard({
                   // selecting the link so Ctrl+C works, and say so as an
                   // ordinary note rather than a red failure.
                   const selectInstead = () => {
-                    const el = signinInputRef.current
-                    el?.focus()
-                    el?.select()
+                    const el = signinCodeRef.current
+                    if (el) {
+                      el.focus()
+                      const range = document.createRange()
+                      range.selectNodeContents(el)
+                      const selection = window.getSelection()
+                      selection?.removeAllRanges()
+                      selection?.addRange(range)
+                    }
                     onNote('Press Ctrl+C (Cmd+C) to copy — the link is selected.')
                   }
                   let attempt: Promise<void> | undefined

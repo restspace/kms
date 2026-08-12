@@ -6,7 +6,7 @@
 // `eventDays()` — fixing it here fixes those call sites too.
 
 import { describe, expect, it } from 'vitest'
-import { classifySchedule, eventDays, localToUtc, utcToLocal, formatEventDateRange } from './timeUtils'
+import { classifySchedule, eventDays, formatMinutes, localToUtc, utcToLocal, formatEventDateRange } from './timeUtils'
 
 describe('eventDays', () => {
   it('a US-timezone (west of UTC) event spanning local May 12–14 yields exactly those three days', () => {
@@ -125,5 +125,30 @@ describe('classifySchedule', () => {
 
   it('is "placed" when both time and room are set', () => {
     expect(classifySchedule({ starts_at: '2027-05-12T09:00:00.000Z', room_id: 'room-a' })).toBe('placed')
+  })
+})
+
+describe('formatMinutes', () => {
+  it('reads an explicit "(N min)" out of the format label (eval defect: Lightning Talk (10 min) placed as 30)', () => {
+    expect(formatMinutes('Lightning Talk (10 min)')).toBe(10)
+    expect(formatMinutes('Deep Dive – 75 minutes')).toBe(75)
+    expect(formatMinutes('45-min briefing')).toBe(45)
+  })
+
+  it('falls back to the known format defaults, case-insensitively and as a prefix', () => {
+    expect(formatMinutes('Workshop')).toBe(90)
+    expect(formatMinutes('workshop — hands on')).toBe(90)
+    expect(formatMinutes('Lightning Talk')).toBe(10)
+    expect(formatMinutes('Featured Keynote')).toBe(45)
+  })
+
+  it('returns null when the format says nothing about duration', () => {
+    expect(formatMinutes(null)).toBeNull()
+    expect(formatMinutes(undefined)).toBeNull()
+    expect(formatMinutes('Fireside Chat')).toBeNull()
+  })
+
+  it('prefers the explicit minutes over the family default', () => {
+    expect(formatMinutes('Workshop (120 min)')).toBe(120)
   })
 })

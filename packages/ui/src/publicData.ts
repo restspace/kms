@@ -166,10 +166,24 @@ export async function fetchSpeakers(slug: string): Promise<SpeakersFeed | null> 
 // ---------------------------------------------------------------------------
 
 export interface PublicFeedFilter {
-  /** Track id or (case-insensitive) track name. */
+  /** Track id, (case-insensitive) track name, or track name slug. */
   track?: string | null;
   /** Day key, YYYY-MM-DD in the event timezone. */
   day?: string | null;
+}
+
+/**
+ * Readable URL form of a track name — "Platform Engineering" →
+ * "platform-engineering". Generated links use this instead of the opaque
+ * track UUID; the read side (this filter, plus the XML feeds server-side)
+ * accepts id, name and slug alike, so old UUID links keep working.
+ */
+export function trackSlug(name: string): string {
+  return name
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
 }
 
 /** True when the filter would change nothing. */
@@ -189,9 +203,13 @@ export function applyFeedFilter(
 ): AgendaFeed | null {
   if (!feed || isEmptyFilter(filter)) return feed;
   const wanted = (filter?.track ?? '').trim().toLowerCase();
+  // Slugifying both sides makes name matching case/whitespace/punctuation
+  // insensitive and, in the same stroke, accepts the readable slugs the embed
+  // builder now generates ("platform-engineering" ⇄ "Platform Engineering").
+  const wantedSlug = trackSlug(wanted);
   const trackIds = new Set(
     feed.tracks
-      .filter((t) => t.id.toLowerCase() === wanted || (t.name ?? '').trim().toLowerCase() === wanted)
+      .filter((t) => t.id.toLowerCase() === wanted || (wantedSlug !== '' && trackSlug(t.name ?? '') === wantedSlug))
       .map((t) => t.id),
   );
   const day = (filter?.day ?? '').trim();

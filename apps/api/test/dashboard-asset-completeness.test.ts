@@ -8,7 +8,8 @@
 
 import { SELF, env } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
-import { seedContact, seedEvent, seedStaff, seedSubmission, seedTask } from './fixtures-admin';
+import { seedContact, seedEvent, seedFileAsset, seedStaff, seedSubmission, seedTask } from './fixtures-admin';
+import { createFileRequest, createFileRequestUpload } from './fixtures-portal';
 
 const getDashboard = (cookie: string) =>
   SELF.fetch('https://example.com/app/api/dashboard', { headers: { cookie, accept: 'application/json' } });
@@ -64,5 +65,53 @@ describe('GET /app/api/dashboard — asset completeness', () => {
     const body = (await res.json()) as { tracking: { assets: Array<{ contact_id: string; missing_slides: number }> } };
     const row = body.tracking.assets.find((a) => a.contact_id === speaker);
     expect(row?.missing_slides).toBe(1);
+  });
+
+  // Eval defect: Priya's slides read as complete while the Tasks tab showed
+  // four not_started rows and the event had Files=0. Slides completeness now
+  // needs positive evidence (a completed upload task or an actual file) — a
+  // speaker with only non-upload tasks and no files must be flagged.
+  it('flags missing slides when the speaker has only non-upload tasks and no files on record', async () => {
+    const eventId = await seedEvent();
+    const admin = await seedStaff(eventId, 'admin');
+    const speaker = await seedContact(eventId, { email: 'priya@example.com' });
+    const submission = await seedSubmission(eventId, { status: 'accepted' });
+    await env.DB.prepare(
+      `INSERT INTO submission_participants (id, submission_id, contact_id, role, position, is_primary_contact)
+       VALUES (?, ?, ?, 'speaker', 0, 1)`,
+    ).bind(`sp-${crypto.randomUUID()}`, submission, speaker).run();
+
+    // Four tasks, all acknowledge-typed (the create form's default), all open.
+    for (const title of ['Upload presentation', 'Confirm AV needs', 'Sign release', 'Book travel']) {
+      const task = await seedTask(eventId, { title, action_type: 'acknowledge' });
+      await assignTask(task, speaker, 'not_started');
+    }
+
+    const res = await getDashboard(admin.cookie);
+    const body = (await res.json()) as { tracking: { assets: Array<{ contact_id: string; missing_slides: number }> } };
+    const row = body.tracking.assets.find((a) => a.contact_id === speaker);
+    expect(row?.missing_slides).toBe(1);
+  });
+
+  it('reads slides as present when a current uploaded file exists, even with no upload task', async () => {
+    const eventId = await seedEvent();
+    const admin = await seedStaff(eventId, 'admin');
+    const speaker = await seedContact(eventId, { email: 'uploaded@example.com' });
+    const submission = await seedSubmission(eventId, { status: 'accepted' });
+    await env.DB.prepare(
+      `INSERT INTO submission_participants (id, submission_id, contact_id, role, position, is_primary_contact)
+       VALUES (?, ?, ?, 'speaker', 0, 1)`,
+    ).bind(`sp-${crypto.randomUUID()}`, submission, speaker).run();
+
+    // A real deliverable in the same table the Files library reads.
+    const requestId = await createFileRequest(eventId, { title: 'Slides' });
+    const assetId = await seedFileAsset(eventId, speaker, { filename: 'slides.pdf' });
+    await createFileRequestUpload(requestId, speaker, assetId);
+
+    const res = await getDashboard(admin.cookie);
+    const body = (await res.json()) as { tracking: { assets: Array<{ contact_id: string; missing_slides: number }> } };
+    const row = body.tracking.assets.find((a) => a.contact_id === speaker);
+    // The row may exist for missing bio/headshot, but slides must read present.
+    expect(row?.missing_slides ?? 0).toBe(0);
   });
 });

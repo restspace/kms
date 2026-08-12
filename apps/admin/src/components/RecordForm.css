@@ -42,6 +42,19 @@
   white-space: nowrap;
 }
 
+/* Advisory notice (e.g. same-name duplicate) — informational, never blocks
+   the save, so it deliberately does not use the danger palette. */
+.record-form-warning {
+  margin-bottom: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border-strong, var(--border));
+  border-left: 3px solid var(--accent, currentColor);
+  border-radius: var(--radius-sm);
+  background: var(--surface-raised, var(--surface));
+  color: var(--text);
+  font-size: var(--text-grid);
+}
+
 .record-form-fields {
   display: flex;
   flex-direction: column;

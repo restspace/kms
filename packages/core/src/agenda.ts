@@ -10,6 +10,7 @@ export type ConflictSeverity = 'error' | 'warning' | 'info';
 export type ConflictCode =
   | 'ROOM_DOUBLE_BOOKED'
   | 'SPEAKER_DOUBLE_BOOKED'
+  | 'SPEAKER_LIKELY_DOUBLE_BOOKED'
   | 'OUTSIDE_EVENT_WINDOW'
   | 'ROOM_CAPACITY_EXCEEDED'
   | 'TRACK_OVERLAP'
@@ -21,6 +22,12 @@ export type ConflictCode =
 export interface AgendaSpeakerRef {
   contact_id: string;
   name: string;
+  /**
+   * Optional: lets the double-booking rule catch *duplicate* speaker records
+   * (two contact rows for one human — e.g. created by an import that failed
+   * to dedupe). Never surfaced in any message or signature.
+   */
+  email?: string | null;
 }
 
 export interface AgendaSessionInput {
@@ -58,6 +65,7 @@ export const SPEAKER_TRAVEL_GAP_MIN = 10;
 export const CONFLICT_SEVERITY: Record<ConflictCode, ConflictSeverity> = {
   ROOM_DOUBLE_BOOKED: 'error',
   SPEAKER_DOUBLE_BOOKED: 'error',
+  SPEAKER_LIKELY_DOUBLE_BOOKED: 'warning',
   OUTSIDE_EVENT_WINDOW: 'error',
   ROOM_CAPACITY_EXCEEDED: 'warning',
   TRACK_OVERLAP: 'warning',
@@ -75,6 +83,16 @@ export interface Timed {
   session: AgendaSessionInput;
   start: number;
   end: number;
+}
+
+/** Case/whitespace-insensitive identity key for speaker names and emails. */
+function normIdentity(value: string | null | undefined): string {
+  return (value ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
+/** Stable id for a cross-record speaker match (two contact rows, one human). */
+function identityPairKey(a: string, b: string): string {
+  return [a, b].sort().join('~');
 }
 
 function signature(code: ConflictCode, sessionIds: string[], contactId?: string): string {
@@ -173,15 +191,63 @@ function pairRules(a: Timed, b: Timed, roomById: Map<string, AgendaRoomInput>, o
       make('ROOM_DOUBLE_BOOKED', `“${sa.title}” and “${sb.title}” overlap in ${room?.name ?? 'the same room'}.`, pair),
     );
   }
+  // Speaker double-booking. Exact contact-id matches are errors. Two
+  // *different* contact records that share an email (or, more weakly, a
+  // normalized name) are very likely one human duplicated by an import that
+  // failed to dedupe — flag those too rather than reporting "0 conflicts":
+  // same email is still an error, same name alone is a warning.
   const speakersB = new Map(sb.speakers.map((sp) => [sp.contact_id, sp]));
+  const emailsB = new Map<string, AgendaSpeakerRef>();
+  const namesB = new Map<string, AgendaSpeakerRef>();
+  for (const sp of sb.speakers) {
+    const email = normIdentity(sp.email);
+    if (email && !emailsB.has(email)) emailsB.set(email, sp);
+    const name = normIdentity(sp.name);
+    if (name && !namesB.has(name)) namesB.set(name, sp);
+  }
+  const flagged = new Set<string>();
   for (const sp of sa.speakers) {
     if (speakersB.has(sp.contact_id)) {
+      if (flagged.has(sp.contact_id)) continue;
+      flagged.add(sp.contact_id);
       out.push(
         make(
           'SPEAKER_DOUBLE_BOOKED',
           `${sp.name} is on “${sa.title}” and “${sb.title}” at the same time.`,
           pair,
           sp.contact_id,
+        ),
+      );
+      continue;
+    }
+    const email = normIdentity(sp.email);
+    const emailHit = email ? emailsB.get(email) : undefined;
+    if (emailHit && emailHit.contact_id !== sp.contact_id) {
+      const key = identityPairKey(sp.contact_id, emailHit.contact_id);
+      if (flagged.has(key)) continue;
+      flagged.add(key);
+      out.push(
+        make(
+          'SPEAKER_DOUBLE_BOOKED',
+          `${sp.name} is on “${sa.title}” and “${sb.title}” at the same time (two speaker records share one email — likely duplicates).`,
+          pair,
+          key,
+        ),
+      );
+      continue;
+    }
+    const name = normIdentity(sp.name);
+    const nameHit = name ? namesB.get(name) : undefined;
+    if (nameHit && nameHit.contact_id !== sp.contact_id) {
+      const key = identityPairKey(sp.contact_id, nameHit.contact_id);
+      if (flagged.has(key)) continue;
+      flagged.add(key);
+      out.push(
+        make(
+          'SPEAKER_LIKELY_DOUBLE_BOOKED',
+          `Two speakers named ${sp.name} are on “${sa.title}” and “${sb.title}” at the same time — if they are the same person, this is a double-booking (duplicate speaker records).`,
+          pair,
+          key,
         ),
       );
     }
@@ -302,7 +368,16 @@ export function buildConflictIndexes(sessions: AgendaSessionInput[]): ConflictIn
   for (const t of timed) {
     if (t.session.room_id) push(byRoom, t.session.room_id, t);
     if (t.session.track_id) push(byTrack, t.session.track_id, t);
-    for (const sp of t.session.speakers) push(bySpeaker, sp.contact_id, t);
+    for (const sp of t.session.speakers) {
+      push(bySpeaker, sp.contact_id, t);
+      // Extra identity keys (prefixed so they cannot collide with a contact
+      // id) let the incremental engine find duplicate-record matches — same
+      // person under two contact rows — exactly like the full sweep does.
+      const name = normIdentity(sp.name);
+      if (name) push(bySpeaker, `~name:${name}`, t);
+      const email = normIdentity(sp.email);
+      if (email) push(bySpeaker, `~email:${email}`, t);
+    }
   }
   return { byRoom, bySpeaker, byTrack };
 }
@@ -360,7 +435,13 @@ export function computeConflictsForSession(
   };
   if (changed.room_id) consider(indexes.byRoom.get(changed.room_id));
   if (changed.track_id) consider(indexes.byTrack.get(changed.track_id));
-  for (const sp of changed.speakers) consider(indexes.bySpeaker.get(sp.contact_id));
+  for (const sp of changed.speakers) {
+    consider(indexes.bySpeaker.get(sp.contact_id));
+    const name = normIdentity(sp.name);
+    if (name) consider(indexes.bySpeaker.get(`~name:${name}`));
+    const email = normIdentity(sp.email);
+    if (email) consider(indexes.bySpeaker.get(`~email:${email}`));
+  }
   for (const other of candidates.values()) {
     // The sweep always passes the earlier session first; message wording and
     // session_ids order depend on it.

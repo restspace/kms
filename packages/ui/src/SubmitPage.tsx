@@ -111,6 +111,18 @@ function participantIdentity(questions: QuestionDef[], answers: Answers): { name
 const readableRole = (role: string): string =>
   role.split('-').map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join('-')
 
+/** Ids of identity questions synthesized client-side when a
+ * collect-participants form configures no name/email participant questions.
+ * Their answers are sent as flat `{first_name, last_name, email}` fields on
+ * the participant payload (which the server lifts into identity), never as
+ * question-keyed answers. */
+const SYNTH_IDENTITY_PREFIX = '__identity-'
+const IDENTITY_FALLBACKS: Array<{ key: 'first_name' | 'last_name' | 'email'; label: string; type: 'text' | 'email' }> = [
+  { key: 'first_name', label: 'First Name', type: 'text' },
+  { key: 'last_name', label: 'Last Name', type: 'text' },
+  { key: 'email', label: 'Email', type: 'email' },
+]
+
 type Step = 'welcome' | 'account' | 'submission' | 'participant' | 'review'
 
 const STEPS: Array<{ key: Step; label: string }> = [
@@ -160,10 +172,37 @@ export function SubmitPage({ data }: { data: SubmitBootstrap }) {
   const [draftChoice, setDraftChoice] = useState<'resume' | 'new' | null>(null)
   const [draftChoiceError, setDraftChoiceError] = useState<string | null>(null)
   const [startingNew, setStartingNew] = useState(false)
-  const participantQuestions = useMemo(
-    () => data.questions.filter((q) => q.section === 'participant').sort((a, b) => a.position - b.position),
-    [data.questions],
-  )
+  const participantQuestions = useMemo(() => {
+    const configured = data.questions
+      .filter((q) => q.section === 'participant')
+      .sort((a, b) => a.position - b.position)
+    if (!form.collect_participants) return configured
+    // A collect-participants form whose configured questions cover no
+    // name/email leaves every added slot unidentifiable — the server rejects
+    // it with participants_invalid and the step is a dead end (CFP defect).
+    // Synthesize the missing identity inputs; `submit` sends their values as
+    // flat fields the server lifts into the participant's identity.
+    const have = new Set(configured.map((q) => q.field_key))
+    const basePosition = configured.reduce((max, q) => Math.max(max, q.position), 0)
+    const fallbacks = IDENTITY_FALLBACKS.filter((f) => !have.has(f.key)).map(
+      (f, i): QuestionDef => ({
+        id: `${SYNTH_IDENTITY_PREFIX}${f.key}`,
+        section: 'participant',
+        field_key: f.key,
+        field_id: `${SYNTH_IDENTITY_PREFIX}${f.key}`,
+        label: f.label,
+        help_text: null,
+        type: f.type,
+        position: basePosition + i + 1,
+        required: true,
+        locked: false,
+        options: null,
+        max_chars: 255,
+        visibility: null,
+      }),
+    )
+    return [...configured, ...fallbacks]
+  }, [data.questions, form.collect_participants])
   const primaryParticipantAnswers = useMemo((): Answers => {
     const seed: Record<string, string | null | undefined> = {
       email: viewer?.email,
@@ -283,7 +322,15 @@ export function SubmitPage({ data }: { data: SubmitBootstrap }) {
         body: JSON.stringify({ submission_id: submissionIdRef.current, answers: answersRef.current }),
       })
         .then(async (res) => {
-          if (!res.ok) return
+          if (!res.ok) {
+            // The limit can close underneath an open wizard (another tab, a
+            // second device). Say so instead of autosaving silently forever.
+            const body = (await res.json().catch(() => ({}))) as { error?: string; message?: string }
+            if (res.status === 409 && body.error === 'limit_reached') {
+              setStepError(body.message ?? 'You have reached the submission limit for this form.')
+            }
+            return
+          }
           const body = (await res.json()) as { submission_id: string }
           setSubmissionId(body.submission_id)
           setSavedAt(new Date().toLocaleTimeString())
@@ -366,7 +413,18 @@ export function SubmitPage({ data }: { data: SubmitBootstrap }) {
   const validateParticipantStep = useCallback((): boolean => {
     const nextErrors: Record<string, string>[] = []
     let anyFieldErrors = false
-    for (const p of participants) {
+    const isEmptyAnswer = (v: AnswerValue) =>
+      v === undefined || v === null || v === false ||
+      (typeof v === 'string' && v.trim() === '') ||
+      (Array.isArray(v) && v.length === 0)
+    for (const [i, p] of participants.entries()) {
+      // A never-touched extra slot is ignored (and dropped at submit), not a
+      // wall of "required" errors the submitter can only escape by noticing
+      // the Remove link.
+      if (i > 0 && Object.values(p.answers).every(isEmptyAnswer)) {
+        nextErrors.push({})
+        continue
+      }
       const validation = filterFileErrors(participantQuestions, validateAnswers(participantQuestions, p.answers))
       const errs: Record<string, string> = {}
       for (const err of validation) errs[err.question_id] = err.message
@@ -378,8 +436,9 @@ export function SubmitPage({ data }: { data: SubmitBootstrap }) {
       setStepError('Please fix the highlighted participant fields.')
       return false
     }
+    const active = participants.filter((p, i) => i === 0 || !Object.values(p.answers).every(isEmptyAnswer))
     for (const cfg of roleConfigs) {
-      const count = participants.filter((p) => p.role === cfg.role).length
+      const count = active.filter((p) => p.role === cfg.role).length
       if (count < cfg.min) {
         setStepError(`At least ${cfg.min} ${cfg.role}${cfg.min > 1 ? 's' : ''} required.`)
         return false
@@ -414,11 +473,33 @@ export function SubmitPage({ data }: { data: SubmitBootstrap }) {
     setSubmitting(true)
     setStepError(null)
     try {
-      const outgoingParticipants = participants.map((p) => ({
-        role: p.role,
-        is_primary_contact: p.is_primary_contact,
-        answers: discardHiddenAnswers(participantQuestions, p.answers),
-      }))
+      const isEmptyAnswer = (v: AnswerValue) =>
+        v === undefined || v === null || v === false ||
+        (typeof v === 'string' && v.trim() === '') ||
+        (Array.isArray(v) && v.length === 0)
+      const outgoingParticipants = participants
+        // An accidental never-filled extra slot is dropped, not a dead end
+        // (the primary slot always goes through — the server re-asserts the
+        // signed-in submitter as participant 1 regardless).
+        .filter((p, i) => i === 0 || !Object.values(p.answers).every(isEmptyAnswer))
+        .map((p) => {
+          const kept = discardHiddenAnswers(participantQuestions, p.answers)
+          // Synthesized identity questions travel as flat fields, not answers
+          // — the server has no configured question to key them by.
+          const flat: Record<string, string> = {}
+          for (const q of participantQuestions) {
+            if (!q.id.startsWith(SYNTH_IDENTITY_PREFIX)) continue
+            const v = kept[q.id]
+            delete kept[q.id]
+            if (typeof v === 'string' && v.trim() !== '') flat[q.field_key] = v.trim()
+          }
+          return {
+            role: p.role,
+            is_primary_contact: p.is_primary_contact,
+            answers: kept,
+            ...flat,
+          }
+        })
       const res = await fetch(`${data.base_path}/submit`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
@@ -432,9 +513,13 @@ export function SubmitPage({ data }: { data: SubmitBootstrap }) {
       if (!res.ok) {
         const detail = Array.isArray(body.errors)
           ? (body.errors as Array<{ message: string }>).map((e) => e.message).join('; ')
-          : typeof body.error === 'string'
-            ? body.error
-            : 'Submission failed.'
+          : typeof body.message === 'string'
+            ? body.message
+            : typeof body.detail === 'string'
+              ? body.detail
+              : typeof body.error === 'string'
+                ? body.error
+                : 'Submission failed.'
         setStepError(detail)
         return
       }
@@ -597,14 +682,28 @@ export function SubmitPage({ data }: { data: SubmitBootstrap }) {
               {loginState === 'sent' ? (
                 <>
                   <p className="sb-muted">
-                    An account already exists for that email — check your inbox for a sign-in
-                    link, which returns you to this form.
+                    An account already exists for <strong>{loginEmail.trim()}</strong>, so we
+                    emailed you a sign-in link instead. Opening the link brings you straight
+                    back to this form, signed in and ready to continue. If you opened it in
+                    another tab or window, press Continue below to pick up here.
                   </p>
                   {devLink && (
                     <p className="sb-devlink">
                       Demo login: <a href={devLink}>use your sign-in link</a>
                     </p>
                   )}
+                  <div className="sb-nav" style={{ justifyContent: 'flex-start', gap: '.75rem' }}>
+                    <button
+                      type="button"
+                      className="sb-button sb-primary"
+                      onClick={() => window.location.assign(data.base_path)}
+                    >
+                      I clicked the link — continue
+                    </button>
+                    <button type="button" className="sb-button" onClick={() => setLoginState('idle')}>
+                      Use a different email
+                    </button>
+                  </div>
                 </>
               ) : loginState === 'created' ? (
                 <p className="sb-muted">Setting up your account…</p>

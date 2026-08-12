@@ -231,6 +231,24 @@ importRoutes.post('/commit', async (c) => {
   const timezone = await eventTimezone(c, scope.eventId, source);
   const plan = await planImport({ db: c.env.DB, eventId: scope.eventId, source, timezone }, target, headers, rows, mapping);
 
+  // Eval defect (dry run said merge, commit created duplicates): the commit
+  // re-plans against the LIVE database, so anything that moved the ground
+  // between preview and commit — another organiser's writes, a demo reset, a
+  // deleted merge target — silently produced a different plan from the one the
+  // organiser just confirmed. The wizard now sends the per-row actions it
+  // showed; if the re-plan disagrees, the commit refuses instead of applying a
+  // plan nobody saw. Optional, so older clients (and the REST surface) keep
+  // today's behaviour.
+  if (Array.isArray(body.expected_actions)) {
+    const expected = body.expected_actions.map((v) => String(v));
+    const actual = plan.rows.map((r) => r.action);
+    const drifted =
+      expected.length !== actual.length || actual.some((action, i) => action !== expected[i]);
+    if (drifted) {
+      return c.json({ error: 'plan_changed', summary: plan.summary }, 409);
+    }
+  }
+
   // Sessionboard commits are recorded as an undoable batch (§5.5); generic
   // commits keep today's exact behaviour (no batch row, batchId: null).
   const batchId = source === 'sessionboard' ? crypto.randomUUID() : null;

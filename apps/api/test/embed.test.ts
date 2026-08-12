@@ -158,6 +158,40 @@ describe('GET /e/:slug/agenda.xml', () => {
     const nonsense = await (await SELF.fetch(`${ORIGIN}/e/${slug}/agenda.xml?track=nope`)).text();
     expect(nonsense).toContain('<sessions></sessions>');
   });
+
+  it('honours ?track= by readable slug (what generated embed links now carry)', async () => {
+    // A multi-word, punctuated name whose slug differs from its lowercase
+    // form — "data-ai" only matches through the slug rule, not name equality.
+    const slugEvent = `xmlslug-${crypto.randomUUID().slice(0, 8)}`;
+    const slugEventId = await createEvent({ slug: slugEvent, timezone: 'UTC' });
+    const aiTrack = `trk-${crypto.randomUUID()}`;
+    await env.DB.prepare('INSERT INTO tracks (id, event_id, name, position) VALUES (?, ?, ?, 0)')
+      .bind(aiTrack, slugEventId, 'Data & AI')
+      .run();
+    const talk = await createSubmission(slugEventId, { title: 'Vectors', code: 'AI-1' });
+    await schedule(talk, '2026-10-01T09:00:00.000Z', '2026-10-01T10:00:00.000Z', undefined, aiTrack);
+    const other = await createSubmission(slugEventId, { title: 'Untracked', code: 'AI-2' });
+    await schedule(other, '2026-10-01T11:00:00.000Z', '2026-10-01T12:00:00.000Z');
+    await publishAgenda(slugEventId);
+
+    const bySlug = await (await SELF.fetch(`${ORIGIN}/e/${slugEvent}/agenda.xml?track=data-ai`)).text();
+    expect(bySlug).toContain('AI-1');
+    expect(bySlug).not.toContain('AI-2');
+    // UUID links generated before the slug change keep working.
+    const byUuid = await (await SELF.fetch(`${ORIGIN}/e/${slugEvent}/agenda.xml?track=${aiTrack}`)).text();
+    expect(byUuid).toContain('AI-1');
+    expect(byUuid).not.toContain('AI-2');
+  });
+
+  it('sessions.xml honours the same ?track= / ?day= filters as agenda.xml', async () => {
+    await publishAgenda(eventId);
+    const byName = await (await SELF.fetch(`${ORIGIN}/e/${slug}/sessions.xml?track=platform`)).text();
+    expect(byName).toContain('X-1');
+    expect(byName).not.toContain('X-2');
+    const byDay = await (await SELF.fetch(`${ORIGIN}/e/${slug}/sessions.xml?day=2026-10-02`)).text();
+    expect(byDay).toContain('X-2');
+    expect(byDay).not.toContain('X-1');
+  });
 });
 
 describe('framing headers', () => {

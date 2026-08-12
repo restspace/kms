@@ -216,6 +216,16 @@ export const SESSION_FIELDS: ImportField[] = [
 
 export const CONTACT_IMPORT_FIELDS: ImportField[] = [
   { key: 'email', label: 'Email', aliases: ['e-mail', 'email address', 'speaker email'], required: true, hint: 'The dedupe key within the organisation' },
+  // A single "Name" column used to auto-map onto first_name via the containment
+  // pass, producing first name "Priya Raman" / last name blank (eval defect).
+  // It now binds this field instead, and the planner splits it: last token →
+  // last name, the rest → first name. Explicit First/Last columns always win.
+  {
+    key: 'full_name',
+    label: 'Full name',
+    aliases: ['name', 'speaker name', 'contact name', 'full name'],
+    hint: 'Split on import: last word becomes the last name',
+  },
   { key: 'first_name', label: 'First name', aliases: ['first', 'given name', 'forename'] },
   { key: 'last_name', label: 'Last name', aliases: ['last', 'surname', 'family name'] },
   { key: 'company', label: 'Company', aliases: ['organisation', 'organization', 'employer', 'affiliation'] },
@@ -807,6 +817,24 @@ export async function planContacts(
 ): Promise<ImportPlan> {
   const source = ctx.source ?? 'generic';
   const records = dataRows.map((row) => applyMapping(headers, row, mapping));
+  // A mapped "Full name" column becomes first/last here — before matching, so
+  // the preview, the merge fill-blanks list and the commit (which re-plans
+  // through this same function) all see the split names. Explicit First/Last
+  // columns win: the full name is then ignored rather than second-guessed.
+  for (const values of records) {
+    const full = values.full_name;
+    if (full === undefined) continue;
+    delete values.full_name;
+    if (values.first_name !== undefined || values.last_name !== undefined) continue;
+    const parts = full.trim().split(/\s+/).filter(Boolean);
+    if (parts.length === 0) continue;
+    if (parts.length === 1) {
+      values.first_name = parts[0] as string;
+    } else {
+      values.last_name = parts[parts.length - 1] as string;
+      values.first_name = parts.slice(0, -1).join(' ');
+    }
+  }
   const emails = records
     .map((r) => (r.email ?? '').toLowerCase())
     .filter((e) => e !== '' && EMAIL_RE.test(e));

@@ -35,6 +35,7 @@ import {
   eventDays,
   fmtDay,
   fmtRange,
+  formatMinutes,
   localToUtc,
   tzAbbr,
   utcToLocal,
@@ -74,15 +75,6 @@ const COMPACT_MEDIA_QUERY = `(max-width: ${breakpoints.compact}px)`
 
 /** Grid modes; `list` and `conflicts` stay usable at every width. */
 const GRID_VIEWS: AgendaView[] = ['day', 'week', 'month', 'rooms']
-
-/** Default block length by format (docs/07 §3 "session's default duration"). */
-const FORMAT_DURATION: Record<string, number> = {
-  Workshop: 90,
-  Keynote: 45,
-  'Featured Keynote': 45,
-  Panel: 45,
-  'Lightning Talk': 10,
-}
 
 interface UndoEntry {
   id: string
@@ -277,7 +269,7 @@ export function AgendaSection({
   )
   const defaultDuration = useCallback((s: AgendaSessionRow): number => {
     if (s.starts_at && s.ends_at) return durationMinutes(s.starts_at, s.ends_at)
-    return FORMAT_DURATION[s.format ?? ''] ?? 30
+    return formatMinutes(s.format) ?? 30
   }, [])
 
   /** Recompute conflicts locally after an optimistic change (same engine). */
@@ -554,6 +546,21 @@ export function AgendaSection({
         { title: 'Unpublish agenda', confirmLabel: 'Unpublish', danger: true },
       )
       if (!confirmed) return
+    }
+    if (next) {
+      // Publish-time guard (eval defect): an accepted session still in the
+      // tray silently never appears publicly. Name the unplaced sessions and
+      // make going live an explicit choice.
+      const unplaced = current.sessions.filter((s) => s.starts_at === null)
+      if (unplaced.length > 0) {
+        const listed = unplaced.slice(0, 6).map((s) => `• ${s.code} · ${s.title}`)
+        if (unplaced.length > 6) listed.push(`…and ${unplaced.length - 6} more`)
+        const confirmed = await appConfirm(
+          `${unplaced.length} accepted session${unplaced.length === 1 ? ' is' : 's are'} not scheduled yet and will NOT appear on the public agenda:\n\n${listed.join('\n')}\n\nPublish anyway?`,
+          { title: 'Unscheduled sessions will be missing', confirmLabel: 'Publish anyway', cancelLabel: 'Keep as draft' },
+        )
+        if (!confirmed) return
+      }
     }
     setPublishBusy(true)
     setData((cur) => (cur === null ? cur : { ...cur, event: { ...cur.event, agenda_published: next ? 1 : 0 } }))
@@ -1080,7 +1087,26 @@ function ListView({
                     ? `${fmtDay(utcToLocal(s.starts_at, timezone).day)} · ${fmtRange(s.starts_at, s.ends_at, timezone)}`
                     : <span className="list-unscheduled">Unscheduled</span>}
                 </td>
-                <td>{s.starts_at && s.ends_at ? `${durationMinutes(s.starts_at, s.ends_at)} min` : ''}</td>
+                <td>
+                  {s.starts_at && s.ends_at
+                    ? (() => {
+                        // Duration/format divergence (eval defect: a 10-min
+                        // lightning talk sat in a silent 30-min block).
+                        const dur = durationMinutes(s.starts_at, s.ends_at)
+                        const expected = formatMinutes(s.format)
+                        return expected !== null && expected !== dur ? (
+                          <span
+                            className="list-duration-mismatch"
+                            title={`Format “${s.format}” suggests ${expected} min`}
+                          >
+                            {dur} min ⚠
+                          </span>
+                        ) : (
+                          `${dur} min`
+                        )
+                      })()
+                    : ''}
+                </td>
                 <td>{s.invited === 1 ? '✓' : ''}</td>
               </tr>
             )

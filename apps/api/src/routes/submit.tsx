@@ -232,7 +232,7 @@ function trackAnswerValues(questions: QuestionDef[], answers: Answers): string[]
  *  saved before the options were derived, and any client posting the API
  *  directly against the older shape. Accepting both keeps those working while
  *  the id remains what the pipeline resolves against. */
-function normaliseTrackAnswers(questions: QuestionDef[], answers: Answers): Answers {
+export function normaliseTrackAnswers(questions: QuestionDef[], answers: Answers): Answers {
   const q = trackBoundQuestion(questions);
   const options = q?.options;
   if (!q || !options || answers[q.id] === undefined) return answers;
@@ -251,7 +251,7 @@ function normaliseTrackAnswers(questions: QuestionDef[], answers: Answers): Answ
  *  swapped for the track name it stands for. Storing the name also keeps every
  *  answer row readable if the track is later deleted, and keeps existing rows
  *  (which always held names) the same shape. Nothing else is rewritten. */
-function storableAnswers(questions: QuestionDef[], answers: Answers): Answers {
+export function storableAnswers(questions: QuestionDef[], answers: Answers): Answers {
   const q = trackBoundQuestion(questions);
   if (!q || !q.options || answers[q.id] === undefined) return answers;
   const label = (raw: string) => q.options?.find((o) => o.value === raw)?.label ?? raw;
@@ -262,6 +262,54 @@ function storableAnswers(questions: QuestionDef[], answers: Answers): Answers {
       ? label(v)
       : v;
   return { ...answers, [q.id]: swapped };
+}
+
+/** Columns a submission row carries that mirror system questions, for
+ *  re-hydrating an answer set that has no stored `submission_answers` rows. */
+export interface SystemColumnRow {
+  title?: string | null;
+  description?: string | null;
+  format?: string | null;
+  level?: string | null;
+  language?: string | null;
+  capacity?: number | null;
+  ceu_credits?: number | null;
+  client_session_id?: string | null;
+  track_id?: string | null;
+}
+
+/**
+ * Fill answers that have no stored row from the submission's own system
+ * columns (CFP defect, live-reproduced 2026-08-12: resuming a seeded/imported
+ * draft loaded an entirely empty wizard — the row carried title, description,
+ * format, level and track only as columns, with no `submission_answers` rows
+ * to hydrate from, and the next autosave then overwrote the stored content
+ * with the empty form state). Never overwrites an answer that does exist;
+ * only questions whose field_key maps onto a populated column are filled.
+ * The track column re-hydrates as the track id — the same value shape the
+ * derived Track options use — as an array when the question is a multiselect.
+ */
+export function synthesizeAnswersFromColumns(
+  questions: QuestionDef[],
+  answers: Answers,
+  row: SystemColumnRow,
+): Answers {
+  const out: Answers = { ...answers };
+  const scalarKeys = [
+    'title', 'description', 'format', 'level', 'language', 'capacity', 'ceu_credits', 'client_session_id',
+  ] as const;
+  for (const q of questions) {
+    if (out[q.id] !== undefined && out[q.id] !== null && out[q.id] !== '') continue;
+    if (q.field_key === 'track') {
+      if (row.track_id) out[q.id] = q.type === 'multiselect' ? [row.track_id] : row.track_id;
+      continue;
+    }
+    if ((scalarKeys as readonly string[]).includes(q.field_key)) {
+      const value = row[q.field_key as (typeof scalarKeys)[number]];
+      if (value !== undefined && value !== null && value !== '') out[q.id] = value;
+    }
+  }
+  return out;
 }
 
 function tagAnswers(questions: QuestionDef[], answers: Answers): string[] {
@@ -341,12 +389,14 @@ submitRoutes.get('/:slug/:formId', async (c) => {
       const [count, draft] = await Promise.all([
         countForLimit(c.env.DB, form.id, session.contactId),
         c.env.DB.prepare(
-          `SELECT id, title FROM submissions
+          `SELECT id, title, description, format, level, language, capacity, ceu_credits,
+                  client_session_id, track_id
+           FROM submissions
            WHERE form_id = ? AND submitter_contact_id = ? AND status = 'draft'
            ORDER BY updated_at DESC LIMIT 1`,
         )
           .bind(form.id, session.contactId)
-          .first<{ id: string; title: string | null }>(),
+          .first<{ id: string; title: string | null } & SystemColumnRow>(),
       ]);
       let draftAnswers: Answers | null = null;
       if (draft) {
@@ -359,6 +409,17 @@ submitRoutes.get('/:slug/:formId', async (c) => {
         for (const row of results) {
           draftAnswers[row.question_id] = row.value_json ? (JSON.parse(row.value_json) as Answers[string]) : null;
         }
+        // Resume must hydrate what the draft actually holds (CFP defect —
+        // "resume loads an entirely empty form"): a seeded/imported draft has
+        // no answer rows, only system columns, so those columns are the
+        // answers. Stored track answers are labels (storableAnswers); the
+        // wizard's derived Track options are keyed by track id — normalise so
+        // the select actually hydrates instead of falling back to "Select…".
+        const abstract = questions.filter((q) => q.section === 'abstract');
+        draftAnswers = normaliseTrackAnswers(
+          abstract,
+          synthesizeAnswersFromColumns(abstract, draftAnswers, draft),
+        );
       }
       viewer = {
         ...contact,
@@ -576,6 +637,22 @@ submitRoutes.post('/:slug/:formId/draft', async (c) => {
 
   const columns = systemColumns(abstractQuestions, answers);
   const isCreate = submissionId === null;
+
+  // Data-loss guard (CFP defect): a client that saves before its resume
+  // hydration has applied — or any caller posting a blank answer set at an
+  // existing draft — must never wipe stored content. An all-empty autosave
+  // over an existing draft is a no-op: there is nothing worth persisting in
+  // it, and clearing a whole draft is what "Start a new submission" and
+  // withdraw are for. (Clearing individual fields still saves fine — the
+  // guard only fires when EVERY answer is empty.)
+  const isEmptyAnswer = (v: Answers[string]) =>
+    v === undefined || v === null || v === false ||
+    (typeof v === 'string' && v.trim() === '') ||
+    (Array.isArray(v) && v.length === 0);
+  if (!isCreate && Object.values(answers).every(isEmptyAnswer)) {
+    return c.json({ submission_id: submissionId, skipped: 'empty' });
+  }
+
   if (!submissionId) {
     if (ctx.limit !== null && (await countForLimit(db, ctx.form.id, session.contactId)) >= ctx.limit) {
       return c.json(limitReachedBody(), 409);
@@ -728,13 +805,23 @@ function normaliseParticipants(raw: unknown, participantQuestions: QuestionDef[]
     const modern = p.answers !== null && typeof p.answers === 'object';
     const answers = modern ? parseAnswers(p.answers) : {};
     const identity = emptyIdentity();
-    if (!modern) {
-      for (const key of IDENTITY_FIELD_KEYS) {
-        const value = typeof p[key] === 'string' ? (p[key] as string) : '';
-        if (!value) continue;
+    for (const key of IDENTITY_FIELD_KEYS) {
+      const value = typeof p[key] === 'string' ? (p[key] as string) : '';
+      if (!value) continue;
+      const q = questionByFieldKey.get(key);
+      if (!modern) {
+        // Legacy flat shape: lift onto the matching questions so both shapes
+        // take the same validation path.
         identity[key] = value;
-        const q = questionByFieldKey.get(key);
         if (q) answers[q.id] = value;
+      } else if (!q || answers[q.id] === undefined || answers[q.id] === '') {
+        // Modern shape may still carry flat identity fields for identity the
+        // form has no configured question for (CFP defect: a
+        // collect-participants form without name/email participant questions
+        // rendered a dead-end slot whose occupant could never be identified —
+        // the wizard now sends these as flat fields). A configured question's
+        // own answer always wins; the flat field only fills a gap.
+        identity[key] = value;
       }
     }
     out.push({
@@ -885,6 +972,18 @@ submitRoutes.post('/:slug/:formId/submit', async (c) => {
 
   // Participants: the signed-in submitter is always participant 1 / primary.
   let participants = normaliseParticipants(body.participants, participantQuestions);
+  // An accidental empty slot ("+ Add participant" clicked and never filled)
+  // is ignored rather than dead-ending the whole submission on
+  // participants_invalid — there is nobody in it to attach.
+  const slotIsEmpty = (p: ParticipantInput) =>
+    Object.values(p.identity).every((v) => v === '') &&
+    Object.values(p.answers).every(
+      (v) =>
+        v === undefined || v === null || v === false ||
+        (typeof v === 'string' && v.trim() === '') ||
+        (Array.isArray(v) && v.length === 0),
+    );
+  participants = participants.filter((p) => !slotIsEmpty(p));
   if (ctx.form.collect_participants === 1) {
     if (participants.length > MAX_PARTICIPANTS_PER_SUBMISSION) {
       return c.json(
@@ -1000,16 +1099,29 @@ submitRoutes.post('/:slug/:formId/submit', async (c) => {
   // means a different submission.
   const dupCutoff = new Date(Date.now() - REPLAY_WINDOW_MS).toISOString();
   const dupDescription = (columns.description as string) ?? null;
-  if (isCreate) {
-    replayOf = await findRecentDuplicate(db, ctx.form.id, session.contactId, title, dupDescription, dupCutoff);
-  }
 
+  // Limit before replay (eval defect: "advertised 'Submission limit: 1 per
+  // user' yet accepted a second, duplicate proposal with an identical
+  // title"). The content-replay heuristic cannot tell a dropped-response
+  // retry from a person deliberately submitting the same proposal again, and
+  // answering the latter with a success page mis-states what happened — no
+  // new submission exists, and the limit is already spent. When the quota is
+  // full, a fresh create is refused with the honest limit_reached body
+  // *before* the duplicate lookup gets a chance to dress it up as a success.
+  // (A retry of a draft promotion still replays fine — it arrives with its
+  // submission_id and is resolved above, never reaching this check. True
+  // concurrent twins are still collapsed by the in-batch duplicate guard and
+  // the post-batch duplicate lookup in the commit loop below.)
+  //
   // Friendly pre-check; the batch re-checks the same predicate atomically so a
   // racing request cannot squeeze past it.
-  if (isCreate && replayOf === null && ctx.limit !== null) {
+  if (isCreate && ctx.limit !== null) {
     if ((await countForLimit(db, ctx.form.id, session.contactId)) >= ctx.limit) {
       return c.json(limitReachedBody(), 409);
     }
+  }
+  if (isCreate) {
+    replayOf = await findRecentDuplicate(db, ctx.form.id, session.contactId, title, dupDescription, dupCutoff);
   }
 
   // Routing (docs/04 §4) — answers keyed by question id.

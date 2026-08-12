@@ -363,12 +363,220 @@ describe('sweepBulkJobs / compose', () => {
     expect(polled.failed).toBe(0);
   });
 
+  // 2026-08-12 eval sweep, defect 1 (MAJOR): the compose idempotency key used
+  // to be `compose:<contact>:<contact>:v1` — identical for every compose ever
+  // sent to a contact — so a second deliberate message to the same person was
+  // swallowed as 'duplicate': no message_log row, nothing sent, while the UI
+  // claimed every recipient had a row. The job id is now the key's version, so
+  // each compose (a distinct bulk_jobs snapshot) sends, while retried ticks of
+  // the same job still dedupe.
+  it('a second compose to the same recipient sends again (one row per compose, not per contact)', async () => {
+    await clearPendingJobs();
+    const eventId = await createEvent({ name: 'RepeatConf' });
+    const admin = await staffSession(eventId);
+    const target = await createContact(eventId, { email: 'repeat@example.com', first_name: 'Rae' });
+
+    const first = await SELF.fetch(
+      'https://example.com/app/api/messaging/compose',
+      post(admin.cookie, { subject: 'First note', body: 'Hello', audience: 'selected', contact_ids: [target] }),
+    );
+    const { job_id: job1 } = (await first.json()) as { job_id: string };
+    await settleJob(job1);
+
+    const second = await SELF.fetch(
+      'https://example.com/app/api/messaging/compose',
+      post(admin.cookie, { subject: 'Second note', body: 'Hello again', audience: 'selected', contact_ids: [target] }),
+    );
+    expect(second.status).toBe(202);
+    const { job_id: job2 } = (await second.json()) as { job_id: string };
+    await settleJob(job2);
+
+    const { results: rows } = await env.DB.prepare(
+      `SELECT subject, status, bulk_job_id FROM message_log
+       WHERE contact_id = ? AND template_key = 'compose' ORDER BY created_at`,
+    ).bind(target).all<{ subject: string; status: string; bulk_job_id: string }>();
+    expect(rows).toHaveLength(2);
+    expect(rows.map((r) => r.subject)).toEqual(['First note', 'Second note']);
+    expect(rows.every((r) => r.status === 'sent')).toBe(true);
+    expect(rows[0].bulk_job_id).toBe(job1);
+    expect(rows[1].bulk_job_id).toBe(job2);
+
+    // Neither job reported the second send as a skipped duplicate.
+    const j2 = await env.DB.prepare('SELECT status, skipped_duplicate FROM bulk_jobs WHERE id = ?')
+      .bind(job2)
+      .first<{ status: string; skipped_duplicate: number }>();
+    expect(j2).toEqual({ status: 'done', skipped_duplicate: 0 });
+  });
+
+  // 2026-08-12 eval sweep, defects 2/3: a recipient who dropped off the event
+  // roster between compose and expansion used to vanish with no trace — fewer
+  // log rows than "Send to N" promised, and nothing saying why. Now the
+  // compose-time email snapshot lets the expander write an accounted-for
+  // 'failed' row with the skip reason.
+  it('a recipient removed from the event mid-job still gets a log row with a skip reason', async () => {
+    await clearPendingJobs();
+    const eventId = await createEvent();
+    const stays = await createContact(eventId, { email: 'stays@example.com' });
+    const leaves = await createContact(eventId, { email: 'leaves@example.com' });
+
+    // Seed the job directly (as the compose route now freezes it, emails
+    // snapshot included) so we can remove a recipient before any expansion.
+    const jobId = crypto.randomUUID();
+    await env.DB.prepare(
+      `INSERT INTO bulk_jobs (id, event_id, kind, status, params_json, total, enqueued, created_by, created_at, updated_at)
+       VALUES (?, ?, 'compose', 'pending', ?, 2, 0, 'tester', ?, ?)`,
+    ).bind(
+      jobId,
+      eventId,
+      JSON.stringify({
+        subject: 'Roster check',
+        body: composeBodyToHtml('Body'),
+        body_text: 'Body',
+        contact_ids: [stays, leaves],
+        emails: { [stays]: 'stays@example.com', [leaves]: 'leaves@example.com' },
+      }),
+      ts,
+      ts,
+    ).run();
+    await env.DB.prepare('DELETE FROM event_contacts WHERE event_id = ? AND contact_id = ?')
+      .bind(eventId, leaves)
+      .run();
+
+    await sweepBulkJobs(env, 50);
+
+    const job = await env.DB.prepare('SELECT status, enqueued FROM bulk_jobs WHERE id = ?')
+      .bind(jobId)
+      .first<{ status: string; enqueued: number }>();
+    expect(job).toEqual({ status: 'done', enqueued: 2 });
+
+    const { results: rows } = await env.DB.prepare(
+      `SELECT to_email, status, error FROM message_log WHERE bulk_job_id = ? ORDER BY to_email`,
+    ).bind(jobId).all<{ to_email: string; status: string; error: string | null }>();
+    // Every selected recipient has a row: one delivered, one failed-with-reason.
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toMatchObject({ to_email: 'leaves@example.com', status: 'failed' });
+    expect(rows[0].error).toContain('no longer on this event');
+    expect(rows[1]).toMatchObject({ to_email: 'stays@example.com', status: 'sent' });
+  });
+
+  // 2026-08-12 eval sweep, defect 5: the rendered per-recipient body is
+  // persisted on the message_log row (migration 0029) so the Messages tab
+  // detail view can prove what was sent and that merge fields resolved.
+  it('persists the rendered subject and body on the message_log row', async () => {
+    await clearPendingJobs();
+    const eventId = await createEvent({ name: 'BodyConf' });
+    const admin = await staffSession(eventId);
+    const grace = await createContact(eventId, { email: 'grace@example.com', first_name: 'Grace', last_name: 'Hopper' });
+
+    const res = await SELF.fetch(
+      'https://example.com/app/api/messaging/compose',
+      post(admin.cookie, {
+        subject: 'Hello {{first_name}}',
+        body: 'Hi {{first_name}} {{last_name}}, welcome to {{event.name}}.',
+        audience: 'selected',
+        contact_ids: [grace],
+      }),
+    );
+    const { job_id: jobId } = (await res.json()) as { job_id: string };
+    await settleJob(jobId);
+
+    const row = await env.DB.prepare(
+      'SELECT subject, body_html, body_text FROM message_log WHERE bulk_job_id = ?',
+    ).bind(jobId).first<{ subject: string; body_html: string | null; body_text: string | null }>();
+    expect(row?.subject).toBe('Hello Grace');
+    expect(row?.body_text).toContain('Hi Grace Hopper, welcome to BodyConf.');
+    expect(row?.body_html).toContain('Hi Grace Hopper, welcome to BodyConf.');
+    expect(row?.body_text).not.toContain('{{');
+  });
+
   it('escapes the organiser\'s text rather than letting it become markup', () => {
     const html = composeBodyToHtml('A <script>alert(1)</script> line\nwith a break\n\nSecond paragraph');
     expect(html).not.toContain('<script>');
     expect(html).toContain('&lt;script&gt;');
     expect(html).toContain('<br>');
     expect(html.match(/<p>/g)).toHaveLength(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// POST /app/api/messaging/messages/:id/retry (2026-08-12 sweep, defect 3)
+// ---------------------------------------------------------------------------
+
+describe('POST /app/api/messaging/messages/:id/retry', () => {
+  /** A failed message_log row + its dead-lettered outbox row, as the outbox
+   * sweep leaves them after MAX_ATTEMPTS. */
+  async function seedFailedMessage(eventId: string, contactId: string, email: string) {
+    const msgId = crypto.randomUUID();
+    const logKey = `compose:${contactId}:${contactId}:v${crypto.randomUUID()}`;
+    await env.DB.prepare(
+      `INSERT INTO message_log (id, event_id, template_key, to_email, contact_id, subject, body_html, body_text, status, error, idempotency_key, created_at)
+       VALUES (?, ?, 'compose', ?, ?, 'Retry me', '<p>Hello Retry</p>', 'Hello Retry', 'failed', 'provider exploded', ?, ?)`,
+    ).bind(msgId, eventId, email, contactId, logKey, ts).run();
+    await env.DB.prepare(
+      `INSERT INTO outbox (id, kind, idempotency_key, payload, status, attempts, next_attempt_at, last_error, created_at)
+       VALUES (?, 'email', ?, ?, 'dead', 8, ?, 'provider exploded', ?)`,
+    ).bind(
+      crypto.randomUUID(),
+      logKey,
+      JSON.stringify({ to: email, subject: 'Retry me', html: '<p>Hello Retry</p>', text: 'Hello Retry', log_key: logKey }),
+      ts,
+      ts,
+    ).run();
+    return { msgId, logKey };
+  }
+
+  it('revives a dead outbox row and delivers, flipping the row to sent', async () => {
+    const eventId = await createEvent();
+    const admin = await staffSession(eventId);
+    const target = await createContact(eventId, { email: 'retry-target@example.com' });
+    const { msgId, logKey } = await seedFailedMessage(eventId, target, 'retry-target@example.com');
+
+    const res = await SELF.fetch(`https://example.com/app/api/messaging/messages/${msgId}/retry`, post(admin.cookie, {}));
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { ok: boolean; status: string; error: string | null };
+    expect(body.ok).toBe(true);
+    expect(body.status).toBe('sent'); // DEV_MODE console provider delivers inline
+    expect(body.error).toBeNull();
+
+    const log = await env.DB.prepare('SELECT status, error FROM message_log WHERE id = ?')
+      .bind(msgId)
+      .first<{ status: string; error: string | null }>();
+    expect(log).toEqual({ status: 'sent', error: null });
+    const outbox = await env.DB.prepare('SELECT status FROM outbox WHERE idempotency_key = ?')
+      .bind(logKey)
+      .first<{ status: string }>();
+    expect(outbox?.status).toBe('done');
+  });
+
+  it('rebuilds the payload from the stored body when the outbox row is gone', async () => {
+    const eventId = await createEvent();
+    const admin = await staffSession(eventId);
+    const target = await createContact(eventId, { email: 'retry-orphan@example.com' });
+    const { msgId, logKey } = await seedFailedMessage(eventId, target, 'retry-orphan@example.com');
+    await env.DB.prepare('DELETE FROM outbox WHERE idempotency_key = ?').bind(logKey).run();
+
+    const res = await SELF.fetch(`https://example.com/app/api/messaging/messages/${msgId}/retry`, post(admin.cookie, {}));
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { status: string }).status).toBe('sent');
+  });
+
+  it('refuses a message that is not failed, and a foreign event\'s message', async () => {
+    const eventId = await createEvent();
+    const otherEvent = await createEvent({ slug: `retry-other-${crypto.randomUUID().slice(0, 8)}` });
+    const admin = await staffSession(eventId);
+    const target = await createContact(eventId, { email: 'retry-sent@example.com' });
+    const { msgId } = await seedFailedMessage(eventId, target, 'retry-sent@example.com');
+    await env.DB.prepare(`UPDATE message_log SET status = 'sent' WHERE id = ?`).bind(msgId).run();
+
+    const notFailed = await SELF.fetch(`https://example.com/app/api/messaging/messages/${msgId}/retry`, post(admin.cookie, {}));
+    expect(notFailed.status).toBe(409);
+    expect(((await notFailed.json()) as { error: string }).error).toBe('not_failed');
+
+    // Same row, but through a session on a different event: not visible.
+    const foreignAdmin = await staffSession(otherEvent);
+    await env.DB.prepare(`UPDATE message_log SET status = 'failed' WHERE id = ?`).bind(msgId).run();
+    const foreign = await SELF.fetch(`https://example.com/app/api/messaging/messages/${msgId}/retry`, post(foreignAdmin.cookie, {}));
+    expect(foreign.status).toBe(404);
   });
 });
 

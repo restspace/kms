@@ -114,6 +114,48 @@ describe('SubmitPage participant contract', () => {
     expect(optionValues).toEqual(expect.arrayContaining(['speaker', 'co-speaker']))
   })
 
+  it('eval defect 3: a form with no participant identity questions still renders name/email inputs per slot', () => {
+    // collect_participants is on but the organiser configured no participant
+    // questions at all — every slot used to render only the role dropdown and
+    // dead-end at submit with participants_invalid.
+    render(<SubmitPage data={makeBootstrap([])} />)
+
+    fireEvent.click(screen.getByRole('button', { name: /^Next$/ })) // welcome -> account
+    fireEvent.click(screen.getByRole('button', { name: /^Next$/ })) // account -> submission
+    fireEvent.click(screen.getByRole('button', { name: /^Next$/ })) // submission -> participant
+
+    fireEvent.click(screen.getByRole('button', { name: /\+ Add participant/ }))
+
+    expect(screen.getAllByText('First Name').length).toBe(2)
+    expect(screen.getAllByText('Last Name').length).toBe(2)
+    expect(screen.getAllByText('Email').length).toBe(2)
+    // The accidental empty slot is removable.
+    expect(screen.getByRole('button', { name: /Remove/ })).toBeTruthy()
+  })
+
+  it('eval defect 1: choosing Resume hydrates the saved draft answers into the wizard', () => {
+    const questions = [
+      makeQuestion({ id: 'q-title', field_key: 'title', label: 'Title', position: 0 }),
+      makeQuestion({ id: 'q-desc', field_key: 'description', type: 'textarea', label: 'Description', position: 1 }),
+    ]
+    const data = makeBootstrap(questions)
+    data.viewer!.draft = {
+      id: 'draft-1',
+      title: 'Streaming Function Calls',
+      answers: { 'q-title': 'Streaming Function Calls', 'q-desc': 'Progressive rendering patterns.' },
+    }
+    render(<SubmitPage data={data} />)
+
+    fireEvent.click(screen.getByRole('button', { name: /^Next$/ })) // welcome -> account
+    fireEvent.click(screen.getByRole('button', { name: /Resume draft/ }))
+    fireEvent.click(screen.getByRole('button', { name: /^Next$/ })) // account -> submission
+
+    expect((screen.getByLabelText('Title') as unknown as HTMLInputElement).value).toBe('Streaming Function Calls')
+    expect((screen.getByLabelText('Description') as unknown as HTMLTextAreaElement).value).toBe(
+      'Progressive rendering patterns.',
+    )
+  })
+
   it('item 1: the review step shows the Track option label, not the stored track id', () => {
     const questions: QuestionDef[] = [
       makeQuestion({

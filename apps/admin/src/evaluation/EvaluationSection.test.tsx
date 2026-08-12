@@ -396,8 +396,11 @@ describe('EvaluationSection — round editor (lane L3)', () => {
     const { fireEvent } = await import('@testing-library/preact')
     fireEvent.click(screen.getByLabelText('Send sign-in link to Ada Lovelace'))
 
-    const field = (await screen.findByLabelText('Sign-in link for Ada Lovelace')) as HTMLInputElement
-    expect(field.value).toBe('https://kms.example/auth/callback?t=abc123')
+    // The link renders as a wrapping, fully-visible code block now (2026-08-12
+    // eval: the old one-line read-only input truncated the URL), so the whole
+    // URL is its text content rather than an input value.
+    const field = await screen.findByLabelText('Sign-in link for Ada Lovelace')
+    expect(field.textContent).toBe('https://kms.example/auth/callback?t=abc123')
     expect(screen.getByText(/Sign-in link for Ada Lovelace \(r@example.com\)/)).toBeTruthy()
   })
 
@@ -417,6 +420,6 @@ describe('EvaluationSection — round editor (lane L3)', () => {
 
     await waitFor(() => expect(addCriterion).toHaveBeenCalled())
     expect(addCriterion).toHaveBeenCalledTimes(1)
-    expect(addCriterion).toHaveBeenCalledWith('p1', { name: 'Originality', weight: 1 })
+    expect(addCriterion).toHaveBeenCalledWith('p1', { name: 'Originality', weight: 1, kind: 'score' })
   })
 })

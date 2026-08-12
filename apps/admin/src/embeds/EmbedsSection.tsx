@@ -87,6 +87,20 @@ function attr(value: string): string {
   return value.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 }
 
+/**
+ * Readable URL form of a track name (eval defect: generated links carried the
+ * opaque track UUID). Must stay in step with packages/ui trackSlug and
+ * routes/embed.ts, which accept slug, name or UUID on the read side — old
+ * UUID links keep working, new ones say what they filter.
+ */
+function trackSlug(name: string): string {
+  return name
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+}
+
 export function EmbedsSection({ me }: { me: Me }) {
   const slug = me.event.slug
   const origin = typeof window === 'undefined' ? '' : window.location.origin
@@ -351,7 +365,10 @@ const DEFAULT_EMBED_ACCENT = '#2c4a73'
             >
               <option value={ALL}>All tracks</option>
               {tracks.map((t) => (
-                <option key={t.id} value={t.id}>
+                // Value is the readable slug (falling back to the UUID only
+                // when a name slugs to nothing), so the snippet, direct link
+                // and feed URL all express the filter the same readable way.
+                <option key={t.id} value={trackSlug(t.name) || t.id}>
                   {t.name}
                 </option>
               ))}

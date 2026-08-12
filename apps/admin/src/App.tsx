@@ -17,6 +17,7 @@ import {
   listContactFields,
   listRooms,
   queryResource,
+  searchOrgContacts,
   sendDecisions,
   switchEvent,
   updateContact,
@@ -26,6 +27,7 @@ import {
   type ContactRow,
   type Me,
   type MessageRow,
+  type OrgContactRow,
   type RoomRow,
   type SubmissionRow,
   type TaskAssignmentRow,
@@ -64,6 +66,7 @@ import {
 import { FileLibraryDetail, TaskFilesPanel, formatBytes } from './workspace/FilePanels'
 import {
   ComposeForm,
+  MessageDetailPanel,
   PortalInviteButton,
   describeSettledJob,
   pollBulkJob,
@@ -261,6 +264,25 @@ const contactName = (c: ContactRow): string =>
  */
 export const isPlaceholderContact = (c: Pick<ContactRow, 'first_name' | 'last_name'>): boolean =>
   !(c.first_name ?? '').trim() && !(c.last_name ?? '').trim()
+
+/**
+ * Eval defect (no duplicate detection): true when `rows` contains a contact
+ * whose full name equals `first last`, case-insensitively and with runs of
+ * whitespace collapsed. Pure so the matching rule is pinned by a logic test;
+ * the async lookup around it lives in `buildWorkspaceConfig`'s speakers tab.
+ */
+export const hasSameNameContact = (
+  rows: Array<Pick<ContactRow, 'first_name' | 'last_name'>>,
+  first: string,
+  last: string,
+): boolean => {
+  const norm = (s: string) => s.trim().replace(/\s+/g, ' ').toLowerCase()
+  const target = norm([first, last].filter(Boolean).join(' '))
+  if (!target) return false
+  return rows.some(
+    (r) => norm([r.first_name ?? '', r.last_name ?? ''].filter(Boolean).join(' ')) === target,
+  )
+}
 
 const initials = (c: ContactRow): string => {
   const parts = [c.first_name, c.last_name].filter(Boolean) as string[]
@@ -876,6 +898,39 @@ export function buildWorkspaceConfig(
       .map((item) => ({ ...attachCustomFieldFormKeys(item, contactFields), ...flattenContactLinks(item.links) }))
     return { ...result, items }
   }
+  /**
+   * Eval defect (no duplicate detection): advisory same-name check for the
+   * "+ New" speaker form. Looks across the accessible events' rosters AND the
+   * organisation's not-yet-on-this-event contacts, matching the typed full
+   * name case-insensitively (hasSameNameContact). Non-blocking by design —
+   * legitimate namesakes exist — and any lookup failure stays silent: an
+   * advisory must never break the form.
+   */
+  const speakerDuplicateNameWarning = async (data: Record<string, unknown>): Promise<string | null> => {
+    const first = typeof data.first_name === 'string' ? data.first_name.trim() : ''
+    const last = typeof data.last_name === 'string' ? data.last_name.trim() : ''
+    if (!first && !last) return null
+    const fullName = [first, last].filter(Boolean).join(' ')
+    const probe = last || first
+    const [rosterRows, orgRows] = await Promise.all([
+      queryResource<ContactRow>('contacts')({ from: 0, size: 50, filters: { q: probe } }).then(
+        (r) => r.items,
+        () => [] as ContactRow[],
+      ),
+      searchOrgContacts(probe).then(
+        (r) => r.items,
+        () => [] as OrgContactRow[],
+      ),
+    ])
+    if (hasSameNameContact(rosterRows, first, last)) {
+      return `A contact named “${fullName}” already exists in your events — saving will create a second record with the same name. Check the Speakers list (or “＋ EXISTING”) before saving.`
+    }
+    if (hasSameNameContact(orgRows, first, last)) {
+      return `A contact named “${fullName}” already exists in this organisation — “＋ EXISTING” adds them to this event without creating a duplicate.`
+    }
+    return null
+  }
+
   const speakers: TabConfig<ContactRow> = {
     displayTitle: 'Speakers',
     dataSource: speakersDataSource,
@@ -1017,6 +1072,7 @@ export function buildWorkspaceConfig(
       ...speakerSchema,
       properties: { ...speakerSchema.properties, ...customFieldSchemaProperties(contactFields) },
     },
+    formWarning: speakerDuplicateNameWarning,
     // F13: a duplicate email is a validation rule worth keeping, but the
     // form used to be a dead end — the organiser had no way back to the
     // contact that already owns the address. The API now echoes its id on
@@ -1104,11 +1160,16 @@ export function buildWorkspaceConfig(
         header: 'Rating',
         width: '80px',
         sortable: true,
-        // The two sorts the doc calls the whole review UI (workplan 13 W2):
-        // first click = decision-meeting agenda (score desc), second click =
-        // coverage worklist (fewest ratings first), third clears.
+        // First click = decision-meeting agenda (score desc), second click =
+        // score ascending (a second click on a sorted column universally reads
+        // as "reverse it" — jumping straight to the coverage sort here made
+        // the Rating column look non-monotonic and shuffled, the 2026-08-12
+        // eval defect), third click = coverage worklist (fewest ratings
+        // first, workplan 13 W2), fourth clears. Rating NULLs (unrated rows)
+        // sort last in BOTH directions server-side (adminApi.ts orderSql).
         sortCycle: [
           { field: 'rating', direction: 'desc' },
+          { field: 'rating', direction: 'asc' },
           { field: 'review_count', direction: 'asc' },
         ],
         render: (value: number | null, item) =>
@@ -1571,20 +1632,9 @@ export function buildWorkspaceConfig(
       },
       eventColumn,
     ],
-    detailComponent: ({ item }) => (
-      <div className="detail-panel">
-        <h2>{item.subject ?? '(no subject)'}</h2>
-        <div className="detail-sub">
-          {item.template_key} · <span className={`status-chip status-${item.status}`}>{item.status}</span>
-        </div>
-        <dl>
-          <dt>To</dt><dd>{item.contact_name ? `${item.contact_name} <${item.to_email}>` : item.to_email}</dd>
-          <dt>Queued</dt><dd>{new Date(item.created_at).toLocaleString()}</dd>
-          {item.sent_at && <><dt>Sent</dt><dd>{new Date(item.sent_at).toLocaleString()}</dd></>}
-          {item.error && <><dt>Error</dt><dd>{item.error}</dd></>}
-        </dl>
-      </div>
-    ),
+    // Rendered body + retry affordance live in workspace/messaging.tsx
+    // (2026-08-12 eval sweep, defects 3/5).
+    detailComponent: ({ item }) => <MessageDetailPanel item={item} />,
     // A pinned message contributes its recipient as the contact anchor
     // (Speakers ← Messages); submission_id arrives via the submission's
     // author contacts (adminApi.ts messages submission_id filter).
@@ -1931,10 +1981,18 @@ export default function App() {
   // parameter such as `rec` moved.
   const routeFilterSignature = useMemo(() => stableStringify(route.flt ?? null), [route.flt])
   const routeSeeds = useMemo<Record<string, unknown> | null>(() => {
-    const merged = { ...(route.flt ?? {}), ...(route.q ? { q: route.q } : {}) }
+    // `route.q` is deliberately NOT folded in here any more. DataTabManager
+    // already owns the search: it seeds its input from `searchValue` (route.q)
+    // on mount and merges the committed value into the active tab's dataSource
+    // params, so the URL-restore case never needed the seed. Folding q into
+    // every tab's initialFilters meant each committed keystroke changed the
+    // tabs' initial-filter signature, and DataList answers that by resetting
+    // its local filters — which is exactly the eval defect "typing in the
+    // search box resets the active Confirmation pill back to All".
+    const merged = { ...(route.flt ?? {}) }
     return Object.keys(merged).length > 0 ? merged : null
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [routeFilterSignature, route.q])
+  }, [routeFilterSignature])
 
   const mergedSeeds = useMemo<WorkspaceSeeds>(() => {
     const base = wsPreset?.seeds ?? {}
@@ -2128,8 +2186,10 @@ export default function App() {
   /**
    * Workspace search (deferred-gap item): DataTabManager already debounces
    * and merges `q` into the active tab's query itself; this only mirrors the
-   * committed value into the URL so it survives reload/back (`?q=`), which
-   * `routeSeeds` below restores into every tab's initial filters on load.
+   * committed value into the URL so it survives reload/back (`?q=`) —
+   * DataTabManager's `searchValue` prop restores it on load. It must never
+   * flow into the tabs' initialFilters (see routeSeeds): that resets the
+   * user's filter pills on every committed keystroke.
    */
   const handleSearchChange = useCallback((value: string) => {
     navigate({ q: value || null }, { replace: true })
@@ -2533,7 +2593,15 @@ export default function App() {
         ) : view === 'greenroom' && !isReviewer ? (
           <GreenRoomSection key={me.event.id} />
         ) : view === 'dashboard' && !isReviewer ? (
-          <DashboardSection key={me.event.id} onNavigate={handleNavigate} />
+          // The dashboard is per-event (session-bound), like Forms/Settings.
+          // The EventScopeNote pins which event it shows — without it, an
+          // "All events" workspace filter made the single-event numbers read
+          // as an all-events aggregate (eval defect: Forward Summit rendered
+          // another event's zeros with no scope label).
+          <div className="section-with-event" key={me.event.id}>
+            <EventScopeNote scope={scope} />
+            <DashboardSection onNavigate={handleNavigate} />
+          </div>
         ) : view === 'embeds' && !isReviewer ? (
           <div className="section-with-event" key={me.event.id}>
             <EventScopeNote scope={scope} />

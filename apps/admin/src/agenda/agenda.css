@@ -546,6 +546,9 @@
 .agenda-list tr.conflict-error .list-title { color: var(--danger); }
 .agenda-list tr.conflict-warning .list-title { color: var(--notice-text); }
 .list-unscheduled { color: var(--text-faint); }
+/* Scheduled length disagrees with what the session's format says (e.g. a
+   "Lightning Talk (10 min)" sitting in a 30-minute block); hover explains. */
+.list-duration-mismatch { color: var(--notice-text); cursor: help; }
 
 /* --- Conflicts view ------------------------------------------------------- */
 

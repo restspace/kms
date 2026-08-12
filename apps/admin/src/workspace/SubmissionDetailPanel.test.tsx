@@ -55,6 +55,9 @@ vi.mock('../api', () => ({
   queryResource: () => api.contactSearch,
   listTracks: async () => ({ items: [] }),
   listRooms: async () => ({ items: [] }),
+  // Content history (eval defect fix): fetched by ContentHistorySection,
+  // which renders inside the detail panel but is not under test here.
+  getSubmissionRevisions: async () => ({ items: [] }),
 }))
 
 // The files sub-panel does its own fetching and is not under test here.

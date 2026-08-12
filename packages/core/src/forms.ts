@@ -402,23 +402,21 @@ export interface ParticipantRoleConfig {
   max: number | null;
 }
 
-// Manual-review item (O4/item 2): the public submit form's role dropdown
-// only ever offered 'speaker' for any form an organiser hadn't explicitly
-// configured with a `participant_roles` JSON blob (FormBuilder's own
-// RolesPanel defaults an unconfigured form to speaker-only too — see
-// apps/admin/src/forms/FormBuilder.tsx's RolesPanel), while the organiser
-// workspace's ParticipantsEditor always offers the full canonical vocabulary
-// (ALL_PARTICIPANT_ROLES) regardless of the originating form — so a
-// co-author/co-presenter added to an existing submission from the admin side
-// could never have been labelled that way by the submitter themselves.
-// 'co-speaker' is added here as the shared minimum baseline both sides now
-// agree on for a form nobody has explicitly restricted; an organiser who
-// still wants speaker-only can say so explicitly via RolesPanel, same as
-// today.
-export const DEFAULT_PARTICIPANT_ROLES: ParticipantRoleConfig[] = [
-  { role: 'speaker', min: 1, max: null },
-  { role: 'co-speaker', min: 0, max: null },
-];
+// Manual-review item (O4/item 2), widened by the 2026-08-12 eval sweep
+// ("Participant role dropdown offers only 'Speaker' for every participant,
+// so co-authors/co-presenters cannot be labelled with a distinct role"): a
+// form nobody has explicitly restricted now offers the full canonical
+// vocabulary the organiser workspace's ParticipantsEditor already uses
+// (ALL_PARTICIPANT_ROLES) — speaker required, everything else optional — so
+// a submitter can label a co-author/co-presenter/panelist themselves instead
+// of the organiser having to relabel them after the fact. An organiser who
+// wants a narrower set can still say so explicitly via the FormBuilder's
+// RolesPanel, same as today.
+export const DEFAULT_PARTICIPANT_ROLES: ParticipantRoleConfig[] = ALL_PARTICIPANT_ROLES.map((role) => ({
+  role,
+  min: role === 'speaker' ? 1 : 0,
+  max: null,
+}));
 
 export function parseParticipantRoles(json: string | null | undefined): ParticipantRoleConfig[] {
   if (!json) return DEFAULT_PARTICIPANT_ROLES;

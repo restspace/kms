@@ -5,11 +5,13 @@ import {
   getComposeAudiences,
   invitePortal,
   queryResource,
+  retryMessage,
   type BulkJobStatus,
   type ComposeAudience,
   type ComposeAudienceCount,
   type ContactRow,
   type MergeField,
+  type MessageRow,
 } from '../api'
 import type { CreateFormProps } from '../components/DataTabManager'
 
@@ -84,18 +86,27 @@ export function pollBulkJob(
 /** "12 sent, 1 failed" / "nothing sent" — the settled wording, shared. */
 export function describeSettledJob(job: BulkJobStatus, noun: string): string {
   if (job.status === 'failed') return job.error ?? `Sending ${noun}s failed.`
+  // Full accounting (2026-08-12 eval sweep, defects 2/3/4): every recipient
+  // the button counted must be accounted for in this line — sent, failed,
+  // still queued, or skipped with a reason — so the confirmation can never
+  // silently disagree with the "Send to N" it followed.
+  const skippedParts: string[] = []
+  if ((job.skipped_duplicate ?? 0) > 0) skippedParts.push(`${job.skipped_duplicate} skipped (already sent)`)
+  if ((job.skipped_no_email ?? 0) > 0) skippedParts.push(`${job.skipped_no_email} skipped (no email address)`)
+  const skippedTail = skippedParts.length > 0 ? `, ${skippedParts.join(', ')}` : ''
   if (job.sent === 0 && job.failed === 0) {
     // "No emails were sent" is only true when nothing was ever queued. A job
     // can settle with messages still in the outbox (delivery retrying, or a
     // tick that queued without delivering inline) — claiming nothing was sent
     // there directly contradicted the Notified stamps the same run set.
     const queued = job.queued ?? 0
-    if (queued > 0) return `${queued} ${noun}${queued === 1 ? '' : 's'} queued — delivery in progress.`
+    if (queued > 0) return `${queued} ${noun}${queued === 1 ? '' : 's'} queued — delivery in progress${skippedTail}.`
+    if (skippedParts.length > 0) return `No new ${noun}s were sent — ${skippedParts.join(', ')}.`
     return `No ${noun}s were sent.`
   }
   const sent = `${job.sent} ${noun}${job.sent === 1 ? '' : 's'} sent`
   const stillQueued = job.queued ?? 0
-  const tail = stillQueued > 0 ? `, ${stillQueued} still queued` : ''
+  const tail = (stillQueued > 0 ? `, ${stillQueued} still queued` : '') + skippedTail
   return job.failed > 0 ? `${sent}, ${job.failed} failed${tail}.` : `${sent}${tail}.`
 }
 
@@ -211,6 +222,117 @@ export function PortalInviteButton({ contactId, contactName }: { contactId: stri
         </div>
       )}
     </>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Messages tab: detail panel (rendered content + retry)
+// ---------------------------------------------------------------------------
+
+/**
+ * Detail panel for one message_log row (2026-08-12 eval sweep, defects 3/5).
+ *
+ * Previously this showed only metadata (To / Queued / Sent), so an organiser
+ * could never verify what was actually sent or whether merge fields resolved.
+ * The rendered per-recipient body has been persisted on the row since
+ * migration 0029 — show the text rendering (exactly what the provider's
+ * plain-text part carried, merge fields resolved), with the HTML source one
+ * disclosure away. Rows queued before 0029 have no stored body; say so
+ * instead of pretending.
+ *
+ * A 'failed' row also gets a Retry button: it revives the dead outbox row
+ * (or rebuilds it from the stored body) and attempts delivery inline, so the
+ * outcome shown here is the real one.
+ */
+export function MessageDetailPanel({ item }: { item: MessageRow }) {
+  const [row, setRow] = useState(item)
+  const [busy, setBusy] = useState(false)
+  const [note, setNote] = useState<{ tone: 'ok' | 'error'; text: string } | null>(null)
+  useEffect(() => {
+    setRow(item)
+    setNote(null)
+  }, [item])
+
+  const retry = async () => {
+    setBusy(true)
+    setNote(null)
+    try {
+      const r = await retryMessage(item.id)
+      setRow((prev) => ({ ...prev, status: r.status, error: r.error, sent_at: r.sent_at }))
+      setNote(
+        r.status === 'sent'
+          ? { tone: 'ok', text: 'Delivered.' }
+          : r.status === 'queued'
+            ? { tone: 'ok', text: 'Re-queued — delivery will be retried shortly.' }
+            : { tone: 'error', text: r.error ?? 'The retry did not succeed.' },
+      )
+    } catch (err) {
+      setNote({ tone: 'error', text: err instanceof Error ? err.message : 'The message could not be retried.' })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="detail-panel">
+      <h2>{row.subject ?? '(no subject)'}</h2>
+      <div className="detail-sub">
+        {row.template_key} · <span className={`status-chip status-${row.status}`}>{row.status}</span>
+      </div>
+      <dl>
+        <dt>To</dt><dd>{row.contact_name ? `${row.contact_name} <${row.to_email}>` : row.to_email}</dd>
+        <dt>Queued</dt><dd>{new Date(row.created_at).toLocaleString()}</dd>
+        {row.sent_at && <><dt>Sent</dt><dd>{new Date(row.sent_at).toLocaleString()}</dd></>}
+        {row.error && <><dt>Error</dt><dd>{row.error}</dd></>}
+      </dl>
+      {row.status === 'failed' && (
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', margin: '8px 0' }}>
+          <button type="button" disabled={busy} onClick={() => void retry()}>
+            {busy ? 'Retrying…' : 'Retry send'}
+          </button>
+          {note && (
+            <span role="status" className={note.tone === 'error' ? 'compose-note-error' : 'compose-note-ok'}>
+              {note.text}
+            </span>
+          )}
+        </div>
+      )}
+      {row.status !== 'failed' && note && (
+        <p role="status" className={note.tone === 'error' ? 'compose-note-error' : 'compose-note-ok'}>{note.text}</p>
+      )}
+      <h3 style={{ marginTop: 12 }}>Message body</h3>
+      {row.body_text || row.body_html ? (
+        <>
+          <pre
+            style={{
+              whiteSpace: 'pre-wrap',
+              overflowWrap: 'anywhere',
+              fontFamily: 'inherit',
+              fontSize: 13,
+              background: 'rgba(127, 127, 127, 0.08)',
+              padding: 10,
+              borderRadius: 6,
+              maxHeight: 360,
+              overflow: 'auto',
+            }}
+          >
+            {row.body_text ?? row.body_html}
+          </pre>
+          {row.body_html && (
+            <details>
+              <summary style={{ cursor: 'pointer', fontSize: 12 }}>HTML source</summary>
+              <pre style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', fontSize: 11, maxHeight: 240, overflow: 'auto' }}>
+                {row.body_html}
+              </pre>
+            </details>
+          )}
+        </>
+      ) : (
+        <p className="pane-sub">
+          The rendered body was not recorded for this message (it was queued before body logging was added).
+        </p>
+      )}
+    </div>
   )
 }
 

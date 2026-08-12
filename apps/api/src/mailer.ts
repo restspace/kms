@@ -123,8 +123,8 @@ export async function queueTemplated(
   const inserted = await db
     .prepare(
       `INSERT OR IGNORE INTO message_log
-         (id, event_id, template_key, to_email, contact_id, subject, status, idempotency_key, bulk_job_id, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)`,
+         (id, event_id, template_key, to_email, contact_id, subject, body_html, body_text, status, idempotency_key, bulk_job_id, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)`,
     )
     .bind(
       crypto.randomUUID(),
@@ -133,6 +133,12 @@ export async function queueTemplated(
       args.toEmail,
       args.contactId,
       rendered.subject,
+      // 0029: the rendered per-recipient body is persisted alongside the
+      // subject so organisers can verify what was actually sent (and that
+      // merge fields resolved) from the Messages tab, after the outbox row
+      // is long gone.
+      rendered.html,
+      rendered.text,
       logKey,
       args.bulkJobId ?? null,
       ts,
@@ -190,8 +196,8 @@ export async function prepareTemplated(db: D1Database, args: SendTemplatedArgs):
     db
       .prepare(
         `INSERT OR IGNORE INTO message_log
-           (id, event_id, template_key, to_email, contact_id, subject, status, idempotency_key, bulk_job_id, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)`,
+           (id, event_id, template_key, to_email, contact_id, subject, body_html, body_text, status, idempotency_key, bulk_job_id, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)`,
       )
       .bind(
         crypto.randomUUID(),
@@ -200,6 +206,8 @@ export async function prepareTemplated(db: D1Database, args: SendTemplatedArgs):
         args.toEmail,
         args.contactId,
         rendered.subject,
+        rendered.html, // 0029: see queueTemplated — rendered body is auditable
+        rendered.text,
         logKey,
         args.bulkJobId ?? null,
         ts,

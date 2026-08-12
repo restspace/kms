@@ -7,6 +7,7 @@ import { breakpoints } from '@kms/theme';
 import useElementSize from '../hooks/useElementSize';
 import { stableSerialize } from '../utils/stableSerialize';
 import { advanceSort, type SortCycleEntry } from './sortCycle';
+import { downloadExport } from './exportDownload';
 import {
   applyCellEdit,
   applyCellMerge,
@@ -734,6 +735,21 @@ export const DataList = <T extends Record<string, any>, TFilters extends Record<
   const [items, setItems] = useState<T[]>([]);
   const [endReached, setEndReached] = useState<boolean>(false);
   const [loadError, setLoadError] = useState<string | null>(null);
+  // Transient export feedback (2026-08-12 eval: the ↓CSV/↓XLSX buttons gave no
+  // on-screen confirmation, filename or failure state). 'busy' pins the note
+  // while the fetch runs; success/failure notes clear themselves.
+  const [exportNotice, setExportNotice] = useState<{ kind: 'busy' | 'ok' | 'error'; text: string } | null>(null);
+  const exportNoticeTimer = useRef<number | null>(null);
+  const showExportNotice = useCallback((notice: { kind: 'busy' | 'ok' | 'error'; text: string }) => {
+    if (exportNoticeTimer.current !== null) window.clearTimeout(exportNoticeTimer.current);
+    setExportNotice(notice);
+    if (notice.kind !== 'busy') {
+      exportNoticeTimer.current = window.setTimeout(() => setExportNotice(null), 6000);
+    }
+  }, []);
+  useEffect(() => () => {
+    if (exportNoticeTimer.current !== null) window.clearTimeout(exportNoticeTimer.current);
+  }, []);
   const [sortState, setSortState] = useState<SortState>(() => {
     // restoredState.sort === null means the user had explicitly cleared the sort;
     // undefined means there is no restored state, so the configured default applies.
@@ -2437,22 +2453,36 @@ export const DataList = <T extends Record<string, any>, TFilters extends Record<
                       key={format}
                       type="button"
                       className="data-list-export-button"
+                      disabled={exportNotice?.kind === 'busy'}
                       title={exportConfig.title ?? `Export the current view as ${format.toUpperCase()} (honours active filters)`}
                       onClick={() => {
                         const sort = sortState.field && sortState.direction
                           ? { field: sortState.field, direction: sortState.direction }
                           : undefined;
-                        const anchor = document.createElement('a');
-                        anchor.href = exportConfig.buildUrl(format, { filters: mergedFilters, sort });
-                        anchor.rel = 'noopener';
-                        document.body.appendChild(anchor);
-                        anchor.click();
-                        anchor.remove();
+                        const url = exportConfig.buildUrl(format, { filters: mergedFilters, sort });
+                        showExportNotice({ kind: 'busy', text: `Exporting ${format.toUpperCase()}…` });
+                        downloadExport(url, `export.${format}`).then(
+                          (filename) => showExportNotice({ kind: 'ok', text: `Downloaded ${filename}` }),
+                          (err: unknown) =>
+                            showExportNotice({
+                              kind: 'error',
+                              text: `Export failed — ${err instanceof Error ? err.message : 'the request did not complete'}`,
+                            }),
+                        );
                       }}
                     >
                       ↓ {format.toUpperCase()}
                     </button>
                   ))}
+                  {exportNotice && (
+                    <span
+                      className={`data-list-export-notice ${exportNotice.kind}`}
+                      role="status"
+                      aria-live="polite"
+                    >
+                      {exportNotice.text}
+                    </span>
+                  )}
                 </div>
               )}
               {toolbarActions && toolbarActions.length > 0 && !isMobile && (

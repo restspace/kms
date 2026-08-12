@@ -13,6 +13,7 @@ export type { EventPageKind, EventPageBootstrap, EventPageOptions } from './Even
 export {
   applyFeedFilter,
   isEmptyFilter,
+  trackSlug,
   fetchAgenda,
   fetchSpeakers,
   agendaJsonUrl,

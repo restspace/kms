@@ -30,6 +30,15 @@ export interface FileVersionRow {
   size_bytes: number | null;
   uploader_name: string | null;
   uploader_email: string | null;
+  /**
+   * Who actually performed the upload (file_assets.uploaded_by_contact_id) —
+   * distinct from uploader_name/email, which describe the chain's contact
+   * (the speaker the file is *for*; an admin-side headshot or organiser
+   * upload is performed by someone else). UIs should prefer these for
+   * "Uploaded by" and fall back to the chain contact.
+   */
+  uploaded_by_name: string | null;
+  uploaded_by_email: string | null;
 }
 
 export interface FileCommentRow {
@@ -49,10 +58,13 @@ const VERSION_SELECT = `SELECT u.id AS upload_id, u.file_request_id, u.contact_i
        u.file_asset_id, u.uploaded_at, u.version, u.is_current,
        fa.filename, fa.content_type, fa.size_bytes,
        NULLIF(TRIM(COALESCE(c.first_name, '') || ' ' || COALESCE(c.last_name, '')), '') AS uploader_name,
-       c.email AS uploader_email
+       c.email AS uploader_email,
+       NULLIF(TRIM(COALESCE(ub.first_name, '') || ' ' || COALESCE(ub.last_name, '')), '') AS uploaded_by_name,
+       ub.email AS uploaded_by_email
 FROM file_request_uploads u
 JOIN file_assets fa ON fa.id = u.file_asset_id
-LEFT JOIN contacts c ON c.id = u.contact_id`;
+LEFT JOIN contacts c ON c.id = u.contact_id
+LEFT JOIN contacts ub ON ub.id = fa.uploaded_by_contact_id`;
 
 /** Every version in one chain, oldest first. */
 export async function loadChainVersions(db: D1Database, key: ChainKey): Promise<FileVersionRow[]> {

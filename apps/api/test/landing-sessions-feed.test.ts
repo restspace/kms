@@ -68,6 +68,22 @@ describe('GET /e/:slug/sessions.json', () => {
   });
 });
 
+describe('GET /e/:slug (event root)', () => {
+  it('redirects to the agenda page instead of 404ing, preserving the query string', async () => {
+    const eventId = await seedEvent({ slug: `root-${crypto.randomUUID().slice(0, 8)}` });
+    const slug = (await env.DB.prepare('SELECT slug FROM events WHERE id = ?').bind(eventId).first<{ slug: string }>())!.slug;
+
+    const res = await SELF.fetch(`https://example.com/e/${slug}?track=platform`, { redirect: 'manual' });
+    expect(res.status).toBe(302);
+    expect(res.headers.get('location')).toBe(`/e/${slug}/agenda?track=platform`);
+  });
+
+  it('404s for an unknown slug', async () => {
+    const res = await SELF.fetch('https://example.com/e/no-such-event', { redirect: 'manual' });
+    expect(res.status).toBe(404);
+  });
+});
+
 describe('GET /e/:slug/sessions.xml and sessions.ics', () => {
   it('returns well-formed XML with the session title', async () => {
     const eventId = await seedEvent({ slug: `sessxml-${crypto.randomUUID().slice(0, 8)}` });

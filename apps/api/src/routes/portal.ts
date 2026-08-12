@@ -32,7 +32,7 @@ import {
 import { attemptImmediate, prepareTemplated, sendTemplated, type PreparedEmail } from '../mailer';
 import { bumpEventRevision } from '../revision';
 import { loadQuestions } from './formsAdmin';
-import { isFormClosed } from './submit';
+import { isFormClosed, normaliseTrackAnswers, storableAnswers, synthesizeAnswersFromColumns } from './submit';
 import { clearSessionCookie, getSession, type SessionPayload } from '../session';
 import { getPortalEvents, type PortalEvent } from '../access';
 import {
@@ -765,6 +765,31 @@ async function ensureHeadshotFileRequestId(db: D1Database, eventId: string): Pro
   return id;
 }
 
+// Same shape as the headshot fix above, for *bare* file_upload tasks (no
+// file_requests row): a task upload saved through saveFile used to produce
+// only a file_assets row plus task_assignments.response_id — invisible to the
+// Files library, which reads file_request_uploads. Every such task gets one
+// standing file_requests row (deterministic id, INSERT OR IGNORE so two
+// concurrent first-uploads can't race) and each upload is appended as a
+// version in the speaker's chain, so a portal deliverable always lands in
+// Workspace > Files with the full version history.
+export async function ensureTaskFileRequestId(
+  db: D1Database,
+  eventId: string,
+  taskId: string,
+  taskTitle: string,
+): Promise<string> {
+  const id = `file-request-task-${taskId}`;
+  await db
+    .prepare(
+      `INSERT OR IGNORE INTO file_requests (id, event_id, title, type, created_at)
+       VALUES (?, ?, ?, 'contacts', ?)`,
+    )
+    .bind(id, eventId, taskTitle.slice(0, 200) || 'Task upload', new Date().toISOString())
+    .run();
+  return id;
+}
+
 portalRoutes.get('/:slug/profile', async (c) => {
   const ctx = await loadPortalCtx(c);
   if (ctx instanceof Response) return ctx;
@@ -881,6 +906,9 @@ portalRoutes.post('/:slug/profile', async (c) => {
       ctx.contactId,
     ),
   ]);
+  // Bio/headshot feed the dashboard's asset-completeness widget — bump so the
+  // cached payload can't keep reporting them missing after this save.
+  await bumpEventRevision(c.env, ctx.event.id);
   return c.redirect(`${base}/profile?m=${encodeURIComponent('Profile saved.')}`);
 });
 
@@ -1300,19 +1328,22 @@ portalRoutes.post('/:slug/tasks/:assignmentId/complete', async (c) => {
     });
     if ('error' in saved) return invalid([{ key: 'upload', message: saved.error }]);
     responseId = saved.id;
-    if (row.file_request_id) {
-      // Appends version N+1 and demotes the previous current row in one batch.
-      const appended = await appendUploadVersion(
-        c.env.DB,
-        {
-          fileRequestId: row.file_request_id,
-          contactId: ctx.contactId,
-          submissionId: row.submission_id,
-        },
-        { assetId: saved.id, uploadedAt: ts },
-      );
-      newVersion = appended.version;
-    }
+    // Every task upload is registered as a version chain so it appears in the
+    // organiser Files library (Workspace > Files). Tasks with no file_requests
+    // row get a standing per-task request created on first upload.
+    const chainRequestId =
+      row.file_request_id ?? (await ensureTaskFileRequestId(c.env.DB, ctx.event.id, row.task_id, row.title));
+    // Appends version N+1 and demotes the previous current row in one batch.
+    const appended = await appendUploadVersion(
+      c.env.DB,
+      {
+        fileRequestId: chainRequestId,
+        contactId: ctx.contactId,
+        submissionId: row.submission_id,
+      },
+      { assetId: saved.id, uploadedAt: ts },
+    );
+    newVersion = appended.version;
   } else if (row.action_type === 'acknowledge') {
     const body = await c.req.parseBody();
     if (body.agree !== '1') {
@@ -1375,6 +1406,10 @@ portalRoutes.post('/:slug/tasks/:assignmentId/complete', async (c) => {
   )
     .bind(ts, responseId, assignmentId)
     .run();
+  // Task state and (for uploads) the file record feed the dashboard's speaker
+  // tracking; without a bump its ETag/KV cache would serve the pre-completion
+  // snapshot for up to the cache TTL.
+  await bumpEventRevision(c.env, ctx.event.id);
   if (reupload) {
     return back(newVersion > 1 ? `Version ${newVersion} uploaded.` : 'New version uploaded.');
   }
@@ -1883,12 +1918,35 @@ async function resolveEditTarget(
   return { submission, questions };
 }
 
+/**
+ * Answers as the edit form's controls need them (portal defect,
+ * live-reproduced 2026-08-12: the edit page rendered Track as "Select…"
+ * while the read-only view showed the saved track — saving then silently
+ * cleared it). Two mismatches are repaired here:
+ *   - stored answers hold the track's *label* (submit.tsx storableAnswers),
+ *     but the derived Track options are keyed by track id — normalised back
+ *     to the id so the <select> hydrates;
+ *   - seeded/imported submissions have no answer rows at all, only system
+ *     columns — those columns are synthesized in as answers.
+ */
+function hydrateEditAnswers(
+  questions: QuestionDef[],
+  answers: Answers,
+  submission: EditableSubmissionRow,
+): Answers {
+  return normaliseTrackAnswers(questions, synthesizeAnswersFromColumns(questions, answers, submission));
+}
+
 portalRoutes.get('/:slug/submissions/:id/edit', async (c) => {
   const ctx = await loadPortalCtx(c);
   if (ctx instanceof Response) return ctx;
   const target = await resolveEditTarget(c, ctx, c.req.param('id'));
   if (target instanceof Response) return target;
-  const answers = await loadSubmissionAnswers(c, target.submission.id);
+  const answers = hydrateEditAnswers(
+    target.questions,
+    await loadSubmissionAnswers(c, target.submission.id),
+    target.submission,
+  );
   return c.html(editPageHtml(ctx, target.submission, target.questions, answers, [], flashOf(c)));
 });
 
@@ -1903,7 +1961,11 @@ portalRoutes.post('/:slug/submissions/:id/edit', async (c) => {
 
   const body = await c.req.parseBody({ all: true });
   const existing = await loadSubmissionAnswers(c, submission.id);
-  const answers = readEditAnswers(questions, body, existing);
+  // Normalise before validating: the Track question's options are keyed by
+  // track id, but a stale client (or a stored label echoed back) may post
+  // the label — validateAnswers would reject it as "not one of the offered
+  // options" even though it names a real track.
+  const answers = normaliseTrackAnswers(questions, readEditAnswers(questions, body, existing));
   const errors: FieldError[] = validateAnswers(questions, answers).map((e) => ({
     key: e.question_id,
     message: e.message,
@@ -1915,9 +1977,13 @@ portalRoutes.post('/:slug/submissions/:id/edit', async (c) => {
   const title = sys.title ?? submission.title;
 
   // Track comes from its system question when the form has one, otherwise the
-  // stored value stands. Validate it belongs to this event either way.
+  // stored value stands. An EMPTY track answer keeps the stored value rather
+  // than clearing it (portal defect: an unhydrated "Select…" used to wipe the
+  // saved track on save). Validate it belongs to this event either way.
   const trackQuestion = questions.find((q) => q.field_key === 'track');
-  let trackId = trackQuestion ? answerText(kept[trackQuestion.id]) || null : submission.track_id;
+  let trackId = trackQuestion
+    ? answerText(kept[trackQuestion.id]) || submission.track_id || null
+    : submission.track_id;
   if (trackId) {
     const track = await c.env.DB.prepare('SELECT id FROM tracks WHERE id = ? AND event_id = ?')
       .bind(trackId, ctx.event.id)
@@ -1962,7 +2028,10 @@ portalRoutes.post('/:slug/submissions/:id/edit', async (c) => {
     ),
     c.env.DB.prepare('DELETE FROM submission_answers WHERE submission_id = ?').bind(submission.id),
   ];
-  for (const [questionId, value] of Object.entries(kept)) {
+  // Stored answers keep the same display-text shape the wizard writes
+  // (submit.tsx storableAnswers): the track id goes back to its name so the
+  // portal detail view, organiser panel and exports read it directly.
+  for (const [questionId, value] of Object.entries(storableAnswers(questions, kept))) {
     if (value === undefined) continue;
     statements.push(
       c.env.DB.prepare(

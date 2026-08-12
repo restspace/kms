@@ -12,9 +12,9 @@ describe('Bulk export toolbar action wrapper', () => {
    * Simulate the wrapToolbarActions function behavior to test that it:
    * 1. Wraps the files-zip action's onClick
    * 2. Shows "Preparing" status on click
-   * 3. Shows "Download started" on success
-   * 4. Shows error message on failure
-   * 5. Clears status after timeout
+   * 3. Shows a persistent "ZIP ready" confirmation on success
+   * 4. Shows a persistent error message on failure
+   * (Both persist until dismissed — no auto-clear timers.)
    */
 
   it('wraps files-zip action to show status on success', async () => {
@@ -40,12 +40,13 @@ describe('Bulk export toolbar action wrapper', () => {
         });
         try {
           await originalAction.onClick(ctx);
-          setExportStatus({ message: 'Download started', tone: 'info' });
-          setTimeout(() => setExportStatus(null), 3000);
+          setExportStatus({
+            message: `ZIP ready — download started (files for ${count} submission${count === 1 ? '' : 's'}).`,
+            tone: 'info'
+          });
         } catch (err) {
           const message = err instanceof Error ? err.message : 'Download failed';
           setExportStatus({ message, tone: 'error' });
-          setTimeout(() => setExportStatus(null), 5000);
         }
       }
     };
@@ -60,7 +61,7 @@ describe('Bulk export toolbar action wrapper', () => {
       tone: 'info'
     });
     expect(setExportStatus).toHaveBeenCalledWith({
-      message: 'Download started',
+      message: 'ZIP ready — download started (files for 2 submissions).',
       tone: 'info'
     });
   });

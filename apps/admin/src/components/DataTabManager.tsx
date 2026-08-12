@@ -403,6 +403,13 @@ export interface TabConfig<T = any> {
    */
   onUpsert?: (data: Record<string, any>, existingItem?: T) => Promise<T | null>;
   /**
+   * Optional non-blocking advisory check for the generic CREATE form (e.g.
+   * "a contact with this name already exists"). RecordForm re-runs it,
+   * debounced, as the values change and shows the returned message above the
+   * fields; it never gates saving. Not used by custom createComponents.
+   */
+  formWarning?: (data: Record<string, any>) => Promise<string | null>;
+  /**
    * Optional handler to delete a record. When provided, edit forms receive an onDelete callback.
    * The handler should confirm with the user and return true if the record was deleted.
    */
@@ -2532,16 +2539,18 @@ export const DataTabManager: React.FC<DataTabManagerProps> = ({
               message: `Preparing ZIP of files for ${count} submission${count === 1 ? '' : 's'}…`,
               tone: 'info'
             });
+            // Success and failure both persist until dismissed (eval defect:
+            // the transient "Preparing ZIP…" vanished with no ready/failed
+            // confirmation, leaving the organiser unsure it completed).
             try {
               await action.onClick(ctx);
-              setExportStatus({ message: 'Download started', tone: 'info' });
-              // Clear status after 3 seconds
-              setTimeout(() => setExportStatus(null), 3000);
+              setExportStatus({
+                message: `ZIP ready — download started (files for ${count} submission${count === 1 ? '' : 's'}).`,
+                tone: 'info'
+              });
             } catch (err) {
               const message = err instanceof Error ? err.message : 'Download failed';
               setExportStatus({ message, tone: 'error' });
-              // Keep error visible for 5 seconds
-              setTimeout(() => setExportStatus(null), 5000);
             }
           }
         };
@@ -2766,6 +2775,7 @@ export const DataTabManager: React.FC<DataTabManagerProps> = ({
               }}
               componentContext={createContext}
               onDirtyChange={createDirtyChangeHandler(tab.id)}
+              formWarning={tabConfig.formWarning}
             />
           </div>
         );
@@ -3078,6 +3088,14 @@ export const DataTabManager: React.FC<DataTabManagerProps> = ({
       {exportStatus && (
         <div className={`data-tab-export-status data-tab-export-status-${exportStatus.tone}`} role="status">
           {exportStatus.message}
+          <button
+            type="button"
+            aria-label="Dismiss"
+            className="data-tab-export-status-dismiss"
+            onClick={() => setExportStatus(null)}
+          >
+            ×
+          </button>
         </div>
       )}
       <div className="data-tab-content">

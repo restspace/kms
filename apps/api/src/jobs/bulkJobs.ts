@@ -638,6 +638,11 @@ interface ComposeParams {
   subject: string;
   body: string;
   contact_ids: string[];
+  /** contact id → email, snapshotted at compose time (2026-08-12 sweep):
+   * lets a recipient who vanished from the event roster mid-job still get an
+   * accounted-for message_log row instead of silently disappearing between
+   * "Send to N" and the Messages tab. Optional: pre-fix jobs lack it. */
+  emails?: Record<string, string>;
 }
 
 /**
@@ -667,6 +672,7 @@ async function expandCompose(env: Env, job: BulkJobRow, limit: number): Promise<
 
   const total = job.total ?? params.contact_ids.length;
   const slice = params.contact_ids.slice(job.enqueued, job.enqueued + limit);
+  let duplicates = 0;
   if (slice.length > 0) {
     const placeholders = slice.map(() => '?').join(', ');
     const { results: contacts } = await db
@@ -693,7 +699,40 @@ async function expandCompose(env: Env, job: BulkJobRow, limit: number): Promise<
     // so `enqueued` stays a truthful cursor into contact_ids.
     for (const contactId of slice) {
       const contact = byId.get(contactId);
-      if (!contact) continue;
+      if (!contact) {
+        // 2026-08-12 sweep, defects 2/3: this used to `continue` with no
+        // trace — one of N selected recipients simply never appeared in the
+        // Messages tab and the confirmation count silently disagreed with
+        // "Send to N". Every selected recipient must land a log row with a
+        // status, so write a 'failed' row (with the reason in `error`) using
+        // the email snapshotted at compose time. Pre-fix jobs without the
+        // snapshot still skip, but new composes always carry it.
+        const snapshotEmail = params.emails?.[contactId];
+        if (snapshotEmail) {
+          await db
+            .prepare(
+              // contact_id via subquery: the contact may have been deleted
+              // outright (not just dropped from event_contacts), and a bare
+              // bind would trip the FK — the subquery yields NULL then.
+              `INSERT OR IGNORE INTO message_log
+                 (id, event_id, template_key, to_email, contact_id, subject, status, error, idempotency_key, bulk_job_id, created_at)
+               VALUES (?, ?, 'compose', ?, (SELECT id FROM contacts WHERE id = ?), ?, 'failed', ?, ?, ?, ?)`,
+            )
+            .bind(
+              crypto.randomUUID(),
+              job.event_id,
+              snapshotEmail,
+              contactId,
+              params.subject,
+              'skipped: contact is no longer on this event',
+              `compose:${contactId}:${contactId}:v${job.id}`,
+              job.id,
+              nowIso(),
+            )
+            .run();
+        }
+        continue;
+      }
       const fullName = [contact.first_name, contact.last_name].filter(Boolean).join(' ') || contact.email;
       const recipientContext = {
         first_name: contact.first_name ?? 'there',
@@ -709,6 +748,19 @@ async function expandCompose(env: Env, job: BulkJobRow, limit: number): Promise<
         contactId: contact.id,
         toEmail: contact.email,
         entityId: contact.id,
+        // 2026-08-12 sweep, defect 1 (MAJOR): this used to default to v1,
+        // making the idempotency key `compose:<contact>:<contact>:v1` —
+        // identical for EVERY compose ever sent to a contact. The second
+        // deliberate message to the same person came back 'duplicate': no
+        // message_log row, nothing sent, while the UI told the organiser
+        // every recipient had a row. The entity a compose is "about" is this
+        // job (each compose snapshot is a distinct message), so the job id is
+        // the version: a fresh compose always sends, while a retried tick of
+        // the SAME job still dedupes exactly as before. This does not
+        // reintroduce the 0014 bug — reminders' per-day key is untouched;
+        // for compose a fresh job id per press is precisely the semantics
+        // the organiser asked for.
+        version: job.id,
         bulkJobId: job.id,
         template: { subject: params.subject, body: params.body },
         context: {
@@ -730,13 +782,20 @@ async function expandCompose(env: Env, job: BulkJobRow, limit: number): Promise<
       // already flips to 'done' this tick and the compose dialog's poll loop
       // stops polling and reports a stale zero sent-count.
       if (outcome === 'queued' && payload) await deliverNow(db, env, payload.log_key, payload);
+      // With the job id in the key a 'duplicate' can only be a retried tick
+      // of this same job (the row already exists — accounting is intact),
+      // but count it anyway so a resumed job's confirmation stays truthful.
+      if (outcome === 'duplicate') duplicates += 1;
     }
   }
 
   const enqueued = Math.min(params.contact_ids.length, job.enqueued + slice.length);
   await db
-    .prepare(`UPDATE bulk_jobs SET enqueued = ?, status = ?, updated_at = ? WHERE id = ?`)
-    .bind(enqueued, enqueued >= total ? 'done' : 'running', nowIso(), job.id)
+    .prepare(
+      `UPDATE bulk_jobs SET enqueued = ?, status = ?, skipped_duplicate = skipped_duplicate + ?, updated_at = ?
+       WHERE id = ?`,
+    )
+    .bind(enqueued, enqueued >= total ? 'done' : 'running', duplicates, nowIso(), job.id)
     .run();
 }
 

@@ -168,3 +168,119 @@ describe('pencilled sessions and conflicts (docs/13 W5, D8)', () => {
     expect(hits.map((c) => c.code)).not.toContain('ROOM_DOUBLE_BOOKED');
   });
 });
+
+// Duplicate speaker records (eval defect: two contact rows both named
+// "Priya Raman" produced "0 conflicts" for a same-slot double booking).
+// Identity fallbacks: same email across records is still an error; same
+// normalized name alone is a warning-level SPEAKER_LIKELY_DOUBLE_BOOKED.
+describe('speaker double-booking across duplicate speaker records', () => {
+  const base: Omit<AgendaSessionInput, 'id' | 'code' | 'title' | 'speakers' | 'room_id'> = {
+    starts_at: '2026-10-01T10:00:00.000Z',
+    ends_at: '2026-10-01T10:30:00.000Z',
+    track_id: null,
+    capacity: null,
+  };
+  const session = (
+    id: string,
+    room: string,
+    speakers: AgendaSessionInput['speakers'],
+  ): AgendaSessionInput => ({ ...base, id, code: id.toUpperCase(), title: `Talk ${id}`, room_id: room, speakers });
+
+  it('still flags an exact contact-id match as an error', () => {
+    const hits = computeConflicts(
+      [
+        session('a', 'room-a', [{ contact_id: 'c1', name: 'Priya Raman' }]),
+        session('b', 'room-b', [{ contact_id: 'c1', name: 'Priya Raman' }]),
+      ],
+      ROOMS,
+      EVENT,
+    );
+    const hit = hits.find((c) => c.code === 'SPEAKER_DOUBLE_BOOKED');
+    expect(hit?.severity).toBe('error');
+    expect(hit?.contact_id).toBe('c1');
+  });
+
+  it('flags two records sharing an email as SPEAKER_DOUBLE_BOOKED (error)', () => {
+    const hits = computeConflicts(
+      [
+        session('a', 'room-a', [{ contact_id: 'c1', name: 'Priya Raman', email: 'Priya@Example.com ' }]),
+        session('b', 'room-b', [{ contact_id: 'c2', name: 'P. Raman', email: 'priya@example.com' }]),
+      ],
+      ROOMS,
+      EVENT,
+    );
+    const hit = hits.find((c) => c.code === 'SPEAKER_DOUBLE_BOOKED');
+    expect(hit?.severity).toBe('error');
+    expect(hit?.contact_id).toBe('c1~c2');
+    expect(hit?.session_ids.slice().sort()).toEqual(['a', 'b']);
+  });
+
+  it('flags two records sharing only a normalized name as a warning', () => {
+    const hits = computeConflicts(
+      [
+        session('a', 'room-a', [{ contact_id: 'c1', name: 'Priya Raman' }]),
+        session('b', 'room-b', [{ contact_id: 'c2', name: '  priya   RAMAN ' }]),
+      ],
+      ROOMS,
+      EVENT,
+    );
+    const hit = hits.find((c) => c.code === 'SPEAKER_LIKELY_DOUBLE_BOOKED');
+    expect(hit).toBeDefined();
+    expect(hit?.severity).toBe('warning');
+    expect(hit?.contact_id).toBe('c1~c2');
+  });
+
+  it('does not fire the name fallback for non-overlapping sessions or genuinely different names', () => {
+    const later = {
+      starts_at: '2026-10-01T11:00:00.000Z',
+      ends_at: '2026-10-01T11:30:00.000Z',
+    };
+    const noOverlap = computeConflicts(
+      [
+        session('a', 'room-a', [{ contact_id: 'c1', name: 'Priya Raman' }]),
+        { ...session('b', 'room-b', [{ contact_id: 'c2', name: 'Priya Raman' }]), ...later },
+      ],
+      ROOMS,
+      EVENT,
+    );
+    expect(noOverlap.map((c) => c.code)).not.toContain('SPEAKER_LIKELY_DOUBLE_BOOKED');
+
+    const differentPeople = computeConflicts(
+      [
+        session('a', 'room-a', [{ contact_id: 'c1', name: 'Priya Raman' }]),
+        session('b', 'room-b', [{ contact_id: 'c2', name: 'Priya Sharma' }]),
+      ],
+      ROOMS,
+      EVENT,
+    );
+    expect(differentPeople.map((c) => c.code)).not.toContain('SPEAKER_LIKELY_DOUBLE_BOOKED');
+    expect(differentPeople.map((c) => c.code)).not.toContain('SPEAKER_DOUBLE_BOOKED');
+  });
+
+  it('emits one conflict per duplicate pair, not one per matching direction', () => {
+    const hits = computeConflicts(
+      [
+        session('a', 'room-a', [
+          { contact_id: 'c1', name: 'Priya Raman' },
+          { contact_id: 'c3', name: 'Priya Raman' },
+        ]),
+        session('b', 'room-b', [{ contact_id: 'c2', name: 'Priya Raman' }]),
+      ],
+      ROOMS,
+      EVENT,
+    );
+    const likely = hits.filter((c) => c.code === 'SPEAKER_LIKELY_DOUBLE_BOOKED');
+    // c1 matches c2 (first name hit); c3 also matches c2 — distinct pairs.
+    expect(likely.length).toBe(2);
+    expect(new Set(likely.map((c) => c.contact_id)).size).toBe(2);
+  });
+
+  it('the incremental engine agrees with the full sweep on duplicate-record matches', () => {
+    const a = session('a', 'room-a', [{ contact_id: 'c1', name: 'Priya Raman', email: 'priya@example.com' }]);
+    const b = session('b', 'room-b', [{ contact_id: 'c2', name: 'Priya Raman', email: 'PRIYA@example.com' }]);
+    const full = normalise(computeConflicts([a, b], ROOMS, EVENT).filter((c) => c.session_ids.includes('b')));
+    const incr = normalise(computeConflictsForSession(b, buildConflictIndexes([a]), ROOMS, EVENT));
+    expect(incr).toEqual(full);
+    expect(incr.length).toBeGreaterThan(0);
+  });
+});

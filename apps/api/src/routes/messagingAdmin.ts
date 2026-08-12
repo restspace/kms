@@ -12,11 +12,12 @@
 
 import { Hono } from 'hono';
 import { can } from '@kms/core';
+import { createDb } from '@kms/db';
 import { DEFAULT_TEMPLATES } from '@kms/email';
 import type { Actor } from '@kms/core';
 import type { AccessEnv } from '../access';
 import { getRevalidatedPrivilegedSession } from '../session';
-import { sendTemplated } from '../mailer';
+import { deliverEmail, sendTemplated, type OutboxEmailPayload } from '../mailer';
 import { sweepBulkJobs } from '../jobs/bulkJobs';
 import { mintToken, sha256hex } from '../tokens';
 
@@ -283,6 +284,12 @@ messagingAdminRoutes.post('/compose', async (c) => {
         body: composeBodyToHtml(messageBody),
         body_text: messageBody,
         contact_ids: recipients.map((r) => r.id),
+        // Email snapshot per recipient (2026-08-12 sweep, defects 2/3): if a
+        // recipient drops off the event roster before the expander reaches
+        // them, this is what lets the expander still write an accounted-for
+        // 'failed' log row instead of silently sending to fewer people than
+        // the button said.
+        emails: Object.fromEntries(recipients.map((r) => [r.id, r.email])),
       }),
       recipients.length,
       session.contactId,
@@ -318,6 +325,96 @@ messagingAdminRoutes.get('/compose/audiences', async (c) => {
     })),
   );
   return c.json({ items, merge_fields: COMPOSE_MERGE_FIELDS });
+});
+
+/**
+ * POST /app/api/messaging/messages/:id/retry — re-queue one failed message.
+ *
+ * 2026-08-12 eval sweep, defect 3: a 'failed' row in the Messages tab (the
+ * outbox dead-lettered it after MAX_ATTEMPTS) had no affordance at all — the
+ * organiser could see the failure but do nothing about it. Retry revives the
+ * dead outbox row (or rebuilds it from the 0029 stored body when the outbox
+ * row is gone), flips the log row back to 'queued', and attempts delivery
+ * inline so the response carries the real outcome; if the inline attempt
+ * fails the normal outbox sweep owns the backoff/retries from there.
+ */
+messagingAdminRoutes.post('/messages/:id/retry', async (c) => {
+  const session = c.get('session');
+  const db = c.env.DB;
+  const id = c.req.param('id');
+  const msg = await db
+    .prepare(
+      `SELECT id, status, idempotency_key, to_email, subject, body_html, body_text
+       FROM message_log WHERE id = ? AND event_id = ?`,
+    )
+    .bind(id, session.eventId)
+    .first<{
+      id: string; status: string; idempotency_key: string; to_email: string;
+      subject: string | null; body_html: string | null; body_text: string | null;
+    }>();
+  if (!msg) return c.json({ error: 'not_found' }, 404);
+  if (msg.status !== 'failed') return c.json({ error: 'not_failed' }, 409);
+
+  const outboxRow = await db
+    .prepare('SELECT id, payload FROM outbox WHERE idempotency_key = ?')
+    .bind(msg.idempotency_key)
+    .first<{ id: string; payload: string }>();
+
+  let payload: OutboxEmailPayload;
+  const ts = new Date().toISOString();
+  if (outboxRow) {
+    // The dead-lettered row still carries the exact payload that failed —
+    // resend that, byte for byte, with the attempt counter reset so it gets
+    // a full backoff sequence again rather than dying on the first miss.
+    payload = JSON.parse(outboxRow.payload) as OutboxEmailPayload;
+    await db
+      .prepare(`UPDATE outbox SET status = 'pending', attempts = 0, next_attempt_at = ?, last_error = NULL WHERE id = ?`)
+      .bind(ts, outboxRow.id)
+      .run();
+  } else if (msg.body_html || msg.body_text) {
+    payload = {
+      to: msg.to_email,
+      subject: msg.subject ?? '',
+      html: msg.body_html ?? '',
+      text: msg.body_text ?? msg.body_html ?? '',
+      log_key: msg.idempotency_key,
+    };
+    await createDb(db).outbox.enqueue({ kind: 'email', idempotencyKey: msg.idempotency_key, payload });
+  } else {
+    // Pre-0029 row with no outbox row left: nothing stores what the message
+    // said, so there is nothing faithful to resend.
+    return c.json({ error: 'not_retryable' }, 409);
+  }
+
+  await db.prepare(`UPDATE message_log SET status = 'queued', error = NULL WHERE id = ?`).bind(id).run();
+
+  // Inline attempt through the same claim lease the sweep uses (mirrors
+  // sendTemplated's fast path), but awaited so the response reports the real
+  // outcome instead of an optimistic "queued".
+  const claimed = await db
+    .prepare(
+      `UPDATE outbox SET status = 'in_flight', next_attempt_at = ?
+       WHERE idempotency_key = ? AND status = 'pending'
+       RETURNING id`,
+    )
+    .bind(new Date(Date.now() + 5 * 60_000).toISOString(), msg.idempotency_key)
+    .first<{ id: string }>();
+  if (claimed) {
+    try {
+      await deliverEmail(db, c.env, payload);
+      await createDb(db).outbox.markDoneByKey(msg.idempotency_key);
+    } catch (err) {
+      // deliverEmail already recorded the error on message_log; count the
+      // attempt toward the normal backoff so the sweep takes over.
+      await createDb(db).outbox.markFailed(claimed.id, err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  const after = await db
+    .prepare('SELECT status, error, sent_at FROM message_log WHERE id = ?')
+    .bind(id)
+    .first<{ status: string; error: string | null; sent_at: string | null }>();
+  return c.json({ ok: true, status: after?.status ?? 'queued', error: after?.error ?? null, sent_at: after?.sent_at ?? null });
 });
 
 // ---------------------------------------------------------------------------

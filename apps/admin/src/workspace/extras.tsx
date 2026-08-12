@@ -6,6 +6,7 @@ import {
   addSubmissionComment,
   addSubmissionParticipant,
   getSubmissionDetail,
+  getSubmissionRevisions,
   listRooms,
   listTracks,
   PARTICIPANT_ROLES,
@@ -18,6 +19,7 @@ import {
   updateSubmissionParticipantRole,
   updateSubmissionStatus,
   type ContactRow,
+  type ContentRevision,
   type RoomRow,
   type SubmissionComment,
   type SubmissionDetail,
@@ -601,6 +603,109 @@ export function ParticipantsEditor({
 }
 
 /**
+ * Content history (eval defect: revisions were recorded server-side —
+ * content_revisions, migration 0023 — but no UI surfaced them, so edits to
+ * titles/abstracts looked untraceable and irreversible). Each row is the
+ * pre-edit snapshot the API stores; "Restore" writes it back through the
+ * normal updateSubmission PUT, which itself snapshots the current content
+ * first — so a restore is traceable and reversible too.
+ */
+export function ContentHistorySection({
+  submissionId,
+  onRestored,
+}: {
+  submissionId: string
+  /** Refresh the host panel after a restore lands. */
+  onRestored?: () => void | Promise<void>
+}) {
+  const [items, setItems] = useState<ContentRevision[] | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [openId, setOpenId] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [note, setNote] = useState<string | null>(null)
+
+  const load = () =>
+    getSubmissionRevisions(submissionId)
+      .then((r) => setItems(r.items))
+      .catch((e: unknown) => setError(e instanceof Error ? e.message : 'Failed to load history'))
+
+  useEffect(() => {
+    setItems(null)
+    setError(null)
+    setNote(null)
+    setOpenId(null)
+    void load()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [submissionId])
+
+  const restore = async (rev: ContentRevision) => {
+    const ok = await appConfirm(
+      `Restore the title and description as they were before the edit on ${fmtDateTime(rev.edited_at)}? The current content is kept in the history.`,
+    )
+    if (!ok) return
+    setBusy(true)
+    setError(null)
+    try {
+      await updateSubmission(submissionId, { title: rev.title, description: rev.description })
+      setNote('Restored. The replaced content was added to the history.')
+      await load()
+      await onRestored?.()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Restore failed')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <>
+      <h2 style={{ fontSize: 14, marginTop: 16 }}>
+        Content history{items && items.length > 0 ? ` (${items.length})` : ''}
+      </h2>
+      {error && <p className="file-error" role="alert">{error}</p>}
+      {note && <p className="file-empty" role="status">{note}</p>}
+      {!items && !error && <p className="file-empty">Loading…</p>}
+      {items && items.length === 0 && (
+        <p className="file-empty">No content edits recorded — the title and description are as first submitted.</p>
+      )}
+      {items?.map((rev) => (
+        <div className="file-chain" key={rev.id}>
+          <div className="file-chain-head">
+            <span className="fname">
+              {fmtDateTime(rev.edited_at)} · edited by {rev.edited_by_name ?? 'Unknown'} ·{' '}
+              {rev.source === 'portal' ? 'Speaker portal' : 'Admin'}
+            </span>
+            <button type="button" onClick={() => setOpenId((prev) => (prev === rev.id ? null : rev.id))}>
+              {openId === rev.id ? 'Hide' : 'Before this edit'}
+            </button>
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => void restore(rev)}
+              title="Put the title and description back to how they were before this edit"
+            >
+              Restore
+            </button>
+          </div>
+          {openId === rev.id && (
+            <dl>
+              <DetailPair term="Title">{rev.title}</DetailPair>
+              {rev.description ? (
+                <DetailPair term="Description">
+                  <span style={{ whiteSpace: 'pre-line' }}>{htmlToText(rev.description)}</span>
+                </DetailPair>
+              ) : (
+                <DetailPair term="Description">(empty)</DetailPair>
+              )}
+            </dl>
+          )}
+        </div>
+      ))}
+    </>
+  )
+}
+
+/**
  * Submission detail tab: answers, participants with roles, review summary —
  * plus the controls an organiser reaches for straight after opening a record.
  *
@@ -875,6 +980,15 @@ export function SubmissionDetailPanel({ id, onEdit, onItemSaved }: {
       {/* Submission-scoped uploads (slides and the like) with download links —
           manual-QA item (b): these were invisible to organisers. */}
       <SubmissionFilesPanel submissionId={id} />
+
+      {/* Content edit history + restore (content_revisions, migration 0023). */}
+      <ContentHistorySection
+        submissionId={id}
+        onRestored={async () => {
+          const fresh = await load()
+          onItemSaved?.(fresh.submission)
+        }}
+      />
 
       <h2 style={{ fontSize: 14, marginTop: 16 }}>
         Reviews {detail.reviews.length > 0 && <span style={{ color: 'var(--text-muted)', fontWeight: 400 }}>({detail.reviews.length})</span>}

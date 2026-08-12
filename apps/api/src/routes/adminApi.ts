@@ -528,6 +528,7 @@ const RESOURCE_SPECS: Record<string, Omit<ResourceDef, 'fromSql'>> = {
     idExpr: 'm.id',
     defaultCursorSort: { field: 'created_at', direction: 'desc' },
     selectSql: `SELECT m.id, m.template_key, m.to_email, m.contact_id, m.subject, m.status,
+                m.body_html, m.body_text,
                 m.error, m.created_at, m.sent_at,
                 m.event_id AS event_id, ev.name AS event_name,
                 NULLIF(TRIM(COALESCE(mc.first_name, '') || ' ' || COALESCE(mc.last_name, '')), '') AS contact_name`,
@@ -1178,6 +1179,22 @@ adminApiRoutes.put('/contacts/:id', async (c) => {
   const fields = pickContactFields(body);
   if ('email' in fields && !fields.email) return c.json({ error: 'email_required' }, 400);
 
+  // Eval defect (silent speaker-edit loss): the workspace's "All events" grid
+  // shows membership rows from EVERY accessible event, and the edit form echoes
+  // the row it was seeded from — event_id included. Writing the profile columns
+  // to the SESSION's event regardless meant an edit opened from another event's
+  // row either 404'd (not on the cookie event) or landed on the wrong
+  // event_contacts row while the grid re-read the one on screen: a 200 with the
+  // edit apparently discarded. The row's own event, guarded against the
+  // caller's writer seats, is the write target now; session.eventId stays the
+  // default so every existing caller is byte-for-byte unaffected.
+  let eventId = session.eventId;
+  if (typeof body.event_id === 'string' && body.event_id !== '' && body.event_id !== session.eventId) {
+    const seat = await requireEventAccess(c, body.event_id);
+    if (!seat || !isWriter(seat.role)) return c.json({ error: 'forbidden' }, 403);
+    eventId = body.event_id;
+  }
+
   // Custom-field writes need the contact to be on this event's roster even when
   // no fixed field changed (the UPDATEs below would otherwise be skipped, and
   // with them the only check that the id belongs to this event). The join to
@@ -1187,11 +1204,11 @@ adminApiRoutes.put('/contacts/:id', async (c) => {
        JOIN event_contacts ec ON ec.contact_id = c.id AND ec.event_id = ?
       WHERE c.id = ?`,
   )
-    .bind(session.eventId, id)
+    .bind(eventId, id)
     .first();
   if (!existing) return c.json({ error: 'not_found' }, 404);
 
-  const fieldOps = await prepareContactFieldValueOps(c.env.DB, session.eventId, id, body.custom_fields);
+  const fieldOps = await prepareContactFieldValueOps(c.env.DB, eventId, id, body.custom_fields);
   if (fieldOps.error) return c.json({ error: fieldOps.error, field: fieldOps.field }, 400);
 
   const { identity, profile } = splitContactFields(fields);
@@ -1199,17 +1216,22 @@ adminApiRoutes.put('/contacts/:id', async (c) => {
   const profileCols = Object.keys(profile);
   const ts = new Date().toISOString();
   const statements: D1PreparedStatement[] = [];
+  // Indices of the statements whose row counts prove the save landed — a 200
+  // must never again be returned for a write that touched nothing.
+  let identityIdx = -1;
+  let profileIdx = -1;
   if (identityCols.length > 0) {
     // Editing identity here edits it for every event in the org — that is what
     // the merge means, not a leak. The EXISTS repeats the roster check as this
     // statement's own tenancy guard.
+    identityIdx = statements.length;
     statements.push(
       c.env.DB.prepare(
         `UPDATE contacts SET ${identityCols.map((k) => `${k} = ?`).join(', ')}, updated_at = ?
           WHERE id = ?
             AND EXISTS (SELECT 1 FROM event_contacts ec
                          WHERE ec.contact_id = contacts.id AND ec.event_id = ?)`,
-      ).bind(...identityCols.map((k) => identity[k]), ts, id, session.eventId),
+      ).bind(...identityCols.map((k) => identity[k]), ts, id, eventId),
     );
   } else if (profileCols.length > 0) {
     // event_contacts carries no updated_at of its own, so a profile-only edit
@@ -1217,25 +1239,33 @@ adminApiRoutes.put('/contacts/:id', async (c) => {
     statements.push(c.env.DB.prepare('UPDATE contacts SET updated_at = ? WHERE id = ?').bind(ts, id));
   }
   if (profileCols.length > 0) {
+    profileIdx = statements.length;
     statements.push(
       c.env.DB.prepare(
         `UPDATE event_contacts SET ${profileCols.map((k) => `${k} = ?`).join(', ')}
           WHERE event_id = ? AND contact_id = ?`,
-      ).bind(...profileCols.map((k) => profile[k]), session.eventId, id),
+      ).bind(...profileCols.map((k) => profile[k]), eventId, id),
     );
   }
   statements.push(...fieldOps.ops);
   if (statements.length > 0) {
+    let results: D1Result[];
     try {
-      await c.env.DB.batch(statements);
+      results = await c.env.DB.batch(statements);
     } catch (err) {
       const message = err instanceof Error ? err.message : '';
       if (message.includes('UNIQUE')) return c.json({ error: 'email_exists', existing_id: await findContactIdByEmail(c, fields.email) }, 409);
       throw err;
     }
-    await bumpEventRevision(c.env, session.eventId);
+    // The roster check above can race a concurrent detach; if either UPDATE
+    // matched no row the save did not happen and the client must hear so.
+    const wroteNothing =
+      (identityIdx >= 0 && (results[identityIdx]?.meta.changes ?? 0) === 0) ||
+      (profileIdx >= 0 && (results[profileIdx]?.meta.changes ?? 0) === 0);
+    if (wroteNothing) return c.json({ error: 'not_found' }, 404);
+    await bumpEventRevision(c.env, eventId);
   }
-  const row = await contactWithCustomFields(c.env.DB, session.eventId, id);
+  const row = await contactWithCustomFields(c.env.DB, eventId, id);
   return c.json(row);
 });
 

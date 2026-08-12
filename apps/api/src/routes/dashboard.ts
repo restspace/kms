@@ -69,7 +69,15 @@ export async function speakerTracking(
             ec.arrival_marked_by,
             CASE WHEN ec.biography IS NULL OR ec.biography = '' THEN 1 ELSE 0 END AS missing_bio,
             CASE WHEN ec.headshot_asset_id IS NULL THEN 1 ELSE 0 END AS missing_headshot,
-            COALESCE(tg.missing_slides, 0) AS missing_slides,
+            -- Slides read as PRESENT only on positive evidence: a completed
+            -- file_upload assignment, or an actual current uploaded file.
+            -- "No upload task assigned" used to read as slides-complete,
+            -- which contradicted a Tasks tab full of not_started rows and a
+            -- Files tab showing zero files (eval defect: Priya's slides
+            -- reported complete with Files=0). Like bio and headshot, a
+            -- deliverable is missing until it exists.
+            CASE WHEN COALESCE(tg.has_complete_upload, 0) = 1 OR COALESCE(up.n, 0) > 0
+                 THEN 0 ELSE 1 END AS missing_slides,
             COALESCE(tg.outstanding, 0) AS outstanding,
             COALESCE(tg.overdue, 0) AS overdue,
             CASE WHEN cf.contact_id IS NULL THEN 0 ELSE 1 END AS confirmed
@@ -91,19 +99,25 @@ export async function speakerTracking(
                        -- "missing slides" even after the presentation
                        -- upload itself was done, contradicting the Tasks
                        -- tab where that assignment showed complete with
-                       -- uploaded versions. A completed file_upload
-                       -- assignment now counts as "slides present" outright;
-                       -- only contacts with file_upload assignments and
-                       -- none of them complete are still flagged.
-                       CASE WHEN SUM(CASE WHEN t.action_type = 'file_upload' AND ta.status = 'complete' THEN 1 ELSE 0 END) > 0 THEN 0
-                            WHEN SUM(CASE WHEN t.action_type = 'file_upload' THEN 1 ELSE 0 END) > 0 THEN 1
-                            ELSE 0 END AS missing_slides,
+                       -- uploaded versions.
+                       MAX(CASE WHEN t.action_type = 'file_upload' AND ta.status = 'complete' THEN 1 ELSE 0 END) AS has_complete_upload,
                        SUM(CASE WHEN ta.status != 'complete' THEN 1 ELSE 0 END) AS outstanding,
                        SUM(CASE WHEN ta.status != 'complete' AND t.due_at IS NOT NULL AND t.due_at < ?2 THEN 1 ELSE 0 END) AS overdue
                 FROM task_assignments ta
                 JOIN tasks t ON t.id = ta.task_id
                 WHERE t.event_id = ?1
                 GROUP BY ta.contact_id) tg ON tg.contact_id = c.id
+     -- Actual deliverable files on record for this contact at this event: the
+     -- current version of any upload chain, excluding the standing per-event
+     -- headshot request (headshots are tracked separately above). This is the
+     -- same table the Files library reads, so the widget can never claim
+     -- slides exist while Workspace > Files shows none.
+     LEFT JOIN (SELECT u.contact_id, COUNT(*) AS n
+                FROM file_request_uploads u
+                JOIN file_assets fa ON fa.id = u.file_asset_id
+                WHERE fa.event_id = ?1 AND u.is_current = 1
+                  AND u.file_request_id != ('file-request-headshots-' || ?1)
+                GROUP BY u.contact_id) up ON up.contact_id = c.id
      LEFT JOIN (SELECT DISTINCT sp2.contact_id
                 FROM submission_participants sp2
                 JOIN submissions s2 ON s2.id = sp2.submission_id

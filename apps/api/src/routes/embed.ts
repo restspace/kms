@@ -151,6 +151,30 @@ function tag(name: string, value: string | number | null | undefined): string {
   return `<${name}>${xmlEscape(String(value))}</${name}>`;
 }
 
+/**
+ * Readable URL form of a track name — same rule as packages/ui trackSlug and
+ * the admin embed builder's copy: the builder generates ?track=<slug> links,
+ * and this side accepts slug, name or UUID alike for back-compat.
+ */
+export function trackSlug(name: string): string {
+  return name
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
+
+/** Track ids selected by a ?track= param (UUID, name or slug). */
+export function matchTrackIds(tracks: Array<{ id: string; name: string | null }>, wantRaw: string): Set<string> {
+  const want = wantRaw.trim().toLowerCase();
+  const wantSlug = trackSlug(want);
+  return new Set(
+    tracks
+      .filter((t) => t.id.toLowerCase() === want || (wantSlug !== '' && trackSlug(t.name ?? '') === wantSlug))
+      .map((t) => t.id),
+  );
+}
+
 /** YYYY-MM-DD in the event's own timezone (same rule as agenda.json's `day`). */
 function dayKey(iso: string, timezone: string): string {
   try {
@@ -239,15 +263,11 @@ embedRoutes.get('/e/:slug/agenda.xml', async (c) => {
     speakersBySession.set(row.submission_id, list);
   }
 
-  // Same filter vocabulary as the public pages: track id or track name, day key.
+  // Same filter vocabulary as the public pages: track id, name or slug, day key.
   const q = new URL(c.req.url).searchParams;
-  const wantTrack = (q.get('track') ?? '').trim().toLowerCase();
+  const wantTrack = (q.get('track') ?? '').trim();
   const wantDay = (q.get('day') ?? '').trim();
-  const trackIds = new Set(
-    tracks
-      .filter((t) => t.id.toLowerCase() === wantTrack || (t.name ?? '').trim().toLowerCase() === wantTrack)
-      .map((t) => t.id),
-  );
+  const trackIds = matchTrackIds(tracks, wantTrack);
 
   const visible = sessions.filter((s) => {
     if (wantTrack && !(s.track_id !== null && trackIds.has(s.track_id))) return false;

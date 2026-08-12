@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { isValidEmailShape, isValidHandleOrUrlShape, isValidUrlShape } from '@kms/core';
 import { toReadableText } from '../utility';
 import { stableSerialize } from '../utils/stableSerialize';
@@ -46,6 +46,12 @@ export interface RecordFormProps {
   onDelete?: () => void;
   /** Reports whether the form has unsaved changes. */
   onDirtyChange?: (isDirty: boolean) => void;
+  /**
+   * Non-blocking advisory check, re-run (debounced) as the values change.
+   * Returns a message to show above the fields — e.g. "a contact with this
+   * name already exists" — or null. Never prevents saving.
+   */
+  formWarning?: (value: Record<string, any>) => Promise<string | null>;
 }
 
 interface PropertySchema {
@@ -91,7 +97,8 @@ export const RecordForm: React.FC<RecordFormProps> = ({
   onSchemaFormChange,
   schemaFormMeta,
   onDelete,
-  onDirtyChange
+  onDirtyChange,
+  formWarning
 }) => {
   const [liveSchema, setLiveSchema] = useState<Record<string, any>>(schema);
   const [value, setValue] = useState<Record<string, any>>(() => {
@@ -124,6 +131,30 @@ export const RecordForm: React.FC<RecordFormProps> = ({
   if (initialSignatureRef.current === null) {
     initialSignatureRef.current = stableSerialize(value);
   }
+
+  // Advisory warning (eval defect: no duplicate detection on the new-contact
+  // form). Debounced so typing doesn't fire a request per keystroke; a stale
+  // response is dropped rather than overwriting a fresher one. Purely
+  // informational — the save button is never gated on it.
+  const [warning, setWarning] = useState<string | null>(null);
+  const warningRunRef = useRef(0);
+  const valueSignature = stableSerialize(value);
+  useEffect(() => {
+    if (!formWarning) return;
+    const run = ++warningRunRef.current;
+    const timer = setTimeout(() => {
+      void formWarning(valueRef.current)
+        .then((message) => {
+          if (warningRunRef.current === run) setWarning(message);
+        })
+        .catch(() => {
+          // An advisory check must never surface as a form error.
+          if (warningRunRef.current === run) setWarning(null);
+        });
+    }, 400);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [formWarning, valueSignature]);
 
   const changeHelpers = useMemo(() => ({
     setValue,
@@ -352,6 +383,11 @@ export const RecordForm: React.FC<RecordFormProps> = ({
               {submitError.action.label}
             </button>
           )}
+        </div>
+      )}
+      {warning && (
+        <div className="record-form-warning" role="status">
+          <span>{warning}</span>
         </div>
       )}
       <div className="record-form-fields">

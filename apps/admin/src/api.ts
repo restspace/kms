@@ -340,11 +340,21 @@ export interface MessageRow {
   contact_id: string | null
   contact_name: string | null
   subject: string | null
+  /** Rendered per-recipient body (0029). Null on rows queued before body logging. */
+  body_html: string | null
+  body_text: string | null
   status: string
   error: string | null
   created_at: string
   sent_at: string | null
 }
+
+/** Re-queue one failed message (Messages tab detail panel's Retry button). */
+export const retryMessage = (id: string) =>
+  request<{ ok: boolean; status: string; error: string | null; sent_at: string | null }>(
+    `/app/api/messaging/messages/${id}/retry`,
+    { method: 'POST' },
+  )
 
 /** One reviews-resource row (workplan 13 W1a) — the committee's scores. */
 export interface ReviewRow {
@@ -654,14 +664,14 @@ export const PARTICIPANT_ROLES = ['speaker', 'co-speaker', 'moderator', 'panelis
 
 export interface EvaluationOverview {
   plans: Array<{ id: string; name: string; description: string | null; status: string; anonymise_submitters: number; scoring_scale_min: number; scoring_scale_max: number }>
-  criteria: Array<{ id: string; plan_id: string; name: string; description: string | null; weight: number; position: number }>
+  criteria: Array<{ id: string; plan_id: string; name: string; description: string | null; weight: number; position: number; kind?: string; options?: string | null }>
   reviewers: Array<{ id: string; email: string; name: string | null }>
   stats: Array<{ plan_id: string; submissions: number; assignments: number; completed: number }>
 }
 
 export interface ReviewQueue {
   assignments: Array<Record<string, unknown>>
-  criteria: Record<string, Array<{ id: string; name: string; description: string | null; weight: number }>>
+  criteria: Record<string, Array<{ id: string; name: string; description: string | null; weight: number; kind?: string; options?: string | null }>>
   participants: Record<string, Array<{ name: string | null; role: string }>>
 }
 
@@ -787,6 +797,14 @@ export interface FileVersion {
   size_bytes: number | null
   uploader_name: string | null
   uploader_email: string | null
+  /**
+   * Who actually performed the upload (file_assets.uploaded_by_contact_id) —
+   * `uploader_*` above is the chain's contact (who the file is *for*). Both
+   * views show uploaded_by first and fall back to the chain contact, so the
+   * library row and the detail page can never disagree about attribution.
+   */
+  uploaded_by_name?: string | null
+  uploaded_by_email?: string | null
 }
 
 export interface FileComment {
@@ -851,6 +869,41 @@ export const addFileComment = (uploadId: string, body: string) =>
     body: JSON.stringify({ body }),
   })
 
+/**
+ * Organiser-side upload (reuses the portal's storage machinery server-side).
+ * Pass `upload_id` to append a new version to an existing chain, or
+ * `submission_id` to start a new chain on that submission.
+ */
+export const uploadOrganiserFile = async (
+  file: File,
+  target: { upload_id?: string; submission_id?: string },
+): Promise<{ ok: boolean; upload_id: string; version: number }> => {
+  const form = new FormData()
+  form.set('file', file)
+  if (target.upload_id) form.set('upload_id', target.upload_id)
+  if (target.submission_id) form.set('submission_id', target.submission_id)
+  const res = await fetch('/app/api/files/uploads', { method: 'POST', body: form, credentials: 'same-origin' })
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as { error?: string }
+    throw new Error(body.error ?? `Upload failed (${res.status})`)
+  }
+  return res.json() as Promise<{ ok: boolean; upload_id: string; version: number }>
+}
+
+/** One pre-edit snapshot per content edit (title/description), newest first. */
+export interface ContentRevision {
+  id: string
+  title: string
+  description: string | null
+  edited_by: string | null
+  edited_by_name: string | null
+  source: 'admin' | 'portal'
+  edited_at: string
+}
+
+export const getSubmissionRevisions = (submissionId: string) =>
+  request<{ items: ContentRevision[] }>(`/app/api/submissions/${submissionId}/revisions`)
+
 export const getEvaluationOverview = () => request<EvaluationOverview>('/app/api/evaluation/overview')
 export const createPlan = (name: string) =>
   request<{ ok: boolean; id: string }>('/app/api/evaluation/plans', { method: 'POST', body: JSON.stringify({ name }) })
@@ -901,7 +954,7 @@ export interface AgendaSessionRow {
   updated_at: string
   /** 1 when a live METHOD:REQUEST calendar invite exists */
   invited: number
-  speakers: Array<{ contact_id: string; name: string }>
+  speakers: Array<{ contact_id: string; name: string; email?: string | null }>
 }
 
 export interface AgendaConflictRow {
@@ -1294,12 +1347,24 @@ export const importCommit = (
   rows: string[][],
   mapping: string[],
   source?: ImportSource,
+  /** Per-row actions from the dry run the user confirmed. The server re-plans
+   *  and answers 409 `plan_changed` when the live data no longer produces this
+   *  plan, instead of silently applying a different one. */
+  expectedActions?: ImportRowAction[],
 ) =>
   request<{ ok: boolean; summary: Record<string, number>; applied: Record<string, number>; batchId: string }>(
     '/app/api/import/commit',
     {
       method: 'POST',
-      body: JSON.stringify({ target, event_id: eventId, headers, rows, mapping, source }),
+      body: JSON.stringify({
+        target,
+        event_id: eventId,
+        headers,
+        rows,
+        mapping,
+        source,
+        ...(expectedActions ? { expected_actions: expectedActions } : {}),
+      }),
     },
   )
 

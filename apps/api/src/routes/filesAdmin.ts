@@ -12,9 +12,12 @@ import { can } from '@kms/core';
 import type { Actor } from '@kms/core';
 import type { AccessEnv } from '../access';
 import { accessibleEventIds } from '../access';
+import { DOCUMENT_TYPES, IMAGE_TYPES, MAX_UPLOAD_BYTES, saveFile } from '../filestore';
+import { bumpEventRevision } from '../revision';
 import { getRevalidatedPrivilegedSession } from '../session';
 import {
   addComment,
+  appendUploadVersion,
   loadChainForUpload,
   loadChainVersions,
   loadThread,
@@ -167,7 +170,7 @@ filesAdminRoutes.get('/chains/:uploadId', async (c) => {
 filesAdminRoutes.get('/task-assignments/:id', async (c) => {
   const eventIds = await accessibleEventIds(c);
   const row = await c.env.DB.prepare(
-    `SELECT ta.id, ta.contact_id, ta.submission_id, ta.response_id, ta.status,
+    `SELECT ta.id, ta.task_id, ta.contact_id, ta.submission_id, ta.response_id, ta.status,
             t.file_request_id, t.action_type, t.event_id
      FROM task_assignments ta JOIN tasks t ON t.id = ta.task_id
      WHERE ta.id = ?`,
@@ -175,6 +178,7 @@ filesAdminRoutes.get('/task-assignments/:id', async (c) => {
     .bind(c.req.param('id'))
     .first<{
       id: string;
+      task_id: string;
       contact_id: string;
       submission_id: string | null;
       response_id: string | null;
@@ -186,9 +190,13 @@ filesAdminRoutes.get('/task-assignments/:id', async (c) => {
   if (!row || !eventIds.includes(row.event_id)) return c.json({ error: 'not_found' }, 404);
   if (row.action_type !== 'file_upload') return c.json({ versions: [], comments: [] });
 
-  if (row.file_request_id) {
+  // A task with no file_requests row still gets a standing per-task request
+  // (`file-request-task-<taskId>`, created by the portal on first upload) so
+  // its uploads land in the library — read that chain the same way.
+  const chainRequestId = row.file_request_id ?? `file-request-task-${row.task_id}`;
+  {
     const versions = await loadChainVersions(c.env.DB, {
-      fileRequestId: row.file_request_id,
+      fileRequestId: chainRequestId,
       contactId: row.contact_id,
       submissionId: row.submission_id,
     });
@@ -225,8 +233,113 @@ filesAdminRoutes.get('/task-assignments/:id', async (c) => {
     size_bytes: asset.size_bytes,
     uploader_name: null,
     uploader_email: null,
+    uploaded_by_name: null,
+    uploaded_by_email: null,
   };
   return c.json({ versions: [only], comments: [] });
+});
+
+/** Portal-parity accepted types for organiser uploads: documents + images. */
+const ORGANISER_UPLOAD_TYPES = new Set<string>([...DOCUMENT_TYPES, ...IMAGE_TYPES]);
+
+/**
+ * POST /app/api/files/uploads — organiser-side upload (eval defect: the
+ * submission Files section offered only "No files uploaded" text, so an
+ * organiser could not add or replace a deliverable on a speaker's behalf).
+ *
+ * Multipart form fields:
+ *  - `file`          the bytes (required)
+ *  - `upload_id`     an existing chain: the new file becomes its next version
+ *  - `submission_id` a new chain on this submission (used when no upload_id)
+ *
+ * Reuses the exact machinery the portal uses (saveFile + appendUploadVersion),
+ * so an organiser upload is indistinguishable from a speaker upload in the
+ * library, the version chain and the /files/:id ACL. New chains hang off a
+ * standing per-event "Organiser uploads" file request, mirroring the
+ * headshot/per-task standing requests.
+ */
+filesAdminRoutes.post('/uploads', async (c) => {
+  const session = c.get('session');
+  if (session.role !== 'owner' && session.role !== 'admin') return c.json({ error: 'forbidden' }, 403);
+  const eventIds = await accessibleEventIds(c);
+
+  const body = await c.req.parseBody();
+  const file = body.file;
+  if (!(file instanceof File) || file.size === 0) return c.json({ error: 'file_required' }, 400);
+  const uploadId = typeof body.upload_id === 'string' ? body.upload_id : '';
+  const submissionId = typeof body.submission_id === 'string' ? body.submission_id : '';
+
+  let key: { fileRequestId: string; contactId: string; submissionId: string | null };
+  let eventId: string;
+
+  if (uploadId) {
+    // New version of an existing chain.
+    const anchor = await c.env.DB.prepare(
+      `SELECT u.file_request_id, u.contact_id, u.submission_id, fa.event_id
+       FROM file_request_uploads u JOIN file_assets fa ON fa.id = u.file_asset_id
+       WHERE u.id = ?`,
+    )
+      .bind(uploadId)
+      .first<{ file_request_id: string; contact_id: string; submission_id: string | null; event_id: string }>();
+    if (!anchor || !eventIds.includes(anchor.event_id)) return c.json({ error: 'not_found' }, 404);
+    eventId = anchor.event_id;
+    key = {
+      fileRequestId: anchor.file_request_id,
+      contactId: anchor.contact_id,
+      submissionId: anchor.submission_id,
+    };
+  } else {
+    // New chain on a submission. The chain's contact is the speaker the file
+    // is for — the submission's submitter (or first participant) — so the
+    // library's "For" semantics hold; file_assets.uploaded_by_contact_id
+    // separately records the organiser who performed the upload.
+    if (!submissionId) return c.json({ error: 'submission_id_required' }, 400);
+    const submission = await c.env.DB.prepare(
+      `SELECT s.id, s.event_id, s.submitter_contact_id,
+              (SELECT sp.contact_id FROM submission_participants sp
+                WHERE sp.submission_id = s.id ORDER BY sp.position LIMIT 1) AS participant_contact_id
+       FROM submissions s WHERE s.id = ?`,
+    )
+      .bind(submissionId)
+      .first<{
+        id: string;
+        event_id: string;
+        submitter_contact_id: string | null;
+        participant_contact_id: string | null;
+      }>();
+    if (!submission || !eventIds.includes(submission.event_id)) return c.json({ error: 'not_found' }, 404);
+    eventId = submission.event_id;
+    const contactId =
+      submission.submitter_contact_id ?? submission.participant_contact_id ?? session.contactId;
+    const fileRequestId = `file-request-organiser-${eventId}`;
+    await c.env.DB.prepare(
+      `INSERT OR IGNORE INTO file_requests (id, event_id, title, type, created_at)
+       VALUES (?, ?, 'Organiser uploads', 'submissions', ?)`,
+    )
+      .bind(fileRequestId, eventId, new Date().toISOString())
+      .run();
+    key = { fileRequestId, contactId, submissionId };
+  }
+
+  const saved = await saveFile(c.env, {
+    eventId,
+    uploadedByContactId: session.contactId,
+    file,
+    maxBytes: MAX_UPLOAD_BYTES,
+    allowedTypes: ORGANISER_UPLOAD_TYPES,
+  });
+  if ('error' in saved) return c.json({ error: saved.error }, 400);
+
+  const appended = await appendUploadVersion(c.env.DB, key, {
+    assetId: saved.id,
+    uploadedAt: new Date().toISOString(),
+  });
+  await bumpEventRevision(c.env, eventId);
+  const versions = await loadChainVersions(c.env.DB, key);
+  return c.json(
+    { ok: true, upload_id: appended.uploadId, version: appended.version, versions },
+    201,
+  );
 });
 
 // POST /app/api/files/uploads/:uploadId/comments { body } — an organiser reply
