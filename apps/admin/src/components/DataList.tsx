@@ -5,7 +5,6 @@ import { FixedSizeList as List, ListChildComponentProps, ListOnItemsRenderedProp
 import InfiniteLoader from 'react-window-infinite-loader';
 import { breakpoints } from '@kms/theme';
 import useElementSize from '../hooks/useElementSize';
-import PlusIcon from '../assets/plus-icon.svg';
 import { stableSerialize } from '../utils/stableSerialize';
 import { advanceSort, type SortCycleEntry } from './sortCycle';
 import {
@@ -2251,16 +2250,30 @@ export const DataList = <T extends Record<string, any>, TFilters extends Record<
         {liveAnnouncement}
       </div>
       <div className="data-list-table">
-        {FilterComponent && filterConfig && (
-          <div className="data-list-filters">
-            <FilterComponent
-              filters={localFilters}
-              setFilters={setLocalFilters}
-              resetFilters={resetFilters}
-              {...(filterConfig.filterProps ?? {})}
-            />
+        {/* Always rendered (even with no filters) so every tab shares the same
+            header band height; the Add button lives at its right edge. */}
+        <div className="data-list-filters">
+          <div className="data-list-filters-content">
+            {FilterComponent && filterConfig && (
+              <FilterComponent
+                filters={localFilters}
+                setFilters={setLocalFilters}
+                resetFilters={resetFilters}
+                {...(filterConfig.filterProps ?? {})}
+              />
+            )}
           </div>
-        )}
+          {onAddClick && (
+            <button
+              type="button"
+              className="data-list-filters-add"
+              onClick={onAddClick}
+              title="Add new record"
+            >
+              Add
+            </button>
+          )}
+        </div>
         <div className="data-list-main">
           <div className="data-list-main-content">
             {!isMobile && (
@@ -2417,17 +2430,6 @@ export const DataList = <T extends Record<string, any>, TFilters extends Record<
                   </List>
                 )}
               </InfiniteLoader>
-              {onAddClick && (
-                <button
-                  type="button"
-                  className={`data-list-add-button ${hasSummaryData ? 'with-summary-row' : ''}`}
-                  onClick={onAddClick}
-                  title="Add new record"
-                  aria-label="Add new record"
-                >
-                  <img src={PlusIcon} alt="" aria-hidden="true" />
-                </button>
-              )}
               {exportConfig && !isMobile && (
                 <div className={`data-list-export-buttons ${hasSummaryData ? 'with-summary-row' : ''}`}>
                   {(['csv', 'xlsx'] as const).map((format) => (

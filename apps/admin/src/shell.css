@@ -420,7 +420,7 @@
    filter(s) — "All Events", "Event: <name>" and/or "<Tab>: <row>". */
 
 .ws-scope-title {
-  padding: var(--space-3) var(--space-3) var(--space-1);
+  padding: var(--space-2) var(--space-3);
   font-size: 18px;
   font-weight: 600;
   color: var(--text);

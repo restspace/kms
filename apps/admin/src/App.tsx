@@ -1008,7 +1008,9 @@ export function buildWorkspaceConfig(
       )
     },
     globalFilterSets: { id: 'contact_id' },
-    globalFilterReceives: { submission_id: 'submission_id' },
+    // contact_id lets any tab that contributes a contact (Tasks and Messages
+    // by their assignee/recipient FK) narrow Speakers to that person.
+    globalFilterReceives: { submission_id: 'submission_id', contact_id: 'contact_id' },
     exportConfig: exportFor('contacts'),
     toolbarActions: [addExistingContactAction, importAction('contacts', 'speakers')],
     schema: {
@@ -1477,7 +1479,12 @@ export function buildWorkspaceConfig(
         </dl>
       </div>
     ),
-    globalFilterReceives: { submission_id: 'submission_id' },
+    // contact_id reaches reviews through the submission: anchoring a Speaker
+    // shows the reviews of that contact's submissions (adminApi.ts reviews
+    // contact_id filter). reviewer_contact_id makes a pinned review contribute
+    // its reviewer as the contact anchor for other tabs.
+    globalFilterSets: { reviewer_contact_id: 'contact_id' },
+    globalFilterReceives: { submission_id: 'submission_id', contact_id: 'contact_id' },
     exportConfig: exportFor('reviews'),
   }
 
@@ -1527,6 +1534,8 @@ export function buildWorkspaceConfig(
         <div className="detail-body" style={{ whiteSpace: 'pre-line' }}>{item.body}</div>
       </div>
     ),
+    // A pinned comment contributes its author as the contact anchor.
+    globalFilterSets: { author_contact_id: 'contact_id' },
     globalFilterReceives: { submission_id: 'submission_id' },
     exportConfig: exportFor('comments'),
   }
@@ -1576,7 +1585,11 @@ export function buildWorkspaceConfig(
         </dl>
       </div>
     ),
-    globalFilterReceives: { contact_id: 'contact_id' },
+    // A pinned message contributes its recipient as the contact anchor
+    // (Speakers ← Messages); submission_id arrives via the submission's
+    // author contacts (adminApi.ts messages submission_id filter).
+    globalFilterSets: { contact_id: 'contact_id' },
+    globalFilterReceives: { contact_id: 'contact_id', submission_id: 'submission_id' },
     exportConfig: exportFor('messages'),
     // SPK-13: the tab was read-only history — there was no way to write to
     // speakers from the workspace at all. `createComponent` (the Tasks tab's
@@ -1670,6 +1683,8 @@ export function buildWorkspaceConfig(
       eventColumn,
     ],
     detailComponent: ({ item }) => <FileLibraryDetail item={item} />,
+    // A pinned file contributes its owning contact as the contact anchor.
+    globalFilterSets: { contact_id: 'contact_id' },
     globalFilterReceives: { contact_id: 'contact_id', submission_id: 'submission_id' },
   }
 
@@ -1997,8 +2012,13 @@ export default function App() {
   useEffect(() => {
     if (view !== 'workspace') {
       // The manager unmounts with the view, taking its "already active" state
-      // with it — so does the record of what it last reported.
+      // with it — so does the record of what it last reported. The pending
+      // detail request must go too: the manager tracks the last handled token
+      // in a ref that dies with it, so a remount (e.g. a dashboard deep link
+      // back into the workspace) would otherwise replay the stale request and
+      // auto-open a detail tab nobody asked for.
       reportedTab.current = null
+      setDetailRequest(undefined)
       return
     }
     if (!route.tab) return

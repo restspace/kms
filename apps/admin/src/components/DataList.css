@@ -17,10 +17,57 @@
   flex: 1 1 auto;
 }
 
+/* Header band above the grid. Always present — min-height keeps tabs without
+   filters at the same height as the standard single chip row (22px chips +
+   2×space-2 padding). */
 .data-list-filters {
   flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  min-height: 38px;
   border-bottom: 1px solid var(--border);
   background: var(--chrome);
+}
+
+.data-list-filters-content {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* The filter components carry their own bottom border for standalone use;
+   inside the band the band's border is the only one wanted. */
+.data-list-filters-content .chip-filter {
+  border-bottom: none;
+}
+
+/* Ordinary Add button at the right edge of the filter band (replaces the old
+   floating round button at the bottom-right of the list). */
+.data-list-filters-add {
+  flex-shrink: 0;
+  align-self: center;
+  margin: 0 var(--space-3) 0 var(--space-2);
+  height: 22px;
+  padding: 0 var(--space-3) 1px;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  background: var(--accent);
+  color: var(--accent-contrast);
+  font: inherit;
+  font-size: var(--text-caption);
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background-color 0.15s ease;
+}
+
+.data-list-filters-add:hover {
+  background: var(--accent-strong);
+  border-color: var(--accent-strong);
+}
+
+.data-list-filters-add:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 .data-list-main {
@@ -417,10 +464,6 @@
     padding: 10px 6px 10px 0;
   }
 
-  .data-list-add-button {
-    right: max(40px, calc(env(safe-area-inset-right) + 24px));
-  }
-
   .data-list-summary-row,
   .data-list-summary-mobile {
     padding-left: 6px;
@@ -573,7 +616,8 @@
   color: var(--text-secondary);
 }
 
-/* Floating add button */
+/* Floating round button base — now only the quick-add (⚡) button uses it;
+   the standard Add moved into the filter band (.data-list-filters-add). */
 .data-list-add-button {
   position: absolute;
   bottom: max(16px, env(safe-area-inset-bottom));
@@ -609,12 +653,6 @@
 .data-list-add-button:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
-}
-
-.data-list-add-button img {
-  width: 20px;
-  height: 20px;
-  filter: brightness(0) invert(1);
 }
 
 /* Fetch-error banner with retry */
@@ -683,9 +721,8 @@
   background: var(--danger-soft);
 }
 
-/* Quick-add button sits left of the standard add button */
+/* Quick-add button takes the bottom-right slot the standard add vacated */
 .data-list-fast-add-button {
-  right: max(64px, calc(env(safe-area-inset-right) + 52px));
   font-size: 18px;
   line-height: 1;
 }

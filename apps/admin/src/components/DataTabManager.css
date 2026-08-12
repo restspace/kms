@@ -144,16 +144,18 @@
   flex-shrink: 0;
 }
 
-/* Vertical pushpin shown on tabs whose list is being filtered by the global
-   filter. `bottom: 50%` of the dot-sized wrapper puts the needle tip (the
-   bottom edge of the SVG) exactly at the centre of the dot. */
+/* Pushpin shown on tabs whose list is being filtered by the global filter.
+   `bottom: 50%` of the dot-sized wrapper puts the needle tip (the bottom
+   edge of the SVG) exactly at the centre of the dot; the tilt rotates about
+   that tip (transform-origin bottom-centre) so the point stays put. */
 .data-tab-filter-pin {
   position: absolute;
   left: 50%;
   bottom: 50%;
-  transform: translateX(-50%);
+  transform: translateX(-50%) rotate(30deg);
+  transform-origin: 50% 100%;
   width: 10px;
-  height: 18px;
+  height: 16px;
   color: var(--accent);
   pointer-events: none;
 }

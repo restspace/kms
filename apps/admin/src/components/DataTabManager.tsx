@@ -2955,12 +2955,12 @@ export const DataTabManager: React.FC<DataTabManagerProps> = ({
                    global filter; the needle tip lands on the dot's centre. */
                 <svg
                   className="data-tab-filter-pin"
-                  viewBox="0 0 10 18"
+                  viewBox="0 0 10 16"
                   aria-hidden="true"
                   focusable="false"
                 >
                   <path d="M2 1h6v5l1.5 2h-9L2 6z" fill="currentColor" />
-                  <line x1="5" y1="8" x2="5" y2="18" stroke="currentColor" strokeWidth="1.5" />
+                  <line x1="5" y1="8" x2="5" y2="16" stroke="currentColor" strokeWidth="1.5" />
                 </svg>
               )}
               <button

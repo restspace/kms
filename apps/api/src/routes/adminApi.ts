@@ -549,12 +549,31 @@ const RESOURCE_SPECS: Record<string, Omit<ResourceDef, 'fromSql'>> = {
       template_key: eq('m.template_key'),
       status: eq('m.status'),
       contact_id: eq('m.contact_id'),
+      // The submission anchor reaches messages through the submission's
+      // author contacts (submitter OR participant — the submissions
+      // resource's broad contact_id relation): anchoring a submission shows
+      // everything sent to the people on it.
+      submission_id: (value) => {
+        const v = asText(value);
+        if (v === null) return null;
+        return {
+          sql: `EXISTS (SELECT 1 FROM submissions sub
+                        WHERE sub.id = ?
+                          AND (sub.submitter_contact_id = m.contact_id
+                               OR EXISTS (SELECT 1 FROM submission_participants sp
+                                          WHERE sp.submission_id = sub.id
+                                            AND sp.contact_id = m.contact_id)))`,
+          params: [v],
+        };
+      },
     },
     filterDocs: {
       q: 'Free-text match over recipient email and subject.',
       template_key: 'Exact template key, e.g. submission_confirmation, magic_link, task_reminder.',
       status: 'Exact status: queued | sent | failed | bounced.',
       contact_id: 'Messages sent to this contact. The global anchor filter uses this.',
+      submission_id:
+        "Messages sent to this submission's contacts (its submitter or any participant). The global anchor filter uses this.",
     },
   },
 
@@ -597,6 +616,20 @@ const RESOURCE_SPECS: Record<string, Omit<ResourceDef, 'fromSql'>> = {
       submission_id: eq('r.submission_id'),
       plan_id: eq('r.plan_id'),
       reviewer_contact_id: eq('r.reviewer_contact_id'),
+      // The contact anchor reaches reviews through the reviewed submission's
+      // author contacts — same broad "theirs" semantics as the submissions
+      // resource's contact_id (submitter OR participant), so anchoring a
+      // Speaker narrows Reviews to reviews of that person's submissions.
+      contact_id: (value) => {
+        const v = asText(value);
+        if (v === null) return null;
+        return {
+          sql: `(s.submitter_contact_id = ?
+                 OR EXISTS (SELECT 1 FROM submission_participants sp
+                            WHERE sp.submission_id = r.submission_id AND sp.contact_id = ?))`,
+          params: [v, v],
+        };
+      },
       conflict_of_interest: (value) =>
         value === true || value === 'true'
           ? { sql: 'r.conflict_of_interest = 1', params: [] }
@@ -611,6 +644,8 @@ const RESOURCE_SPECS: Record<string, Omit<ResourceDef, 'fromSql'>> = {
     },
     filterDocs: {
       submission_id: 'Reviews of this submission. The global anchor filter uses this.',
+      contact_id:
+        "Reviews of this contact's submissions (submitted by them OR with them as a participant — the same broad relation as the submissions resource's contact_id). The global anchor filter uses this.",
       plan_id: 'Reviews recorded in this evaluation round.',
       reviewer_contact_id: 'Reviews written by this reviewer.',
       conflict_of_interest:
