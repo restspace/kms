@@ -14,6 +14,9 @@ import { sendTemplated } from '../mailer';
 import { clearSessionCookie, createSessionToken, setSessionCookie } from '../session';
 import { cleanupExpiredTokensStatement, consumeToken, mintToken, sha256hex } from '../tokens';
 import type { TokenPurpose } from '../tokens';
+import { DUMMY_CREDENTIAL, hashPassword, MIN_PASSWORD_LENGTH, verifyPassword } from '../password';
+import { loginPage, signupPage } from './portal';
+import { adminLoginPage } from './admin';
 
 export const authRoutes = new Hono<AppEnv>();
 
@@ -38,9 +41,39 @@ async function readBody(c: Context<AppEnv>) {
     : await c.req.parseBody();
   return {
     email: typeof body.email === 'string' ? body.email : '',
+    password: typeof body.password === 'string' ? body.password : '',
+    /** 'admin' when the post came from the /app gate, so a failed password
+     *  login re-renders that page instead of the portal's. */
+    surface: typeof body.surface === 'string' ? body.surface : '',
     event_slug: typeof body.event_slug === 'string' ? body.event_slug : '',
     redirect_to: safeRedirect(body.redirect_to),
   };
+}
+
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+/**
+ * Failed-password throttle. Fixed 15-minute window keyed on
+ * sha256(email|client-ip) — the address is never written to KV in clear, and
+ * pairing it with the IP means one attacker cannot lock a victim out globally.
+ * Only failures increment, so a legitimate sign-in never spends budget.
+ */
+const PW_FAIL_WINDOW_SECONDS = 15 * 60;
+const PW_FAIL_MAX = 10;
+
+async function pwFailKey(c: Context<AppEnv>, email: string): Promise<string> {
+  const ip = c.req.header('CF-Connecting-IP') ?? '';
+  return `pwfail:${await sha256hex(`${email}|${ip}`)}`;
+}
+
+async function pwFailCount(c: Context<AppEnv>, key: string): Promise<number> {
+  const raw = await c.env.KV.get(key);
+  const n = raw === null ? 0 : Number.parseInt(raw, 10);
+  return Number.isFinite(n) ? n : 0;
+}
+
+async function recordPwFail(c: Context<AppEnv>, key: string, current: number): Promise<void> {
+  await c.env.KV.put(key, String(current + 1), { expirationTtl: PW_FAIL_WINDOW_SECONDS });
 }
 
 /**
@@ -185,6 +218,154 @@ authRoutes.post('/request', async (c) => {
   );
 });
 
+interface CredentialRow {
+  password_hash: string | null;
+  salt: string | null;
+  pending_hash: string | null;
+  pending_salt: string | null;
+  iterations: number;
+}
+
+// POST /auth/login — password sign-in for the portal and the /app gate.
+//
+// Every failure answers identically ("invalid email or password", 401),
+// whatever went wrong: unknown address, no password set, wrong password. And
+// when there is nothing to verify against we still verify — against
+// DUMMY_CREDENTIAL — so an unknown address costs the same ~100 ms of PBKDF2 as
+// a known one and the form cannot be used to enumerate addresses by timing.
+authRoutes.post('/login', async (c) => {
+  const { email, password, surface, event_slug, redirect_to } = await readBody(c);
+  const json = wantsJson(c.req.header('accept'));
+  const normalisedEmail = email.trim().toLowerCase();
+
+  const db = createDb(c.env.DB);
+  const event = event_slug ? await db.events.getBySlug(event_slug) : null;
+
+  // Generic rejection, rendered for whichever surface asked.
+  const reject = async (): Promise<Response> => {
+    if (json) return c.json({ ok: false, error: 'invalid_credentials' }, 401);
+    if (surface === 'admin' || !event) {
+      const events = await db.events.listAll();
+      return c.html(adminLoginPage(events, 'Invalid email or password'), 401);
+    }
+    return c.html(loginPage(event, { error: 'Invalid email or password', email: normalisedEmail }), 401);
+  };
+
+  if (!EMAIL_RE.test(normalisedEmail) || password.length === 0 || !event) return reject();
+
+  const rateKey = await pwFailKey(c, normalisedEmail);
+  const fails = await pwFailCount(c, rateKey);
+  if (fails >= PW_FAIL_MAX) return reject();
+
+  const fail = async (): Promise<Response> => {
+    await recordPwFail(c, rateKey, fails);
+    return reject();
+  };
+
+  const contact = await db.contacts.getByEmail(event.org_id, normalisedEmail);
+  const credential = contact
+    ? await c.env.DB.prepare(
+        'SELECT password_hash, salt, pending_hash, pending_salt, iterations FROM auth_credentials WHERE contact_id = ?',
+      )
+        .bind(contact.id)
+        .first<CredentialRow>()
+    : null;
+
+  // A pending-only row (signed up, link not yet clicked) is not a login.
+  if (!contact || !credential || !credential.password_hash || !credential.salt) {
+    await verifyPassword(password, DUMMY_CREDENTIAL);
+    return fail();
+  }
+  const ok = await verifyPassword(password, {
+    hash: credential.password_hash,
+    salt: credential.salt,
+    iterations: credential.iterations,
+  });
+  if (!ok) return fail();
+
+  // Same arrival semantics as a consumed magic link: proving the password
+  // earns a place on this event's roster, and the seeded profile with it.
+  await db.contacts.attachToEvent(event.id, contact.id, 'cfp');
+  const role = await db.eventUsers.getRole(event.id, contact.id);
+  const sessionToken = await createSessionToken(
+    {
+      contactId: contact.id,
+      eventId: event.id,
+      eventSlug: event.slug,
+      email: contact.email,
+      role,
+    },
+    c.env.SESSION_SECRET,
+  );
+  setSessionCookie(c, sessionToken);
+
+  const dest = safeRedirect(redirect_to) ?? (role === 'speaker' ? `/portal/${event.slug}` : '/app');
+  if (json) return c.json({ ok: true, redirect_to: dest });
+  return c.redirect(dest);
+});
+
+// POST /auth/signup — portal-only "create a password".
+//
+// The password is stored as pending_* and is worth nothing until a magic link
+// is consumed (see /auth/callback), which is what proves the person choosing it
+// reads mail at that address. An existing ACTIVE password is never touched, so
+// a stranger cannot lock a speaker out by "signing up" as them. The response is
+// byte-identical whether or not we hold the address.
+authRoutes.post('/signup', async (c) => {
+  const { email, password, event_slug } = await readBody(c);
+  const json = wantsJson(c.req.header('accept'));
+  const normalisedEmail = email.trim().toLowerCase();
+
+  const db = createDb(c.env.DB);
+  const event = event_slug ? await db.events.getBySlug(event_slug) : null;
+  if (!event) {
+    if (json) return c.json({ ok: false, error: 'event_not_found' }, 404);
+    return c.html(page('Event not found', '<h1>Event not found</h1><p>We could not find that event.</p>'), 404);
+  }
+
+  const invalid = (message: string) => {
+    if (json) return c.json({ ok: false, error: 'invalid_signup', message }, 400);
+    return c.html(signupPage(event, { error: message, email: normalisedEmail }), 400);
+  };
+  if (!EMAIL_RE.test(normalisedEmail)) return invalid('Enter a valid email address.');
+  if (password.length < MIN_PASSWORD_LENGTH) {
+    return invalid(`Passwords must be at least ${MIN_PASSWORD_LENGTH} characters.`);
+  }
+
+  const contact = await db.contacts.getByEmail(event.org_id, normalisedEmail);
+  if (contact) {
+    const { hash, salt, iterations } = await hashPassword(password);
+    await c.env.DB.prepare(
+      `INSERT INTO auth_credentials (contact_id, pending_hash, pending_salt, iterations, algo, created_at)
+       VALUES (?1, ?2, ?3, ?4, 'pbkdf2-sha256', ?5)
+       ON CONFLICT (contact_id) DO UPDATE SET
+         pending_hash = excluded.pending_hash,
+         pending_salt = excluded.pending_salt,
+         iterations   = excluded.iterations`,
+    )
+      .bind(contact.id, hash, salt, iterations, new Date().toISOString())
+      .run();
+  }
+
+  // Always sent, and unconditional: requestMagicLink silently no-ops for an
+  // address we do not hold, so the two cases are indistinguishable from here.
+  const { devLink: link } = await requestMagicLink(c, { email: normalisedEmail, event });
+
+  if (json) return c.json(link !== null ? { ok: true, dev_link: link } : { ok: true });
+  const devBlock =
+    link !== null
+      ? `<div class="devlink"><strong>${c.env.DEV_MODE === 'on' ? 'DEV_MODE' : 'Demo login'}</strong> — your sign-in link:<br><a href="${esc(link)}">${esc(link)}</a></div>`
+      : '';
+  return c.html(
+    page(
+      'Check your email',
+      `<h1>Check your email — click the link to activate your password</h1>
+<p>If <strong>${esc(normalisedEmail)}</strong> is valid, a confirmation link for <strong>${esc(event.name)}</strong> is on its way.</p>
+<p class="muted">The link expires in 15 minutes and can only be used once. Your new password starts working as soon as you open it.</p>${devBlock}`,
+    ),
+  );
+});
+
 // GET /auth/callback?t=… — verify + consume the token, set the session cookie, redirect.
 authRoutes.get('/callback', async (c) => {
   const token = c.req.query('t');
@@ -218,6 +399,19 @@ authRoutes.get('/callback', async (c) => {
   // 'cfp' is the closest of the four sources for a self-service arrival: the
   // person put their own address in, rather than staff or an import adding them.
   await db.contacts.attachToEvent(event.id, consumed.contact_id, 'cfp');
+
+  // Consuming the link is also what activates a password chosen at
+  // /auth/signup: until now it sat in pending_*, where nothing authenticates
+  // against it. Conditional on pending_hash so an ordinary sign-in link never
+  // disturbs a password already in use.
+  await c.env.DB.prepare(
+    `UPDATE auth_credentials
+        SET password_hash = pending_hash, salt = pending_salt, set_at = ?1,
+            pending_hash = NULL, pending_salt = NULL
+      WHERE contact_id = ?2 AND pending_hash IS NOT NULL`,
+  )
+    .bind(new Date().toISOString(), consumed.contact_id)
+    .run();
 
   const contact = await db.contacts.getById(consumed.event_id, consumed.contact_id);
   if (!contact) return expired();

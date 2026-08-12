@@ -208,6 +208,43 @@ describe('GET /e/:slug/agenda.xml', () => {
   });
 });
 
+// AIA-08: an auto-placed session is provisional. It has a time and a room, so
+// every "is it scheduled?" predicate would happily publish it — the XML mirror
+// has to exclude it exactly like agenda.json does, or a slot nobody confirmed
+// shows up on somebody's website.
+describe('GET /e/:slug/agenda.xml — pencilled placements stay private', () => {
+  it('hides an unconfirmed auto-placement and publishes it once confirmed', async () => {
+    const slug = `xml-pencil-${crypto.randomUUID().slice(0, 8)}`;
+    const eventId = await createEvent({ slug, timezone: 'UTC' });
+    const roomId = `room-${crypto.randomUUID()}`;
+    await env.DB.prepare('INSERT INTO rooms (id, event_id, name, position) VALUES (?, ?, ?, 0)')
+      .bind(roomId, eventId, 'Main Hall')
+      .run();
+    const speaker = await createContact(eventId, {
+      email: `pencil-speaker-${crypto.randomUUID().slice(0, 8)}@example.com`,
+      first_name: 'Grace',
+      last_name: 'Hopper',
+    });
+    const sessionId = await createSubmission(eventId, { title: 'Provisionally Placed', code: 'P-1' });
+    await schedule(sessionId, '2026-10-01T09:00:00.000Z', '2026-10-01T10:00:00.000Z', roomId);
+    await addParticipant(sessionId, speaker);
+    await env.DB.prepare('UPDATE submissions SET pencilled_at = ? WHERE id = ?')
+      .bind('2026-08-12T10:00:00.000Z', sessionId)
+      .run();
+    await publishAgenda(eventId);
+
+    const hidden = await (await SELF.fetch(`${ORIGIN}/e/${slug}/agenda.xml`)).text();
+    expect(hidden).not.toContain('Provisionally Placed');
+    expect(hidden).not.toContain('Grace Hopper');
+
+    // Confirming is what `POST /agenda/confirm-placements` does to the row.
+    await env.DB.prepare('UPDATE submissions SET pencilled_at = NULL WHERE id = ?').bind(sessionId).run();
+    const shown = await (await SELF.fetch(`${ORIGIN}/e/${slug}/agenda.xml`)).text();
+    expect(shown).toContain('Provisionally Placed');
+    expect(shown).toContain('Grace Hopper');
+  });
+});
+
 describe('framing headers', () => {
   let slug: string;
 

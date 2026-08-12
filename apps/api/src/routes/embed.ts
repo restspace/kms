@@ -220,7 +220,7 @@ embedRoutes.get('/e/:slug/agenda.xml', async (c) => {
       .prepare(
         `SELECT id, code, title, description, format, level, capacity, track_id, room_id, starts_at, ends_at
          FROM submissions
-         WHERE event_id = ? AND status = 'accepted' AND content_approved = 1 AND starts_at IS NOT NULL AND ends_at IS NOT NULL
+         WHERE event_id = ? AND status = 'accepted' AND content_approved = 1 AND starts_at IS NOT NULL AND ends_at IS NOT NULL AND pencilled_at IS NULL
          ORDER BY starts_at, code`,
       )
       .bind(event.id)
@@ -250,7 +250,7 @@ embedRoutes.get('/e/:slug/agenda.xml', async (c) => {
          JOIN submissions s ON s.id = sp.submission_id
          LEFT JOIN event_contacts ec ON ec.contact_id = c.id AND ec.event_id = ?1
          WHERE s.event_id = ?1 AND s.status = 'accepted' AND s.content_approved = 1
-           AND s.starts_at IS NOT NULL AND s.ends_at IS NOT NULL
+           AND s.starts_at IS NOT NULL AND s.ends_at IS NOT NULL AND s.pencilled_at IS NULL
          ORDER BY sp.position`,
       )
       .bind(event.id)

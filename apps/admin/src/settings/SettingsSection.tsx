@@ -12,6 +12,7 @@ import { appAlert, appConfirm } from '../components/dialogs'
 import { RoomsTracksCard } from './RoomsTracksCard'
 import { EventSettingsHistory } from '../workspace/entityHistory'
 import { ContactFieldsCard } from './ContactFieldsCard'
+import { SpeakerStatusesCard } from './SpeakerStatusesCard'
 import { EmailTemplatesCard } from './EmailTemplatesCard'
 import { ChaseSettingsCard } from './ChaseSettingsCard'
 import './settings.css'
@@ -216,6 +217,8 @@ export function SettingsSection({ me }: { me: Me }) {
       <RoomsTracksCard />
 
       <ContactFieldsCard />
+
+      <SpeakerStatusesCard />
 
       <EmailTemplatesCard />
 

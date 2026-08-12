@@ -6,7 +6,7 @@
 
 import { SELF, env } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
-import { seedContact, seedEvent, seedSubmission } from './fixtures-admin';
+import { jsonReq, seedContact, seedEvent, seedStaff, seedSubmission } from './fixtures-admin';
 
 async function seedPublishedSession(eventId: string): Promise<string> {
   await env.DB.prepare('UPDATE events SET agenda_published = 1 WHERE id = ?').bind(eventId).run();
@@ -109,5 +109,70 @@ describe('GET /e/:slug/sessions.xml and sessions.ics', () => {
     const text = await res.text();
     expect(text).toContain('BEGIN:VEVENT');
     expect(text).toContain('SUMMARY:Streaming Function Calls');
+  });
+});
+
+// AIA-08: the auto-schedule assistant writes real times and rooms, so every
+// public feed's "scheduled" predicate would publish its guesses. `pencilled_at`
+// is the extra condition that keeps a provisional slot off the website (and
+// out of the bulk invite send) until an organiser confirms it.
+describe('pencilled auto-placements are excluded from every public feed', () => {
+  it('hides the session from agenda.json, sessions.json, speakers.json and the ICS until confirmed', async () => {
+    const eventId = await seedEvent({ slug: `pencil-${crypto.randomUUID().slice(0, 8)}` });
+    const admin = await seedStaff(eventId, 'admin');
+    await seedPublishedSession(eventId); // the confirmed one — always visible
+    const slug = (await env.DB.prepare('SELECT slug FROM events WHERE id = ?').bind(eventId).first<{ slug: string }>())!.slug;
+
+    const roomId = (await env.DB.prepare('SELECT id FROM rooms WHERE event_id = ?').bind(eventId).first<{ id: string }>())!.id;
+    const pencilled = await seedSubmission(eventId, { status: 'accepted', title: 'Pencilled In Talk' });
+    await env.DB
+      .prepare('UPDATE submissions SET starts_at = ?, ends_at = ?, room_id = ?, pencilled_at = ? WHERE id = ?')
+      .bind('2026-10-01T18:00:00.000Z', '2026-10-01T18:30:00.000Z', roomId, '2026-08-12T10:00:00.000Z', pencilled)
+      .run();
+    const speakerId = await seedContact(eventId, { first_name: 'Grace', last_name: 'Hopper' });
+    await env.DB.prepare(
+      `INSERT INTO submission_participants (id, submission_id, contact_id, role, position, is_primary_contact)
+       VALUES (?, ?, ?, 'speaker', 0, 1)`,
+    ).bind(`sp-${crypto.randomUUID()}`, pencilled, speakerId).run();
+
+    const titlesOf = async (path: string) => {
+      const body = (await (await SELF.fetch(`https://example.com/e/${slug}/${path}`)).json()) as {
+        sessions: { title: string }[];
+      };
+      return body.sessions.map((s) => s.title);
+    };
+    const speakerNames = async () => {
+      const body = (await (await SELF.fetch(`https://example.com/e/${slug}/speakers.json`)).json()) as {
+        speakers: { name: string }[];
+      };
+      return body.speakers.map((s) => s.name);
+    };
+
+    expect(await titlesOf('agenda.json')).toEqual(['Streaming Function Calls']);
+    expect(await titlesOf('sessions.json')).toEqual(['Streaming Function Calls']);
+    expect(await speakerNames()).toEqual(['Ada Lovelace']);
+    const ics = await (await SELF.fetch(`https://example.com/e/${slug}/agenda.ics`)).text();
+    expect(ics).not.toContain('Pencilled In Talk');
+
+    // The invite send ignores it too — nobody is emailed about a guess.
+    const send = await SELF.fetch(
+      'https://example.com/app/api/agenda/send-confirmations',
+      jsonReq(admin.cookie, {}),
+    );
+    expect(send.status).toBe(202);
+    expect(((await send.json()) as { sent_sessions: number }).sent_sessions).toBe(1);
+
+    // Confirm, and the same session becomes public with no other change.
+    const confirm = await SELF.fetch(
+      'https://example.com/app/api/agenda/confirm-placements',
+      jsonReq(admin.cookie, {}),
+    );
+    expect(confirm.status).toBe(200);
+    expect(((await confirm.json()) as { confirmed: number }).confirmed).toBe(1);
+
+    expect(await titlesOf('agenda.json')).toContain('Pencilled In Talk');
+    expect(await titlesOf('sessions.json')).toContain('Pencilled In Talk');
+    expect(await speakerNames()).toContain('Grace Hopper');
+    expect(await (await SELF.fetch(`https://example.com/e/${slug}/agenda.ics`)).text()).toContain('Pencilled In Talk');
   });
 });

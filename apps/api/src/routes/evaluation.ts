@@ -13,7 +13,8 @@ import { renderTemplatedPreview, sendTemplated } from '../mailer';
 import { APPROVAL_ASK_HTML, sweepBulkJobs } from '../jobs/bulkJobs';
 import { requestMagicLink } from './auth';
 import { mintToken } from '../tokens';
-import { bumpEventRevision, entityRevisionInsert } from '../revision';
+import { bumpEventRevision } from '../revision';
+import { snapshotParticipantsRevision } from '../participants';
 import { isWriter } from '../access';
 import type { SessionPayload } from '../session';
 import { reviewWindowState } from '../reviewWindow';
@@ -745,43 +746,12 @@ evaluationRoutes.get('/submissions/:id/revisions', async (c) => {
 // remove participants on a decided (accepted/declined) submission; there was
 // no status check to "drop" here. What WAS missing is traceability: unlike
 // the submission title/description path just above, no snapshot was taken
-// before the roster changed. snapshotParticipantsRevision below closes that
-// gap so a post-decision participant change is now provable, the same way
-// D7 asks for, while the speaker portal stays locked exactly as before.
+// before the roster changed. snapshotParticipantsRevision (moved to
+// ../participants.ts for ABS-11, shared with the portal's co-author routes)
+// closes that gap so a post-decision participant change is now provable, the
+// same way D7 asks for, while the speaker portal stays locked exactly as
+// before.
 // ---------------------------------------------------------------------------
-
-/**
- * Pre-edit snapshot of a submission's full participant roster, batched
- * ahead of the INSERT/UPDATE/DELETE it precedes (same commit-together
- * discipline as the submission title/description revision above and the
- * contact/settings ones in adminApi.ts). Recorded unconditionally — unlike a
- * field-diff, a roster add/remove/role-change IS the content change, so
- * there is no "unchanged, skip it" case to filter for.
- */
-async function snapshotParticipantsRevision(
-  db: D1Database,
-  args: { eventId: string; submissionId: string; editedBy: string; editedByName: string | null; editedAt: string },
-): Promise<D1PreparedStatement> {
-  const { results } = await db
-    .prepare(
-      `SELECT sp.id AS participant_id, sp.contact_id, sp.role, sp.position, sp.is_primary_contact,
-              c.first_name, c.last_name, c.email
-       FROM submission_participants sp JOIN contacts c ON c.id = sp.contact_id
-       WHERE sp.submission_id = ? ORDER BY sp.position`,
-    )
-    .bind(args.submissionId)
-    .all();
-  return entityRevisionInsert(db, {
-    eventId: args.eventId,
-    entityType: 'submission_participants',
-    entityId: args.submissionId,
-    payload: { participants: results ?? [] },
-    editedBy: args.editedBy,
-    editedByName: args.editedByName,
-    source: 'admin',
-    editedAt: args.editedAt,
-  });
-}
 
 /** POST /submissions/:id/participants { contact_id, role, is_primary_contact? } */
 evaluationRoutes.post('/submissions/:id/participants', async (c) => {
@@ -830,6 +800,7 @@ evaluationRoutes.post('/submissions/:id/participants', async (c) => {
     editedBy: session.contactId,
     editedByName: await loadAuthorName(c.env.DB, session.contactId),
     editedAt: ts,
+    source: 'admin',
   });
   const insertStmt = c.env.DB.prepare(
     `INSERT INTO submission_participants (id, submission_id, contact_id, role, position, is_primary_contact, title_at_time, org_at_time)
@@ -1091,7 +1062,7 @@ evaluationRoutes.get('/evaluation/overview', async (c) => {
          FROM evaluation_plans p WHERE p.event_id = ?`,
       ).bind(session.eventId).all(),
       db.prepare(
-        `SELECT epr.plan_id, epr.contact_id FROM evaluation_plan_reviewers epr
+        `SELECT epr.plan_id, epr.contact_id, epr.max_assignments FROM evaluation_plan_reviewers epr
          JOIN evaluation_plans p ON p.id = epr.plan_id WHERE p.event_id = ?`,
       ).bind(session.eventId).all(),
       // Per-reviewer workload for the progress view (docs/06 §4) — also what
@@ -1145,12 +1116,21 @@ evaluationRoutes.post('/evaluation/plans', async (c) => {
   const session = c.get('session');
   const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
   const name = typeof body.name === 'string' && body.name.trim() ? body.name.trim() : 'New plan';
+
+  // ABS-01: optional scale at creation time — same validation as the PUT
+  // route, minus the reviews-exist lock (a brand-new plan cannot have any).
+  const min = 'scoring_scale_min' in body ? Number(body.scoring_scale_min) : 1;
+  const max = 'scoring_scale_max' in body ? Number(body.scoring_scale_max) : 5;
+  if (!Number.isInteger(min) || !Number.isInteger(max) || min < 0 || min >= max || max - min > 19) {
+    return c.json({ error: 'invalid_scale' }, 400);
+  }
+
   const id = crypto.randomUUID();
   await c.env.DB.prepare(
-    `INSERT INTO evaluation_plans (id, event_id, name, description, status, anonymise_submitters, created_at)
-     VALUES (?, ?, ?, ?, 'active', 1, ?)`,
+    `INSERT INTO evaluation_plans (id, event_id, name, description, status, anonymise_submitters, scoring_scale_min, scoring_scale_max, created_at)
+     VALUES (?, ?, ?, ?, 'active', 1, ?, ?, ?)`,
   )
-    .bind(id, session.eventId, name, typeof body.description === 'string' ? body.description : null, nowIso())
+    .bind(id, session.eventId, name, typeof body.description === 'string' ? body.description : null, min, max, nowIso())
     .run();
   // Seed one criterion. A plan with no scoring_criteria rows renders a
   // scorecard with nothing to score, and the reviewer's Save is rejected for
@@ -1190,6 +1170,38 @@ evaluationRoutes.put('/evaluation/plans/:id', async (c) => {
       if (!parsed.ok) return c.json({ error: `invalid_${key}` }, 400);
       sets.push(`${key} = ?`);
       params.push(parsed.value);
+    }
+  }
+  // ABS-01 per-round scoring scale. Reviewer save (POST /review/assignments/:id)
+  // already clamps to whatever min/max the plan carries and the queue payload
+  // already builds its buttons from them — only this write path was missing.
+  // A scale change is refused once any review has been recorded against the
+  // plan (409 scale_locked_reviews_exist): a review's stored score was clamped
+  // to, and its weighted_total computed against, the *old* bounds, so silently
+  // moving the bounds under it would make that score mean something different
+  // than what the reviewer actually submitted.
+  if ('scoring_scale_min' in body || 'scoring_scale_max' in body) {
+    const current = await c.env.DB.prepare(
+      'SELECT scoring_scale_min, scoring_scale_max FROM evaluation_plans WHERE id = ? AND event_id = ?',
+    )
+      .bind(c.req.param('id'), session.eventId)
+      .first<{ scoring_scale_min: number; scoring_scale_max: number }>();
+    if (!current) return c.json({ error: 'not_found' }, 404);
+    const min = 'scoring_scale_min' in body ? Number(body.scoring_scale_min) : current.scoring_scale_min;
+    const max = 'scoring_scale_max' in body ? Number(body.scoring_scale_max) : current.scoring_scale_max;
+    if (
+      !Number.isInteger(min) || !Number.isInteger(max) ||
+      min < 0 || min >= max || max - min > 19
+    ) {
+      return c.json({ error: 'invalid_scale' }, 400);
+    }
+    if (min !== current.scoring_scale_min || max !== current.scoring_scale_max) {
+      const hasReviews = await c.env.DB.prepare('SELECT 1 FROM reviews WHERE plan_id = ? LIMIT 1')
+        .bind(c.req.param('id'))
+        .first();
+      if (hasReviews) return c.json({ error: 'scale_locked_reviews_exist' }, 409);
+      sets.push('scoring_scale_min = ?', 'scoring_scale_max = ?');
+      params.push(min, max);
     }
   }
   if (sets.length === 0) return c.json({ error: 'no_fields' }, 400);
@@ -1508,6 +1520,31 @@ evaluationRoutes.post('/evaluation/plans/:id/assign', async (c) => {
     .bind(session.eventId, ...planBinds(planId), ...only)
     .all<{ id: string }>();
 
+  // ABS-06 per-reviewer cap (evaluation_plan_reviewers.max_assignments, NULL
+  // = uncapped). Loaded up front, alongside every pair already assigned in
+  // this plan, so the in-loop counting stays exact under INSERT OR IGNORE: a
+  // pair that already exists doesn't consume capacity a second time on a
+  // re-run, and a freshly-capped reviewer's *existing* load still counts
+  // toward their cap from the start.
+  const { results: capRows } = await db
+    .prepare('SELECT contact_id, max_assignments FROM evaluation_plan_reviewers WHERE plan_id = ?')
+    .bind(planId)
+    .all<{ contact_id: string; max_assignments: number | null }>();
+  const caps = new Map(capRows.map((r) => [r.contact_id, r.max_assignments]));
+  const { results: existingRows } = await db
+    .prepare('SELECT reviewer_contact_id, submission_id FROM review_assignments WHERE plan_id = ?')
+    .bind(planId)
+    .all<{ reviewer_contact_id: string; submission_id: string }>();
+  const existingPairs = new Set(existingRows.map((r) => `${r.reviewer_contact_id}|${r.submission_id}`));
+  const counts = new Map<string, number>();
+  for (const row of existingRows) {
+    counts.set(row.reviewer_contact_id, (counts.get(row.reviewer_contact_id) ?? 0) + 1);
+  }
+  const atCap = (reviewerId: string): boolean => {
+    const cap = caps.get(reviewerId);
+    return cap != null && (counts.get(reviewerId) ?? 0) >= cap;
+  };
+
   const statements: D1PreparedStatement[] = [];
   const ts = nowIso();
   // The plan's reviewer pool — so re-opening the editor pre-ticks the same
@@ -1519,14 +1556,37 @@ evaluationRoutes.post('/evaluation/plans/:id/assign', async (c) => {
       ).bind(planId, reviewerId, ts),
     );
   }
+  // Submissions that ended up with fewer reviewers than requested because
+  // every remaining candidate was at (or over) their cap.
+  const unassigned: Array<{ submission_id: string; short: number }> = [];
   let cursor = 0;
   for (const submission of submissions) {
-    const chosen =
-      strategy === 'all'
-        ? reviewerIds
-        : Array.from({ length: perSubmission }, (_, i) => reviewerIds[(cursor + i) % reviewerIds.length]!);
-    if (strategy === 'round_robin') cursor = (cursor + perSubmission) % reviewerIds.length;
+    let chosen: string[];
+    if (strategy === 'all') {
+      // An already-assigned pair is kept regardless of cap (it consumes no
+      // new capacity — INSERT OR IGNORE simply no-ops it); a not-yet-assigned
+      // reviewer at cap is left out.
+      chosen = reviewerIds.filter(
+        (id) => existingPairs.has(`${id}|${submission.id}`) || !atCap(id),
+      );
+    } else {
+      chosen = [];
+      // Scan at most reviewerIds.length candidates from the cursor, skipping
+      // capped reviewers, so a fully-capped pool cannot loop forever.
+      for (let i = 0; i < reviewerIds.length && chosen.length < perSubmission; i += 1) {
+        const id = reviewerIds[(cursor + i) % reviewerIds.length]!;
+        if (existingPairs.has(`${id}|${submission.id}`) || !atCap(id)) chosen.push(id);
+      }
+      cursor = (cursor + perSubmission) % reviewerIds.length;
+    }
+    const desired = strategy === 'all' ? reviewerIds.length : perSubmission;
+    if (chosen.length < desired) unassigned.push({ submission_id: submission.id, short: desired - chosen.length });
     for (const reviewerId of chosen) {
+      const key = `${reviewerId}|${submission.id}`;
+      if (!existingPairs.has(key)) {
+        existingPairs.add(key);
+        counts.set(reviewerId, (counts.get(reviewerId) ?? 0) + 1);
+      }
       statements.push(
         db.prepare(
           `INSERT OR IGNORE INTO review_assignments (id, plan_id, submission_id, reviewer_contact_id, status, assigned_at)
@@ -1550,6 +1610,7 @@ evaluationRoutes.post('/evaluation/plans/:id/assign', async (c) => {
     // "the round has no submissions" (submissions === 0) — the UI says which.
     created: Math.max(0, (count?.n ?? 0) - (before?.n ?? 0)),
     submissions: submissions.length,
+    unassigned,
   });
 });
 
@@ -1591,11 +1652,39 @@ evaluationRoutes.post('/evaluation/plans/:id/reviewers', async (c) => {
     return c.json({ error: 'invalid_reviewer' }, 400);
   }
 
-  await db
-    .prepare('INSERT OR IGNORE INTO evaluation_plan_reviewers (plan_id, contact_id, added_at) VALUES (?, ?, ?)')
-    .bind(planId, contactId, nowIso())
-    .run();
-  return c.json({ ok: true, plan_id: planId, contact_id: contactId }, 201);
+  // ABS-06: optional per-reviewer workload cap for this plan. Sending null
+  // clears it back to uncapped; anything else must be a whole number >= 1.
+  // Omitting the field entirely (the plain "tick this reviewer into the
+  // pool" call every other caller makes) must leave an existing cap alone —
+  // this endpoint doubles as plain pool-add and there is no reason a tick
+  // with no opinion about capacity should silently wipe one out.
+  const capProvided = 'max_assignments' in body;
+  let maxAssignments: number | null = null;
+  if (capProvided && body.max_assignments !== null) {
+    const n = Number(body.max_assignments);
+    if (!Number.isInteger(n) || n < 1) return c.json({ error: 'invalid_max_assignments' }, 400);
+    maxAssignments = n;
+  }
+
+  if (capProvided) {
+    await db
+      .prepare(
+        `INSERT INTO evaluation_plan_reviewers (plan_id, contact_id, added_at, max_assignments) VALUES (?, ?, ?, ?)
+         ON CONFLICT (plan_id, contact_id) DO UPDATE SET max_assignments = excluded.max_assignments`,
+      )
+      .bind(planId, contactId, nowIso(), maxAssignments)
+      .run();
+  } else {
+    await db
+      .prepare('INSERT OR IGNORE INTO evaluation_plan_reviewers (plan_id, contact_id, added_at) VALUES (?, ?, ?)')
+      .bind(planId, contactId, nowIso())
+      .run();
+  }
+  const stored = await db
+    .prepare('SELECT max_assignments FROM evaluation_plan_reviewers WHERE plan_id = ? AND contact_id = ?')
+    .bind(planId, contactId)
+    .first<{ max_assignments: number | null }>();
+  return c.json({ ok: true, plan_id: planId, contact_id: contactId, max_assignments: stored?.max_assignments ?? null }, 201);
 });
 
 /**

@@ -21,6 +21,7 @@ import {
   type PlanSubmissionsPayload,
 } from './evaluationApi'
 import { appConfirm } from '../components/dialogs'
+import { buildAssignBody, buildScalePatch, parseCapInput } from './evaluationLogic'
 import '../workspace/review.css'
 
 /**
@@ -66,7 +67,7 @@ const asArray = <T,>(value: unknown): T[] => (Array.isArray(value) ? (value as T
 
 /** Overview payload plus the fields lane L3 added to the endpoint. */
 export interface Overview extends EvaluationOverview {
-  pool: Array<{ plan_id: string; contact_id: string }>
+  pool: Array<{ plan_id: string; contact_id: string; max_assignments?: number | null }>
   workload: Array<{ plan_id: string; contact_id: string; assigned: number; completed: number }>
   /** Per-reviewer totals across every active plan — what GET /review/queue
    * actually hands that reviewer, unlike `workload` which is per-plan. */
@@ -311,8 +312,22 @@ function PlanCard({
   const [addingCrit, setAddingCrit] = useState(false)
   // Each section reads as a one-line summary until its ✎ opens the editor.
   const [editTiming, setEditTiming] = useState(false)
+  const [editScale, setEditScale] = useState(false)
   const [editCriteria, setEditCriteria] = useState(false)
   const [editReviewers, setEditReviewers] = useState(false)
+
+  // ABS-05: submissions ticked for a scoped Assign (server already accepts
+  // submission_ids — this was the missing UI half).
+  const [assignPicked, setAssignPicked] = useState<Set<string>>(new Set())
+  const toggleAssignPicked = useCallback((id: string, on: boolean) => {
+    setAssignPicked((prev) => {
+      const next = new Set(prev)
+      if (on) next.add(id)
+      else next.delete(id)
+      return next
+    })
+  }, [])
+  const [onlySelected, setOnlySelected] = useState(false)
 
   const pct = stats && stats.assignments > 0 ? Math.round((stats.completed / stats.assignments) * 100) : 0
 
@@ -462,6 +477,53 @@ function PlanCard({
       </div>
       )}
 
+      {/* ABS-01 — the per-round scoring scale. Reviewer buttons and the save
+          clamp already build from these bounds; this is the only editor. */}
+      <div className="eval-inline">
+        <span className="eval-inline-text">
+          Scale {plan.scoring_scale_min}–{plan.scoring_scale_max}
+        </span>
+        <button
+          className="fbtn-link eval-editicon"
+          aria-label="Edit scale"
+          aria-expanded={editScale}
+          onClick={() => setEditScale((v) => !v)}
+        >
+          ✎
+        </button>
+      </div>
+      {editScale && (
+      <div className="eval-window" style={{ display: 'flex', gap: 8, flexWrap: 'wrap', margin: '6px 0', alignItems: 'end' }}>
+        <label style={{ fontSize: 11, display: 'grid', gap: 2 }}>
+          Min
+          <input
+            type="number"
+            aria-label="Scale minimum"
+            defaultValue={plan.scoring_scale_min}
+            onBlur={(e) => {
+              const patch = buildScalePatch('scoring_scale_min', (e.target as HTMLInputElement).value, plan.scoring_scale_min)
+              if (patch) run(`${plan.name}: scale saved`, () => updatePlan(plan.id, patch))
+            }}
+          />
+        </label>
+        <label style={{ fontSize: 11, display: 'grid', gap: 2 }}>
+          Max
+          <input
+            type="number"
+            aria-label="Scale maximum"
+            defaultValue={plan.scoring_scale_max}
+            onBlur={(e) => {
+              const patch = buildScalePatch('scoring_scale_max', (e.target as HTMLInputElement).value, plan.scoring_scale_max)
+              if (patch) run(`${plan.name}: scale saved`, () => updatePlan(plan.id, patch))
+            }}
+          />
+        </label>
+        {(stats?.completed ?? 0) > 0 && (
+          <span className="pane-sub">Reviews are already recorded — the scale can no longer change.</span>
+        )}
+      </div>
+      )}
+
       <div className="eval-inline">
         <strong style={{ fontSize: 12 }}>Criteria</strong>
         <span className="eval-inline-text">
@@ -578,7 +640,12 @@ function PlanCard({
       </>
       )}
 
-      <SubmissionPicker plan={plan} run={run} />
+      <SubmissionPicker
+        plan={plan}
+        run={run}
+        assignPicked={assignPicked}
+        onToggleAssignPicked={toggleAssignPicked}
+      />
 
       <div className="eval-assign">
         <div className="eval-inline">
@@ -621,6 +688,7 @@ function PlanCard({
                   <th>Name</th>
                   <th>Done</th>
                   <th>All Plans</th>
+                  {editReviewers && <th>Cap</th>}
                 </tr>
               </thead>
               <tbody>
@@ -629,6 +697,9 @@ function PlanCard({
                   const outstanding = load ? load.assigned - load.completed : 0
                   const queueTotal = overview.queue_totals.find((q) => q.contact_id === r.id)
                   const who = r.name ?? r.email
+                  // ABS-06: the cap lives on the pool row, so it only means
+                  // anything once this reviewer is actually in the pool.
+                  const poolRow = overview.pool.find((p) => p.plan_id === plan.id && p.contact_id === r.id)
                   return (
                     <tr key={r.id} className="eval-reviewer">
                       <td>
@@ -722,6 +793,32 @@ function PlanCard({
                       <td title="Assignments across every active plan — matches this reviewer's actual queue">
                         {queueTotal ? `${queueTotal.completed}/${queueTotal.assigned}` : '—'}
                       </td>
+                      {editReviewers && (
+                        <td>
+                          {poolRow ? (
+                            <input
+                              type="number"
+                              min={1}
+                              step={1}
+                              aria-label={`Assignment cap for ${who}`}
+                              title="Blank = unlimited"
+                              placeholder="∞"
+                              style={{ width: 48 }}
+                              defaultValue={poolRow.max_assignments ?? ''}
+                              onBlur={(e) => {
+                                const next = parseCapInput((e.target as HTMLInputElement).value, poolRow.max_assignments ?? null)
+                                if (next === undefined) return
+                                run(
+                                  next === null ? `${who}: cap cleared` : `${who}: capped at ${next}`,
+                                  () => addPlanReviewer(plan.id, r.id, next),
+                                )
+                              }}
+                            />
+                          ) : (
+                            <span className="pane-sub">—</span>
+                          )}
+                        </td>
+                      )}
                     </tr>
                   )
                 })}
@@ -834,25 +931,47 @@ function PlanCard({
               {[1, 2, 3].map((n) => <option key={n} value={n}>{n} per submission</option>)}
             </select>
           )}
+          {/* ABS-05: scope Assign to just the submissions ticked for it in
+              "Choose submissions" — server already accepts submission_ids. */}
+          <label style={{ fontSize: 11, display: 'flex', gap: 4, alignItems: 'center' }}>
+            <input
+              type="checkbox"
+              aria-label="Only assign selected submissions"
+              checked={onlySelected}
+              disabled={assignPicked.size === 0}
+              onChange={(e) => setOnlySelected((e.target as HTMLInputElement).checked)}
+            />
+            Only selected submissions ({assignPicked.size})
+          </label>
           <button
             className="fbtn"
-            disabled={assigning || chosen.length === 0}
+            disabled={assigning || chosen.length === 0 || (onlySelected && assignPicked.size === 0)}
             onClick={() => {
               setAssigning(true)
+              const scoped = onlySelected && assignPicked.size > 0
               run(
                 (result) => {
                   // The old silent "0 submissions" outcome now says why.
-                  const res = result as { submissions: number; created: number }
+                  const res = result as { submissions: number; created: number; unassigned?: Array<{ submission_id: string; short: number }> }
+                  const scopeNote = scoped ? ` (${assignPicked.size} selected submission(s))` : ''
+                  const shortfallNote =
+                    res.unassigned && res.unassigned.length > 0
+                      ? ` — ${res.unassigned.length} submission(s) short of reviewers (caps reached)`
+                      : ''
+                  if (scoped) setAssignPicked(new Set())
                   return res.submissions === 0
                     ? 'No submissions in this round yet — add some above, then assign.'
-                    : `${plan.name}: ${res.created} new assignment(s) across ${res.submissions} submission(s)`
+                    : `${plan.name}: ${res.created} new assignment(s) across ${res.submissions} submission(s)${scopeNote}${shortfallNote}`
                 },
                 () =>
-                  assignReviewers(plan.id, {
-                    reviewer_contact_ids: chosen,
-                    strategy,
-                    per_submission: perSubmission,
-                  }).finally(() => setAssigning(false)),
+                  assignReviewers(
+                    plan.id,
+                    buildAssignBody(
+                      { reviewer_contact_ids: chosen, strategy, per_submission: perSubmission },
+                      onlySelected,
+                      assignPicked,
+                    ),
+                  ).finally(() => setAssigning(false)),
               )
             }}
           >
@@ -940,9 +1059,15 @@ function AddReviewer({ planId, run }: { planId: string; run: (label: Label, acti
 function SubmissionPicker({
   plan,
   run,
+  assignPicked,
+  onToggleAssignPicked,
 }: {
   plan: Plan
   run: (label: Label, action: () => Promise<unknown>) => void
+  /** ABS-05: submission ids ticked for a scoped Assign (separate from plan
+   *  membership — a submission can be a member without being picked). */
+  assignPicked: Set<string>
+  onToggleAssignPicked: (id: string, on: boolean) => void
 }) {
   const [open, setOpen] = useState(false)
   const [data, setData] = useState<PlanSubmissionsPayload | null>(null)
@@ -1061,6 +1186,15 @@ function SubmissionPicker({
                   <span style={{ flex: 1 }}>{item.title}</span>
                   <span className="pane-sub">{item.track_name ?? '—'} · {item.status}</span>
                   {item.assignments > 0 && <span className="pane-sub">{item.assignments} assigned</span>}
+                  {item.member === 1 && (
+                    <input
+                      type="checkbox"
+                      aria-label={`assign ${item.code}`}
+                      title="assign"
+                      checked={assignPicked.has(item.id)}
+                      onChange={(e) => onToggleAssignPicked(item.id, (e.target as HTMLInputElement).checked)}
+                    />
+                  )}
                 </label>
               ))}
             </div>

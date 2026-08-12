@@ -31,13 +31,15 @@ export interface SessionPayload {
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
-function b64urlEncode(bytes: Uint8Array): string {
+/** base64url, no padding. Exported because password.ts encodes salts and
+ *  derived key material with exactly this alphabet — one implementation. */
+export function b64urlEncode(bytes: Uint8Array): string {
   let bin = '';
   for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i] as number);
   return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
 
-function b64urlDecode(s: string): Uint8Array<ArrayBuffer> | null {
+export function b64urlDecode(s: string): Uint8Array<ArrayBuffer> | null {
   try {
     const b64 = s.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - (s.length % 4)) % 4);
     const bin = atob(b64);

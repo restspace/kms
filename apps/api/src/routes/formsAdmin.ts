@@ -281,7 +281,7 @@ export const TRACK_FIELD_KEY = 'track';
  *  difference: submissions.format stores the display *name*, not an id, and
  *  every read surface consumes that string — so options are keyed by name
  *  (`value === label`) and the column keeps receiving names unchanged.
- *  Migration 0032 clears the stored options on canonical format fields. */
+ *  Migration 0037 clears the stored options on canonical format fields. */
 export const FORMAT_FIELD_KEY = 'format';
 
 async function trackOptions(db: D1Database, eventId: string) {
@@ -309,7 +309,7 @@ export async function loadQuestions(db: D1Database, formId: string, eventId?: st
   // Derived only when the question carries no option list of its own. A form
   // that deliberately authored track options — an import, or the id/slug-style
   // values submit-track-option-value.test.ts reproduces from the live CFP form
-  // — keeps them and the name-matching path. Migrations 0013/0032 clear the
+  // — keeps them and the name-matching path. Migrations 0013/0037 clear the
   // stored options on canonical track/format fields so existing forms adopt
   // derivation.
   const emptyOptions = (q: { options: unknown }) =>

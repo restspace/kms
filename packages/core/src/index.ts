@@ -2,6 +2,8 @@ export * from './types';
 export * from './auth';
 export * from './forms';
 export * from './agenda';
+export * from './agendaTime';
+export * from './autoSchedule';
 export * from './html';
 export * from './redact';
 export * from './time';

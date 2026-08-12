@@ -255,6 +255,16 @@ INSERT INTO event_contacts (event_id, contact_id, company, job_title, added_at, 
 INSERT INTO event_users (event_id, contact_id, role, invited_at, accepted_at) VALUES
   ('evt00000-0000-4000-8000-000000000001', 'con00000-0000-4000-8000-000000000001', 'owner', '2026-08-08T12:00:00Z', '2026-08-08T12:00:00Z');
 
+-- Demo passwords (0032). The landing page advertises these so the demo can be
+-- driven without opening a mailbox: the owner (james@atelyr.com) signs in with
+-- demo-admin-pass, the speaker (ada@example.com) with demo-speaker-pass.
+-- PBKDF2-SHA256, 100000 iterations, 256-bit output, base64url, with fixed
+-- salts (ASCII 'kms-seed-salt-01' / '-02' base64url-encoded) so the seed is
+-- deterministic. Real sign-ups get random salts - see apps/api/src/password.ts.
+INSERT INTO auth_credentials (contact_id, password_hash, salt, algo, iterations, set_at, created_at) VALUES
+  ('con00000-0000-4000-8000-000000000001', '6x0eiQrY3dgqkfGM8-kILK-s_pheAaHuf6ZVMr2Mm6g', 'a21zLXNlZWQtc2FsdC0wMQ', 'pbkdf2-sha256', 100000, '2026-08-08T12:00:00Z', '2026-08-08T12:00:00Z'),
+  ('con00000-0000-4000-8000-000000000002', '-Mly4hYLVBXry_tmRABO7rSx-gdiy9Q8ZCJRgnun7hM', 'a21zLXNlZWQtc2FsdC0wMg', 'pbkdf2-sha256', 100000, '2026-08-08T12:00:00Z', '2026-08-08T12:00:00Z');
+
 -- ---------------------------------------------------------------------------
 -- Speaker biographies (EMB-05/EMB-13, root cause of "bio never renders"):
 -- the `contacts` INSERT above never set `biography`, so every seeded speaker

@@ -32,6 +32,7 @@ const CONTACT_FK_COLUMNS: ReadonlyArray<[table: string, column: string]> = [
   ['event_contacts', 'contact_id'],
   ['event_contacts', 'arrival_marked_by'],
   ['portal_accounts', 'contact_id'],
+  ['auth_credentials', 'contact_id'],
   ['contact_tags', 'contact_id'],
   ['submissions', 'submitter_contact_id'],
   ['submission_participants', 'contact_id'],
@@ -154,6 +155,11 @@ async function seedMergeFixture() {
   await env.DB.prepare(
     "INSERT INTO auth_tokens (token_hash, contact_id, event_id, purpose, created_at, expires_at) VALUES (?, ?, ?, 'portal-login', ?, ?)",
   ).bind(uid('tok'), loser, eventA, ts, '2027-01-01T00:00:00Z').run();
+  // Password credential on the loser only (0032): no winner row to collide
+  // with, so the merge repoints it wholesale.
+  await env.DB.prepare(
+    "INSERT INTO auth_credentials (contact_id, password_hash, salt, algo, iterations, set_at, created_at) VALUES (?, 'loser-hash', 'loser-salt', 'pbkdf2-sha256', 100000, ?, ?)",
+  ).bind(loser, ts, ts).run();
   await env.DB.prepare(
     "INSERT INTO calendar_invites (id, session_id, contact_id, uid) VALUES (?, ?, ?, ?)",
   ).bind(uid('ci'), subShared, loser, uid('uid')).run();
@@ -382,6 +388,25 @@ describe('POST /app/api/contacts/:id/merge', () => {
     const row = await env.DB.prepare('SELECT email, first_name, last_name FROM contacts WHERE id = ?')
       .bind(winner).first<{ email: string; first_name: string; last_name: string }>();
     expect(row).toEqual({ email: 'preferred@example.com', first_name: 'Priya', last_name: 'Raman' });
+  });
+
+  it('keeps the winner own password when both sides hold a credential (0032)', async () => {
+    const eventA = await seedEvent();
+    const admin = await seedStaff(eventA, 'admin');
+    const winner = await seedContact(eventA, { email: 'pw.winner@example.com' });
+    const loser = await seedContact(eventA, { email: 'pw.loser@example.com' });
+    for (const [id, tag] of [[winner, 'winner'], [loser, 'loser']] as const) {
+      await env.DB.prepare(
+        "INSERT INTO auth_credentials (contact_id, password_hash, salt, algo, iterations, set_at, created_at) VALUES (?, ?, ?, 'pbkdf2-sha256', 100000, ?, ?)",
+      ).bind(id, `${tag}-hash`, `${tag}-salt`, ts, ts).run();
+    }
+
+    const res = await api(`/contacts/${winner}/merge`, admin.cookie, { loser_id: loser });
+    expect(res.status).toBe(200);
+
+    const rows = await env.DB.prepare('SELECT contact_id, password_hash FROM auth_credentials WHERE contact_id IN (?, ?)')
+      .bind(winner, loser).all<{ contact_id: string; password_hash: string }>();
+    expect(rows.results).toEqual([{ contact_id: winner, password_hash: 'winner-hash' }]);
   });
 
   it('is forbidden to a reviewer session', async () => {

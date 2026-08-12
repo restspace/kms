@@ -126,6 +126,23 @@ describe('classifySchedule', () => {
   it('is "placed" when both time and room are set', () => {
     expect(classifySchedule({ starts_at: '2027-05-12T09:00:00.000Z', room_id: 'room-a' })).toBe('placed')
   })
+
+  // AIA-08: an auto-placed session has both, but nobody has agreed to it yet.
+  it('is "pencilled" when both are set but the placement is unconfirmed', () => {
+    expect(
+      classifySchedule({
+        starts_at: '2027-05-12T09:00:00.000Z',
+        room_id: 'room-a',
+        pencilled_at: '2026-08-12T10:00:00.000Z',
+      }),
+    ).toBe('pencilled')
+  })
+
+  it('is "placed" once the pencilled flag is cleared', () => {
+    expect(
+      classifySchedule({ starts_at: '2027-05-12T09:00:00.000Z', room_id: 'room-a', pencilled_at: null }),
+    ).toBe('placed')
+  })
 })
 
 describe('formatMinutes', () => {

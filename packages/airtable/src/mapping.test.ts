@@ -56,6 +56,33 @@ describe('mapSubmission', () => {
     });
   });
 
+  // ABS-01 rating normalization: sync.ts's selectSql computes rating_normalized
+  // (a scale-aware mean across plans, unlike the raw rating_cache average) —
+  // it must win over the averageRating(rating_cache) fallback when present.
+  it('prefers the normalized rating column over the raw rating_cache average', () => {
+    const fields = mapSubmission({
+      code: 'S-042',
+      title: 'Talk',
+      status: 'accepted',
+      // A raw average of these would be 6.5 (pooling a 1-5 round with a
+      // 0-10 round as if they were the same unit); the normalized column is
+      // what the query actually produces and must be used instead.
+      rating_cache: '{"plan-1": 4, "plan-2": 9}',
+      rating_normalized: 4.25,
+    });
+    expect(fields.Rating).toBe(4.25);
+  });
+
+  it('falls back to averageRating(rating_cache) when rating_normalized is absent (e.g. a hand-built row)', () => {
+    const fields = mapSubmission({
+      code: 'S-042',
+      title: 'Talk',
+      status: 'accepted',
+      rating_cache: '{"plan-1": 4, "plan-2": 5}',
+    });
+    expect(fields.Rating).toBe(4.5);
+  });
+
   it('maps nulls and empty strings to explicit null so cleared values clear in Airtable', () => {
     const fields = mapSubmission({ code: 'S-1', title: 'T', status: 'draft', description: '', track_name: null });
     expect(fields.Description).toBeNull();

@@ -8,7 +8,7 @@
 
 import { Hono } from 'hono';
 import type { Context } from 'hono';
-import { computeConflicts } from '@kms/core';
+import { autoSchedule, computeConflicts } from '@kms/core';
 import type { AgendaRoomInput, AgendaSessionInput, Conflict } from '@kms/core';
 import type { Env } from '../env';
 import { bumpEventRevision } from '../revision';
@@ -45,6 +45,8 @@ interface SessionRow {
   room_id: string | null;
   starts_at: string | null;
   ends_at: string | null;
+  /** Set while the auto-schedule assistant's placement is unconfirmed (AIA-08). */
+  pencilled_at: string | null;
   updated_at: string;
   invited: number;
 }
@@ -63,7 +65,7 @@ export interface AgendaSession extends SessionRow {
 
 const SESSION_SELECT = `
   SELECT s.id, s.code, s.title, s.description, s.format, s.level, s.capacity,
-         s.track_id, s.room_id, s.starts_at, s.ends_at, s.updated_at,
+         s.track_id, s.room_id, s.starts_at, s.ends_at, s.pencilled_at, s.updated_at,
          EXISTS (SELECT 1 FROM calendar_invites ci
                  WHERE ci.session_id = s.id AND ci.method = 'REQUEST') AS invited
   FROM submissions s
@@ -253,9 +255,13 @@ agendaRoutes.put('/sessions/:id/schedule', async (c) => {
   const capacity = parseCapacity(body.capacity);
   if (capacity === undefined && 'capacity' in body) return c.json({ error: 'invalid_capacity' }, 400);
 
+  // `pencilled_at = NULL`: a manual schedule write *is* the confirmation
+  // (AIA-08) — an organiser who drags or Moves an auto-placed session has
+  // reviewed that slot, so the provisional flag drops and the session becomes
+  // publishable like any hand-placed one.
   await db
     .prepare(
-      `UPDATE submissions SET starts_at = ?1, ends_at = ?2, room_id = ?3,
+      `UPDATE submissions SET starts_at = ?1, ends_at = ?2, room_id = ?3, pencilled_at = NULL,
          capacity = CASE WHEN ?5 = 1 THEN ?6 ELSE capacity END, updated_at = ?4
        WHERE id = ?7`,
     )
@@ -350,6 +356,7 @@ agendaRoutes.post('/send-confirmations', async (c) => {
       `SELECT s.id FROM submissions s
        WHERE s.event_id = ? AND s.status = 'accepted'
          AND s.starts_at IS NOT NULL AND s.ends_at IS NOT NULL
+         AND s.pencilled_at IS NULL
          AND NOT EXISTS (SELECT 1 FROM calendar_invites ci
                          WHERE ci.session_id = s.id AND ci.method = 'REQUEST')`,
     )
@@ -379,6 +386,189 @@ agendaRoutes.post('/send-confirmations', async (c) => {
   // now "how much the job will do", not "how much was sent inline".
   const payload = await agendaPayload(c);
   return c.json({ ok: true, job_id: jobId, sent_sessions: results.length, queued: 0, ...payload }, 202);
+});
+
+// ---------------------------------------------------------------------------
+// Auto-schedule assist (AIA-08). Three routes: propose-and-write, confirm,
+// and the batch write the client's Undo uses to put everything back.
+//
+// An auto-placement is *pencilled*: the row carries `pencilled_at`, which
+// keeps it out of every public feed, out of the speaker portal and out of the
+// bulk invite send until an organiser says yes. Reviewing is therefore free —
+// nothing has been promised to anyone.
+// ---------------------------------------------------------------------------
+
+/** The event + rooms + sessions the assistant reasons over (agendaPayload's own queries). */
+async function loadBoard(c: Context<ApiEnv>) {
+  const eventId = c.get('session').eventId;
+  const db = c.env.DB;
+  const [event, rooms, sessions] = await Promise.all([
+    db
+      .prepare('SELECT id, name, slug, timezone, starts_at, ends_at, location, agenda_published FROM events WHERE id = ?')
+      .bind(eventId)
+      .first<EventRow>(),
+    db
+      .prepare('SELECT id, name, capacity, position FROM rooms WHERE event_id = ? ORDER BY position')
+      .bind(eventId)
+      .all<AgendaRoomInput & { position: number }>()
+      .then((r) => r.results),
+    loadSessions(db, eventId),
+  ]);
+  return { event, rooms, sessions };
+}
+
+// POST /agenda/auto-schedule — place every tray session, pencilled.
+//
+// FR-COMM-6 note: the write only ever touches rows with `starts_at IS NULL`,
+// and send-confirmations only invites sessions that *have* a time, so a row
+// this route can move can never hold a live REQUEST invite. Bypassing the
+// notify guard here is therefore safe rather than an omission.
+agendaRoutes.post('/auto-schedule', async (c) => {
+  const session = c.get('session');
+  const db = c.env.DB;
+  const { event, rooms, sessions } = await loadBoard(c);
+  if (!event) return c.json({ error: 'not_found' }, 404);
+
+  const formatById = new Map(sessions.map((s) => [s.id, s.format]));
+  const engine = toEngineInput(sessions);
+  const unscheduled = engine
+    .filter((s) => s.starts_at === null)
+    .map((s) => ({ ...s, format: formatById.get(s.id) ?? null }));
+  const scheduled = engine.filter((s) => s.starts_at !== null);
+
+  if (unscheduled.length === 0) {
+    // Nothing to do — no write, no revision bump, so a stray click cannot
+    // invalidate every cached public page.
+    return c.json({ ok: true, placed: 0, placements: [], skipped: [], ...(await agendaPayload(c)) });
+  }
+
+  const result = autoSchedule(
+    unscheduled,
+    scheduled,
+    rooms,
+    { starts_at: event.starts_at, ends_at: event.ends_at },
+    { timezone: event.timezone },
+  );
+
+  let placed = 0;
+  if (result.placements.length > 0) {
+    const ts = nowIso();
+    // `starts_at IS NULL` in the WHERE clause: if an organiser dragged one of
+    // these sessions onto the board while the assistant was thinking, their
+    // hand-placed slot wins and this row is simply skipped.
+    const stmt = db.prepare(
+      `UPDATE submissions SET starts_at = ?1, ends_at = ?2, room_id = ?3, pencilled_at = ?4, updated_at = ?5
+       WHERE id = ?6 AND event_id = ?7 AND status = 'accepted' AND starts_at IS NULL`,
+    );
+    const written = await db.batch(
+      result.placements.map((p) =>
+        stmt.bind(p.starts_at, p.ends_at, p.room_id, ts, ts, p.id, session.eventId),
+      ),
+    );
+    placed = written.reduce((n, r) => n + (r.meta?.changes ?? 0), 0);
+    await bumpEventRevision(c.env, session.eventId);
+  }
+
+  return c.json({
+    ok: true,
+    placed,
+    placements: result.placements,
+    skipped: result.skipped,
+    ...(await agendaPayload(c)),
+  });
+});
+
+// POST /agenda/confirm-placements — "yes, all of that" in one click.
+agendaRoutes.post('/confirm-placements', async (c) => {
+  const session = c.get('session');
+  const result = await c.env.DB
+    .prepare(
+      `UPDATE submissions SET pencilled_at = NULL, updated_at = ?
+       WHERE event_id = ? AND pencilled_at IS NOT NULL AND status = 'accepted'`,
+    )
+    .bind(nowIso(), session.eventId)
+    .run();
+  const confirmed = result.meta.changes ?? 0;
+  if (confirmed > 0) await bumpEventRevision(c.env, session.eventId);
+  return c.json({ ok: true, confirmed, ...(await agendaPayload(c)) });
+});
+
+// POST /agenda/schedule-batch — many schedule writes as one call. Undo of an
+// auto-place is a batch revert (put ~40 sessions back in the tray), which as
+// 40 PUTs would be 40 payload round-trips and 40 revision bumps.
+//
+// Validation mirrors the single PUT item by item, and the FR-COMM-6 invite
+// guard is *stricter* here: there is no notify/ack path, so a batch touching
+// any invited session is refused whole rather than partly applied.
+const SCHEDULE_BATCH_MAX = 200;
+
+agendaRoutes.post('/schedule-batch', async (c) => {
+  const session = c.get('session');
+  const db = c.env.DB;
+  const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+  const items = Array.isArray(body.items) ? (body.items as Array<Record<string, unknown>>) : null;
+  if (!items) return c.json({ error: 'invalid_items' }, 400);
+  if (items.length > SCHEDULE_BATCH_MAX) return c.json({ error: 'too_many_items' }, 400);
+  if (items.length === 0) return c.json({ ok: true, updated: 0, ...(await agendaPayload(c)) });
+
+  const parsed: Array<{ id: string; starts_at: string | null; ends_at: string | null; room_id: string | null }> = [];
+  for (const item of items) {
+    const id = typeof item.id === 'string' ? item.id : '';
+    if (!id) return c.json({ error: 'invalid_items' }, 400);
+    const startsAt = parseInstant(item.starts_at ?? null);
+    const endsAt = parseInstant(item.ends_at ?? null);
+    if (startsAt === undefined || endsAt === undefined) return c.json({ error: 'invalid_time' }, 400);
+    if ((startsAt === null) !== (endsAt === null)) return c.json({ error: 'invalid_time' }, 400);
+    if (startsAt !== null && endsAt !== null && Date.parse(endsAt) <= Date.parse(startsAt)) {
+      return c.json({ error: 'invalid_time' }, 400);
+    }
+    const roomId = typeof item.room_id === 'string' && item.room_id !== '' ? item.room_id : null;
+    parsed.push({ id, starts_at: startsAt, ends_at: endsAt, room_id: roomId });
+  }
+
+  // Tenant isolation, once for the whole batch rather than per item.
+  const roomIds = [...new Set(parsed.map((p) => p.room_id).filter((r): r is string => r !== null))];
+  if (roomIds.length > 0) {
+    const { results: rooms } = await db
+      .prepare(`SELECT id FROM rooms WHERE event_id = ? AND id IN (${roomIds.map(() => '?').join(',')})`)
+      .bind(session.eventId, ...roomIds)
+      .all<{ id: string }>();
+    if (rooms.length !== roomIds.length) return c.json({ error: 'invalid_room' }, 400);
+  }
+
+  const ids = [...new Set(parsed.map((p) => p.id))];
+  const { results: known } = await db
+    .prepare(
+      `SELECT id FROM submissions
+       WHERE event_id = ? AND status = 'accepted' AND id IN (${ids.map(() => '?').join(',')})`,
+    )
+    .bind(session.eventId, ...ids)
+    .all<{ id: string }>();
+  if (known.length !== ids.length) return c.json({ error: 'not_found' }, 404);
+
+  const { results: invited } = await db
+    .prepare(
+      `SELECT DISTINCT session_id FROM calendar_invites
+       WHERE method = 'REQUEST' AND session_id IN (${ids.map(() => '?').join(',')})`,
+    )
+    .bind(...ids)
+    .all<{ session_id: string }>();
+  if (invited.length > 0) {
+    return c.json({ error: 'invite_notify_required', ids: invited.map((r) => r.session_id) }, 409);
+  }
+
+  const ts = nowIso();
+  const stmt = db.prepare(
+    `UPDATE submissions SET starts_at = ?1, ends_at = ?2, room_id = ?3, pencilled_at = NULL, updated_at = ?4
+     WHERE id = ?5 AND event_id = ?6 AND status = 'accepted'`,
+  );
+  const written = await db.batch(
+    parsed.map((p) => stmt.bind(p.starts_at, p.ends_at, p.room_id, ts, p.id, session.eventId)),
+  );
+  const updated = written.reduce((n, r) => n + (r.meta?.changes ?? 0), 0);
+  await bumpEventRevision(c.env, session.eventId);
+
+  return c.json({ ok: true, updated, ...(await agendaPayload(c)) });
 });
 
 // POST /agenda/conflicts/ignore — toggle a signature (docs/07 §4).

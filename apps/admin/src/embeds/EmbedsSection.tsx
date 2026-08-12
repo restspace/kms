@@ -20,7 +20,7 @@ import './embeds.css'
 /**
  * Embeds (rubric EMB-15) — a generator plus a saved list. The generator's
  * options all travel in the URL, so a copied snippet works with no
- * server-side record; *saving* (0033_saved_embeds) just names the current
+ * server-side record; *saving* (0038_saved_embeds) just names the current
  * option state so the screen can answer "what have we embedded where?" and
  * reload a configuration for editing. Snippets are rebuilt from the saved
  * options at copy time, never stored.
