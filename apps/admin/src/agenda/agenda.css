@@ -221,6 +221,7 @@
 .tray-list { flex: 1; overflow-y: auto; padding: 4px 12px 12px; }
 .tray-empty { color: var(--text-muted); font-size: var(--text-label); }
 .tray-card {
+  position: relative; /* anchors the hover-reveal open button */
   border: 1px solid var(--border);
   border-left: 4px solid var(--track-color, var(--border-strong));
   border-radius: var(--radius);
@@ -239,6 +240,7 @@
 }
 .tray-card-format { color: var(--text-faint); }
 .tray-card-title { font-size: var(--text-grid); font-weight: 600; margin: 2px 0; }
+.tray-card-meta { font-size: var(--text-caption); color: var(--text-muted); }
 .tray-card-speakers { font-size: var(--text-caption); color: var(--text-secondary); }
 .tray-drop-hint {
   position: absolute;
@@ -279,6 +281,17 @@
 /* Day-only placement (docs/13 W5): dropping on the header sets the day, room stays NULL. */
 .tg-col-head.drop-over { background: var(--accent-soft); color: var(--accent); }
 .tg-col-sub { color: var(--text-faint); font-weight: 400; font-size: var(--text-caption); }
+/* Count of tray sessions preset to this room/track but still without a date/time. */
+.tg-col-pill {
+  margin-left: auto;
+  background: var(--accent-soft);
+  color: var(--accent);
+  border: 1px solid var(--accent-border);
+  border-radius: 999px;
+  padding: 0 6px;
+  font-size: var(--text-caption);
+  font-weight: 600;
+}
 .tg-body { display: flex; position: relative; }
 .tg-gutter {
   width: 64px;
@@ -354,9 +367,42 @@
   background: var(--surface);
   opacity: 0.75;
 }
-.tg-block-flag { position: absolute; top: 2px; right: 5px; }
+/* Inline by default (ListView renders it in the Title cell — absolute here
+   would escape the table and paint a bare triangle at the page corner). */
+.tg-block-flag { position: static; }
+/* On grid blocks the flag pins top-left, yielding the top-right corner to the
+   open button; the flagged block's time line is padded clear of it. */
+.tg-block .tg-block-flag { position: absolute; top: 2px; left: 5px; }
+.tg-block.conflict-error .tg-block-time,
+.tg-block.conflict-warning .tg-block-time { padding-left: 15px; }
 .tg-block.conflict-error .tg-block-flag { color: var(--danger); }
 .tg-block.conflict-warning .tg-block-flag { color: var(--notice-text); }
+/* Hover/focus-revealed "open submission in Workspace" affordance, shared by
+   grid blocks and tray cards. */
+.tg-open-btn {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: var(--surface);
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 14px;
+  text-align: center;
+  cursor: pointer;
+  opacity: 0;
+  z-index: 2;
+}
+.tg-block:hover .tg-open-btn,
+.tg-block:focus-within .tg-open-btn,
+.tray-card:hover .tg-open-btn,
+.tray-card:focus-within .tg-open-btn { opacity: 1; }
+.tg-open-btn:hover,
+.tg-open-btn:focus-visible { color: var(--accent); border-color: var(--accent-border); background: var(--accent-soft); }
 .tg-block-time { color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .tg-block-title {
   font-weight: 600;
@@ -370,7 +416,15 @@
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.tg-block-speakers { color: var(--text-secondary); }
+.tg-block-speakers {
+  color: var(--text-secondary);
+  /* One line, like the title: the block's floored height budgets exactly one
+     row for speakers, so a long list ellipsizes instead of wrapping into the
+     resize handle. */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .tg-resize {
   position: absolute;
   left: 0;
@@ -619,6 +673,16 @@
 }
 .agenda-dialog h3 { font-family: var(--font-display); margin: 0 0 2px; font-size: 15px; }
 .agenda-dialog-sub { margin: 0 0 14px; color: var(--text-muted); font-size: var(--text-label); }
+.agenda-dialog-open-link {
+  margin-left: 10px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--accent);
+  font-size: var(--text-label);
+  cursor: pointer;
+}
+.agenda-dialog-open-link:hover { text-decoration: underline; }
 .agenda-dialog-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;

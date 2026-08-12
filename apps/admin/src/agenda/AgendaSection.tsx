@@ -30,7 +30,6 @@ import { RoomsBoard } from './RoomsBoard'
 import { TimeGrid, type DropPreview, type GridColumn } from './TimeGrid'
 import { Tray } from './Tray'
 import {
-  classifySchedule,
   durationMinutes,
   eventDays,
   fmtDay,
@@ -474,12 +473,15 @@ export function AgendaSection({
     )
   }, [data, search])
 
+  // The tray holds everything without a date/time — including sessions with a
+  // room preset (previously classified 'pencilled' and rendered nowhere on Day
+  // view). Their room/track membership surfaces as header pills instead.
   const unscheduled = useMemo(
-    () => filteredSessions.filter((s) => classifySchedule(s) === 'tray'),
+    () => filteredSessions.filter((s) => s.starts_at === null),
     [filteredSessions],
   )
   const pencilledCount = useMemo(
-    () => filteredSessions.filter((s) => classifySchedule(s) === 'pencilled').length,
+    () => filteredSessions.filter((s) => s.starts_at !== null && s.room_id === null).length,
     [filteredSessions],
   )
   const pendingConfirmations = useMemo(
@@ -498,16 +500,32 @@ export function AgendaSection({
   // The view strip stays live, so List and Conflicts are one tap away.
   const refuseGrid = isCompact && GRID_VIEWS.includes(view)
 
+  // Header pills: sessions with a room/track preset but no date/time live in
+  // the tray, so the column they belong to advertises how many are waiting.
+  const unplacedPill = (count: number, name: string) =>
+    count > 0
+      ? {
+          pill: count,
+          pillTitle: `${count} session${count === 1 ? '' : 's'} in ${name} with no date/time — see the Unscheduled tray`,
+        }
+      : {}
+
   const dayColumns: GridColumn[] =
     groupBy === 'room'
       ? data.rooms.map((r) => ({
           key: r.id,
           label: r.name,
           ...(r.capacity !== null ? { sub: `${r.capacity}` } : {}),
+          ...unplacedPill(unscheduled.filter((s) => s.room_id === r.id).length, r.name),
           day: curDay,
         }))
       : [
-          ...data.tracks.map((t) => ({ key: t.id, label: t.name, day: curDay })),
+          ...data.tracks.map((t) => ({
+            key: t.id,
+            label: t.name,
+            ...unplacedPill(unscheduled.filter((s) => s.track_id === t.id).length, t.name),
+            day: curDay,
+          })),
           { key: '__none', label: 'No track', day: curDay },
         ]
 
@@ -740,6 +758,7 @@ export function AgendaSection({
                 trackById={trackById}
                 rooms={data.rooms}
                 conflictLevel={conflictLevel}
+                conflictTitle={conflictTitle}
                 onOpenMove={setMoveId}
               />
             }
@@ -751,6 +770,7 @@ export function AgendaSection({
           <Tray
             sessions={unscheduled}
             tracks={data.tracks}
+            rooms={data.rooms}
             defaultDuration={defaultDuration}
             trackColor={trackColor}
             onUnschedule={(id) => commitSchedule(id, { starts_at: null, ends_at: null, room_id: null })}
@@ -792,6 +812,13 @@ export function AgendaSection({
               onDropDay={(id, day) => {
                 const s = sessionById.get(id)
                 if (s) commitSchedule(id, patchFrom(day, 0, defaultDuration(s), null))
+              }}
+              confineColumnKey={(id) => {
+                // A tray session with a preset room/track only drops into its
+                // own column; scheduled blocks keep full freedom.
+                const s = sessionById.get(id)
+                if (!s || s.starts_at !== null) return null
+                return groupBy === 'room' ? s.room_id : s.track_id
               }}
             />
           )}
@@ -849,7 +876,7 @@ export function AgendaSection({
           )}
 
           {view === 'list' && (
-            <ListView sessions={filteredSessions} timezone={tz} trackById={trackById} rooms={data.rooms} conflictLevel={conflictLevel} onOpenMove={setMoveId} />
+            <ListView sessions={filteredSessions} timezone={tz} trackById={trackById} rooms={data.rooms} conflictLevel={conflictLevel} conflictTitle={conflictTitle} onOpenMove={setMoveId} />
           )}
 
           {view === 'conflicts' && (
@@ -1024,6 +1051,7 @@ function ListView({
   trackById,
   rooms,
   conflictLevel,
+  conflictTitle,
   onOpenMove,
 }: {
   sessions: AgendaSessionRow[]
@@ -1031,6 +1059,7 @@ function ListView({
   trackById: Map<string, { name: string }>
   rooms: Array<{ id: string; name: string }>
   conflictLevel: (id: string) => 'error' | 'warning' | null
+  conflictTitle: (id: string) => string
   onOpenMove: (id: string) => void
 }) {
   const [sort, setSort] = useState<{ field: 'starts_at' | 'title' | 'code'; dir: 1 | -1 }>({ field: 'starts_at', dir: 1 })
@@ -1075,7 +1104,11 @@ function ListView({
               <tr key={s.id} className={level ? `conflict-${level}` : ''} onDoubleClick={() => onOpenMove(s.id)}>
                 <td>{s.code}</td>
                 <td className="list-title">
-                  {level && <span className="tg-block-flag" aria-hidden>⚠ </span>}
+                  {level && (
+                    <span className="tg-block-flag" role="img" aria-label="Scheduling conflict" title={conflictTitle(s.id)}>
+                      ⚠{' '}
+                    </span>
+                  )}
                   {s.title}
                 </td>
                 <td>{s.speakers.map((sp) => sp.name).join(', ')}</td>

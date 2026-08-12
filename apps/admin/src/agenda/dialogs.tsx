@@ -2,6 +2,7 @@ import { useRef, useState } from 'react'
 import type { AgendaRoom, AgendaSessionRow, AgendaTrack } from '../api'
 import { durationMinutes, fmtDay, formatMinutes, utcToLocal } from './timeUtils'
 import { ModalDialog } from '../components/dialogs'
+import { navigate } from '../router'
 
 /**
  * The keyboard "Move session" dialog (docs/07 §3 a11y alternative — everything
@@ -109,7 +110,20 @@ export function MoveDialog({
         </div>
       }
     >
-      <p className="agenda-dialog-sub">{session.code} · {session.title}</p>
+      <p className="agenda-dialog-sub">
+        {session.code} · {session.title}
+        <button
+          type="button"
+          className="agenda-dialog-open-link"
+          title="Open submission in Workspace"
+          onClick={() => {
+            onClose()
+            navigate({ v: 'workspace', tab: 'submissions', rec: session.id })
+          }}
+        >
+          Open submission ↗
+        </button>
+      </p>
       <div className="agenda-dialog-grid">
         <label>
           Date

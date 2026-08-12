@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react'
-import type { AgendaSessionRow, AgendaTrack } from '../api'
+import type { AgendaRoom, AgendaSessionRow, AgendaTrack } from '../api'
 import { getDrag, setDrag } from './dragState'
+import { navigate } from '../router'
 
 /**
  * Unscheduled tray (docs/07 §1): accepted sessions with no time or room,
@@ -11,13 +12,14 @@ import { getDrag, setDrag } from './dragState'
 interface TrayProps {
   sessions: AgendaSessionRow[]
   tracks: AgendaTrack[]
+  rooms: AgendaRoom[]
   defaultDuration: (s: AgendaSessionRow) => number
   trackColor: (s: AgendaSessionRow) => string | null
   onUnschedule: (id: string) => void
   onOpenMove: (id: string) => void
 }
 
-export function Tray({ sessions, tracks, defaultDuration, trackColor, onUnschedule, onOpenMove }: TrayProps) {
+export function Tray({ sessions, tracks, rooms, defaultDuration, trackColor, onUnschedule, onOpenMove }: TrayProps) {
   const [q, setQ] = useState('')
   const [trackId, setTrackId] = useState('')
   const [format, setFormat] = useState('')
@@ -122,9 +124,30 @@ export function Tray({ sessions, tracks, defaultDuration, trackColor, onUnschedu
                 {s.format && <span className="tray-card-format">{s.format}</span>}
               </div>
               <div className="tray-card-title">{s.title}</div>
+              {(() => {
+                const trackName = s.track_id ? tracks.find((t) => t.id === s.track_id)?.name ?? null : null
+                const roomName = s.room_id ? rooms.find((r) => r.id === s.room_id)?.name ?? null : null
+                if (!trackName && !roomName) return null
+                return <div className="tray-card-meta">{[trackName, roomName].filter(Boolean).join(' · ')}</div>
+              })()}
               {s.speakers.length > 0 && (
                 <div className="tray-card-speakers">{s.speakers.map((sp) => sp.name).join(', ')}</div>
               )}
+              <button
+                type="button"
+                className="tg-open-btn"
+                title="Open submission in Workspace"
+                aria-label={`Open ${s.code} in Workspace`}
+                draggable={false}
+                onMouseDown={(e) => e.stopPropagation()}
+                onDoubleClick={(e) => e.stopPropagation()}
+                onClick={(e) => {
+                  e.stopPropagation()
+                  navigate({ v: 'workspace', tab: 'submissions', rec: s.id })
+                }}
+              >
+                ↗
+              </button>
             </div>
           )
         })}

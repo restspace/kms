@@ -581,7 +581,7 @@ export function SubmitPage({ data }: { data: SubmitBootstrap }) {
         {form.close_at
           ? `Form submissions will be accepted until ${fmtDeadline(form.close_at, event.timezone)}.`
           : 'This form is open.'}
-        {limit !== null && <span> · Submission limit: {limit} per user</span>}
+        {limit !== null && <span> · Submission limit: {limit} per user for this form</span>}
       </div>
 
       <ol className="sb-stepper">

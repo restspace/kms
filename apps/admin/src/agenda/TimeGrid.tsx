@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { AgendaSessionRow } from '../api'
 import { getDrag, setDrag } from './dragState'
+import { navigate } from '../router'
 import { classifySchedule, durationMinutes, fmtMinutes, snapTo, utcToLocal } from './timeUtils'
 
 /**
@@ -18,6 +19,8 @@ export interface GridColumn {
   label: string
   sub?: string
   day: string
+  pill?: number
+  pillTitle?: string
 }
 
 export interface DropPreview {
@@ -41,6 +44,8 @@ interface TimeGridProps {
   previewDrop: (id: string, column: GridColumn, startMin: number, durationMin: number) => DropPreview
   /** Dropped on the column header rather than a time slot (docs/13 W5): day-only placement, room stays NULL. */
   onDropDay?: (id: string, day: string) => void
+  /** Returns a column key to confine an unscheduled drag's drop target to, or null for no restriction. */
+  confineColumnKey?: (id: string) => string | null
 }
 
 interface Ghost {
@@ -98,6 +103,24 @@ export function assignLanes(items: LanedSession[]): void {
   flush()
 }
 
+/** Speakers get a line of their own only on blocks with room for it. */
+export const showsSpeakers = (s: AgendaSessionRow, durationMin: number): boolean =>
+  durationMin >= 40 && s.speakers.length > 0
+
+const MIN_BLOCK_PX = 36
+const MIN_SPEAKER_BLOCK_PX = 56
+
+/**
+ * Rendered box height (the grid maps 1 minute to 1 pixel): the true duration,
+ * floored so every line the block renders fits whole — time + title need
+ * 36px, and the speakers line another 20px. Anything that reasons about
+ * vertical space (lane assignment as much as the block itself) must use this
+ * rather than the raw duration, or a floored block paints over the one below.
+ */
+export function blockHeightPx(s: AgendaSessionRow, durationMin: number): number {
+  return Math.max(durationMin, showsSpeakers(s, durationMin) ? MIN_SPEAKER_BLOCK_PX : MIN_BLOCK_PX)
+}
+
 export function TimeGrid({
   columns,
   sessions,
@@ -113,6 +136,7 @@ export function TimeGrid({
   onOpenMove,
   previewDrop,
   onDropDay,
+  confineColumnKey,
 }: TimeGridProps) {
   const [ghost, setGhost] = useState<Ghost | null>(null)
   const [dayOverKey, setDayOverKey] = useState<string | null>(null)
@@ -189,7 +213,10 @@ export function TimeGrid({
     const laned: LanedSession[] = list.map((s) => {
       const local = utcToLocal(s.starts_at as string, timezone)
       const durationMin = durationMinutes(s.starts_at as string, s.ends_at as string)
-      return { session: s, startMin: local.minutes, endMin: local.minutes + durationMin, lane: 0, lanes: 1 }
+      // Lanes split on *rendered* extents, not true times: a short block is
+      // floored to its content height, so a back-to-back neighbour that is
+      // clear in minutes can still collide in pixels.
+      return { session: s, startMin: local.minutes, endMin: local.minutes + blockHeightPx(s, durationMin), lane: 0, lanes: 1 }
     })
     laned.sort((a, b) => a.startMin - b.startMin || b.endMin - a.endMin)
     assignLanes(laned)
@@ -271,6 +298,9 @@ export function TimeGrid({
           >
             <span>{col.label}</span>
             {col.sub && <span className="tg-col-sub">{col.sub}</span>}
+            {col.pill !== undefined && col.pill > 0 && (
+              <span className="tg-col-pill" title={col.pillTitle}>{col.pill}</span>
+            )}
           </div>
         ))}
       </div>
@@ -291,7 +321,7 @@ export function TimeGrid({
                 <div
                   className="tg-block pencilled"
                   key={s.id}
-                  style={{ top: local.minutes - dayStartMin, height: Math.max(dur, 36) }}
+                  style={{ top: local.minutes - dayStartMin, height: Math.max(dur, MIN_BLOCK_PX) }}
                   draggable
                   tabIndex={0}
                   role="button"
@@ -315,6 +345,21 @@ export function TimeGrid({
                     {fmtMinutes(local.minutes)} – {fmtMinutes(local.minutes + dur)} · no room
                   </div>
                   <div className="tg-block-title">{s.title}</div>
+                  <button
+                    type="button"
+                    className="tg-open-btn"
+                    title="Open submission in Workspace"
+                    aria-label={`Open ${s.code} in Workspace`}
+                    draggable={false}
+                    onMouseDown={(e) => e.stopPropagation()}
+                    onDoubleClick={(e) => e.stopPropagation()}
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      navigate({ v: 'workspace', tab: 'submissions', rec: s.id })
+                    }}
+                  >
+                    ↗
+                  </button>
                 </div>
               )
             })}
@@ -325,6 +370,11 @@ export function TimeGrid({
             className="tg-col"
             key={col.key}
             onDragOver={(e) => {
+              const drag = getDrag()
+              if (drag && confineColumnKey) {
+                const only = confineColumnKey(drag.id)
+                if (only !== null && only !== col.key) return
+              }
               const slot = slotFromEvent(e)
               if (!slot) return
               e.preventDefault()
@@ -344,6 +394,11 @@ export function TimeGrid({
               }
             }}
             onDrop={(e) => {
+              const drag = getDrag()
+              if (drag && confineColumnKey) {
+                const only = confineColumnKey(drag.id)
+                if (only !== null && only !== col.key) return
+              }
               e.preventDefault()
               const slot = slotFromEvent(e)
               const g = ghost?.colKey === col.key ? ghost : null
@@ -372,12 +427,13 @@ export function TimeGrid({
                   style={{
                     top: local.minutes - dayStartMin,
                     // A 30-min (or shorter — Lightning Talks default to 10)
-                    // slot maps to fewer pixels than the time line + title
-                    // line need, clipping the title mid-line. Floor the box
-                    // at a height that fits both single-line rows; short
-                    // sessions render slightly taller than their slot rather
-                    // than lose the title (docs/07 eval fix).
-                    height: Math.max(dur, 36),
+                    // slot maps to fewer pixels than the block's content
+                    // lines need, clipping text mid-glyph. blockHeightPx
+                    // floors the box to fit every line it renders — the
+                    // speakers line included — so short sessions render
+                    // slightly taller than their slot rather than lose or
+                    // slice a row (docs/07 eval fix).
+                    height: blockHeightPx(s, dur),
                     // Overlapping sessions in the same room/slot split into
                     // side-by-side lanes instead of the CSS default
                     // (`left:3px; right:3px`, i.e. full width) which stacked
@@ -417,9 +473,24 @@ export function TimeGrid({
                     {fmtMinutes(local.minutes)} – {fmtMinutes(local.minutes + dur)}
                   </div>
                   <div className="tg-block-title">{s.title}</div>
-                  {dur >= 40 && s.speakers.length > 0 && (
+                  {showsSpeakers(s, dur) && (
                     <div className="tg-block-speakers">{s.speakers.map((sp) => sp.name).join(', ')}</div>
                   )}
+                  <button
+                    type="button"
+                    className="tg-open-btn"
+                    title="Open submission in Workspace"
+                    aria-label={`Open ${s.code} in Workspace`}
+                    draggable={false}
+                    onMouseDown={(e) => e.stopPropagation()}
+                    onDoubleClick={(e) => e.stopPropagation()}
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      navigate({ v: 'workspace', tab: 'submissions', rec: s.id })
+                    }}
+                  >
+                    ↗
+                  </button>
                   <div
                     className="tg-resize"
                     aria-hidden
