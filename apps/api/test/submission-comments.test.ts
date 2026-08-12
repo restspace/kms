@@ -391,7 +391,7 @@ describe('submission comment threads (workplan 7)', () => {
         return (await res.json()) as { comments: Array<DetailComment & { author_contact_id?: string | null }> };
       };
 
-      // Not anonymised (0024 default is now on, so this plan opts out explicitly).
+      // Not anonymised (new plans default to anonymised now, so this plan opts out explicitly).
       await SELF.fetch(`${base}/evaluation/plans/${plan}`, jsonReq(admin.cookie, { anonymise_submitters: false }, 'PUT'));
       const openBody = await getThread(reviewerA.cookie, assignA);
       const names = openBody.comments.map((c) => c.author_name);

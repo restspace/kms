@@ -1037,8 +1037,8 @@ evaluationRoutes.post('/evaluation/plans', async (c) => {
   const name = typeof body.name === 'string' && body.name.trim() ? body.name.trim() : 'New plan';
   const id = crypto.randomUUID();
   await c.env.DB.prepare(
-    `INSERT INTO evaluation_plans (id, event_id, name, description, status, created_at)
-     VALUES (?, ?, ?, ?, 'active', ?)`,
+    `INSERT INTO evaluation_plans (id, event_id, name, description, status, anonymise_submitters, created_at)
+     VALUES (?, ?, ?, ?, 'active', 1, ?)`,
   )
     .bind(id, session.eventId, name, typeof body.description === 'string' ? body.description : null, nowIso())
     .run();

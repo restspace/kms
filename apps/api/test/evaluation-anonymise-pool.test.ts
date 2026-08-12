@@ -57,9 +57,9 @@ async function roundWithNamedSpeaker(anonymise: boolean) {
     `${base}/evaluation/plans/${planId}/assign`,
     jsonReq(admin.cookie, { reviewer_contact_ids: [reviewer.contactId], strategy: 'all' }),
   );
-  // Explicit either way (rather than relying on the column default): 0024
-  // flipped new plans to anonymise_submitters=1 by default, so "not
-  // anonymised" now has to opt out, same as "anonymised" opts in.
+  // Explicit either way (rather than relying on the column default): new
+  // plans now default to anonymise_submitters=1 at creation, so "not
+  // anonymised" has to opt out explicitly, same as "anonymised" opts in.
   const put = await SELF.fetch(
     `${base}/evaluation/plans/${planId}`,
     jsonReq(admin.cookie, { anonymise_submitters: anonymise }, 'PUT'),
