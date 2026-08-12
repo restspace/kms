@@ -182,6 +182,46 @@ describe('POST /app/api/:resource/query — keyset pagination', () => {
     });
     expect(desc.body.items.map((r) => r.code)).toEqual(['SESS-HIGH', 'SESS-LOW', 'SESS-NONE']);
   });
+
+  // Regression: the keyset (cursor) branch used to COALESCE the REAL `rating`
+  // column with '' for NULL handling, mixing storage classes — SQLite's
+  // NUMERIC-before-TEXT ordering rule then broke ascending order (and
+  // inverted the "NULL sorts last" rule on descending). The offset-mode test
+  // above exercises the CASE-WHEN branch; this one is the same scenario
+  // through `cursor: ''` (first keyset page) to cover the other branch.
+  it('sorts an unscored submission last on rating in keyset (cursor) mode too, in both directions', async () => {
+    const eventId = await seedEvent();
+    const admin = await seedStaff(eventId, 'admin');
+    const plan = `plan-${crypto.randomUUID().slice(0, 8)}`;
+    await env.DB.prepare(
+      `INSERT INTO evaluation_plans (id, event_id, name, status, created_at) VALUES (?, ?, 'P', 'active', ?)`,
+    ).bind(plan, eventId, '2026-08-01T00:00:00Z').run();
+    const low = await seedSubmission(eventId, { code: 'SESS-LOW' });
+    const high = await seedSubmission(eventId, { code: 'SESS-HIGH' });
+    const unscored = await seedSubmission(eventId, { code: 'SESS-NONE' });
+    for (const [id, value] of [[low, 2.5], [high, 4.75]] as const) {
+      await env.DB.prepare('UPDATE submissions SET evaluation_plan_id = ?, rating_cache = ? WHERE id = ?')
+        .bind(plan, JSON.stringify({ [plan]: value }), id)
+        .run();
+    }
+    await env.DB.prepare('UPDATE submissions SET evaluation_plan_id = ? WHERE id = ?').bind(plan, unscored).run();
+
+    const asc = await query(admin.cookie, 'submissions', {
+      size: 10,
+      filters: {},
+      sort: { field: 'rating', direction: 'asc' },
+      cursor: '',
+    });
+    expect(asc.body.items.map((r) => r.code)).toEqual(['SESS-LOW', 'SESS-HIGH', 'SESS-NONE']);
+
+    const desc = await query(admin.cookie, 'submissions', {
+      size: 10,
+      filters: {},
+      sort: { field: 'rating', direction: 'desc' },
+      cursor: '',
+    });
+    expect(desc.body.items.map((r) => r.code)).toEqual(['SESS-HIGH', 'SESS-LOW', 'SESS-NONE']);
+  });
 });
 
 describe('POST /app/api/:resource/query — contacts confirmation (SPK-04)', () => {

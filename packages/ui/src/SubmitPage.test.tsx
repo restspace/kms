@@ -33,6 +33,7 @@ function makeBootstrap(questions: QuestionDef[]): SubmitBootstrap {
       welcome_message_visible: false,
       collect_participants: true,
       participant_roles: null,
+      status: 'open',
       close_at: null,
       submission_limit: null,
       auto_redirect_to_portal: false,
@@ -111,5 +112,38 @@ describe('SubmitPage participant contract', () => {
     expect(optionLabels).toContain('Co-Speaker')
     const optionValues = Array.from(select.options).map((o) => o.value)
     expect(optionValues).toEqual(expect.arrayContaining(['speaker', 'co-speaker']))
+  })
+
+  it('item 1: the review step shows the Track option label, not the stored track id', () => {
+    const questions: QuestionDef[] = [
+      makeQuestion({
+        id: 'q-track',
+        field_key: 'track',
+        type: 'dropdown',
+        label: 'Track',
+        position: 0,
+        options: [
+          { value: 'trk-uuid-1', label: 'Backend' },
+          { value: 'trk-uuid-2', label: 'Frontend' },
+        ],
+      }),
+    ]
+    render(<SubmitPage data={makeBootstrap(questions)} />)
+
+    fireEvent.click(screen.getByRole('button', { name: /^Next$/ })) // welcome -> account
+    fireEvent.click(screen.getByRole('button', { name: /^Next$/ })) // account -> submission
+
+    const select = screen.getByLabelText('Track') as unknown as HTMLSelectElement
+    // @testing-library/preact rewrites fireEvent.change to an input event
+    // under preact/compat, which a <select>'s onChange never sees — dispatch
+    // directly (see EvaluationSection.test.tsx for the same workaround).
+    select.value = 'trk-uuid-2'
+    select.dispatchEvent(new Event('change', { bubbles: true }))
+
+    fireEvent.click(screen.getByRole('button', { name: /^Next$/ })) // submission -> participant
+    fireEvent.click(screen.getByRole('button', { name: /^Next$/ })) // participant -> review
+
+    expect(screen.getByText('Frontend')).toBeTruthy()
+    expect(screen.queryByText('trk-uuid-2')).toBeNull()
   })
 })

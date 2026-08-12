@@ -90,4 +90,37 @@ describe('GET /app/api/evaluation/overview', () => {
       submissions: 0, assignments: 0, completed: 0,
     });
   });
+
+  it('queue_totals sums a reviewer\'s assignments across every active plan, matching GET /review/queue (not a single plan\'s count)', async () => {
+    const eventId = await seedEvent();
+    const admin = await seedStaff(eventId, 'admin');
+    const reviewer = await seedStaff(eventId, 'reviewer');
+    const ts = '2026-08-01T00:00:00Z';
+
+    // Two active plans, each with one submission and one assignment for the
+    // same reviewer — their true queue (GET /review/queue) spans both.
+    const planA = `plan-${crypto.randomUUID().slice(0, 8)}`;
+    const planB = `plan-${crypto.randomUUID().slice(0, 8)}`;
+    for (const planId of [planA, planB]) {
+      await env.DB.prepare(
+        `INSERT INTO evaluation_plans (id, event_id, name, status, created_at) VALUES (?, ?, 'Round', 'active', ?)`,
+      ).bind(planId, eventId, ts).run();
+      const submissionId = await seedSubmission(eventId, { code: `SESS-${planId.slice(-4)}` });
+      await env.DB.prepare(
+        `INSERT INTO review_assignments (id, plan_id, submission_id, reviewer_contact_id, status, assigned_at)
+         VALUES (?, ?, ?, ?, 'pending', ?)`,
+      ).bind(`ra-${crypto.randomUUID()}`, planId, submissionId, reviewer.contactId, ts).run();
+    }
+
+    const overviewBody = (await (await overview(admin.cookie)).json()) as {
+      queue_totals: Array<{ contact_id: string; assigned: number; completed: number }>;
+    };
+    const mine = overviewBody.queue_totals.find((q) => q.contact_id === reviewer.contactId);
+    expect(mine?.assigned).toBe(2);
+
+    // GET /review/queue is the ground truth this is meant to agree with.
+    const queueRes = await SELF.fetch('https://example.com/app/api/review/queue', { headers: { cookie: reviewer.cookie } });
+    const queueBody = (await queueRes.json()) as { assignments: unknown[] };
+    expect(queueBody.assignments).toHaveLength(mine!.assigned);
+  });
 });

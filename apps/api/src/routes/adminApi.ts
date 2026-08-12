@@ -21,6 +21,7 @@ import { formsAdminRoutes } from './formsAdmin';
 import { APPROVAL_STATES, evaluationRoutes } from './evaluation';
 import { agendaRoutes } from './agenda';
 import { stageAirtableDeletes } from '../airtableStage';
+import { sendTaskReminderNow } from '../jobs/reminders';
 import { dashboardRoutes } from './dashboard';
 import { greenroomRoutes } from './greenroom';
 
@@ -204,6 +205,17 @@ const eq = (expr: string): FilterBuilder => (value) => {
 const SUBMISSION_STATUSES = new Set([
   'draft', 'pending', 'accept_queue', 'accepted', 'decline_queue', 'declined', 'withdrawn',
 ]);
+
+// Sort fields whose SQL expression is a REAL/numeric column rather than text
+// (currently just `rating`) — used by the keyset-pagination branch of
+// queryResource to pick a same-storage-class NULL sentinel instead of
+// COALESCE(...,'') , which mixes REAL and TEXT storage classes and corrupts
+// ordering. Kept alongside restApi.ts's own NUMERIC_SORT_FIELDS (that file's
+// cursor sentinel is direction-agnostic; this one is direction-signed so
+// NULLs sort last regardless of asc/desc, matching the offset branch).
+const NUMERIC_SORT_FIELDS = new Set(['rating']);
+const NUMERIC_NULL_SENTINEL_HIGH = '1e15';
+const NUMERIC_NULL_SENTINEL_LOW = '-1e15';
 
 /** Bound on the per-submission review count (workplan 13 W2 coverage filters). */
 const reviewCountBound = (op: '>=' | '<='): FilterBuilder => (value) => {
@@ -767,7 +779,18 @@ export async function queryResource(
     const direction = sort && def.sortable[sort.field] ? sort.direction : def.defaultCursorSort.direction;
     // COALESCE keeps the ordering total: a NULL sort value would otherwise
     // compare false against every keyset bound and silently drop rows.
-    const sortExpr = `COALESCE(${def.sortable[field] ?? def.idExpr}, '')`;
+    // For NUMERIC_SORT_FIELDS (e.g. `rating`, a REAL column), COALESCE-ing
+    // with '' would silently switch storage class from REAL to TEXT for NULL
+    // rows — SQLite's type-ordering then puts that '' sentinel *after* every
+    // real number on an ascending sort (numeric < text), which reads right by
+    // accident on ASC but is a storage-class bug, and inverts on DESC. Use a
+    // same-storage-class numeric sentinel instead, sized (and signed by
+    // direction) so NULL rows always sort last — matching the CASE WHEN …
+    // IS NULL null-ordering the offset branch below uses.
+    const col = def.sortable[field] ?? def.idExpr;
+    const sortExpr = NUMERIC_SORT_FIELDS.has(field)
+      ? `COALESCE(${col}, ${direction === 'desc' ? NUMERIC_NULL_SENTINEL_LOW : NUMERIC_NULL_SENTINEL_HIGH})`
+      : `COALESCE(${col}, '')`;
     const dir = direction === 'desc' ? 'DESC' : 'ASC';
     const keysetParams: unknown[] = [];
     if (cursor !== '') {
@@ -1875,6 +1898,52 @@ adminApiRoutes.put('/tasks/:id', async (c) => {
   const row = await taskRow(c.env.DB, id, session.eventId);
   if (!row) return c.json({ error: 'not_found' }, 404);
   return c.json(row);
+});
+
+/**
+ * POST /tasks/:id/remind — on-demand deliverable reminder (the task-side
+ * equivalent of `POST /evaluation/plans/:id/remind`'s "Remind lagging"
+ * reviewers, which had no counterpart here). Body `{ submission_ids?,
+ * contact_ids? }` narrows which of this task's outstanding assignments get
+ * nudged right now instead of waiting for the next reminder-offset/overdue
+ * tick; omit both to remind everyone still outstanding on this task.
+ * `contact_ids` maps to assignment ids server-side (task_assignments has no
+ * direct contact filter in the shared query) — reuses jobs/reminders.ts's
+ * composition so this never duplicates the template/context logic.
+ */
+adminApiRoutes.post('/tasks/:id/remind', async (c) => {
+  const session = c.get('session');
+  if (!isWriter(session.role)) return c.json({ error: 'forbidden' }, 403);
+  const id = c.req.param('id');
+  const task = await taskRow(c.env.DB, id, session.eventId);
+  if (!task) return c.json({ error: 'not_found' }, 404);
+
+  const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+  const submissionIds = Array.isArray(body.submission_ids)
+    ? body.submission_ids.filter((v): v is string => typeof v === 'string' && v !== '')
+    : [];
+  const contactIds = Array.isArray(body.contact_ids)
+    ? body.contact_ids.filter((v): v is string => typeof v === 'string' && v !== '')
+    : [];
+
+  let assignmentIds: string[] | undefined;
+  if (contactIds.length > 0) {
+    const { results } = await c.env.DB.prepare(
+      `SELECT id FROM task_assignments WHERE task_id = ? AND contact_id IN (${contactIds.map(() => '?').join(', ')})`,
+    )
+      .bind(id, ...contactIds)
+      .all<{ id: string }>();
+    assignmentIds = results.map((r) => r.id);
+    if (assignmentIds.length === 0) return c.json({ ok: true, sent: 0, assignment_ids: [] });
+  }
+
+  const result = await sendTaskReminderNow(c.env, {
+    eventId: session.eventId,
+    taskId: id,
+    submissionIds: submissionIds.length > 0 ? submissionIds : undefined,
+    assignmentIds,
+  });
+  return c.json({ ok: true, ...result });
 });
 
 adminApiRoutes.delete('/tasks/:id', async (c) => {

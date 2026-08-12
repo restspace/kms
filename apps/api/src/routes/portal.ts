@@ -9,7 +9,9 @@ import { createDb } from '@kms/db';
 import {
   discardHiddenAnswers,
   isValidUrlShape,
+  normalizeXHandleToUrl,
   redactInternal,
+  sanitizeRichHtml,
   validateAnswers,
   visibleQuestionIds,
   type AnswerValue,
@@ -584,7 +586,7 @@ portalRoutes.get('/:slug/submissions/:id', async (c) => {
 <dl class="detail">
 ${submission.format ? `<dt>Format</dt><dd>${esc(String(submission.format))}</dd>` : ''}
 ${submission.track_name ? `<dt>Track</dt><dd>${esc(String(submission.track_name))}</dd>` : ''}
-${submission.description ? `<dt>Description</dt><dd>${esc(String(submission.description))}</dd>` : ''}
+${submission.description ? `<dt>Description</dt><dd>${sanitizeRichHtml(String(submission.description)) ?? ''}</dd>` : ''}
 ${answers
   // The form's own "Title"/"Description"/"Format"/"Track" questions freeze
   // their answer text at submit time and would otherwise duplicate the
@@ -656,7 +658,7 @@ const PRONOUN_OPTIONS = ['', 'they/them', 'she/her', 'he/him', 'prefer not to sa
 /** Link controls and the `links` json keys they map onto. */
 const LINK_FIELDS = [
   ['link_linkedin', 'linkedin', 'LinkedIn URL'],
-  ['link_twitter', 'twitter', 'X (Twitter) URL'],
+  ['link_twitter', 'twitter', 'X (Twitter) handle or URL'],
   ['link_facebook', 'facebook', 'Facebook URL'],
   ['link_website', 'website', 'Website'],
 ] as const;
@@ -725,7 +727,7 @@ ${contact.headshot_asset_id ? `<img class="headshot-preview" src="/files/${esc(c
 ${fieldErrorHtml(errors, 'headshot')}
 </div>
 <div class="card"><h2>My Links</h2>
-${LINK_FIELDS.map(([control, , label]) => field(control, label, 'url')).join('\n')}
+${LINK_FIELDS.map(([control, , label]) => field(control, label, control === 'link_twitter' ? 'text' : 'url')).join('\n')}
 <p style="margin-top:1.2rem"><button type="submit">Save profile</button></p>
 </div>
 </div>
@@ -792,7 +794,13 @@ portalRoutes.post('/:slug/profile', async (c) => {
     company: raw('company'),
     job_title: raw('job_title'),
   };
-  for (const [control] of LINK_FIELDS) values[control] = raw(control);
+  for (const [control] of LINK_FIELDS) {
+    const posted = raw(control);
+    // The X/Twitter control accepts a bare handle as well as a full URL;
+    // normalize it to a URL up front so both validation and the stored
+    // value (and the echoed form on a validation error) see the same shape.
+    values[control] = control === 'link_twitter' ? normalizeXHandleToUrl(posted) : posted;
+  }
 
   const errors: FieldError[] = [];
   if (!values.first_name) errors.push({ key: 'first_name', message: 'First name is required.' });
@@ -800,7 +808,11 @@ portalRoutes.post('/:slug/profile', async (c) => {
   for (const [control, , label] of LINK_FIELDS) {
     const value = values[control] ?? '';
     if (value !== '' && !isValidUrlShape(value)) {
-      errors.push({ key: control, message: `${label} must be a full http:// or https:// address.` });
+      const message =
+        control === 'link_twitter'
+          ? `${label} must be a handle (e.g. @name) or a full http:// or https:// address.`
+          : `${label} must be a full http:// or https:// address.`;
+      errors.push({ key: control, message });
     }
   }
   if (errors.length > 0) return c.html(profilePageHtml(ctx, values, errors, null), 400);
@@ -1914,7 +1926,25 @@ portalRoutes.post('/:slug/submissions/:id/edit', async (c) => {
   }
 
   const updatedAt = new Date().toISOString();
+  // Content history (CFP content-revisions): snapshot the PRE-edit
+  // title/description — `submission` here is still the row as loaded by
+  // resolveEditTarget, before this statement changes it — batched with the
+  // update so history and the change it precedes commit together.
   const statements: D1PreparedStatement[] = [
+    c.env.DB.prepare(
+      `INSERT INTO content_revisions
+         (id, event_id, submission_id, title, description, edited_by, edited_by_name, source, edited_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'portal', ?)`,
+    ).bind(
+      crypto.randomUUID(),
+      ctx.event.id,
+      submission.id,
+      submission.title,
+      submission.description,
+      ctx.contact.id,
+      displayName(ctx.contact),
+      updatedAt,
+    ),
     c.env.DB.prepare(
       `UPDATE submissions SET title = ?, description = ?, format = ?, level = ?, language = ?,
          track_id = ?, updated_at = ?

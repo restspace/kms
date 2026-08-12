@@ -43,6 +43,10 @@ export interface SubmitFormInfo {
   welcome_message_visible: boolean
   collect_participants: boolean
   participant_roles: string | null
+  /** 'closed' means the organiser closed the form early, independent of
+   *  close_at — the deadline message only reflects reality when the form is
+   *  still 'open' (or hasn't reached close_at yet). */
+  status: 'open' | 'closed'
   close_at: string | null
   /** effective limit (form override or event default); null = unlimited */
   submission_limit: number | null
@@ -455,7 +459,9 @@ export function SubmitPage({ data }: { data: SubmitBootstrap }) {
     return (
       <Wizard title={form.external_title}>
         <div className="sb-banner">
-          This form is closed{form.close_at ? ` — submissions ended ${fmtDeadline(form.close_at, event.timezone)}` : ''}.
+          {form.status === 'closed'
+            ? 'This form is closed — the organisers closed submissions early.'
+            : `This form is closed${form.close_at ? ` — submissions ended ${fmtDeadline(form.close_at, event.timezone)}` : ''}.`}
         </div>
         <p>
           Already submitted? Visit your <a href={`/portal/${event.slug}`}>speaker portal</a>.
@@ -720,7 +726,7 @@ export function SubmitPage({ data }: { data: SubmitBootstrap }) {
               .map((q) => (
                 <div key={q.id}>
                   <dt>{q.label}</dt>
-                  <dd>{formatAnswer(answers[q.id])}</dd>
+                  <dd>{formatAnswer(q, answers[q.id])}</dd>
                 </div>
               ))}
           </dl>
@@ -786,10 +792,20 @@ function Nav({
   )
 }
 
-function formatAnswer(v: AnswerValue): string {
+function formatAnswer(q: QuestionDef, v: AnswerValue): string {
   if (v === undefined || v === null || v === '') return '—'
-  if (Array.isArray(v)) return v.join(', ')
+  // Option-based questions (dropdown/radio/multiselect, including the
+  // canonical Track question) store the option's `value` — for Track that's
+  // the track id, not its name — so resolve back through `options` to show
+  // the label the submitter actually picked, same as the pickers themselves.
+  const options = q.options ?? []
+  const labelFor = (raw: unknown) => {
+    const match = options.find((o) => o.value === raw)
+    return match ? match.label : String(raw)
+  }
+  if (Array.isArray(v)) return options.length > 0 ? v.map(labelFor).join(', ') : v.join(', ')
   if (typeof v === 'boolean') return v ? 'Yes' : 'No'
+  if (options.length > 0) return labelFor(v)
   return String(v).replace(/<[^>]*>/g, '')
 }
 

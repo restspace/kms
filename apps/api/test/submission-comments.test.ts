@@ -365,4 +365,65 @@ describe('submission comment threads (workplan 7)', () => {
       expect(rows.results[0]!.body).toBe('Backfilled rationale.');
     });
   });
+
+  describe('reviewer identity redaction on the thread (anonymise_submitters)', () => {
+    it('pseudonymises reviewer authors (rationale + discussion) when the plan anonymises, real names otherwise', async () => {
+      const eventId = await seedEvent();
+      const reviewerA = await seedStaff(eventId, 'reviewer', 'reviewer-a@example.com');
+      const reviewerB = await seedStaff(eventId, 'reviewer', 'reviewer-b@example.com');
+      const admin = await seedStaff(eventId, 'admin');
+      const submissionId = await seedSubmission(eventId);
+      const plan = await seedPlan(eventId);
+      const criterion = await seedCriterion(plan);
+      const assignA = await seedAssignment(plan, submissionId, reviewerA.contactId);
+      const assignB = await seedAssignment(plan, submissionId, reviewerB.contactId);
+
+      // Complete both reviews (opens the D3 gate) with distinct rationale text
+      // so each reviewer leaves a real-name-bearing row.
+      await SELF.fetch(`${base}/review/assignments/${assignA}`, jsonReq(reviewerA.cookie, { scores: { [criterion]: 4 }, comment: 'From A' }));
+      await SELF.fetch(`${base}/review/assignments/${assignB}`, jsonReq(reviewerB.cookie, { scores: { [criterion]: 3 }, comment: 'From B' }));
+      // An organiser reply — never pseudonymised, anonymise or not.
+      await SELF.fetch(`${base}/submissions/${submissionId}/comments`, jsonReq(admin.cookie, { body: 'Organiser note.' }));
+
+      const getThread = async (cookie: string, assignmentId: string) => {
+        const res = await SELF.fetch(`${base}/review/assignments/${assignmentId}/comments`, { headers: { cookie } });
+        expect(res.status).toBe(200);
+        return (await res.json()) as { comments: Array<DetailComment & { author_contact_id?: string | null }> };
+      };
+
+      // Not anonymised (0024 default is now on, so this plan opts out explicitly).
+      await SELF.fetch(`${base}/evaluation/plans/${plan}`, jsonReq(admin.cookie, { anonymise_submitters: false }, 'PUT'));
+      const openBody = await getThread(reviewerA.cookie, assignA);
+      const names = openBody.comments.map((c) => c.author_name);
+      expect(names).toContain('Test Person'); // seedStaff's default contact name, shared by both reviewers
+      expect(openBody.comments.some((c) => c.body === 'Organiser note.')).toBe(true);
+
+      // Anonymised: reviewer rows get stable per-thread pseudonyms; the
+      // organiser row is untouched.
+      await SELF.fetch(`${base}/evaluation/plans/${plan}`, jsonReq(admin.cookie, { anonymise_submitters: true }, 'PUT'));
+      const hiddenBody = await getThread(reviewerA.cookie, assignA);
+      const reviewerRows = hiddenBody.comments.filter((c) => c.author_role === 'reviewer' || c.kind === 'rationale');
+      expect(reviewerRows.every((c) => (c.author_name ?? '').startsWith('Reviewer '))).toBe(true);
+      // Two distinct authors -> two distinct, stable pseudonyms.
+      expect(new Set(reviewerRows.map((c) => c.author_name)).size).toBe(2);
+      // author_contact_id is cleared alongside the name — no trivial de-anon.
+      expect(reviewerRows.every((c) => c.author_contact_id == null)).toBe(true);
+      // The organiser's row keeps its real name and role untouched.
+      const organiserRow = hiddenBody.comments.find((c) => c.body === 'Organiser note.');
+      expect(organiserRow?.author_role).toBe('admin');
+      expect(organiserRow?.author_name).not.toBeNull();
+
+      // Same pseudonym mapping is stable for the POST response too.
+      const postRes = await SELF.fetch(
+        `${base}/review/assignments/${assignA}/comments`,
+        jsonReq(reviewerA.cookie, { body: 'Following up.' }),
+      );
+      expect(postRes.status).toBe(200);
+      const postBody = (await postRes.json()) as { comments: DetailComment[] };
+      const mine = postBody.comments.find((c) => c.body === 'Following up.');
+      expect(mine?.author_name).toBe(
+        reviewerRows.find((c) => c.body === 'From A')!.author_name,
+      );
+    });
+  });
 });

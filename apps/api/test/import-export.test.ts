@@ -480,4 +480,49 @@ describe('files bundle ZIP', () => {
     expect((await post('/export/files.zip', outsider.cookie, { submission_ids: [] })).status).toBe(400);
     expect((await post('/export/files.zip', outsider.cookie, { submission_ids: [first] })).status).toBe(404);
   });
+
+  /** A headshot (event_contacts) + a contact-level file-request upload with no
+   * submission_id — neither has a file_request_uploads row keyed by
+   * submission_id, so the pre-fix query (`u.submission_id IN (...)`) missed
+   * both entirely. */
+  it('includes the speaker headshot and contact-level (no-submission) uploads under the submission folder', async () => {
+    const eventId = await seedEvent();
+    const admin = await seedStaff(eventId, 'admin');
+    const requestId = crypto.randomUUID();
+    await env.DB.prepare(
+      "INSERT INTO file_requests (id, event_id, title, type, created_at) VALUES (?, ?, 'Bio + ID', 'contacts', ?)",
+    ).bind(requestId, eventId, '2026-08-01T00:00:00Z').run();
+
+    const headshotAssetId = crypto.randomUUID();
+    await env.KV.put(`file:${headshotAssetId}`, 'HEADSHOT-BYTES');
+    await env.DB.prepare(
+      `INSERT INTO file_assets (id, event_id, key, filename, content_type, size_bytes, created_at)
+       VALUES (?, ?, ?, 'headshot.jpg', 'image/jpeg', 14, ?)`,
+    ).bind(headshotAssetId, eventId, `file:${headshotAssetId}`, '2026-08-01T00:00:00Z').run();
+    const speaker = await seedContact(eventId, { headshot_asset_id: headshotAssetId });
+
+    const idAssetId = crypto.randomUUID();
+    await env.KV.put(`file:${idAssetId}`, 'ID-BYTES');
+    await env.DB.prepare(
+      `INSERT INTO file_assets (id, event_id, key, filename, content_type, size_bytes, created_at)
+       VALUES (?, ?, ?, 'id-scan.pdf', 'application/pdf', 8, ?)`,
+    ).bind(idAssetId, eventId, `file:${idAssetId}`, '2026-08-01T00:00:00Z').run();
+    // No submission_id: a profile-level file-request task, not tied to a talk.
+    await env.DB.prepare(
+      `INSERT INTO file_request_uploads (id, file_request_id, contact_id, submission_id, file_asset_id, uploaded_at, version, is_current)
+       VALUES (?, ?, ?, NULL, ?, ?, 1, 1)`,
+    ).bind(crypto.randomUUID(), requestId, speaker, idAssetId, '2026-08-01T00:00:00Z').run();
+
+    const submissionId = await seedSubmission(eventId, { code: 'SESS-201', title: 'Speaker Profile Talk', submitter_contact_id: speaker });
+
+    const res = await post('/export/files.zip', admin.cookie, { submission_ids: [submissionId] });
+    expect(res.status).toBe(200);
+    const entries = unzipSync(new Uint8Array(await res.arrayBuffer()));
+    expect(Object.keys(entries).sort()).toEqual([
+      'SESS-201-Speaker-Profile-Talk/headshot.jpg',
+      'SESS-201-Speaker-Profile-Talk/id-scan.pdf',
+    ]);
+    expect(strFromU8(entries['SESS-201-Speaker-Profile-Talk/headshot.jpg']!)).toBe('HEADSHOT-BYTES');
+    expect(strFromU8(entries['SESS-201-Speaker-Profile-Talk/id-scan.pdf']!)).toBe('ID-BYTES');
+  });
 });

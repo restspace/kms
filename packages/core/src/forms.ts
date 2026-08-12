@@ -178,6 +178,35 @@ export const isValidUrlShape = (value: string): boolean => {
   }
 };
 
+// X/Twitter's own handle rules: letters, digits, underscore, 1-15 chars.
+const X_HANDLE_RE = /^[A-Za-z0-9_]{1,15}$/;
+
+/** Strips a leading `@` (bare handles are entered either way). */
+const stripHandleSigil = (value: string): string => (value.startsWith('@') ? value.slice(1) : value);
+
+/**
+ * True for anything the X/Twitter link field should accept: a full
+ * http(s) URL, or a bare handle (`name` or `@name`). Used where a field is
+ * labelled as taking a handle but still round-trips as a link once saved
+ * (`normalizeXHandleToUrl`).
+ */
+export const isValidHandleOrUrlShape = (value: string): boolean =>
+  isValidUrlShape(value) || X_HANDLE_RE.test(stripHandleSigil(value));
+
+/**
+ * Normalizes an X/Twitter field's raw input to a storable value: a full URL
+ * is kept as-is, a bare handle (`name` or `@name`) becomes
+ * `https://x.com/<handle>`, and anything else that matches neither shape is
+ * returned untouched so the caller's own URL validation can reject it with
+ * its usual message.
+ */
+export const normalizeXHandleToUrl = (value: string): string => {
+  const trimmed = value.trim();
+  if (trimmed === '' || isValidUrlShape(trimmed)) return trimmed;
+  const handle = stripHandleSigil(trimmed);
+  return X_HANDLE_RE.test(handle) ? `https://x.com/${handle}` : trimmed;
+};
+
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 // Local or zoned ISO datetimes; seconds optional (matches <input type="datetime-local">).
 const DATETIME_RE = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(:\d{2})?(\.\d+)?(Z|[+-]\d{2}:?\d{2})?$/;

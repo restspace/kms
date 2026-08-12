@@ -1351,9 +1351,14 @@ export async function downloadFilesBundle(submissionIds: string[]): Promise<numb
 // template overrides behind every system email (SPK-14).
 // ---------------------------------------------------------------------------
 
-/** SPK-06: mint a portal magic link for a contact and email it to them. */
+/**
+ * SPK-06: mint a portal magic link for a contact and email it to them. The
+ * server also hands back the minted `link` itself (bound to this contact),
+ * so the caller can surface it for the organiser to copy/verify/impersonate
+ * with — the same contract `sendReviewerSigninLink` has for reviewers.
+ */
 export const invitePortal = (contactId: string) =>
-  request<{ ok: boolean; outcome: 'queued' | 'duplicate' | 'template_disabled' }>(
+  request<{ ok: boolean; outcome: 'queued' | 'duplicate' | 'template_disabled'; link: string }>(
     '/app/api/messaging/invite-portal',
     { method: 'POST', body: JSON.stringify({ contact_id: contactId }) },
   )

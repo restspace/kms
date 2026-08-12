@@ -1,5 +1,5 @@
 import React, { useCallback, useMemo, useRef, useState } from 'react';
-import { isValidEmailShape, isValidUrlShape } from '@kms/core';
+import { isValidEmailShape, isValidHandleOrUrlShape, isValidUrlShape } from '@kms/core';
 import { toReadableText } from '../utility';
 import { stableSerialize } from '../utils/stableSerialize';
 import type { SchemaFormChangeHandler, SchemaFormChangeMeta } from './DataTabManager';
@@ -166,6 +166,9 @@ export const RecordForm: React.FC<RecordFormProps> = ({
       }
       if ((prop.format === 'url' || prop.format === 'uri') && !isValidUrlShape(rawValue)) {
         return 'Enter a valid link (http:// or https://)';
+      }
+      if (prop.format === 'social-handle' && !isValidHandleOrUrlShape(rawValue)) {
+        return 'Enter a handle (e.g. @name) or a full link';
       }
     }
     return null;

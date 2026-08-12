@@ -11,7 +11,7 @@
 // pass — today's behaviour byte for byte, OVERDUE_CAP and idempotency
 // included. In chase_mode='assisted' the draft waits for a human.
 
-import { stageChase } from '../chase';
+import { stageChase, type ChaseStageArgs } from '../chase';
 import type { Env } from '../env';
 
 const DAY_MS = 86_400_000;
@@ -45,6 +45,35 @@ interface DraftReminderRow {
   event_name: string;
   event_slug: string;
   chase_mode: string | null;
+}
+
+/**
+ * Compose the task_reminder chase args from a row + the pre-computed due
+ * line — shared by the scheduled sweep and the manual "remind now" trigger
+ * so the two never drift in template/context shape. `version` is the caller's
+ * idempotency segment: the sweep's offset/overdue-day key for the scheduled
+ * path, a date-stamped "manual" key for the on-demand one.
+ */
+function composeTaskReminder(env: Env, row: TaskReminderRow, version: string, dueLine: string): ChaseStageArgs {
+  return {
+    templateKey: 'task_reminder',
+    subjectOf: 'task',
+    subjectId: row.assignment_id,
+    version,
+    eventId: row.event_id,
+    contactId: row.contact_id,
+    toEmail: row.email,
+    chaseMode: row.chase_mode,
+    context: {
+      event: { name: row.event_name },
+      speaker: { first_name: row.first_name ?? 'there' },
+      task: {
+        title: row.task_title,
+        due_line: dueLine,
+        url: `${env.APP_URL}/portal/${row.event_slug}/tasks`,
+      },
+    },
+  };
 }
 
 export async function sweepReminders(env: Env): Promise<void> {
@@ -96,26 +125,72 @@ async function sweepTaskReminders(env: Env, now: number): Promise<void> {
     }
     if (!sendKey) continue;
 
-    await stageChase(env.DB, {
-      templateKey: 'task_reminder',
-      subjectOf: 'task',
-      subjectId: row.assignment_id,
-      version: sendKey,
-      eventId: row.event_id,
-      contactId: row.contact_id,
-      toEmail: row.email,
-      chaseMode: row.chase_mode,
-      context: {
-        event: { name: row.event_name },
-        speaker: { first_name: row.first_name ?? 'there' },
-        task: {
-          title: row.task_title,
-          due_line: dueLine,
-          url: `${env.APP_URL}/portal/${row.event_slug}/tasks`,
-        },
-      },
-    });
+    await stageChase(env.DB, composeTaskReminder(env, row, sendKey, dueLine));
   }
+}
+
+/**
+ * On-demand counterpart to the scheduled sweep above (mirrors
+ * evaluation.ts's `POST /evaluation/plans/:id/remind` for "Remind lagging"
+ * reviewers, which deliverables reminders lacked an equivalent of). Sends the
+ * task_reminder chase immediately for outstanding (not-complete) assignments,
+ * optionally narrowed to one submission or one filtered set of assignment
+ * ids — reusing `composeTaskReminder` so the manual send is byte-for-byte the
+ * same template/context the sweep would have used, just staged under a
+ * date-stamped "manual" idempotency key instead of the offset/overdue one.
+ * That key is deliberately distinct from the sweep's: a manual nudge must not
+ * dedupe against (or block) that day's scheduled reminder, and a second
+ * manual click the same day is still a no-op rather than a re-send.
+ */
+export async function sendTaskReminderNow(
+  env: Env,
+  opts: { eventId: string; taskId?: string; submissionIds?: string[]; assignmentIds?: string[] },
+): Promise<{ sent: number; assignment_ids: string[] }> {
+  const filters: string[] = ['ta.status != \'complete\'', 't.event_id = ?'];
+  const params: unknown[] = [opts.eventId];
+  if (opts.taskId) {
+    filters.push('ta.task_id = ?');
+    params.push(opts.taskId);
+  }
+  if (opts.submissionIds && opts.submissionIds.length > 0) {
+    filters.push(`ta.submission_id IN (${opts.submissionIds.map(() => '?').join(', ')})`);
+    params.push(...opts.submissionIds);
+  }
+  if (opts.assignmentIds && opts.assignmentIds.length > 0) {
+    filters.push(`ta.id IN (${opts.assignmentIds.map(() => '?').join(', ')})`);
+    params.push(...opts.assignmentIds);
+  }
+  const { results } = await env.DB.prepare(
+    `SELECT ta.id AS assignment_id, t.id AS task_id, t.title AS task_title, t.due_at,
+            t.reminder_offsets_days, c.id AS contact_id, c.email, c.first_name,
+            e.id AS event_id, e.name AS event_name, e.slug AS event_slug, e.chase_mode
+     FROM task_assignments ta
+     JOIN tasks t ON t.id = ta.task_id
+     JOIN contacts c ON c.id = ta.contact_id
+     JOIN events e ON e.id = t.event_id
+     WHERE ${filters.join(' AND ')}`,
+  )
+    .bind(...params)
+    .all<TaskReminderRow>();
+
+  const day = new Date().toISOString().slice(0, 10);
+  const sent: string[] = [];
+  for (const row of results) {
+    if (!row.email) continue;
+    let dueLine = '';
+    if (row.due_at) {
+      const due = new Date(row.due_at).getTime();
+      if (!Number.isNaN(due)) {
+        const now = Date.now();
+        dueLine = now < due
+          ? `, due in ${Math.max(1, Math.ceil((due - now) / DAY_MS))} day(s)`
+          : ' — now overdue';
+      }
+    }
+    await stageChase(env.DB, composeTaskReminder(env, row, `manual-${day}`, dueLine));
+    sent.push(row.assignment_id);
+  }
+  return { sent: sent.length, assignment_ids: sent };
 }
 
 /** Draft reminders at T-7d, T-2d and T-12h before a form's close date. */

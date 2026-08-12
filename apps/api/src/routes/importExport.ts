@@ -488,6 +488,20 @@ export function uniqueEntry(taken: Set<string>, path: string): string {
  * re-uploaded three times contributes one entry, not three. POST rather than
  * GET because a grid selection is unbounded; the browser turns the response
  * into a download via a blob URL.
+ *
+ * Three sources feed the bundle, all folded into the same submission-code
+ * folder structure via the `targets`/`target_contacts` CTEs:
+ *  1. file_request_uploads keyed directly by submission_id (talk decks,
+ *     slides — the original behaviour, unchanged).
+ *  2. file_request_uploads with a NULL submission_id — a portal file-request
+ *     task answered against a *contact* rather than a specific talk (e.g. a
+ *     general "upload your ID" ask) — attributed to every selected
+ *     submission that contact submits or speaks on.
+ *  3. event_contacts.headshot_asset_id — the speaker-profile headshot,
+ *     which has no file_request_uploads row at all, attributed the same way.
+ * A contact who speaks on two selected submissions gets their profile-level
+ * files (2) and (3) once per submission folder — deliberate: each folder is
+ * a self-contained "everything for this talk" bundle.
  */
 exportRoutes.post('/files.zip', async (c) => {
   const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
@@ -498,14 +512,59 @@ exportRoutes.post('/files.zip', async (c) => {
 
   const eventIds = await accessibleEventIds(c);
   const { results } = await c.env.DB.prepare(
-    `SELECT u.submission_id, u.uploaded_at, s.code, s.title, fa.key, fa.filename, fa.size_bytes
-     FROM file_request_uploads u
-     JOIN file_assets fa ON fa.id = u.file_asset_id
-     JOIN submissions s ON s.id = u.submission_id
-     WHERE u.is_current = 1
-       AND u.submission_id IN (${ids.map(() => '?').join(', ')})
-       AND s.event_id IN (${eventIds.map(() => '?').join(', ')})
-     ORDER BY s.code, u.uploaded_at`,
+    `WITH targets AS (
+       SELECT s.id AS submission_id, s.event_id, s.code, s.title, s.submitter_contact_id
+       FROM submissions s
+       WHERE s.id IN (${ids.map(() => '?').join(', ')})
+         AND s.event_id IN (${eventIds.map(() => '?').join(', ')})
+     ),
+     target_contacts AS (
+       SELECT submission_id, event_id, submitter_contact_id AS contact_id
+       FROM targets WHERE submitter_contact_id IS NOT NULL
+       UNION
+       SELECT sp.submission_id, t.event_id, sp.contact_id
+       FROM submission_participants sp
+       JOIN targets t ON t.submission_id = sp.submission_id
+     )
+     SELECT bundle.submission_id, bundle.uploaded_at, bundle.code, bundle.title,
+            bundle.key, bundle.filename, bundle.size_bytes
+     FROM (
+       -- (1) uploads tied directly to the submission
+       SELECT t.submission_id AS submission_id, u.uploaded_at AS uploaded_at,
+              t.code AS code, t.title AS title,
+              fa.key AS key, fa.filename AS filename, fa.size_bytes AS size_bytes
+       FROM file_request_uploads u
+       JOIN file_assets fa ON fa.id = u.file_asset_id
+       JOIN targets t ON t.submission_id = u.submission_id
+       WHERE u.is_current = 1
+
+       UNION ALL
+
+       -- (2) contact-level uploads (portal file-request tasks with no
+       -- specific submission), attributed to every selected submission the
+       -- uploader is on
+       SELECT tc.submission_id AS submission_id, u.uploaded_at AS uploaded_at,
+              t.code AS code, t.title AS title,
+              fa.key AS key, fa.filename AS filename, fa.size_bytes AS size_bytes
+       FROM file_request_uploads u
+       JOIN file_assets fa ON fa.id = u.file_asset_id
+       JOIN target_contacts tc ON tc.contact_id = u.contact_id
+       JOIN targets t ON t.submission_id = tc.submission_id
+       WHERE u.is_current = 1 AND u.submission_id IS NULL
+
+       UNION ALL
+
+       -- (3) speaker-profile headshots — never had a file_request_uploads row
+       SELECT tc.submission_id AS submission_id, ec.added_at AS uploaded_at,
+              t.code AS code, t.title AS title,
+              fa.key AS key, fa.filename AS filename, fa.size_bytes AS size_bytes
+       FROM event_contacts ec
+       JOIN file_assets fa ON fa.id = ec.headshot_asset_id
+       JOIN target_contacts tc ON tc.contact_id = ec.contact_id AND tc.event_id = ec.event_id
+       JOIN targets t ON t.submission_id = tc.submission_id
+       WHERE ec.headshot_asset_id IS NOT NULL
+     ) bundle
+     ORDER BY bundle.code, bundle.uploaded_at`,
   )
     .bind(...ids, ...eventIds)
     .all<{

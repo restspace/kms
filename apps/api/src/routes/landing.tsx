@@ -252,6 +252,25 @@ function dayKey(iso: string, timezone: string): string {
 }
 
 /**
+ * Every calendar day the event spans (in the event's own timezone), inclusive
+ * of both ends — not just the days that happen to have a session scheduled
+ * yet. A day with zero sessions still needs a tab/entry, so this must not be
+ * derived from the session list.
+ */
+function eventDayRange(startsAt: string, endsAt: string, timezone: string): string[] {
+  const startKey = dayKey(startsAt, timezone);
+  const endKey = dayKey(endsAt, timezone);
+  const days: string[] = [];
+  let cursor = new Date(`${startKey}T00:00:00Z`);
+  const end = new Date(`${endKey}T00:00:00Z`);
+  while (cursor <= end) {
+    days.push(cursor.toISOString().slice(0, 10));
+    cursor = new Date(cursor.getTime() + 24 * 60 * 60 * 1000);
+  }
+  return days;
+}
+
+/**
  * Shared by GET /e/:slug/agenda.json and GET /e/:slug/sessions.json (EMB-15):
  * the two feeds carry the identical published-session payload — SessionsWidget
  * already reads the agenda shape (rooms/tracks/day grouping is what lets its
@@ -337,7 +356,14 @@ async function loadAgendaFeed(db: D1Database, slug: string) {
     speakerDetailsBySession.set(row.submission_id, details);
   }
 
-  const days = [...new Set(sessions.map((s) => dayKey(s.starts_at, event.timezone)))].sort();
+  // The full event span, not just days that already have a session on the
+  // calendar (EMB-XX): an empty day should still show up as an empty day
+  // rather than silently vanishing from the count. Session days are unioned
+  // in too, in case a session's timestamp ever falls outside the event's
+  // recorded starts_at/ends_at.
+  const days = [
+    ...new Set([...eventDayRange(event.starts_at, event.ends_at, event.timezone), ...sessions.map((s) => dayKey(s.starts_at, event.timezone))]),
+  ].sort();
 
   return {
     // Non-null: the object literal handed to redactInternal is never null/undefined

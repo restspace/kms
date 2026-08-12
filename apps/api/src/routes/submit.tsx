@@ -380,6 +380,7 @@ submitRoutes.get('/:slug/:formId', async (c) => {
       welcome_message_visible: form.welcome_message_visible === 1,
       collect_participants: form.collect_participants === 1,
       participant_roles: form.participant_roles,
+      status: form.status,
       close_at: form.close_at,
       submission_limit: ctx.limit,
       auto_redirect_to_portal: form.auto_redirect_to_portal === 1,

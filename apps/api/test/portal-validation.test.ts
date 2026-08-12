@@ -98,6 +98,22 @@ describe('POST /portal/:slug/profile validation', () => {
     expect(JSON.parse(row?.links ?? '{}')).toMatchObject({ website: 'https://example.com/ada' });
   });
 
+  it('accepts a bare X/Twitter handle and normalizes it to a full URL', async () => {
+    const res = await postProfile({
+      first_name: 'Ada',
+      last_name: 'Lovelace',
+      link_twitter: '@ada_lovelace',
+      link_linkedin: '',
+      link_facebook: '',
+      link_website: '',
+    });
+    expect(res.status).toBe(302);
+    const row = await env.DB.prepare('SELECT links FROM contacts WHERE id = ?')
+      .bind(contactId)
+      .first<{ links: string | null }>();
+    expect(JSON.parse(row?.links ?? '{}')).toMatchObject({ twitter: 'https://x.com/ada_lovelace' });
+  });
+
   it('leaves stored links alone when all four controls are blank and unchanged', async () => {
     await env.DB.prepare('UPDATE contacts SET links = ? WHERE id = ?')
       .bind(JSON.stringify({ linkedin: '', twitter: '', facebook: '', website: '' }), contactId)

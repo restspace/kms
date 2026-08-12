@@ -321,3 +321,85 @@ describe('auto mode reproduces the pre-conversion sweep (D5, 08-communications a
     ]);
   });
 });
+
+// POST /app/api/tasks/:id/remind — the on-demand counterpart to "Remind
+// lagging" reviewers (evaluation.ts's plans/:id/remind), which deliverables
+// reminders had no equivalent of before this change.
+describe('POST /app/api/tasks/:id/remind (on-demand deliverable reminder)', () => {
+  it('sends immediately for an outstanding assignment, outside any offset window, and is a same-day no-op on a second click', async () => {
+    const eventId = await seedEvent();
+    const admin = await seedStaff(eventId, 'admin');
+    const speaker = await seedContact(eventId, { email: 'manual-remind@example.com' });
+    // Due in 30 days: no offset window is open, so the scheduled sweep would
+    // send nothing — the manual trigger must still fire.
+    const { taskId, assignId } = await seedAssignment(eventId, speaker, inMs(30 * DAY_MS));
+    await sweepReminders(env);
+    expect(await logRowsFor(eventId)).toHaveLength(0);
+
+    const res = await SELF.fetch(
+      `https://example.com/app/api/tasks/${taskId}/remind`,
+      jsonReq(admin.cookie, {}),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { ok: boolean; sent: number; assignment_ids: string[] };
+    expect(body.ok).toBe(true);
+    expect(body.sent).toBe(1);
+    expect(body.assignment_ids).toEqual([assignId]);
+
+    const logs = await logRowsFor(eventId);
+    expect(logs).toHaveLength(1);
+    expect(logs[0]!.idempotency_key).toMatch(new RegExp(`^task_reminder:${speaker}:${assignId}:vmanual-\\d{4}-\\d{2}-\\d{2}$`));
+    expect(logs[0]!.status).toBe('queued');
+
+    // A second click the same day dedupes against its own idem_key (same
+    // guarantee the scheduled sweep gets from stageChase) rather than sending
+    // a second copy.
+    const again = await SELF.fetch(`https://example.com/app/api/tasks/${taskId}/remind`, jsonReq(admin.cookie, {}));
+    expect(again.status).toBe(200);
+    expect(await logRowsFor(eventId)).toHaveLength(1);
+
+    // The scheduled sweep's own off/late keys are untouched by the manual
+    // key — the two never dedupe against each other.
+    expect((await logRowsFor(eventId))[0]!.idempotency_key).not.toContain(':voff');
+  });
+
+  it('narrows to the given submission_ids and skips a completed assignment', async () => {
+    const eventId = await seedEvent();
+    const admin = await seedStaff(eventId, 'admin');
+    const speakerA = await seedContact(eventId, { email: 'remind-a@example.com' });
+    const speakerB = await seedContact(eventId, { email: 'remind-b@example.com' });
+    const { taskId, assignId: assignA } = await seedAssignment(eventId, speakerA, inMs(30 * DAY_MS));
+    const taskRow = await env.DB.prepare('SELECT event_id FROM tasks WHERE id = ?').bind(taskId).first<{ event_id: string }>();
+    const submissionId = `sub-${crypto.randomUUID()}`;
+    await env.DB.prepare(
+      `INSERT INTO submissions (id, event_id, code, kind, title, status, source, created_at, updated_at)
+       VALUES (?, ?, 'SESS-REM', 'abstract', 'Remind me', 'accepted', 'manual', ?, ?)`,
+    ).bind(submissionId, taskRow!.event_id, ts, ts).run();
+    await env.DB.prepare('UPDATE task_assignments SET submission_id = ? WHERE id = ?').bind(submissionId, assignA).run();
+
+    const assignB = `ta-${crypto.randomUUID()}`;
+    await env.DB.prepare(
+      `INSERT INTO task_assignments (id, task_id, contact_id, status) VALUES (?, ?, ?, 'complete')`,
+    ).bind(assignB, taskId, speakerB).run();
+
+    const res = await SELF.fetch(
+      `https://example.com/app/api/tasks/${taskId}/remind`,
+      jsonReq(admin.cookie, { submission_ids: [submissionId] }),
+    );
+    const body = (await res.json()) as { sent: number; assignment_ids: string[] };
+    // assignB is filtered out both by not matching submission_ids AND by
+    // already being complete; either reason is sufficient on its own.
+    expect(body.sent).toBe(1);
+    expect(body.assignment_ids).toEqual([assignA]);
+  });
+
+  it('404s for a task in another event', async () => {
+    const eventId = await seedEvent();
+    const otherEvent = await seedEvent();
+    const outsider = await seedStaff(otherEvent, 'admin');
+    const { taskId } = await seedAssignment(eventId, await seedContact(eventId, { email: 'x@example.com' }), inMs(DAY_MS));
+
+    const res = await SELF.fetch(`https://example.com/app/api/tasks/${taskId}/remind`, jsonReq(outsider.cookie, {}));
+    expect(res.status).toBe(404);
+  });
+});

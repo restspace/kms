@@ -23,6 +23,7 @@ import {
   canReviewerSeeThread,
   loadAuthorName,
   loadThread,
+  pseudonymiseReviewerAuthors,
 } from '../submissionComments';
 
 type ApiEnv = { Bindings: Env; Variables: { session: SessionPayload } };
@@ -312,11 +313,23 @@ evaluationRoutes.post('/submissions/send-decisions', async (c) => {
   if (!event) return c.json({ error: 'not_found' }, 404);
 
   const placeholders = ids.map(() => '?').join(', ');
+  // Mirrors expandSendDecisions' fallback (jobs/bulkJobs.ts): a submitter with
+  // no usable email still counts as reachable here if another participant on
+  // the submission has one, so this upfront preflight count doesn't overstate
+  // skipped_no_submitter versus what actually sends.
   const { results } = await db
     .prepare(
-      `SELECT s.id, s.status, s.notified_at, s.submitter_contact_id, c.email AS submitter_email
+      `SELECT s.id, s.status, s.notified_at, s.submitter_contact_id,
+              COALESCE(NULLIF(c.email, ''), fb.email) AS submitter_email
        FROM submissions s
        LEFT JOIN contacts c ON c.id = s.submitter_contact_id
+       LEFT JOIN (
+         SELECT sp.submission_id, c2.email,
+                ROW_NUMBER() OVER (PARTITION BY sp.submission_id ORDER BY sp.position) AS rn
+         FROM submission_participants sp
+         JOIN contacts c2 ON c2.id = sp.contact_id
+         WHERE NULLIF(c2.email, '') IS NOT NULL
+       ) fb ON fb.submission_id = s.id AND fb.rn = 1
        WHERE s.event_id = ? AND s.id IN (${placeholders})`,
     )
     .bind(session.eventId, ...ids)
@@ -587,18 +600,79 @@ evaluationRoutes.put('/submissions/:id', async (c) => {
   sets.push('updated_at = ?');
   params.push(nowIso());
 
-  const result = await c.env.DB.prepare(
-    `UPDATE submissions SET ${sets.join(', ')} WHERE id = ? AND event_id = ?`,
-  )
-    .bind(...params, id, session.eventId)
-    .run();
-  if (result.meta.changes === 0) return c.json({ error: 'not_found' }, 404);
+  // Content history (CFP content-revisions): snapshot the PRE-edit
+  // title/description before the UPDATE lands, batched with it so the
+  // snapshot and the change it precedes commit together. Only worth a row
+  // when this edit actually touches one of those fields — a format/track/
+  // room-only PUT leaves no content to have "reverted".
+  const statements: D1PreparedStatement[] = [];
+  if ('title' in body || 'description' in body) {
+    const before = await c.env.DB.prepare(
+      'SELECT title, description FROM submissions WHERE id = ? AND event_id = ?',
+    )
+      .bind(id, session.eventId)
+      .first<{ title: string; description: string | null }>();
+    if (before) {
+      statements.push(
+        c.env.DB.prepare(
+          `INSERT INTO content_revisions
+             (id, event_id, submission_id, title, description, edited_by, edited_by_name, source, edited_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 'admin', ?)`,
+        ).bind(
+          crypto.randomUUID(),
+          session.eventId,
+          id,
+          before.title,
+          before.description,
+          session.contactId,
+          await loadAuthorName(c.env.DB, session.contactId),
+          nowIso(),
+        ),
+      );
+    }
+  }
+  statements.push(
+    c.env.DB.prepare(`UPDATE submissions SET ${sets.join(', ')} WHERE id = ? AND event_id = ?`).bind(
+      ...params,
+      id,
+      session.eventId,
+    ),
+  );
+  const batchResults = await c.env.DB.batch(statements);
+  const updateResult = batchResults[batchResults.length - 1];
+  if (!updateResult || updateResult.meta.changes === 0) return c.json({ error: 'not_found' }, 404);
   await bumpEventRevision(c.env, session.eventId);
   const row = await c.env.DB.prepare('SELECT * FROM submissions WHERE id = ? AND event_id = ?')
     .bind(id, session.eventId)
     .first();
   if (!row) return c.json({ error: 'not_found' }, 404);
   return c.json(row);
+});
+
+/**
+ * GET /submissions/:id/revisions — content history (admin/owner + reviewer
+ * seats, same guard as every other /app/api route mounted through
+ * adminApiRoutes). Newest first; each row is a pre-edit snapshot, so reading
+ * them in order reconstructs "what did this say before edit N" without any
+ * rollback machinery — none is built here by design.
+ */
+evaluationRoutes.get('/submissions/:id/revisions', async (c) => {
+  const session = c.get('session');
+  const id = c.req.param('id');
+  const submission = await c.env.DB.prepare('SELECT id FROM submissions WHERE id = ? AND event_id = ?')
+    .bind(id, session.eventId)
+    .first();
+  if (!submission) return c.json({ error: 'not_found' }, 404);
+
+  const { results } = await c.env.DB.prepare(
+    `SELECT id, title, description, edited_by, edited_by_name, source, edited_at
+     FROM content_revisions
+     WHERE submission_id = ? AND event_id = ?
+     ORDER BY edited_at DESC, id DESC`,
+  )
+    .bind(id, session.eventId)
+    .all();
+  return c.json({ items: results ?? [] });
 });
 
 // ---------------------------------------------------------------------------
@@ -879,7 +953,7 @@ evaluationRoutes.get('/evaluation/overview', async (c) => {
   const session = c.get('session');
   const db = c.env.DB;
   try {
-    const [plans, criteria, reviewers, stats, pool, workload] = await Promise.all([
+    const [plans, criteria, reviewers, stats, pool, workload, queueTotals] = await Promise.all([
       db.prepare('SELECT * FROM evaluation_plans WHERE event_id = ? ORDER BY created_at').bind(session.eventId).all(),
       db.prepare(
         `SELECT sc.* FROM scoring_criteria sc
@@ -920,6 +994,21 @@ evaluationRoutes.get('/evaluation/overview', async (c) => {
          WHERE p.event_id = ?
          GROUP BY ra.plan_id, ra.reviewer_contact_id`,
       ).bind(session.eventId).all(),
+      // Per-reviewer totals matching what GET /review/queue actually hands
+      // that reviewer: summed across every *active* plan they're assigned to,
+      // not grouped per plan like `workload` above. `workload` stays
+      // per-plan (the Assign panel balances load *within* one plan), but a
+      // per-plan number read as "their assignment count" undercounts the
+      // instant a reviewer sits on two active plans at once — this is the
+      // figure that agrees with their queue.
+      db.prepare(
+        `SELECT ra.reviewer_contact_id AS contact_id,
+                COUNT(*) AS assigned,
+                SUM(CASE WHEN ra.status IN ('complete', 'skipped') THEN 1 ELSE 0 END) AS completed
+         FROM review_assignments ra JOIN evaluation_plans p ON p.id = ra.plan_id
+         WHERE p.event_id = ? AND p.status = 'active'
+         GROUP BY ra.reviewer_contact_id`,
+      ).bind(session.eventId).all(),
     ]);
     // ABS-07: this payload carries the plan flags the editor re-renders from
     // (anonymise, window, status). It must never be answered from a cache —
@@ -932,6 +1021,9 @@ evaluationRoutes.get('/evaluation/overview', async (c) => {
       stats: stats.results ?? [],
       pool: pool.results ?? [],
       workload: workload.results ?? [],
+      // Additive: the reviewer's true cross-plan queue size (see the query
+      // above). Existing clients reading `workload` per-plan are unaffected.
+      queue_totals: queueTotals.results ?? [],
     });
   } catch (err) {
     console.error('evaluation/overview failed', err);
@@ -1912,15 +2004,15 @@ async function reviewerAssignment(
   assignmentId: string,
   contactId: string,
   eventId: string,
-): Promise<{ id: string; plan_id: string; submission_id: string } | null> {
+): Promise<{ id: string; plan_id: string; submission_id: string; anonymise_submitters: number } | null> {
   return db
     .prepare(
-      `SELECT ra.id, ra.plan_id, ra.submission_id
+      `SELECT ra.id, ra.plan_id, ra.submission_id, p.anonymise_submitters
        FROM review_assignments ra JOIN evaluation_plans p ON p.id = ra.plan_id
        WHERE ra.id = ? AND ra.reviewer_contact_id = ? AND p.event_id = ?`,
     )
     .bind(assignmentId, contactId, eventId)
-    .first<{ id: string; plan_id: string; submission_id: string }>();
+    .first<{ id: string; plan_id: string; submission_id: string; anonymise_submitters: number }>();
 }
 
 // GET /review/assignments/:id/comments — the thread, once the D3 gate opens.
@@ -1934,7 +2026,10 @@ evaluationRoutes.get('/review/assignments/:id/comments', async (c) => {
   if (!(await canReviewerSeeThread(db, session.contactId, assignment.submission_id))) {
     return c.json({ error: 'review_not_submitted' }, 403);
   }
-  return c.json({ comments: await loadThread(db, assignment.submission_id) });
+  const thread = await loadThread(db, assignment.submission_id);
+  return c.json({
+    comments: assignment.anonymise_submitters === 1 ? pseudonymiseReviewerAuthors(thread) : thread,
+  });
 });
 
 // POST /review/assignments/:id/comments — reviewer reply. Same gate as the
@@ -1962,5 +2057,10 @@ evaluationRoutes.post('/review/assignments/:id/comments', async (c) => {
   });
   if (!commentId) return c.json({ error: 'empty_body' }, 400);
   await bumpEventRevision(c.env, session.eventId);
-  return c.json({ ok: true, id: commentId, comments: await loadThread(db, assignment.submission_id) });
+  const thread = await loadThread(db, assignment.submission_id);
+  return c.json({
+    ok: true,
+    id: commentId,
+    comments: assignment.anonymise_submitters === 1 ? pseudonymiseReviewerAuthors(thread) : thread,
+  });
 });

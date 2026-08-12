@@ -114,6 +114,39 @@ export async function canReviewerSeeThread(
   );
 }
 
+/**
+ * Reviewer-identity redaction for the reviewer-facing discussion thread
+ * (workplan 13, plan.anonymise_submitters). The flag's original purpose is
+ * hiding the *submitter's* identity from reviewers, but a rationale/
+ * discussion thread with real reviewer names defeats that intent from the
+ * other side — a reviewer can infer who scored what from who is arguing for
+ * it. When the plan anonymises, every kind='rationale' or author_role=
+ * 'reviewer' row gets a stable per-thread pseudonym ("Reviewer 1", "Reviewer
+ * 2", …) instead of author_name, assigned by first appearance in the thread
+ * so the same reviewer keeps the same label across the whole conversation.
+ * author_contact_id is cleared alongside it — leaving it in place would make
+ * the pseudonym cosmetic for any client that can resolve contact ids.
+ * Organiser-authored rows (author_role admin/owner) are never touched: the
+ * flag hides submitters and reviewers from each other, not the organisers
+ * running the round.
+ */
+export function pseudonymiseReviewerAuthors(thread: SubmissionCommentRow[]): SubmissionCommentRow[] {
+  const labels = new Map<string, string>();
+  const labelFor = (contactId: string | null): string => {
+    const key = contactId ?? '\0anonymous';
+    let label = labels.get(key);
+    if (!label) {
+      label = `Reviewer ${labels.size + 1}`;
+      labels.set(key, label);
+    }
+    return label;
+  };
+  return thread.map((row) => {
+    if (row.kind !== 'rationale' && row.author_role !== 'reviewer') return row;
+    return { ...row, author_name: labelFor(row.author_contact_id), author_contact_id: null };
+  });
+}
+
 /** Display name for a comment author, denormalised onto the row at write time. */
 export async function loadAuthorName(db: D1Database, contactId: string): Promise<string | null> {
   const row = await db

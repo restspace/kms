@@ -142,4 +142,45 @@ describe('POST /app/api/submissions/send-decisions — notified_at only on succe
       .first<{ n: number }>();
     expect(messages?.n).toBe(0);
   });
+
+  it('falls back to a co-speaker/participant email when the submitter has none, instead of silently skipping', async () => {
+    await clearPendingJobs();
+    const eventId = await createEvent();
+    const cookie = await staffSession(eventId);
+    // No submitter contact at all — the admin-created-record shape this
+    // fallback is meant to rescue.
+    const submissionId = await seedSubmission(eventId, null, 'accept_queue');
+    const coSpeaker = await createContact(eventId, { email: 'co-speaker@example.com', first_name: 'Priya' });
+    await env.DB.prepare(
+      `INSERT INTO submission_participants (id, submission_id, contact_id, role, position, is_primary_contact)
+       VALUES (?, ?, ?, 'co-speaker', 1, 0)`,
+    ).bind(crypto.randomUUID(), submissionId, coSpeaker).run();
+
+    const res = await SELF.fetch(
+      'https://example.com/app/api/submissions/send-decisions',
+      post(cookie, { ids: [submissionId] }),
+    );
+    const body = (await res.json()) as { job_id: string; skipped_no_submitter: number };
+    // The preflight count already reflects the fallback — it must not report
+    // this submission as unreachable when a participant can still be mailed.
+    expect(body.skipped_no_submitter).toBe(0);
+    await settleJob(body.job_id);
+
+    const row = await env.DB.prepare('SELECT status, notified_at FROM submissions WHERE id = ?')
+      .bind(submissionId)
+      .first<{ status: string; notified_at: string | null }>();
+    expect(row?.status).toBe('accepted');
+    expect(row?.notified_at).not.toBeNull();
+
+    const messages = await env.DB.prepare(
+      `SELECT template_key, to_email FROM message_log WHERE bulk_job_id = ?`,
+    ).bind(body.job_id).all<{ template_key: string; to_email: string }>();
+    expect(messages.results).toHaveLength(1);
+    expect(messages.results[0]).toMatchObject({ template_key: 'decision_accepted', to_email: 'co-speaker@example.com' });
+
+    const polled = await (
+      await SELF.fetch(`https://example.com/app/api/bulk-jobs/${body.job_id}`, { headers: { cookie } })
+    ).json() as { skipped_no_submitter: number };
+    expect(polled.skipped_no_submitter).toBe(0);
+  });
 });

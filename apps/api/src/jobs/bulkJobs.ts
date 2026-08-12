@@ -198,10 +198,24 @@ async function expandSendDecisions(env: Env, job: BulkJobRow, limit: number): Pr
   }
 
   const placeholders = params.ids.map(() => '?').join(', ');
+  // Fallback recipient: an admin-created (or otherwise emailless) submitter
+  // used to mean the decision email was silently skipped, even when another
+  // participant/speaker on the same submission has a usable address. `fb`
+  // picks the first participant (by position) carrying a non-blank email;
+  // COALESCE only reaches for it when the submitter's own address is missing
+  // or blank, so a real submitter email is never overridden.
   const selectSql = `SELECT s.id, s.code, s.title, s.status, s.submitter_contact_id,
-              c.email AS submitter_email, c.first_name AS submitter_first_name
+              COALESCE(NULLIF(c.email, ''), fb.email) AS submitter_email,
+              COALESCE(c.first_name, fb.first_name) AS submitter_first_name
        FROM submissions s
        LEFT JOIN contacts c ON c.id = s.submitter_contact_id
+       LEFT JOIN (
+         SELECT sp.submission_id, c2.email, c2.first_name,
+                ROW_NUMBER() OVER (PARTITION BY sp.submission_id ORDER BY sp.position) AS rn
+         FROM submission_participants sp
+         JOIN contacts c2 ON c2.id = sp.contact_id
+         WHERE NULLIF(c2.email, '') IS NOT NULL
+       ) fb ON fb.submission_id = s.id AND fb.rn = 1
        WHERE s.event_id = ? AND s.id IN (${placeholders}) AND s.status IN ('accept_queue', 'decline_queue')`;
   // ORDER BY submitter_contact_id makes a speaker's decisions adjacent, so
   // grouping is a single pass; over-fetch by one row to detect a group

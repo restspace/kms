@@ -38,6 +38,7 @@ import {
   type CommentListRow,
 } from './api'
 import { buildExportUrl, downloadFilesBundle } from './api'
+import { normalizeXHandleToUrl } from '@kms/core'
 import { appAlert, appConfirm, ModalDialog } from './components/dialogs'
 import { RecordFormActionableError } from './components/RecordForm'
 import { TaskCreateForm } from './workspace/TaskCreateForm'
@@ -438,7 +439,7 @@ const StatusChip = ({ status }: { status: string }) => (
 // per-event custom fields.
 const SOCIAL_LINK_FORM_FIELDS = [
   ['link_linkedin', 'linkedin', 'LinkedIn'],
-  ['link_twitter', 'twitter', 'X (Twitter)'],
+  ['link_twitter', 'twitter', 'X (Twitter) handle or URL'],
   ['link_facebook', 'facebook', 'Facebook'],
   ['link_website', 'website', 'Website'],
 ] as const
@@ -456,7 +457,13 @@ const speakerSchema = {
     pronouns: { type: 'string', title: 'Pronouns' },
     biography: { type: 'string', format: 'textarea', title: 'Biography' },
     ...Object.fromEntries(
-      SOCIAL_LINK_FORM_FIELDS.map(([control, , label]) => [control, { type: 'string', format: 'url', title: label }]),
+      SOCIAL_LINK_FORM_FIELDS.map(([control, , label]) => [
+        control,
+        // link_twitter accepts a bare handle as well as a full URL (it is
+        // normalized to a URL in unflattenContactLinks below), so it gets
+        // the looser 'social-handle' format instead of a strict 'url' one.
+        { type: 'string', format: control === 'link_twitter' ? 'social-handle' : 'url', title: label },
+      ]),
     ),
     notes: { type: 'string', format: 'textarea', title: 'Internal notes' },
   },
@@ -479,7 +486,10 @@ const unflattenContactLinks = (data: Record<string, unknown>): Record<string, un
     const control = SOCIAL_LINK_FORM_FIELDS.find(([c]) => c === key)
     if (control) {
       hasAnyLinkKey = true
-      if (typeof value === 'string' && value.trim() !== '') links[control[1]] = value.trim()
+      if (typeof value === 'string' && value.trim() !== '') {
+        const trimmed = value.trim()
+        links[control[1]] = control[1] === 'twitter' ? normalizeXHandleToUrl(trimmed) : trimmed
+      }
     } else {
       out[key] = value
     }

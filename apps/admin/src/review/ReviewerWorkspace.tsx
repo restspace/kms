@@ -57,6 +57,14 @@ export function ReviewerWorkspace() {
   const done = queue.assignments.filter((a) => a.status === 'complete' || a.status === 'skipped').length
   const active = queue.assignments.find((a) => a.id === activeId) ?? null
 
+  /** Switching submissions must never carry the previous one's saved-summary
+      line along with it — clear it here so a freshly opened (or reopened)
+      submission starts with no summary until it is saved again itself. */
+  const switchTo = (id: string) => {
+    setSavedNote(null)
+    setActiveId(id)
+  }
+
   return (
     <div className="review-shell">
       <aside className="review-queue">
@@ -72,7 +80,7 @@ export function ReviewerWorkspace() {
           <button
             key={String(a.id)}
             className={`rq-item${a.id === activeId ? ' active' : ''}`}
-            onClick={() => setActiveId(a.id as string)}
+            onClick={() => switchTo(a.id as string)}
           >
             <span className="rq-code">{String(a.code)} · {String(a.plan_name)}</span>
             <br />
@@ -100,7 +108,7 @@ export function ReviewerWorkspace() {
               const nextOpen =
                 list.slice(index + 1).find((a) => a.status !== 'complete' && a.status !== 'skipped') ??
                 list.find((a) => a.status !== 'complete' && a.status !== 'skipped' && a.id !== active.id)
-              if (nextOpen) setActiveId(nextOpen.id as string)
+              if (nextOpen) switchTo(nextOpen.id as string)
             }}
           />
         ) : (

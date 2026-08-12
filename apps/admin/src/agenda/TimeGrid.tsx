@@ -54,6 +54,50 @@ const NO_PREVIEW: DropPreview = { bad: false, titles: '' }
 const slotKey = (g: { colKey: string; startMin: number; durationMin: number }) =>
   `${g.colKey}:${g.startMin}:${g.durationMin}`
 
+export interface LanedSession {
+  session: AgendaSessionRow
+  startMin: number
+  endMin: number
+  /** Sub-column index within its room/day column, for overlapping sessions. */
+  lane: number
+  /** How many sub-columns the overlap cluster needs. */
+  lanes: number
+}
+
+/**
+ * Greedy lane assignment, ported from packages/ui/src/widgets/AgendaWidget.tsx's
+ * `assignLanes`: walk a column's sessions in start order, giving each one the
+ * first lane free at its start time, grouped into "clusters" of
+ * transitively-overlapping blocks so every block in a cluster gets the same
+ * lane count and the column divides evenly. Without this, two sessions
+ * double-booked into the same room/slot both render at `.tg-block`'s default
+ * `left:3px; right:3px` — i.e. fully stacked, with whichever renders last
+ * hiding the earlier one's title.
+ */
+export function assignLanes(items: LanedSession[]): void {
+  let cluster: LanedSession[] = []
+  let clusterEnd = -Infinity
+  const laneEnds: number[] = []
+
+  const flush = () => {
+    const lanes = laneEnds.length || 1
+    for (const item of cluster) item.lanes = lanes
+    cluster = []
+    laneEnds.length = 0
+  }
+
+  for (const item of items) {
+    if (item.startMin >= clusterEnd) flush()
+    let lane = laneEnds.findIndex((end) => end <= item.startMin)
+    if (lane === -1) lane = laneEnds.length
+    laneEnds[lane] = item.endMin
+    item.lane = lane
+    cluster.push(item)
+    clusterEnd = Math.max(clusterEnd, item.endMin)
+  }
+  flush()
+}
+
 export function TimeGrid({
   columns,
   sessions,
@@ -135,6 +179,21 @@ export function TimeGrid({
     const list = byColumn.get(key) ?? []
     list.push(s)
     byColumn.set(key, list)
+  }
+
+  // Lane assignment per column, keyed by session id — computed once here
+  // (rather than per-render inside the .map below) so every session in a
+  // column sees the whole column's overlap picture, not just itself.
+  const laneById = new Map<string, { lane: number; lanes: number }>()
+  for (const list of byColumn.values()) {
+    const laned: LanedSession[] = list.map((s) => {
+      const local = utcToLocal(s.starts_at as string, timezone)
+      const durationMin = durationMinutes(s.starts_at as string, s.ends_at as string)
+      return { session: s, startMin: local.minutes, endMin: local.minutes + durationMin, lane: 0, lanes: 1 }
+    })
+    laned.sort((a, b) => a.startMin - b.startMin || b.endMin - a.endMin)
+    assignLanes(laned)
+    for (const item of laned) laneById.set(item.session.id, { lane: item.lane, lanes: item.lanes })
   }
 
   /**
@@ -304,6 +363,8 @@ export function TimeGrid({
               const level = conflictLevel(s.id)
               const color = trackColor(s)
               const pencilled = classifySchedule(s) === 'pencilled'
+              const { lane, lanes } = laneById.get(s.id) ?? { lane: 0, lanes: 1 }
+              const lanePct = 100 / lanes
               return (
                 <div
                   className={`tg-block${pencilled ? ' pencilled' : ''}${level ? ` conflict-${level}` : ''}`}
@@ -317,6 +378,13 @@ export function TimeGrid({
                     // sessions render slightly taller than their slot rather
                     // than lose the title (docs/07 eval fix).
                     height: Math.max(dur, 36),
+                    // Overlapping sessions in the same room/slot split into
+                    // side-by-side lanes instead of the CSS default
+                    // (`left:3px; right:3px`, i.e. full width) which stacked
+                    // them and hid the earlier one's title. `lane === 0,
+                    // lanes === 1` reduces to the original 3px/3px inset.
+                    left: `calc(${lanePct * lane}% + 3px)`,
+                    width: `calc(${lanePct}% - 6px)`,
                     ...(color ? { ['--track-color' as string]: color } : {}),
                   }}
                   draggable

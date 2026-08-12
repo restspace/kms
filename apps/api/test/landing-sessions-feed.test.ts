@@ -44,6 +44,21 @@ describe('GET /e/:slug/sessions.json', () => {
     expect(body.sessions[0]?.speakers).toEqual(['Ada Lovelace']);
   });
 
+  it('lists every day the event spans, including a day with zero sessions scheduled yet', async () => {
+    // Default seedEvent span is 2026-10-01T08:00Z .. 2026-10-02T18:00Z (UTC
+    // timezone) — two calendar days — but the only session seeded below lands
+    // on the first day. `days` must still report both, not just the one with
+    // a session on it.
+    const eventId = await seedEvent({ slug: `sessfeed-days-${crypto.randomUUID().slice(0, 8)}` });
+    await seedPublishedSession(eventId);
+    const slug = (await env.DB.prepare('SELECT slug FROM events WHERE id = ?').bind(eventId).first<{ slug: string }>())!.slug;
+
+    const res = await SELF.fetch(`https://example.com/e/${slug}/sessions.json`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { days: string[] };
+    expect(body.days).toEqual(['2026-10-01', '2026-10-02']);
+  });
+
   it('404s when the agenda is not published, same as agenda.json', async () => {
     const eventId = await seedEvent({ slug: `sessfeed-unpub-${crypto.randomUUID().slice(0, 8)}` });
     const slug = (await env.DB.prepare('SELECT slug FROM events WHERE id = ?').bind(eventId).first<{ slug: string }>())!.slug;

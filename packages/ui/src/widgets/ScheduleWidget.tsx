@@ -213,6 +213,7 @@ function SessionCard({
 export function ScheduleWidget({ eventSlug, filter }: ScheduleWidgetProps) {
   const [feed, setFeed] = useState<AgendaFeed | null | undefined>(undefined)
   const [activeDay, setActiveDay] = useState<string | null>(null)
+  const [query, setQuery] = useState('')
   const [starred, setStarred] = useState<Set<string>>(() => new Set())
   const [openSessionId, setOpenSessionId] = useState<string | null>(null)
   // EMB minor: "Export my schedule" gave no feedback that anything happened.
@@ -269,9 +270,20 @@ export function ScheduleWidget({ eventSlug, filter }: ScheduleWidgetProps) {
   )
 
   const visibleSessions = useMemo(() => {
-    if (activeDay === MY_SCHEDULE) return myScheduleSessions
-    return sortedSessions.filter((s) => s.day === activeDay)
-  }, [sortedSessions, myScheduleSessions, activeDay])
+    const base = activeDay === MY_SCHEDULE ? myScheduleSessions : sortedSessions.filter((s) => s.day === activeDay)
+    const q = query.trim().toLowerCase()
+    if (!q) return base
+    // Same scope as SessionsWidget's search (title + speaker display name,
+    // both the plain `speakers` list and the richer `speaker_details`), just
+    // applied on top of the day/"my schedule" tab instead of the whole feed.
+    return base.filter((s) => {
+      const inTitle = s.title.toLowerCase().includes(q)
+      const inSpeakers =
+        s.speakers.some((name) => name.toLowerCase().includes(q)) ||
+        s.speaker_details.some((sp) => sp.name.toLowerCase().includes(q))
+      return inTitle || inSpeakers
+    })
+  }, [sortedSessions, myScheduleSessions, activeDay, query])
 
   function toggleStar(sessionId: string) {
     setStarred((prev) => {
@@ -316,6 +328,16 @@ export function ScheduleWidget({ eventSlug, filter }: ScheduleWidgetProps) {
   return (
     <div className="schedule-widget">
       <style dangerouslySetInnerHTML={{ __html: scheduleWidgetCss }} />
+      <div className="schedule-controls">
+        <input
+          type="search"
+          className="schedule-search"
+          placeholder="Search sessions or speakers…"
+          value={query}
+          onChange={(e) => setQuery(e.currentTarget.value)}
+          aria-label="Search sessions or speakers"
+        />
+      </div>
       <div className="schedule-toolbar">
         <div className="schedule-tabs" role="tablist" aria-label="Schedule day">
           {days.map((day) => (
@@ -355,13 +377,16 @@ export function ScheduleWidget({ eventSlug, filter }: ScheduleWidgetProps) {
         </p>
       )}
 
-      {visibleSessions.length === 0 && activeDay === MY_SCHEDULE && (
+      {visibleSessions.length === 0 && query.trim() !== '' && (
+        <p className="event-widget-empty">No sessions match your search.</p>
+      )}
+      {visibleSessions.length === 0 && query.trim() === '' && activeDay === MY_SCHEDULE && (
         <p className="event-widget-empty">
           Your schedule is empty — tap the star on any session to add it here, then export or subscribe once
           you're set.
         </p>
       )}
-      {visibleSessions.length === 0 && activeDay !== MY_SCHEDULE && (
+      {visibleSessions.length === 0 && query.trim() === '' && activeDay !== MY_SCHEDULE && (
         <p className="event-widget-empty">No sessions scheduled for this day.</p>
       )}
 
@@ -401,6 +426,8 @@ export function ScheduleWidget({ eventSlug, filter }: ScheduleWidgetProps) {
 }
 
 const scheduleWidgetCss = `
+.schedule-controls { display: flex; flex-wrap: wrap; gap: .6rem; align-items: center; margin-bottom: .75rem; }
+.schedule-search { flex: 1 1 240px; padding: .5rem .75rem; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); color: var(--text); font-size: .95rem; }
 .schedule-toolbar { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: .75rem; margin-bottom: 1rem; }
 .schedule-tabs { display: flex; flex-wrap: wrap; gap: .3rem; }
 .schedule-tab { padding: .4rem .8rem; border-radius: 999px; border: 1px solid var(--border); background: var(--surface); color: var(--text-muted); font-size: .88rem; cursor: pointer; }

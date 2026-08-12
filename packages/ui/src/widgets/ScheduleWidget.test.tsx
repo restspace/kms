@@ -102,4 +102,26 @@ describe('ScheduleWidget', () => {
 
     expect(screen.getByRole('status').textContent).toMatch(/Exported 1 session to devflow-my-schedule\.ics/);
   });
+
+  it('matches a credited speaker surname, not just the session title', async () => {
+    const user = userEvent.setup();
+    render(<ScheduleWidget eventSlug="devflow" />);
+    await waitFor(() => expect(screen.getByText('Postmortems of Production LLM Incidents')).toBeTruthy());
+
+    const search = screen.getByLabelText('Search sessions or speakers');
+    await user.type(search, 'Liskov');
+
+    expect(screen.getByText('Postmortems of Production LLM Incidents')).toBeTruthy();
+  });
+
+  it('shows no sessions match your search for a name that matches nothing', async () => {
+    const user = userEvent.setup();
+    render(<ScheduleWidget eventSlug="devflow" />);
+    await waitFor(() => expect(screen.getByText('Postmortems of Production LLM Incidents')).toBeTruthy());
+
+    const search = screen.getByLabelText('Search sessions or speakers');
+    await user.type(search, 'Nobody Here');
+
+    expect(screen.getByText('No sessions match your search.')).toBeTruthy();
+  });
 });

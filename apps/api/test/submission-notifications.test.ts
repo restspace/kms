@@ -163,7 +163,10 @@ describe('GET /e/:slug/agenda.json', () => {
     expect(payload.event.slug).toBe(slug);
     expect(payload.sessions.map((s) => s.code)).toEqual(['SESS-1']);
     expect(payload.sessions[0]!.speakers).toEqual(['Ada L']);
-    expect(payload.days).toEqual(['2026-10-01']);
+    // Event spans 2026-10-01..2026-10-02; both days are listed even though
+    // only the first has a scheduled session (days come from the event's
+    // date range, not just from days that happen to have sessions).
+    expect(payload.days).toEqual(['2026-10-01', '2026-10-02']);
     expect(payload.rooms.map((r) => r.name)).toContain('Main hall');
     expect(JSON.stringify(payload)).not.toContain('sp@example.com');
   });

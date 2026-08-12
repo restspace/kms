@@ -90,6 +90,13 @@ describe('portal submission editing', () => {
       .all<{ question_id: string; value_json: string }>();
     expect(answers.results).toHaveLength(2);
     expect(JSON.parse(answers.results.find((a) => a.question_id === titleQ)?.value_json ?? '""')).toBe('A better title');
+
+    // The pre-edit title/description was snapshotted, attributed to the
+    // speaker who made the change (source='portal').
+    const revision = await env.DB.prepare(
+      'SELECT title, description, edited_by, source FROM content_revisions WHERE submission_id = ?',
+    ).bind(id).first<{ title: string; description: string | null; edited_by: string | null; source: string }>();
+    expect(revision).toMatchObject({ title: 'Original title', edited_by: speakerId, source: 'portal' });
   });
 
   it('queues exactly one admin notification per save, to validated event contacts only', async () => {

@@ -130,3 +130,70 @@ describe('PUT /app/api/submissions/:id { content_approved }', () => {
     expect(await res.json()).toMatchObject({ error: 'invalid_content_approved' });
   });
 });
+
+describe('content revisions (version history)', () => {
+  it('snapshots the pre-edit title/description before a title/description PUT, but not for a content_approved-only PUT', async () => {
+    const eventId = await createEvent({ slug: `cr-basic-${crypto.randomUUID().slice(0, 8)}` });
+    const { cookie } = await adminSession(eventId, eventId);
+    const id = await seedAcceptedScheduled(eventId, 'sub-cr', 'SESS-1');
+    await env.DB.prepare('UPDATE submissions SET description = ? WHERE id = ?').bind('Original description.', id).run();
+
+    // A content_approved-only PUT touches neither title nor description: no
+    // history row, nothing to have "reverted".
+    const approvalOnly = await SELF.fetch(
+      `https://example.com/app/api/submissions/${id}`,
+      json(cookie, { content_approved: false }),
+    );
+    expect(approvalOnly.status).toBe(200);
+    let revisions = await env.DB.prepare('SELECT COUNT(*) AS n FROM content_revisions WHERE submission_id = ?')
+      .bind(id)
+      .first<{ n: number }>();
+    expect(revisions?.n).toBe(0);
+
+    const editRes = await SELF.fetch(
+      `https://example.com/app/api/submissions/${id}`,
+      json(cookie, { title: 'Talk SESS-1 (revised)', description: 'New description.' }),
+    );
+    expect(editRes.status).toBe(200);
+
+    const row = await env.DB.prepare(
+      'SELECT title, description, edited_by, source FROM content_revisions WHERE submission_id = ?',
+    ).bind(id).first<{ title: string; description: string | null; edited_by: string | null; source: string }>();
+    expect(row).toMatchObject({ title: 'Talk SESS-1', description: 'Original description.', source: 'admin' });
+    expect(row?.edited_by).toBeTruthy();
+
+    // The submission itself already carries the new values.
+    const current = await env.DB.prepare('SELECT title, description FROM submissions WHERE id = ?')
+      .bind(id)
+      .first<{ title: string; description: string }>();
+    expect(current).toMatchObject({ title: 'Talk SESS-1 (revised)', description: 'New description.' });
+
+    // A second edit appends a second snapshot (append-only, oldest values first
+    // when read in insertion order) rather than overwriting the first.
+    await SELF.fetch(
+      `https://example.com/app/api/submissions/${id}`,
+      json(cookie, { title: 'Talk SESS-1 (again)' }),
+    );
+    revisions = await env.DB.prepare('SELECT COUNT(*) AS n FROM content_revisions WHERE submission_id = ?')
+      .bind(id)
+      .first<{ n: number }>();
+    expect(revisions?.n).toBe(2);
+
+    // GET .../revisions (admin-only) lists them newest first.
+    const list = await SELF.fetch(`https://example.com/app/api/submissions/${id}/revisions`, { headers: { cookie } });
+    expect(list.status).toBe(200);
+    const listBody = (await list.json()) as { items: Array<{ title: string }> };
+    expect(listBody.items.map((r) => r.title)).toEqual(['Talk SESS-1 (revised)', 'Talk SESS-1']);
+  });
+
+  it('a reviewer session cannot list revisions (admin-only)', async () => {
+    const eventId = await createEvent({ slug: `cr-forbidden-${crypto.randomUUID().slice(0, 8)}` });
+    const id = await seedAcceptedScheduled(eventId, 'sub-cr2', 'SESS-1');
+    const reviewerContactId = await createContact(eventId, { email: `reviewer-${crypto.randomUUID()}@example.com` });
+    await createEventUser(eventId, reviewerContactId, 'reviewer');
+    const reviewerCookie = await sessionCookieFor({ contactId: reviewerContactId, eventId, eventSlug: eventId, role: 'reviewer' });
+
+    const res = await SELF.fetch(`https://example.com/app/api/submissions/${id}/revisions`, { headers: { cookie: reviewerCookie } });
+    expect(res.status).toBe(403);
+  });
+});

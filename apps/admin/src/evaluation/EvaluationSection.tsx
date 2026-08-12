@@ -68,6 +68,9 @@ const asArray = <T,>(value: unknown): T[] => (Array.isArray(value) ? (value as T
 export interface Overview extends EvaluationOverview {
   pool: Array<{ plan_id: string; contact_id: string }>
   workload: Array<{ plan_id: string; contact_id: string; assigned: number; completed: number }>
+  /** Per-reviewer totals across every active plan — what GET /review/queue
+   * actually hands that reviewer, unlike `workload` which is per-plan. */
+  queue_totals: Array<{ contact_id: string; assigned: number; completed: number }>
 }
 
 type Plan = EvaluationOverview['plans'][number] & {
@@ -93,6 +96,7 @@ function normaliseOverview(raw: unknown): Overview {
     stats: asArray<EvaluationOverview['stats'][number]>(o.stats),
     pool: asArray<Overview['pool'][number]>(o.pool),
     workload: asArray<Overview['workload'][number]>(o.workload),
+    queue_totals: asArray<Overview['queue_totals'][number]>(o.queue_totals),
   }
 }
 
@@ -475,6 +479,7 @@ function PlanCard({
         {overview.reviewers.map((r) => {
           const load = overview.workload.find((w) => w.plan_id === plan.id && w.contact_id === r.id)
           const outstanding = load ? load.assigned - load.completed : 0
+          const queueTotal = overview.queue_totals.find((q) => q.contact_id === r.id)
           return (
             <div key={r.id} className="eval-reviewer" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
               <label style={{ flex: 1 }}>
@@ -508,6 +513,11 @@ function PlanCard({
                 {load && (
                   <span className="pane-sub" style={{ marginLeft: 6 }}>
                     {load.completed}/{load.assigned} done
+                  </span>
+                )}
+                {queueTotal && queueTotal.assigned !== load?.assigned && (
+                  <span className="pane-sub" style={{ marginLeft: 6 }} title="Assignments across every active plan — matches this reviewer's actual queue">
+                    ({queueTotal.assigned} across all active plans)
                   </span>
                 )}
               </label>

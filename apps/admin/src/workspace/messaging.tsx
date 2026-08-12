@@ -120,6 +120,11 @@ export function describeRunningJob(job: BulkJobStatus, noun: string): string {
 export function PortalInviteButton({ contactId, contactName }: { contactId: string; contactName: string }) {
   const [busy, setBusy] = useState(false)
   const [note, setNote] = useState<{ tone: 'ok' | 'error'; text: string } | null>(null)
+  // The actual minted link, so an organiser can verify/share/impersonate
+  // through it without needing the speaker's inbox — same contract as the
+  // reviewer sign-in link panel in EvaluationSection.
+  const [link, setLink] = useState<string | null>(null)
+  const linkInputRef = useRef<HTMLInputElement | null>(null)
   const mounted = useRef(true)
   useEffect(() => () => {
     mounted.current = false
@@ -131,6 +136,7 @@ export function PortalInviteButton({ contactId, contactName }: { contactId: stri
     try {
       const r = await invitePortal(contactId)
       if (!mounted.current) return
+      setLink(r.link)
       setNote(
         r.outcome === 'template_disabled'
           ? { tone: 'error', text: 'The sign-in email template is disabled for this event — nothing was sent.' }
@@ -155,6 +161,54 @@ export function PortalInviteButton({ contactId, contactName }: { contactId: stri
         <span role="status" className={note.tone === 'error' ? 'compose-note-error' : 'compose-note-ok'}>
           {note.text}
         </span>
+      )}
+      {link && (
+        <div role="status" style={{ display: 'grid', gap: 4, margin: '6px 0', fontSize: 12 }}>
+          <strong>Portal sign-in link for {contactName}</strong>
+          <span className="pane-sub">
+            Valid for 15 minutes, single use. Open it yourself to preview the portal as {contactName}, or copy it
+            to verify/share the invite without waiting on their inbox.
+          </span>
+          <div style={{ display: 'flex', gap: 6 }}>
+            <input
+              ref={linkInputRef}
+              readOnly
+              aria-label={`Portal sign-in link for ${contactName}`}
+              value={link}
+              style={{ flex: 1, fontFamily: 'monospace', fontSize: 11 }}
+              onFocus={(e) => (e.target as HTMLInputElement).select()}
+            />
+            <button
+              type="button"
+              onClick={() => {
+                // Clipboard writes can be refused (headless runs, an
+                // unfocused/insecure context, or the API being absent
+                // entirely) — that's not an error the organiser caused or can
+                // fix, so fall back to selecting the text for Ctrl+C.
+                const selectInstead = () => {
+                  const el = linkInputRef.current
+                  el?.focus()
+                  el?.select()
+                  setNote({ tone: 'ok', text: 'Press Ctrl+C (Cmd+C) to copy — the link is selected.' })
+                }
+                let attempt: Promise<void> | undefined
+                try {
+                  attempt = navigator.clipboard?.writeText(link)
+                } catch {
+                  attempt = undefined
+                }
+                if (!attempt) {
+                  selectInstead()
+                  return
+                }
+                void attempt.then(() => setNote({ tone: 'ok', text: 'Copied the portal sign-in link.' }), selectInstead)
+              }}
+            >
+              Copy
+            </button>
+            <button type="button" onClick={() => setLink(null)}>Dismiss</button>
+          </div>
+        </div>
       )}
     </>
   )

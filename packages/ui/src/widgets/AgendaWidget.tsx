@@ -498,11 +498,16 @@ const agendaCss = `
 .ag-gutter { position: sticky; left: 0; z-index: 2; grid-column: 1; background: var(--surface); color: var(--text-muted); font-size: .72rem; padding: 2px .5rem 0 .6rem; text-align: right; border-right: 1px solid var(--border); }
 .ag-hourline { border-top: 1px solid var(--border); pointer-events: none; z-index: 0; }
 
-.ag-block { position: relative; z-index: 1; overflow: hidden; display: flex; flex-direction: column; gap: .1rem; align-items: flex-start; text-align: left; margin-block: 1px; padding: .3rem .45rem; font: inherit; font-size: .78rem; line-height: 1.25; cursor: pointer; color: var(--text); border: 1px solid var(--border); border-left: 3px solid var(--ag-track, var(--accent)); border-radius: var(--radius); background: color-mix(in srgb, var(--ag-track, var(--accent)) 10%, var(--surface)); }
+/* min-height: a short-duration slot (a 5-10min grid row) can be shorter than
+   one line of title text; without a floor the block clips mid-glyph instead
+   of cleanly truncating a whole line. */
+.ag-block { position: relative; z-index: 1; overflow: hidden; display: flex; flex-direction: column; gap: .1rem; align-items: flex-start; text-align: left; margin-block: 1px; padding: .3rem .45rem; font: inherit; font-size: .78rem; line-height: 1.25; cursor: pointer; color: var(--text); border: 1px solid var(--border); border-left: 3px solid var(--ag-track, var(--accent)); border-radius: var(--radius); background: color-mix(in srgb, var(--ag-track, var(--accent)) 10%, var(--surface)); min-height: 1.4em; }
 .ag-block:hover, .ag-block:focus-visible { border-color: var(--accent); background: color-mix(in srgb, var(--ag-track, var(--accent)) 22%, var(--surface)); }
 .ag-block-time { color: var(--text-muted); font-size: .7rem; white-space: nowrap; }
-.ag-block-title { font-weight: 600; }
-.ag-block-speakers, .ag-block-track { color: var(--text-muted); font-size: .7rem; }
+/* Clamp to two lines with an ellipsis rather than the block's own
+   overflow: hidden cutting a line off mid-character. */
+.ag-block-title { font-weight: 600; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.ag-block-speakers, .ag-block-track { color: var(--text-muted); font-size: .7rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
 
 .ag-overlay { position: fixed; inset: 0; z-index: 50; background: var(--scrim); display: flex; align-items: flex-start; justify-content: center; padding: 4vh 1rem; overflow-y: auto; }
 .ag-panel { background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: var(--radius); padding: 1.25rem 1.4rem 1.5rem; max-width: 44rem; width: 100%; }

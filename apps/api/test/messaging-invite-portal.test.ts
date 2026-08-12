@@ -32,9 +32,13 @@ describe('POST /app/api/messaging/invite-portal', () => {
       json(admin.cookie, { contact_id: speaker }),
     );
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { ok: boolean; outcome: string };
+    const body = (await res.json()) as { ok: boolean; outcome: string; link: string };
     expect(body.ok).toBe(true);
     expect(body.outcome).toBe('queued');
+    // The organiser gets the actual minted link back too, so they can verify
+    // or share the invite (or preview the portal as the speaker) without
+    // needing that speaker's inbox.
+    expect(body.link).toMatch(/^https?:\/\/.+\/auth\/callback\?t=.+/);
 
     expect(
       await countRows(

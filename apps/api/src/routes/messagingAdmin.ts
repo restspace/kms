@@ -94,7 +94,13 @@ messagingAdminRoutes.post('/invite-portal', async (c) => {
     context: { event: { name: event.name }, magic_link: link },
   });
 
-  return c.json({ ok: true, outcome });
+  // Mirrors the reviewer sign-in-link endpoint's contract (evaluation.ts):
+  // hand the organiser the actual link alongside triggering the email, so
+  // they can verify or share it themselves without needing the speaker's
+  // inbox — e.g. to preview/impersonate the portal as that speaker. The
+  // link is bound to this contact by construction (minted against
+  // `contact.id` above), so surfacing it here can never leak someone else's.
+  return c.json({ ok: true, outcome, link });
 });
 
 // ---------------------------------------------------------------------------
