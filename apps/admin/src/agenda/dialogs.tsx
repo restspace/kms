@@ -182,6 +182,7 @@ export function MoveDialog({
 interface AddSessionDialogProps {
   tracks: AgendaTrack[]
   rooms: AgendaRoom[]
+  formats: string[]
   days: string[]
   onSave: (body: {
     title: string
@@ -196,16 +197,16 @@ interface AddSessionDialogProps {
   onClose: () => void
 }
 
-const FORMATS = ['Keynote', 'Featured Keynote', 'Talk', 'Workshop', 'Panel', 'Lightning Talk']
-
-export function AddSessionDialog({ tracks, rooms, days, onSave, onClose }: AddSessionDialogProps) {
+export function AddSessionDialog({ tracks, rooms, formats, days, onSave, onClose }: AddSessionDialogProps) {
   const [title, setTitle] = useState('')
   const [trackId, setTrackId] = useState('')
-  const [format, setFormat] = useState('Talk')
+  // Formats are the event's managed vocabulary (Settings → Rooms, tracks &
+  // formats) — CFP-S1 replaced the hardcoded list that used to live here.
+  const [format, setFormat] = useState(formats[0] ?? '')
   const [roomId, setRoomId] = useState('')
   const [day, setDay] = useState('')
   const [time, setTime] = useState('10:00')
-  const [duration, setDuration] = useState('30')
+  const [duration, setDuration] = useState(String(formatMinutes(formats[0] ?? '') ?? 30))
   const [capacity, setCapacity] = useState('')
   const titleRef = useRef<HTMLInputElement | null>(null)
 
@@ -270,7 +271,9 @@ export function AddSessionDialog({ tracks, rooms, days, onSave, onClose }: AddSe
               setFormat(next)
             }}
           >
-            {FORMATS.map((f) => (
+            {formats.length === 0 && <option value="">No format</option>}
+            {format !== '' && !formats.includes(format) && <option value={format}>{format}</option>}
+            {formats.map((f) => (
               <option key={f} value={f}>{f}</option>
             ))}
           </select>

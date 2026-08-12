@@ -39,6 +39,24 @@ export interface EmbedOptionsInput {
 }
 
 /**
+ * What a saved embed persists (EMB-15): the full generator state minus
+ * widget/format, which travel as their own columns so the list screen and the
+ * API's allowlist validation can read them without opening the blob. Snippets
+ * are never stored — they are rebuilt from these options at copy time, so a
+ * later snippet-format improvement reaches every saved embed for free.
+ */
+export interface SavedEmbedOptions {
+  accent: string
+  useAccent: boolean
+  showHeader: boolean
+  track: string
+  day: string
+  height: string
+  toggles: EmbedFieldToggles
+  theme: EmbedThemeInput
+}
+
+/**
  * Query params for the public page URL (also what an <iframe src> or the
  * embed.js loader constructs client-side from its data-* attrs). Presentation
  * options only — content filters (track/day) already lived here; toggles and

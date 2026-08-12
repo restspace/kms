@@ -10,8 +10,10 @@ import { render, screen, waitFor } from '@testing-library/preact';
 import userEvent from '@testing-library/user-event';
 
 const queryResource = vi.fn();
+const getTaskAudiences = vi.fn();
 vi.mock('../api', () => ({
   queryResource: (resource: string) => (params: unknown) => queryResource(resource, params),
+  getTaskAudiences: () => getTaskAudiences(),
 }));
 vi.mock('../components/dialogs', () => ({ appAlert: vi.fn(() => Promise.resolve()) }));
 
@@ -24,6 +26,14 @@ const contact = (id: string, first: string, email: string) => ({
 
 beforeEach(() => {
   queryResource.mockReset();
+  getTaskAudiences.mockReset().mockResolvedValue({
+    audiences: [
+      { audience: 'speakers', count: 3 },
+      { audience: 'accepted_speakers', count: 2 },
+      { audience: 'roster', count: 5 },
+      { audience: 'all_contacts', count: 6 },
+    ],
+  });
   vi.mocked(appAlert).mockClear();
 });
 
@@ -78,6 +88,41 @@ describe('TaskCreateForm', () => {
     expect(onSubmit.mock.calls[0][0]).toMatchObject({ assignment_mode: 'automatic', assignee_contact_ids: [] });
     await waitFor(() => expect(appAlert).toHaveBeenCalled());
     expect(vi.mocked(appAlert).mock.calls[0][0]).toMatch(/assignments will be created/i);
+  });
+
+  it('sends an audience instead of ids when one is chosen (CNT-01)', async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(true);
+    render(<TaskCreateForm onSubmit={onSubmit} onCancel={() => {}} title="New task" />);
+
+    await user.type(screen.getByLabelText(/^Title/), 'Upload slides');
+    // Counts from the endpoint label the options honestly.
+    const option = await screen.findByRole('option', { name: /Speakers \(anyone attached to a submission\) — 3/ });
+    await user.selectOptions(screen.getByLabelText('Assign to'), option);
+    // The one-at-a-time picker disappears — the audience is the target.
+    expect(screen.queryByLabelText('Assignees')).toBeNull();
+    expect(screen.getByText(/3 people will be assigned/i)).toBeTruthy();
+
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalled());
+    const body = onSubmit.mock.calls[0][0] as Record<string, unknown>;
+    expect(body).toMatchObject({ audience: 'speakers', target: 'contact' });
+    expect(body.assignee_contact_ids).toBeUndefined();
+  });
+
+  it('blocks a manual task aimed at an empty audience', async () => {
+    const user = userEvent.setup();
+    getTaskAudiences.mockResolvedValue({ audiences: [{ audience: 'accepted_speakers', count: 0 }] });
+    const onSubmit = vi.fn().mockResolvedValue(true);
+    render(<TaskCreateForm onSubmit={onSubmit} onCancel={() => {}} title="New task" />);
+
+    await user.type(screen.getByLabelText(/^Title/), 'Empty audience task');
+    await waitFor(() => expect(getTaskAudiences).toHaveBeenCalled());
+    await user.selectOptions(screen.getByLabelText('Assign to'), 'accepted_speakers');
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+
+    expect((await screen.findByRole('alert')).textContent).toMatch(/nobody in it yet/i);
+    expect(onSubmit).not.toHaveBeenCalled();
   });
 
   it('searches submissions once the target switches', async () => {

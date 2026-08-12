@@ -31,6 +31,60 @@
   max-width: 70ch;
 }
 
+/* Saved embeds (EMB-15): the persisted list above the generator. */
+.embeds-saved {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 14px 14px;
+  margin: 0 0 18px;
+}
+
+.embeds-saved-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.embeds-saved-table th {
+  text-align: left;
+  font-size: 11px;
+  font-weight: 600;
+  font-family: var(--font-display);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+  color: var(--text-muted);
+  padding: 4px 10px 6px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.embeds-saved-table td {
+  padding: 7px 10px 7px 0;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+
+.embeds-saved-table tr.is-active td {
+  background: var(--accent-soft, transparent);
+}
+
+.embeds-saved-actions {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+  white-space: nowrap;
+}
+
+.embeds-save-row {
+  display: flex;
+  gap: 8px;
+}
+
+.embeds-save-row input[type='text'] {
+  flex: 1;
+  min-width: 0;
+}
+
 .embeds-grid {
   display: grid;
   grid-template-columns: minmax(320px, 26rem) minmax(0, 1fr);

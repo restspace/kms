@@ -22,6 +22,7 @@ const api = vi.hoisted(() => ({
   updateSubmission: vi.fn(),
   listTracks: vi.fn(),
   listRooms: vi.fn(),
+  listFormats: vi.fn(),
 }))
 
 vi.mock('../api', () => ({
@@ -36,6 +37,7 @@ vi.mock('../api', () => ({
   queryResource: () => vi.fn(),
   listTracks: api.listTracks,
   listRooms: api.listRooms,
+  listFormats: api.listFormats,
 }))
 
 vi.mock('../components/dialogs', () => ({
@@ -63,6 +65,7 @@ beforeEach(() => {
   vi.clearAllMocks()
   api.listTracks.mockResolvedValue({ items: [] })
   api.listRooms.mockResolvedValue({ items: [] })
+  api.listFormats.mockResolvedValue({ items: [] })
 })
 
 describe('SubmissionEditForm — Level field-mapping fallback', () => {

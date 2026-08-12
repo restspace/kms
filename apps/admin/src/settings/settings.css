@@ -40,8 +40,14 @@
 
 .settings-rt-columns {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(3, 1fr);
   gap: 24px;
+}
+
+@media (max-width: 960px) {
+  .settings-rt-columns {
+    grid-template-columns: 1fr 1fr;
+  }
 }
 
 .settings-rt-columns h3 { font-family: var(--font-display);

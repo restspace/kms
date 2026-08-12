@@ -246,6 +246,21 @@ export const updateRoom = (id: string, data: Record<string, unknown>) =>
 export const deleteRoom = (id: string) =>
   request<{ ok: boolean }>(`/app/api/rooms/${id}`, { method: 'DELETE' })
 
+export interface FormatRow {
+  id: string
+  event_id: string
+  name: string
+  position: number
+}
+
+export const listFormats = () => request<{ items: FormatRow[] }>('/app/api/formats')
+export const createFormat = (data: { name: string }) =>
+  request<FormatRow>('/app/api/formats', { method: 'POST', body: JSON.stringify(data) })
+export const updateFormat = (id: string, data: { name: string }) =>
+  request<FormatRow>(`/app/api/formats/${id}`, { method: 'PUT', body: JSON.stringify(data) })
+export const deleteFormat = (id: string) =>
+  request<{ ok: boolean }>(`/app/api/formats/${id}`, { method: 'DELETE' })
+
 export const listTracks = () => request<{ items: TrackRow[] }>('/app/api/tracks')
 export const createTrack = (data: { name: string; color?: string | null }) =>
   request<TrackRow>('/app/api/tracks', { method: 'POST', body: JSON.stringify(data) })
@@ -253,6 +268,31 @@ export const updateTrack = (id: string, data: Record<string, unknown>) =>
   request<TrackRow>(`/app/api/tracks/${id}`, { method: 'PUT', body: JSON.stringify(data) })
 export const deleteTrack = (id: string) =>
   request<{ ok: boolean }>(`/app/api/tracks/${id}`, { method: 'DELETE' })
+
+// ---------------------------------------------------------------------------
+// Saved embeds (EMB-15): named embed configurations. `options` is the
+// generator state blob (SavedEmbedOptions) — the API validates only name /
+// widget / format and stores the blob opaquely.
+// ---------------------------------------------------------------------------
+
+export interface SavedEmbedRow {
+  id: string
+  event_id: string
+  name: string
+  widget: 'sessions' | 'speakers' | 'agenda' | 'schedule' | 'gallery'
+  format: 'script' | 'iframe' | 'json' | 'xml' | 'ics'
+  options: import('./embeds/embedOptions.logic').SavedEmbedOptions
+  created_at: string
+  updated_at: string
+}
+
+export const listSavedEmbeds = () => request<{ items: SavedEmbedRow[] }>('/app/api/embeds')
+export const createSavedEmbed = (data: Pick<SavedEmbedRow, 'name' | 'widget' | 'format' | 'options'>) =>
+  request<SavedEmbedRow>('/app/api/embeds', { method: 'POST', body: JSON.stringify(data) })
+export const updateSavedEmbed = (id: string, data: Partial<Pick<SavedEmbedRow, 'name' | 'widget' | 'format' | 'options'>>) =>
+  request<SavedEmbedRow>(`/app/api/embeds/${id}`, { method: 'PUT', body: JSON.stringify(data) })
+export const deleteSavedEmbed = (id: string) =>
+  request<{ ok: boolean }>(`/app/api/embeds/${id}`, { method: 'DELETE' })
 
 // ---------------------------------------------------------------------------
 // Contact custom fields (SPK-15): per-event field definitions for the
@@ -300,6 +340,13 @@ export interface TaskRow {
 
 export const createTask = (data: Record<string, unknown>) =>
   request<TaskRow>('/app/api/tasks', { method: 'POST', body: JSON.stringify(data) })
+
+/** Task audiences (CNT-01) — named assignee sets the create form can target
+ * ("all speakers") instead of picking contacts one at a time. Counts are
+ * task-flavored (no email requirement), hence not the messaging endpoint. */
+export type TaskAudience = 'speakers' | 'accepted_speakers' | 'roster' | 'all_contacts'
+export const getTaskAudiences = () =>
+  request<{ audiences: Array<{ audience: TaskAudience; count: number }> }>('/app/api/tasks/audiences')
 
 export const updateTask = (id: string, data: Record<string, unknown>) =>
   request<TaskRow>(`/app/api/tasks/${id}`, { method: 'PUT', body: JSON.stringify(data) })
@@ -766,6 +813,8 @@ export const sendDecisions = (
   options?: {
     /** Workplan 10 Wave B: compute counts + speakers_with_pending without creating a job. */
     preflight?: boolean
+    /** CFP-14: with preflight, also render sample accept/decline emails for the review dialog. */
+    preview?: boolean
     /** Workplan 10 Wave B: exclude these speakers' queued rows from a real send. */
     hold_contact_ids?: string[]
     /** Workplan 13 W3: opt-in per send — ask accepted speakers for employer
@@ -793,6 +842,15 @@ export const sendDecisions = (
       pending_count: number
       pending_titles: string[]
     }>
+    /** CFP-14: decided-but-never-notified rows included in this send (previously silently skipped). */
+    resend?: number
+    /** CFP-14 review dialog: sample renders of the decision emails (preflight+preview only).
+     * A null side means no rows on that side, or its template is disabled. */
+    previews?: {
+      accepted: { subject: string; body_html: string; body_text: string; sample_to: string } | null
+      declined: { subject: string; body_html: string; body_text: string; sample_to: string } | null
+      merged_speakers: number
+    }
     /** CFP-14: null when nothing was in a decision queue; poll it for real sent/failed counts. */
     job_id: string | null
   }>(

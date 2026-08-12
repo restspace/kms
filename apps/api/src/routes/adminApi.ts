@@ -29,6 +29,7 @@ import { formsAdminRoutes } from './formsAdmin';
 import { APPROVAL_STATES, evaluationRoutes } from './evaluation';
 import { agendaRoutes } from './agenda';
 import { stageAirtableDeletes } from '../airtableStage';
+import { resolveAudience, type ComposeAudience } from './messagingAdmin';
 import { sendTaskReminderNow } from '../jobs/reminders';
 import { dashboardRoutes } from './dashboard';
 import { greenroomRoutes } from './greenroom';
@@ -2869,6 +2870,34 @@ const taskRow = (db: D1Database, id: string, eventId: string) =>
      FROM tasks WHERE id = ? AND event_id = ?`,
   ).bind(id, eventId).first();
 
+/**
+ * Task audiences (CNT-01): the messaging composer's named audiences, reusable
+ * as an assignment target — "assign this to all speakers" instead of picking
+ * contacts one at a time. Resolution reuses messagingAdmin's resolveAudience
+ * with `requireEmail: false` (a deliverable is owed even by a contact with no
+ * address; the composer's email filter is a *messaging* rule). 'selected' is
+ * excluded — explicit ids already travel as assignee_contact_ids.
+ */
+const TASK_AUDIENCES = ['speakers', 'accepted_speakers', 'roster', 'all_contacts'] as const;
+type TaskAudience = (typeof TASK_AUDIENCES)[number];
+
+const isTaskAudience = (v: unknown): v is TaskAudience =>
+  typeof v === 'string' && (TASK_AUDIENCES as readonly string[]).includes(v);
+
+// GET /app/api/tasks/audiences — per-audience assignee counts, so the picker
+// can label options honestly ("Speakers (12)"). Task-flavored counts: no
+// email requirement, hence deliberately not the messaging counts endpoint.
+adminApiRoutes.get('/tasks/audiences', async (c) => {
+  const session = c.get('session');
+  const audiences = await Promise.all(
+    TASK_AUDIENCES.map(async (audience) => ({
+      audience,
+      count: (await resolveAudience(c.env.DB, session.eventId, audience, [], { requireEmail: false })).length,
+    })),
+  );
+  return c.json({ audiences });
+});
+
 adminApiRoutes.post('/tasks', async (c) => {
   const session = c.get('session');
   if (!isWriter(session.role)) return c.json({ error: 'forbidden' }, 403);
@@ -2885,6 +2914,23 @@ adminApiRoutes.post('/tasks', async (c) => {
     !(await idsBelongToEvent(c.env.DB, 'submissions', targets.submissionIds, session.eventId))
   ) {
     return c.json({ error: 'reference_not_in_event' }, 400);
+  }
+
+  // CNT-01: an audience expands server-side into contact targets and merges
+  // with any explicitly picked ids (dedup below; the OR IGNORE insert catches
+  // the rest). Resolved once at create time — the assignment set is a
+  // snapshot, not a live rule; on_accept auto-assignment already covers the
+  // "and future speakers too" case.
+  const rawAudience = (body as Record<string, unknown>).audience;
+  if (rawAudience !== undefined && rawAudience !== null && rawAudience !== '') {
+    if (!isTaskAudience(rawAudience)) return c.json({ error: 'invalid_audience' }, 400);
+    const members = await resolveAudience(c.env.DB, session.eventId, rawAudience, [], { requireEmail: false });
+    for (const m of members) {
+      if (!targets.contactIds.includes(m.id)) targets.contactIds.push(m.id);
+    }
+    if (targets.contactIds.length > MAX_TASK_TARGETS) {
+      return c.json({ error: 'too_many_targets', limit: MAX_TASK_TARGETS }, 400);
+    }
   }
 
   const id = crypto.randomUUID();
@@ -3226,6 +3272,191 @@ adminApiRoutes.delete('/tracks/:id', async (c) => {
   ]);
   if ((results[3]?.meta.changes ?? 0) === 0) return c.json({ error: 'not_found' }, 404);
   await bumpEventRevision(c.env, session.eventId);
+  return c.json({ ok: true });
+});
+
+// ---------------------------------------------------------------------------
+// Session formats (CFP-S1): the managed vocabulary behind the public form's
+// format dropdown (derived at read time, formsAdmin.ts FORMAT_FIELD_KEY) and
+// the agenda dialog's format select. Name-only rows — submissions.format
+// stores the name string, so nothing references a format by id and DELETE
+// needs no cleanup (existing submissions keep their recorded name).
+// ---------------------------------------------------------------------------
+
+const formatRow = (db: D1Database, id: string, eventId: string) =>
+  db.prepare('SELECT id, event_id, name, position FROM formats WHERE id = ? AND event_id = ?')
+    .bind(id, eventId)
+    .first();
+
+// GET /app/api/formats — the event's formats, position order.
+adminApiRoutes.get('/formats', async (c) => {
+  const session = c.get('session');
+  const { results } = await c.env.DB.prepare(
+    'SELECT id, event_id, name, position FROM formats WHERE event_id = ? ORDER BY position',
+  )
+    .bind(session.eventId)
+    .all();
+  return c.json({ items: results });
+});
+
+adminApiRoutes.post('/formats', async (c) => {
+  const session = c.get('session');
+  if (!isWriter(session.role)) return c.json({ error: 'forbidden' }, 403);
+  const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+  const name = typeof body.name === 'string' ? body.name.trim() : '';
+  if (!name) return c.json({ error: 'name_required' }, 400);
+
+  const id = crypto.randomUUID();
+  await c.env.DB.prepare(
+    `INSERT INTO formats (id, event_id, name, position, updated_at)
+     SELECT ?1, ?2, ?3, COALESCE((SELECT MAX(position) + 1 FROM formats WHERE event_id = ?2), 0), ?4`,
+  )
+    .bind(id, session.eventId, name.slice(0, ROOM_TRACK_NAME_MAX_CHARS), new Date().toISOString())
+    .run();
+  await bumpEventRevision(c.env, session.eventId);
+  return c.json(await formatRow(c.env.DB, id, session.eventId), 201);
+});
+
+adminApiRoutes.put('/formats/:id', async (c) => {
+  const session = c.get('session');
+  if (!isWriter(session.role)) return c.json({ error: 'forbidden' }, 403);
+  const id = c.req.param('id');
+  const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+  const name = typeof body.name === 'string' ? body.name.trim() : '';
+  if (!name) return c.json({ error: 'name_required' }, 400);
+
+  const result = await c.env.DB.prepare(
+    'UPDATE formats SET name = ?, updated_at = ? WHERE id = ? AND event_id = ?',
+  )
+    .bind(name.slice(0, ROOM_TRACK_NAME_MAX_CHARS), new Date().toISOString(), id, session.eventId)
+    .run();
+  if (result.meta.changes === 0) return c.json({ error: 'not_found' }, 404);
+  await bumpEventRevision(c.env, session.eventId);
+  return c.json(await formatRow(c.env.DB, id, session.eventId));
+});
+
+adminApiRoutes.delete('/formats/:id', async (c) => {
+  const session = c.get('session');
+  if (!isWriter(session.role)) return c.json({ error: 'forbidden' }, 403);
+  const id = c.req.param('id');
+  const result = await c.env.DB.prepare('DELETE FROM formats WHERE id = ? AND event_id = ?')
+    .bind(id, session.eventId)
+    .run();
+  if (result.meta.changes === 0) return c.json({ error: 'not_found' }, 404);
+  await bumpEventRevision(c.env, session.eventId);
+  return c.json({ ok: true });
+});
+
+// ---------------------------------------------------------------------------
+// Saved embeds (EMB-15): named embed configurations for the Embeds screen's
+// list. `options` is the SPA's EmbedOptionsInput as an opaque JSON blob —
+// snippets are rebuilt client-side from it at copy time, never stored — so
+// the API validates only the envelope (name, widget, format) and passes the
+// blob through. No bumpEventRevision: nothing public reads this table.
+// ---------------------------------------------------------------------------
+
+const SAVED_EMBED_WIDGETS = new Set(['sessions', 'speakers', 'agenda', 'schedule', 'gallery']);
+const SAVED_EMBED_FORMATS = new Set(['script', 'iframe', 'json', 'xml', 'ics']);
+const SAVED_EMBED_NAME_MAX_CHARS = 120;
+const SAVED_EMBED_OPTIONS_MAX_CHARS = 8000;
+
+function pickSavedEmbedFields(
+  raw: unknown,
+  { requireAll }: { requireAll: boolean },
+): { values: Record<string, string>; error?: string } {
+  const body = (raw ?? {}) as Record<string, unknown>;
+  const values: Record<string, string> = {};
+  const fail = (error: string): { values: Record<string, string>; error?: string } => ({ values: {}, error });
+
+  if (requireAll || 'name' in body) {
+    const name = typeof body.name === 'string' ? body.name.trim() : '';
+    if (!name) return fail('name_required');
+    values.name = name.slice(0, SAVED_EMBED_NAME_MAX_CHARS);
+  }
+  if (requireAll || 'widget' in body) {
+    if (typeof body.widget !== 'string' || !SAVED_EMBED_WIDGETS.has(body.widget)) return fail('invalid_widget');
+    values.widget = body.widget;
+  }
+  if (requireAll || 'format' in body) {
+    if (typeof body.format !== 'string' || !SAVED_EMBED_FORMATS.has(body.format)) return fail('invalid_format');
+    values.format = body.format;
+  }
+  if (requireAll || 'options' in body) {
+    if (body.options === null || typeof body.options !== 'object' || Array.isArray(body.options)) {
+      return fail('invalid_options');
+    }
+    const json = JSON.stringify(body.options);
+    if (json.length > SAVED_EMBED_OPTIONS_MAX_CHARS) return fail('invalid_options');
+    values.options = json;
+  }
+  return { values };
+}
+
+const savedEmbedRow = async (db: D1Database, id: string, eventId: string) => {
+  const row = await db
+    .prepare('SELECT * FROM saved_embeds WHERE id = ? AND event_id = ?')
+    .bind(id, eventId)
+    .first<Record<string, unknown>>();
+  return row ? { ...row, options: JSON.parse(row.options as string) as unknown } : null;
+};
+
+// GET /app/api/embeds — the event's saved embeds, newest first.
+adminApiRoutes.get('/embeds', async (c) => {
+  const session = c.get('session');
+  const { results } = await c.env.DB.prepare(
+    'SELECT * FROM saved_embeds WHERE event_id = ? ORDER BY created_at DESC, id',
+  )
+    .bind(session.eventId)
+    .all<Record<string, unknown>>();
+  return c.json({ items: results.map((r) => ({ ...r, options: JSON.parse(r.options as string) as unknown })) });
+});
+
+adminApiRoutes.post('/embeds', async (c) => {
+  const session = c.get('session');
+  if (!isWriter(session.role)) return c.json({ error: 'forbidden' }, 403);
+  const { values, error } = pickSavedEmbedFields(await c.req.json().catch(() => ({})), { requireAll: true });
+  if (error) return c.json({ error }, 400);
+
+  const id = crypto.randomUUID();
+  const ts = new Date().toISOString();
+  await c.env.DB.prepare(
+    `INSERT INTO saved_embeds (id, event_id, name, widget, format, options, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+  )
+    .bind(id, session.eventId, values.name, values.widget, values.format, values.options, ts, ts)
+    .run();
+  return c.json(await savedEmbedRow(c.env.DB, id, session.eventId), 201);
+});
+
+adminApiRoutes.put('/embeds/:id', async (c) => {
+  const session = c.get('session');
+  if (!isWriter(session.role)) return c.json({ error: 'forbidden' }, 403);
+  const id = c.req.param('id');
+  const { values, error } = pickSavedEmbedFields(await c.req.json().catch(() => ({})), { requireAll: false });
+  if (error) return c.json({ error }, 400);
+
+  const cols = Object.keys(values);
+  if (cols.length > 0) {
+    const result = await c.env.DB.prepare(
+      `UPDATE saved_embeds SET ${cols.map((k) => `${k} = ?`).join(', ')}, updated_at = ? WHERE id = ? AND event_id = ?`,
+    )
+      .bind(...cols.map((k) => values[k]), new Date().toISOString(), id, session.eventId)
+      .run();
+    if (result.meta.changes === 0) return c.json({ error: 'not_found' }, 404);
+  }
+  const row = await savedEmbedRow(c.env.DB, id, session.eventId);
+  if (!row) return c.json({ error: 'not_found' }, 404);
+  return c.json(row);
+});
+
+adminApiRoutes.delete('/embeds/:id', async (c) => {
+  const session = c.get('session');
+  if (!isWriter(session.role)) return c.json({ error: 'forbidden' }, 403);
+  const id = c.req.param('id');
+  const result = await c.env.DB.prepare('DELETE FROM saved_embeds WHERE id = ? AND event_id = ?')
+    .bind(id, session.eventId)
+    .run();
+  if (result.meta.changes === 0) return c.json({ error: 'not_found' }, 404);
   return c.json({ ok: true });
 });
 
@@ -3703,11 +3934,10 @@ const DEFAULT_FIELD_DEFINITIONS: ReadonlyArray<{
   // abstract (submission scope)
   { key: 'title', label: 'Title', type: 'text', scope: 'submission', maxChars: 255, system: true },
   { key: 'description', label: 'Description', type: 'wysiwyg', scope: 'submission', maxChars: 5000 },
-  {
-    key: 'format', label: 'Format', type: 'dropdown', scope: 'submission',
-    options: ['Keynote', 'Featured Keynote', 'Talk', 'Workshop', 'Panel', 'Lightning Talk']
-      .map((v) => ({ value: v, label: v })),
-  },
+  // Like `track`, `format` carries no options: loadQuestions derives them
+  // from the event's own `formats` rows (formsAdmin.ts FORMAT_FIELD_KEY),
+  // seeded with DEFAULT_FORMATS below on event create.
+  { key: 'format', label: 'Format', type: 'dropdown', scope: 'submission' },
   { key: 'track', label: 'Track', type: 'dropdown', scope: 'submission' },
   {
     key: 'level', label: 'Level', type: 'dropdown', scope: 'submission',
@@ -3727,6 +3957,17 @@ const DEFAULT_FIELD_DEFINITIONS: ReadonlyArray<{
   { key: 'mobile_phone', label: 'Mobile Phone', type: 'phone', scope: 'contact' },
   { key: 'biography', label: 'Biography', type: 'wysiwyg', scope: 'contact', maxChars: 5000 },
   { key: 'headshot', label: 'Headshot', type: 'file', scope: 'contact' },
+];
+
+/** A new event's starting format vocabulary. Durations live in the label on
+ * purpose: submissions.format stores the display string, and the agenda's
+ * formatMinutes() parses "(N min)" out of it for default session lengths. */
+const DEFAULT_FORMATS: ReadonlyArray<string> = [
+  'Keynote (45 min)',
+  'Talk (30 min)',
+  'Lightning Talk (10 min)',
+  'Workshop (120 min)',
+  'Panel (45 min)',
 ];
 
 /** The seed inserts for one new event's field library (create path only —
@@ -3806,6 +4047,13 @@ adminApiRoutes.post('/events', async (c) => {
       ...tracks.map((t, i) =>
         db.prepare('INSERT INTO tracks (id, event_id, name, color, position, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
           .bind(crypto.randomUUID(), id, t.name, t.extra, i, ts),
+      ),
+      // Default format vocabulary — the form's format dropdown and the agenda
+      // dialog both derive from these rows (CFP-S1), so a fresh event must not
+      // start empty the way tracks legitimately do.
+      ...DEFAULT_FORMATS.map((name, i) =>
+        db.prepare('INSERT INTO formats (id, event_id, name, position, updated_at) VALUES (?, ?, ?, ?, ?)')
+          .bind(crypto.randomUUID(), id, name, i, ts),
       ),
       // Same batch as the event row: an event whose field library never landed
       // builds its first submission form out of zero questions.

@@ -1,6 +1,6 @@
-import { useState, type FormEvent } from 'react'
+import { useEffect, useState, type FormEvent } from 'react'
 import type { CreateFormProps } from '../components/DataTabManager'
-import { queryResource, type ContactRow, type SubmissionRow } from '../api'
+import { getTaskAudiences, queryResource, type ContactRow, type SubmissionRow, type TaskAudience } from '../api'
 import { appAlert } from '../components/dialogs'
 
 /**
@@ -22,6 +22,16 @@ import { appAlert } from '../components/dialogs'
 
 const ACTION_TYPES = ['acknowledge', 'file_upload', 'portal_form', 'external_link'] as const
 const TRIGGERS = ['none', 'on_accept', 'on_schedule'] as const
+
+/** CNT-01 audiences — labels mirror the messaging composer's AUDIENCE_LABELS
+ * (messaging.tsx) so "Speakers" means the same set on both surfaces. */
+const AUDIENCE_LABELS: Record<TaskAudience, string> = {
+  speakers: 'Speakers (anyone attached to a submission)',
+  accepted_speakers: 'Accepted speakers',
+  roster: 'All contacts on roster',
+  all_contacts: 'Everyone on this event',
+}
+const AUDIENCES = Object.keys(AUDIENCE_LABELS) as TaskAudience[]
 
 const readableEnum = (value: string) =>
   value.replace(/_/g, ' ').replace(/^./, (ch) => ch.toUpperCase())
@@ -49,6 +59,32 @@ export function TaskCreateForm({ initialValues, onSubmit, onCancel, title, onDir
   const [submissionResults, setSubmissionResults] = useState<SubmissionRow[]>([])
   const [pickedContacts, setPickedContacts] = useState<ContactRow[]>([])
   const [pickedSubmissions, setPickedSubmissions] = useState<SubmissionRow[]>([])
+
+  // --- Audience (CNT-01) ---------------------------------------------------
+  // '' = specific people (the pickers below); otherwise a named audience the
+  // server expands into assignments at create time.
+  const [audience, setAudience] = useState<'' | TaskAudience>('')
+  const [audienceCounts, setAudienceCounts] = useState<Partial<Record<TaskAudience, number>> | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    getTaskAudiences()
+      .then((r) => {
+        if (cancelled) return
+        const counts: Partial<Record<TaskAudience, number>> = {}
+        for (const a of r.audiences) counts[a.audience] = a.count
+        setAudienceCounts(counts)
+      })
+      .catch(() => {
+        /* counts are a nicety; the options still work without them */
+      })
+    return () => { cancelled = true }
+  }, [])
+
+  const audienceLabel = (a: TaskAudience) => {
+    const count = audienceCounts?.[a]
+    return count === undefined ? AUDIENCE_LABELS[a] : `${AUDIENCE_LABELS[a]} — ${count}`
+  }
 
   const setField = (key: keyof typeof fields, value: string) => {
     setFields((prev) => ({ ...prev, [key]: value }))
@@ -96,19 +132,25 @@ export function TaskCreateForm({ initialValues, onSubmit, onCancel, title, onDir
       setSubmitError('Title is required.')
       return
     }
-    const targetIds =
-      fields.target === 'submission'
+    const useAudience = fields.target === 'contact' && audience !== ''
+    const targetIds = useAudience
+      ? { audience }
+      : fields.target === 'submission'
         ? { submission_ids: pickedSubmissions.map((s) => s.id) }
         : { assignee_contact_ids: pickedContacts.map((c) => c.id) }
-    const targetCount = Object.values(targetIds)[0].length
+    const targetCount = useAudience
+      ? (audienceCounts?.[audience as TaskAudience] ?? 1) // a chosen audience is a valid target even before counts load
+      : (Object.values(targetIds)[0] as string[]).length
     // A manual task with no targets can only ever produce zero assignment
     // rows — the exact silent-failure shape CNT-01 flagged. Automatic tasks
     // are legitimately definition-only until their trigger fires.
     if (targetCount === 0 && fields.assignment_mode === 'manual') {
       setSubmitError(
-        fields.target === 'submission'
-          ? 'Pick at least one submission, or switch the assignment mode to Automatic.'
-          : 'Pick at least one assignee, or switch the assignment mode to Automatic.',
+        useAudience
+          ? 'That audience has nobody in it yet — pick another, or select people directly.'
+          : fields.target === 'submission'
+            ? 'Pick at least one submission, or switch the assignment mode to Automatic.'
+            : 'Pick at least one assignee, or switch the assignment mode to Automatic.',
       )
       return
     }
@@ -213,6 +255,31 @@ export function TaskCreateForm({ initialValues, onSubmit, onCancel, title, onDir
           </label>
         </div>
 
+        {fields.target === 'contact' && (
+          <div className="record-form-field">
+            <label htmlFor="task-audience">Assign to</label>
+            <select
+              id="task-audience"
+              value={audience}
+              disabled={isSubmitting}
+              onChange={(e) => { setAudience(e.target.value as '' | TaskAudience); onDirtyChange?.(true) }}
+            >
+              <option value="">Specific people (pick below)</option>
+              {AUDIENCES.map((a) => (
+                <option key={a} value={a}>{audienceLabel(a)}</option>
+              ))}
+            </select>
+            {audience !== '' && (
+              <p style={{ color: 'var(--text-muted)', fontSize: 12, margin: '2px 0 0' }}>
+                {audienceCounts?.[audience] !== undefined
+                  ? `${audienceCounts[audience]} ${audienceCounts[audience] === 1 ? 'person' : 'people'} will be assigned when the task is saved.`
+                  : 'Everyone in this audience will be assigned when the task is saved.'}
+              </p>
+            )}
+          </div>
+        )}
+
+        {(fields.target === 'submission' || audience === '') && (
         <div className="record-form-field">
           <label htmlFor="task-target-search">
             {fields.target === 'submission' ? 'Submissions' : 'Assignees'}
@@ -280,6 +347,7 @@ export function TaskCreateForm({ initialValues, onSubmit, onCancel, title, onDir
             </p>
           )}
         </div>
+        )}
       </div>
 
       <div className="record-form-actions">

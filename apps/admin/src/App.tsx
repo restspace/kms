@@ -187,48 +187,132 @@ export function pollDecisionJob(
  * ModalDialog with a custom footer instead of the two-button appConfirm,
  * since this needs three actions.
  */
-function DecisionPendingDialog({
-  speakers,
-  onSendAll,
-  onHold,
+type DecisionPreflight = Awaited<ReturnType<typeof sendDecisions>>
+
+/** One rendered decision email inside the review dialog — subject, sample
+ * recipient, and the real body HTML (produced server-side by the same
+ * override/theme/template pipeline the expander uses, so it cannot drift). */
+function DecisionEmailPreview({
+  label,
+  count,
+  preview,
+}: {
+  label: string
+  count: number
+  preview: { subject: string; body_html: string; sample_to: string } | null
+}) {
+  if (count === 0) return null
+  return (
+    <div className="decision-preview">
+      <h4>
+        {label} — {count} {count === 1 ? 'email' : 'emails'}
+      </h4>
+      {preview ? (
+        <>
+          <p className="decision-preview-meta">
+            <strong>{preview.subject}</strong> · sample recipient {preview.sample_to}
+          </p>
+          <div className="decision-preview-body" dangerouslySetInnerHTML={{ __html: preview.body_html }} />
+        </>
+      ) : (
+        <p className="decision-preview-meta">
+          This template is switched off in Settings → Email templates, so these rows will have their status
+          updated but no email will be sent.
+        </p>
+      )}
+    </div>
+  )
+}
+
+/**
+ * CFP-14: the send-decisions review step. Every send now passes through this
+ * dialog — counts, rendered previews of the accept/decline emails, and (when
+ * the batch touches speakers with other submissions still under review) the
+ * hold decision that used to live in its own DecisionPendingDialog.
+ * Templates are edited in Settings → Email templates; per-run overrides are
+ * deliberately out of v1 (the resolveOverride seam in mailer.ts is where
+ * they would plug in).
+ */
+export function DecisionReviewDialog({
+  pre,
+  onSend,
   onCancel,
 }: {
-  speakers: Array<{ contact_id: string; name: string; pending_count: number; pending_titles: string[] }>
-  onSendAll: () => void
-  onHold: () => void
+  pre: DecisionPreflight
+  onSend: (holdContactIds: string[] | null) => void
   onCancel: () => void
 }) {
+  const [hold, setHold] = useState(false)
+  const speakers = pre.speakers_with_pending ?? []
+  const total = pre.accepted + pre.declined
+  const notes: string[] = []
+  if ((pre.resend ?? 0) > 0) notes.push(`${pre.resend} previously decided but never notified — included`)
+  if (pre.skipped_notified > 0) notes.push(`${pre.skipped_notified} skipped (already notified)`)
+  const otherSkipped = pre.skipped - pre.skipped_notified
+  if (otherSkipped > 0) notes.push(`${otherSkipped} skipped (not decided yet)`)
+  if ((pre.skipped_no_submitter ?? 0) > 0) notes.push(`${pre.skipped_no_submitter} with no submitter email`)
   return (
     <ModalDialog
       open
-      title={`${speakers.length} speaker${speakers.length === 1 ? '' : 's'} in this batch have other submissions still under review`}
+      title="Review decision emails"
       onClose={onCancel}
       footer={
         <>
           <button onClick={onCancel}>Cancel</button>
-          <button onClick={onHold}>Hold those speakers</button>
-          <button className="primary" onClick={onSendAll}>Send all now</button>
+          <button
+            className="primary"
+            onClick={() => onSend(hold && speakers.length > 0 ? speakers.map((s) => s.contact_id) : null)}
+          >
+            Send {total} {total === 1 ? 'email' : 'emails'}
+          </button>
         </>
       }
     >
       <p>
-        Sending now includes a "still under review" line in their email for the submissions listed below.
-        Holding excludes just these speakers from this send — their decisions stay staged for a later batch.
+        {pre.accepted} accept {pre.accepted === 1 ? 'email' : 'emails'} and {pre.declined} decline{' '}
+        {pre.declined === 1 ? 'email' : 'emails'} will be sent{notes.length > 0 ? ` — ${notes.join('; ')}` : ''}.
       </p>
-      <ul className="decision-pending-list">
-        {speakers.map((s) => (
-          <li key={s.contact_id}>
-            <strong>{s.name}</strong> — {s.pending_count} pending{' '}
-            {s.pending_count === 1 ? 'submission' : 'submissions'}
-            {s.pending_titles.length > 0 && (
-              <>
-                : {s.pending_titles.join(', ')}
-                {s.pending_count > s.pending_titles.length ? ` +${s.pending_count - s.pending_titles.length} more` : ''}
-              </>
-            )}
-          </li>
-        ))}
-      </ul>
+      {(pre.previews?.merged_speakers ?? 0) > 0 && (
+        <p>
+          {pre.previews!.merged_speakers} speaker{pre.previews!.merged_speakers === 1 ? '' : 's'} with several
+          decisions in this batch will receive one combined email instead.
+        </p>
+      )}
+      <DecisionEmailPreview label="Accepted" count={pre.accepted} preview={pre.previews?.accepted ?? null} />
+      <DecisionEmailPreview label="Declined" count={pre.declined} preview={pre.previews?.declined ?? null} />
+      <p className="decision-preview-meta">
+        To change the wording, edit the templates in Settings → Email templates, then reopen this dialog.
+      </p>
+      {speakers.length > 0 && (
+        <>
+          <p>
+            <strong>
+              {speakers.length} speaker{speakers.length === 1 ? '' : 's'} in this batch{' '}
+              {speakers.length === 1 ? 'has' : 'have'} other submissions still under review.
+            </strong>{' '}
+            Sending now includes a "still under review" line in their email; holding excludes just these
+            speakers from this send — their decisions stay staged for a later batch.
+          </p>
+          <ul className="decision-pending-list">
+            {speakers.map((s) => (
+              <li key={s.contact_id}>
+                <strong>{s.name}</strong> — {s.pending_count} pending{' '}
+                {s.pending_count === 1 ? 'submission' : 'submissions'}
+                {s.pending_titles.length > 0 && (
+                  <>
+                    : {s.pending_titles.join(', ')}
+                    {s.pending_count > s.pending_titles.length ? ` +${s.pending_count - s.pending_titles.length} more` : ''}
+                  </>
+                )}
+              </li>
+            ))}
+          </ul>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <input type="checkbox" checked={hold} onChange={(e) => setHold(e.currentTarget.checked)} />
+            Hold those speakers for a later, complete batch
+          </label>
+        </>
+      )}
     </ModalDialog>
   )
 }
@@ -2510,13 +2594,13 @@ export default function App() {
   const decisionPollRef = useRef<{ cancel: () => void } | null>(null)
   useEffect(() => () => decisionPollRef.current?.cancel(), [])
 
-  // Workplan 10 Wave B: speakers_with_pending from the preflight POST, held
-  // until the organiser picks send-all/hold/cancel in DecisionPendingDialog.
-  // `ids` snapshots the checked set at preflight time, independent of
-  // checkedIds (which the dialog leaves untouched until the real POST lands).
-  const [pendingDecisionSend, setPendingDecisionSend] = useState<{
+  // CFP-14: the full preflight+preview response, held until the organiser
+  // confirms or cancels in DecisionReviewDialog. `ids` snapshots the checked
+  // set at preflight time, independent of checkedIds (which the dialog leaves
+  // untouched until the real POST lands).
+  const [decisionReview, setDecisionReview] = useState<{
     ids: string[]
-    speakers: Array<{ contact_id: string; name: string; pending_count: number; pending_titles: string[] }>
+    pre: DecisionPreflight
   } | null>(null)
 
   /**
@@ -2535,22 +2619,15 @@ export default function App() {
         })
         const planned = r.accepted + r.declined
         const other = r.skipped - r.skipped_notified
-        // r.skipped_no_submitter is a subset of the *queued* (accepted +
-        // declined) rows, not of r.skipped — those still get their status
-        // flipped by the expander, they just have no address to mail. Call
-        // that out explicitly so "queued" copy never implies every queued
-        // decision will actually reach an inbox.
-        // FR-REV-2: decisions only fire from a queue state (Accept Queue /
-        // Decline Queue) by design — a row already Accepted/Declined is
-        // refused, not silently resent. That gate is correct, but "not in a
-        // queue" alone left the organiser with no idea what to do about it;
-        // spell out the remedy (the bulk bar's own "→ Accept/Decline Queue"
-        // buttons, right next to this one, re-stage a selection for resend).
+        // r.skipped_no_submitter counts rows in the send set with no address
+        // to mail (their statuses still flip where applicable). CFP-14: rows
+        // decided directly and never notified now ride the send (r.resend),
+        // so `other` is only rows that aren't decided at all — plus decided
+        // rows already notified, reported separately.
         const skippedNote =
           (r.skipped_notified > 0 ? `; ${r.skipped_notified} skipped (already notified)` : '') +
-          (other > 0
-            ? `; ${other} skipped (already decided — move back to Accept/Decline Queue to resend)`
-            : '') +
+          ((r.resend ?? 0) > 0 ? `; ${r.resend} previously decided included` : '') +
+          (other > 0 ? `; ${other} skipped (not decided yet)` : '') +
           ((r.skipped_no_submitter ?? 0) > 0 ? `; ${r.skipped_no_submitter} skipped — no submitter email` : '') +
           // Workplan 10 Wave B: "Hold those speakers" excludes their queued
           // rows from this send — they stay in accept_queue/decline_queue,
@@ -2617,22 +2694,31 @@ export default function App() {
       decisionPollRef.current?.cancel()
       setBulkBusy(true)
       if (action === 'send_decisions') {
-        // Workplan 10 Wave B: preflight first — no job created — so a batch
-        // spanning a speaker's mixed-outcome submissions can be flagged
-        // before any email goes out (tests/workplan-10-decision-email-merging.md §6).
+        // CFP-14: every send passes through the review dialog — preflight
+        // (no job created) computes counts, speaker warnings and rendered
+        // previews; the dialog's Send button does the real POST. The
+        // approval-ask checkbox affects the previewed accept email, so it
+        // rides along here too.
         try {
-          const pre = await sendDecisions(checkedIds, { preflight: true })
-          if (pre.speakers_with_pending && pre.speakers_with_pending.length > 0) {
-            // Hand off to the dialog; it (or Cancel) owns bulkBusy from here.
-            setPendingDecisionSend({ ids: checkedIds, speakers: pre.speakers_with_pending })
+          const pre = await sendDecisions(checkedIds, {
+            preflight: true,
+            preview: true,
+            ...(approvalAskRef.current ? { approval_ask: true } : {}),
+          })
+          if (pre.accepted + pre.declined === 0) {
+            const notes =
+              (pre.skipped_notified > 0 ? `; ${pre.skipped_notified} already notified` : '') +
+              ((pre.skipped_no_submitter ?? 0) > 0 ? `; ${pre.skipped_no_submitter} with no submitter email` : '')
+            setBulkNote(`No decision emails to send — nothing in the selection is decided but unnotified${notes}`)
+            setBulkBusy(false)
             return
           }
+          // Hand off to the dialog; it (or Cancel) owns bulkBusy from here.
+          setDecisionReview({ ids: checkedIds, pre })
         } catch (e) {
           setBulkNote(e instanceof Error ? e.message : 'Action failed')
           setBulkBusy(false)
-          return
         }
-        await sendDecisionsForReal(checkedIds)
         return
       }
       try {
@@ -2846,21 +2932,16 @@ export default function App() {
                 }}
               />
             )}
-            {pendingDecisionSend && (
-              <DecisionPendingDialog
-                speakers={pendingDecisionSend.speakers}
-                onSendAll={() => {
-                  const { ids } = pendingDecisionSend
-                  setPendingDecisionSend(null)
-                  void sendDecisionsForReal(ids)
-                }}
-                onHold={() => {
-                  const { ids, speakers } = pendingDecisionSend
-                  setPendingDecisionSend(null)
-                  void sendDecisionsForReal(ids, { hold_contact_ids: speakers.map((s) => s.contact_id) })
+            {decisionReview && (
+              <DecisionReviewDialog
+                pre={decisionReview.pre}
+                onSend={(holdContactIds) => {
+                  const { ids } = decisionReview
+                  setDecisionReview(null)
+                  void sendDecisionsForReal(ids, holdContactIds ? { hold_contact_ids: holdContactIds } : undefined)
                 }}
                 onCancel={() => {
-                  setPendingDecisionSend(null)
+                  setDecisionReview(null)
                   setBulkBusy(false)
                 }}
               />

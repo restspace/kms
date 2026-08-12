@@ -152,6 +152,58 @@ export function TrackRowEditor({
   )
 }
 
+export interface FormatDraftRow {
+  key: string
+  name: string
+}
+
+interface FormatRowEditorProps {
+  row: FormatDraftRow
+  onNameChange: (name: string) => void
+  onRemove: () => void
+  onNameBlur?: () => void
+  disabled?: boolean
+  nameLabel?: string
+  removeLabel?: string
+}
+
+/** Name-only row (formats carry no colour/capacity — a duration belongs in
+ * the label, e.g. "Talk (30 min)", where the agenda's formatMinutes() reads
+ * it). */
+export function FormatRowEditor({
+  row,
+  onNameChange,
+  onRemove,
+  onNameBlur,
+  disabled,
+  nameLabel = 'Format name',
+  removeLabel = 'Remove format',
+}: FormatRowEditorProps) {
+  return (
+    <div className="rt-row">
+      <input
+        type="text"
+        className="rt-row-name"
+        placeholder="Format name"
+        aria-label={nameLabel}
+        value={row.name}
+        onChange={(e) => onNameChange((e.target as HTMLInputElement).value)}
+        onBlur={onNameBlur}
+        disabled={disabled}
+      />
+      <button
+        type="button"
+        className="rt-row-remove"
+        aria-label={removeLabel}
+        onClick={onRemove}
+        disabled={disabled}
+      >
+        ×
+      </button>
+    </div>
+  )
+}
+
 interface RoomsRepeatableFieldProps {
   rows: RoomDraftRow[]
   onChange: (rows: RoomDraftRow[]) => void

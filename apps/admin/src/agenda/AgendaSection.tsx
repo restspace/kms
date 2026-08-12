@@ -11,6 +11,7 @@ import {
   addAgendaSession,
   getAgenda,
   getBulkJob,
+  listFormats,
   removeSessionSpeaker,
   scheduleSession,
   sendScheduleConfirmations,
@@ -147,6 +148,9 @@ export function AgendaSection({
   const [search, setSearch] = useState('')
   const [moveId, setMoveId] = useState<string | null>(null)
   const [showAdd, setShowAdd] = useState(false)
+  // The event's managed format names (CFP-S1) for the Add Session dialog —
+  // fetched like rooms/tracks, re-synced by the same focus listener below.
+  const [formats, setFormats] = useState<string[]>([])
   const [busy, setBusy] = useState(false)
   const [publishBusy, setPublishBusy] = useState(false)
   const [jobNote, setJobNote] = useState<string | null>(null)
@@ -182,6 +186,9 @@ export function AgendaSection({
   /** Authoritative resync — bypasses the queue's sequence gate on purpose. */
   const reload = useCallback(() => {
     getAgenda().then(setData).catch(() => undefined)
+    listFormats()
+      .then((r) => setFormats(r.items.map((f) => f.name)))
+      .catch(() => undefined)
   }, [])
 
   // One queue for the whole screen: per-session FIFO, newest-response-wins,
@@ -216,6 +223,9 @@ export function AgendaSection({
         })
       })
       .catch((e: unknown) => setError(e instanceof Error ? e.message : 'Failed to load the agenda'))
+    listFormats()
+      .then((r) => setFormats(r.items.map((f) => f.name)))
+      .catch(() => undefined)
   }, [])
 
   // Rooms/tracks live in Settings, often edited in another tab or after the
@@ -1005,6 +1015,7 @@ export function AgendaSection({
         <AddSessionDialog
           tracks={data.tracks}
           rooms={data.rooms}
+          formats={formats}
           days={days}
           onSave={(body) => {
             setShowAdd(false)

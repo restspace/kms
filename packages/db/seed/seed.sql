@@ -44,6 +44,17 @@ INSERT INTO tracks (id, event_id, name, color, position, updated_at) VALUES
   ('trk00000-0000-4000-8000-000000000004', 'evt00000-0000-4000-8000-000000000001', 'Infra & Serving',  '#0ea5e9', 4, '2026-08-01T00:00:00.000Z'),
   ('trk00000-0000-4000-8000-000000000005', 'evt00000-0000-4000-8000-000000000001', 'AI in Production', '#ef4444', 5, '2026-08-01T00:00:00.000Z');
 
+-- The demo event's format vocabulary (CFP-S1) — bare names matching the
+-- `submissions.format` values seeded below, not the duration-labelled
+-- defaults a brand-new event gets (adminApi.ts DEFAULT_FORMATS).
+INSERT INTO formats (id, event_id, name, position, updated_at) VALUES
+  ('fmt00000-0000-4000-8000-000000000001', 'evt00000-0000-4000-8000-000000000001', 'Keynote',          1, '2026-08-01T00:00:00.000Z'),
+  ('fmt00000-0000-4000-8000-000000000002', 'evt00000-0000-4000-8000-000000000001', 'Featured Keynote', 2, '2026-08-01T00:00:00.000Z'),
+  ('fmt00000-0000-4000-8000-000000000003', 'evt00000-0000-4000-8000-000000000001', 'Talk',             3, '2026-08-01T00:00:00.000Z'),
+  ('fmt00000-0000-4000-8000-000000000004', 'evt00000-0000-4000-8000-000000000001', 'Workshop',         4, '2026-08-01T00:00:00.000Z'),
+  ('fmt00000-0000-4000-8000-000000000005', 'evt00000-0000-4000-8000-000000000001', 'Panel',            5, '2026-08-01T00:00:00.000Z'),
+  ('fmt00000-0000-4000-8000-000000000006', 'evt00000-0000-4000-8000-000000000001', 'Lightning Talk',   6, '2026-08-01T00:00:00.000Z');
+
 INSERT INTO rooms (id, event_id, name, capacity, position, notes, updated_at) VALUES
   ('room0000-0000-4000-8000-000000000001', 'evt00000-0000-4000-8000-000000000001', 'Main Stage', 600, 1, NULL, '2026-08-01T00:00:00.000Z'),
   ('room0000-0000-4000-8000-000000000002', 'evt00000-0000-4000-8000-000000000001', 'Hall A',     250, 2, NULL, '2026-08-01T00:00:00.000Z'),
@@ -66,8 +77,10 @@ INSERT INTO field_definitions (id, event_id, key, label, type, scope, options, m
   -- abstract (submission scope)
   ('fld00000-0000-4000-8000-000000000001', 'evt00000-0000-4000-8000-000000000001', 'title',             'Title',             'text',        'submission', NULL, 255, 1),
   ('fld00000-0000-4000-8000-000000000002', 'evt00000-0000-4000-8000-000000000001', 'description',       'Description',       'wysiwyg',     'submission', NULL, 5000, 0),
-  ('fld00000-0000-4000-8000-000000000003', 'evt00000-0000-4000-8000-000000000001', 'format',            'Format',            'dropdown',    'submission',
-    '[{"value":"Keynote","label":"Keynote"},{"value":"Featured Keynote","label":"Featured Keynote"},{"value":"Talk","label":"Talk"},{"value":"Workshop","label":"Workshop"},{"value":"Panel","label":"Panel"},{"value":"Lightning Talk","label":"Lightning Talk"}]', NULL, 0),
+  -- Like `track` below, the canonical `format` field carries no stored
+  -- options: loadQuestions derives them from this event's `formats` rows
+  -- (formsAdmin.ts FORMAT_FIELD_KEY, spec-gap CFP-S1).
+  ('fld00000-0000-4000-8000-000000000003', 'evt00000-0000-4000-8000-000000000001', 'format',            'Format',            'dropdown',    'submission', NULL, NULL, 0),
   ('fld00000-0000-4000-8000-000000000004', 'evt00000-0000-4000-8000-000000000001', 'tags',              'Tags',              'multiselect', 'submission',
     '[{"value":"Open Source","label":"Open Source"},{"value":"Research","label":"Research"},{"value":"Production","label":"Production"},{"value":"Sponsor","label":"Sponsor"}]', NULL, 0),
   -- The canonical `track` field carries no stored options: loadQuestions

@@ -1,14 +1,29 @@
-import { useEffect, useMemo, useState } from 'react'
-import type { Me } from '../api'
-import { embedDataAttrs, embedPageParams, type EmbedFieldToggles, type EmbedThemeInput } from './embedOptions.logic'
+import { useEffect, useState } from 'react'
+import {
+  createSavedEmbed,
+  deleteSavedEmbed,
+  listSavedEmbeds,
+  updateSavedEmbed,
+  type Me,
+  type SavedEmbedRow,
+} from '../api'
+import { appConfirm } from '../components/dialogs'
+import {
+  embedDataAttrs,
+  embedPageParams,
+  type EmbedFieldToggles,
+  type EmbedThemeInput,
+  type SavedEmbedOptions,
+} from './embedOptions.logic'
 import './embeds.css'
 
 /**
- * Embeds (rubric EMB-15) — a pure *generator*. Nothing on this screen is
- * persisted: an organiser picks a public surface, an output format and a few
- * options, and leaves with a snippet or a URL they paste into their own site.
- * Every option travels in the URL, so the same choice works from a CMS, a
- * newsletter or a calendar client with no server-side embed records to manage.
+ * Embeds (rubric EMB-15) — a generator plus a saved list. The generator's
+ * options all travel in the URL, so a copied snippet works with no
+ * server-side record; *saving* (0033_saved_embeds) just names the current
+ * option state so the screen can answer "what have we embedded where?" and
+ * reload a configuration for editing. Snippets are rebuilt from the saved
+ * options at copy time, never stored.
  *
  * The five widgets are the five public pages (apps/api/src/routes/landing.tsx);
  * the loader script is GET /embed.js and the feeds are agenda.json /
@@ -150,6 +165,20 @@ const DEFAULT_EMBED_MUTED = '#6b6259'
   const [days, setDays] = useState<string[]>([])
   const [feedState, setFeedState] = useState<'loading' | 'ready' | 'unpublished'>('loading')
 
+  // Saved embeds (EMB-15): the persisted list, the row currently loaded into
+  // the generator (Save then updates it in place), and the Save box's name.
+  const [saved, setSaved] = useState<SavedEmbedRow[] | null>(null)
+  const [savedError, setSavedError] = useState<string | null>(null)
+  const [activeId, setActiveId] = useState<string | null>(null)
+  const [saveName, setSaveName] = useState('')
+  const [saving, setSaving] = useState(false)
+
+  useEffect(() => {
+    listSavedEmbeds()
+      .then((r) => setSaved(r.items))
+      .catch((e: unknown) => setSavedError(e instanceof Error ? e.message : 'Failed to load saved embeds'))
+  }, [])
+
   useEffect(() => {
     let cancelled = false
     setFeedState('loading')
@@ -182,34 +211,35 @@ const DEFAULT_EMBED_MUTED = '#6b6259'
     if (!def.feeds.includes(format)) setFormat('script')
   }, [widget, format, def])
 
-  const effTrack = filterable ? track : ALL
-  const effDay = filterable ? day : ALL
-
   const toggles: EmbedFieldToggles = { showAbstract, showSpeakers, showRoom, showTrack }
   const theme: EmbedThemeInput = { font, radius, spacing, useMuted, muted }
 
+  /** The generator's current state as the shape a saved embed persists. */
+  const currentOptions: SavedEmbedOptions = { accent, useAccent, showHeader, track, day, height, toggles, theme }
+
   /**
-   * Query string for the public page (?embed / header / accent / filters /
-   * field-visibility toggles / theme tokens) — one builder (embedOptions.logic)
-   * shared with the <script> snippet below, so the two cannot express the
-   * same choice two different ways (the EMB-15 defect this pattern already
-   * fixed for track/day).
+   * The builders below are parameterized on (widget, format, options) rather
+   * than reading component state, so the saved-embeds list can rebuild any
+   * row's snippet at copy time without loading it into the generator first.
+   * All of them route through embedOptions.logic — one builder for the page
+   * query and the <script data-*> attrs, so the two cannot express the same
+   * choice two different ways (the EMB-15 defect this pattern already fixed
+   * for track/day).
    */
-  const pageQuery = useMemo(() => {
-    const s = embedPageParams({ format, showHeader, useAccent, accent, track: effTrack, day: effDay, toggles, theme }).toString()
-    return s ? `?${s}` : ''
-  }, [format, showHeader, useAccent, accent, effTrack, effDay, showAbstract, showSpeakers, showRoom, showTrack, font, radius, spacing, useMuted, muted])
-
-  const pageUrl = `${origin}/e/${encodeURIComponent(slug)}/${widget}${pageQuery}`
-
-  /** Query string for the feed URLs — filters only, no presentation. */
-  const feedQuery = useMemo(() => {
-    const p = new URLSearchParams()
-    if (effTrack) p.set('track', effTrack)
-    if (effDay) p.set('day', effDay)
-    const s = p.toString()
-    return s ? `?${s}` : ''
-  }, [effTrack, effDay])
+  const pageUrlFor = (w: WidgetKey, f: FormatKey, o: SavedEmbedOptions): string => {
+    const wd = WIDGETS.find((x) => x.key === w) as WidgetDef
+    const s = embedPageParams({
+      format: f,
+      showHeader: o.showHeader,
+      useAccent: o.useAccent,
+      accent: o.accent,
+      track: wd.filterable ? o.track : ALL,
+      day: wd.filterable ? o.day : ALL,
+      toggles: o.toggles,
+      theme: o.theme,
+    }).toString()
+    return `${origin}/e/${encodeURIComponent(slug)}/${w}${s ? `?${s}` : ''}`
+  }
 
   // EMB-15 (major defect): every JSON/XML/iCal feed used to point at the
   // agenda endpoints regardless of which widget was selected, so choosing
@@ -220,75 +250,69 @@ const DEFAULT_EMBED_MUTED = '#6b6259'
   // speakers/gallery keep speakers.json (their only format), and
   // agenda/schedule keep the agenda feeds since both really are views over
   // the full published agenda, not a distinct payload.
-  const feedUrl = useMemo(() => {
+  const feedUrlFor = (w: WidgetKey, f: FormatKey, o: SavedEmbedOptions): string => {
+    const wd = WIDGETS.find((x) => x.key === w) as WidgetDef
     const base = `${origin}/e/${encodeURIComponent(slug)}`
-    if (widget === 'speakers' || widget === 'gallery') {
+    const p = new URLSearchParams()
+    if (wd.filterable && o.track) p.set('track', o.track)
+    if (wd.filterable && o.day) p.set('day', o.day)
+    const feedQuery = p.toString() ? `?${p.toString()}` : ''
+    if (w === 'speakers' || w === 'gallery') {
       return `${base}/speakers.json`
     }
-    if (widget === 'sessions') {
-      if (format === 'json') return `${base}/sessions.json`
-      if (format === 'xml') return `${base}/sessions.xml${feedQuery}`
-      if (format === 'ics') return `${base}/sessions.ics`
-      return pageUrl
+    if (w === 'sessions') {
+      if (f === 'json') return `${base}/sessions.json`
+      if (f === 'xml') return `${base}/sessions.xml${feedQuery}`
+      if (f === 'ics') return `${base}/sessions.ics`
+      return pageUrlFor(w, f, o)
     }
-    if (format === 'json') return `${base}/agenda.json`
-    if (format === 'xml') return `${base}/agenda.xml${feedQuery}`
-    if (format === 'ics') return `${base}/agenda.ics`
-    return pageUrl
-  }, [origin, slug, widget, format, feedQuery, pageUrl])
+    if (f === 'json') return `${base}/agenda.json`
+    if (f === 'xml') return `${base}/agenda.xml${feedQuery}`
+    if (f === 'ics') return `${base}/agenda.ics`
+    return pageUrlFor(w, f, o)
+  }
 
-  const snippet = useMemo(() => {
-    if (format === 'script') {
+  const snippetFor = (w: WidgetKey, f: FormatKey, o: SavedEmbedOptions): string => {
+    const wd = WIDGETS.find((x) => x.key === w) as WidgetDef
+    const url = pageUrlFor(w, f, o)
+    if (f === 'script') {
       const lines = [
         `<script src="${attr(origin)}/embed.js"`,
         `        data-event="${attr(slug)}"`,
-        `        data-widget="${attr(widget)}"`,
+        `        data-widget="${attr(w)}"`,
       ]
-      // Derived from the same params as pageQuery (embedOptions.logic), so a
-      // data-* attribute here can never disagree with the direct link's query
-      // param for the identical option.
-      for (const [attrName, value] of embedDataAttrs({ format, showHeader, useAccent, accent, track: effTrack, day: effDay, toggles, theme })) {
+      // Derived from the same params as the page URL (embedOptions.logic), so
+      // a data-* attribute here can never disagree with the direct link's
+      // query param for the identical option.
+      for (const [attrName, value] of embedDataAttrs({
+        format: f,
+        showHeader: o.showHeader,
+        useAccent: o.useAccent,
+        accent: o.accent,
+        track: wd.filterable ? o.track : ALL,
+        day: wd.filterable ? o.day : ALL,
+        toggles: o.toggles,
+        theme: o.theme,
+      })) {
         lines.push(`        data-${attrName}="${attr(value)}"`)
       }
-      if (height.trim()) lines.push(`        data-height="${attr(height.trim())}"`)
+      if (o.height.trim()) lines.push(`        data-height="${attr(o.height.trim())}"`)
       return `${lines.join('\n')}></script>`
     }
-    if (format === 'iframe') {
+    if (f === 'iframe') {
       return [
-        `<iframe src="${attr(pageUrl)}"`,
-        `        title="${attr(me.event.name)} — ${attr(def.label)}"`,
-        `        width="100%" height="${attr(height.trim() || '600')}"`,
+        `<iframe src="${attr(url)}"`,
+        `        title="${attr(me.event.name)} — ${attr(wd.label)}"`,
+        `        width="100%" height="${attr(o.height.trim() || '600')}"`,
         '        style="border:0;display:block" loading="lazy"></iframe>',
-        `<p><a href="${attr(pageUrl.split('?')[0] ?? pageUrl)}">${attr(def.label)} — ${attr(me.event.name)}</a></p>`,
+        `<p><a href="${attr(url.split('?')[0] ?? url)}">${attr(wd.label)} — ${attr(me.event.name)}</a></p>`,
       ].join('\n')
     }
-    return feedUrl
-  }, [
-    format,
-    origin,
-    slug,
-    widget,
-    showHeader,
-    useAccent,
-    accent,
-    effTrack,
-    effDay,
-    showAbstract,
-    showSpeakers,
-    showRoom,
-    showTrack,
-    font,
-    radius,
-    spacing,
-    useMuted,
-    muted,
-    height,
-    pageUrl,
-    feedUrl,
-    me.event.name,
-    def.label,
-  ])
+    return feedUrlFor(w, f, o)
+  }
 
+  const pageUrl = pageUrlFor(widget, format, currentOptions)
+  const snippet = snippetFor(widget, format, currentOptions)
   const previewUrl = pageUrl
 
   const copy = async (label: string, value: string) => {
@@ -301,13 +325,79 @@ const DEFAULT_EMBED_MUTED = '#6b6259'
     }
   }
 
+  /** Hydrate the generator from a saved row (its Load action). */
+  const loadSaved = (row: SavedEmbedRow) => {
+    const o = row.options
+    setWidget(row.widget)
+    setFormat(row.format)
+    setAccent(o.accent || DEFAULT_EMBED_ACCENT)
+    setUseAccent(o.useAccent)
+    setShowHeader(o.showHeader)
+    setTrack(o.track ?? ALL)
+    setDay(o.day ?? ALL)
+    setHeight(o.height || '600')
+    setShowAbstract(o.toggles?.showAbstract ?? true)
+    setShowSpeakers(o.toggles?.showSpeakers ?? true)
+    setShowRoom(o.toggles?.showRoom ?? true)
+    setShowTrack(o.toggles?.showTrack ?? true)
+    setFont(o.theme?.font ?? '')
+    setRadius(o.theme?.radius ?? '')
+    setSpacing(o.theme?.spacing ?? '')
+    setUseMuted(o.theme?.useMuted ?? false)
+    setMuted(o.theme?.muted || DEFAULT_EMBED_MUTED)
+    setActiveId(row.id)
+    setSaveName(row.name)
+  }
+
+  const saveEmbed = async (asNew: boolean) => {
+    const name = saveName.trim()
+    if (!name || saving) return
+    setSaving(true)
+    setSavedError(null)
+    try {
+      if (!asNew && activeId) {
+        const updated = await updateSavedEmbed(activeId, { name, widget, format, options: currentOptions })
+        setSaved((cur) => (cur ?? []).map((r) => (r.id === updated.id ? updated : r)))
+      } else {
+        const created = await createSavedEmbed({ name, widget, format, options: currentOptions })
+        setSaved((cur) => [created, ...(cur ?? [])])
+        setActiveId(created.id)
+      }
+    } catch (e) {
+      setSavedError(e instanceof Error ? e.message : 'Failed to save the embed.')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const removeSaved = async (row: SavedEmbedRow) => {
+    const confirmed = await appConfirm(
+      `Delete "${row.name}"? Snippets already pasted into other sites keep working — only this saved configuration goes away.`,
+      { title: 'Delete saved embed', confirmLabel: 'Delete', danger: true },
+    )
+    if (!confirmed) return
+    try {
+      await deleteSavedEmbed(row.id)
+      setSaved((cur) => (cur ?? []).filter((r) => r.id !== row.id))
+      if (activeId === row.id) {
+        setActiveId(null)
+        setSaveName('')
+      }
+    } catch (e) {
+      setSavedError(e instanceof Error ? e.message : 'Failed to delete the embed.')
+    }
+  }
+
+  const widgetLabel = (key: WidgetKey) => WIDGETS.find((w) => w.key === key)?.label ?? key
+  const formatLabel = (key: FormatKey) => FORMATS.find((f) => f.key === key)?.label ?? key
+
   return (
     <div className="embeds">
       <header className="embeds-head">
         <h2>Embeds</h2>
         <p className="muted">
           Put a live piece of {me.event.name} on your own site. Pick a widget and a format, copy the
-          snippet — nothing is saved here, the options travel in the URL.
+          snippet — and save the configuration to come back to it later.
         </p>
         {feedState === 'unpublished' && (
           <p className="embeds-warn">
@@ -316,6 +406,53 @@ const DEFAULT_EMBED_MUTED = '#6b6259'
           </p>
         )}
       </header>
+
+      <section className="embeds-saved" aria-label="Saved embeds">
+        <div className="embeds-snippet-head">
+          <h3>Saved embeds</h3>
+        </div>
+        {savedError && <p className="embeds-warn">{savedError}</p>}
+        {saved === null ? (
+          <p className="muted embeds-note">Loading…</p>
+        ) : saved.length === 0 ? (
+          <p className="muted embeds-note">
+            Nothing saved yet. Configure a widget below and use “Save” to keep the configuration here.
+          </p>
+        ) : (
+          <table className="embeds-saved-table">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Widget</th>
+                <th>Format</th>
+                <th>Updated</th>
+                <th />
+              </tr>
+            </thead>
+            <tbody>
+              {saved.map((row) => (
+                <tr key={row.id} className={activeId === row.id ? 'is-active' : undefined}>
+                  <td>{row.name}</td>
+                  <td>{widgetLabel(row.widget)}</td>
+                  <td>{formatLabel(row.format)}</td>
+                  <td>{row.updated_at.slice(0, 10)}</td>
+                  <td className="embeds-saved-actions">
+                    <button type="button" onClick={() => loadSaved(row)}>
+                      {activeId === row.id ? 'Loaded' : 'Load'}
+                    </button>
+                    <button type="button" onClick={() => void copy(`row-${row.id}`, snippetFor(row.widget, row.format, row.options))}>
+                      {copied === `row-${row.id}` ? 'Copied' : 'Copy snippet'}
+                    </button>
+                    <button type="button" onClick={() => void removeSaved(row)}>
+                      Delete
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </section>
 
       <div className="embeds-grid">
         <div className="embeds-controls">
@@ -565,6 +702,38 @@ const DEFAULT_EMBED_MUTED = '#6b6259'
         </div>
 
         <div className="embeds-output">
+          <div className="embeds-snippet embeds-save">
+            <div className="embeds-snippet-head">
+              <h3>{activeId ? 'Editing a saved embed' : 'Save this embed'}</h3>
+            </div>
+            <div className="embeds-save-row">
+              <input
+                type="text"
+                placeholder="Name, e.g. Homepage agenda"
+                aria-label="Saved embed name"
+                value={saveName}
+                onChange={(e) => setSaveName(e.currentTarget.value)}
+              />
+              <button
+                type="button"
+                disabled={saveName.trim() === '' || saving}
+                onClick={() => void saveEmbed(false)}
+              >
+                {saving ? 'Saving…' : activeId ? 'Save changes' : 'Save'}
+              </button>
+              {activeId && (
+                <button type="button" disabled={saveName.trim() === '' || saving} onClick={() => void saveEmbed(true)}>
+                  Save as new
+                </button>
+              )}
+            </div>
+            {activeId && (
+              <p className="muted embeds-note">
+                Renaming here and saving updates the saved embed; “Save as new” keeps the original.
+              </p>
+            )}
+          </div>
+
           <div className="embeds-snippet">
             <div className="embeds-snippet-head">
               <h3>{format === 'script' || format === 'iframe' ? 'Snippet' : 'URL'}</h3>

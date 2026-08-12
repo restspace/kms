@@ -277,12 +277,27 @@ function shapeQuestion(row: QuestionRow) {
  *  submit.tsx's `trackAnswers`. */
 export const TRACK_FIELD_KEY = 'track';
 
+/** Same derivation for the canonical Format question (CFP-S1), with one
+ *  difference: submissions.format stores the display *name*, not an id, and
+ *  every read surface consumes that string — so options are keyed by name
+ *  (`value === label`) and the column keeps receiving names unchanged.
+ *  Migration 0032 clears the stored options on canonical format fields. */
+export const FORMAT_FIELD_KEY = 'format';
+
 async function trackOptions(db: D1Database, eventId: string) {
   const { results } = await db
     .prepare('SELECT id, name FROM tracks WHERE event_id = ? ORDER BY position')
     .bind(eventId)
     .all<{ id: string; name: string }>();
   return results.map((t) => ({ value: t.id, label: t.name }));
+}
+
+async function formatOptions(db: D1Database, eventId: string) {
+  const { results } = await db
+    .prepare('SELECT name FROM formats WHERE event_id = ? ORDER BY position')
+    .bind(eventId)
+    .all<{ name: string }>();
+  return results.map((f) => ({ value: f.name, label: f.name }));
 }
 
 export async function loadQuestions(db: D1Database, formId: string, eventId?: string) {
@@ -294,13 +309,21 @@ export async function loadQuestions(db: D1Database, formId: string, eventId?: st
   // Derived only when the question carries no option list of its own. A form
   // that deliberately authored track options — an import, or the id/slug-style
   // values submit-track-option-value.test.ts reproduces from the live CFP form
-  // — keeps them and the name-matching path. Migration 0013 clears the stored
-  // options on canonical track fields so existing forms adopt derivation.
-  const derivable = (q: { field_key: string; options: unknown }) =>
-    q.field_key === TRACK_FIELD_KEY && (q.options === null || (Array.isArray(q.options) && q.options.length === 0));
-  if (!eventId || !questions.some(derivable)) return questions;
-  const options = await trackOptions(db, eventId);
-  return questions.map((q) => (derivable(q) ? { ...q, options } : q));
+  // — keeps them and the name-matching path. Migrations 0013/0032 clear the
+  // stored options on canonical track/format fields so existing forms adopt
+  // derivation.
+  const emptyOptions = (q: { options: unknown }) =>
+    q.options === null || (Array.isArray(q.options) && q.options.length === 0);
+  const derivableTrack = (q: { field_key: string; options: unknown }) =>
+    q.field_key === TRACK_FIELD_KEY && emptyOptions(q);
+  const derivableFormat = (q: { field_key: string; options: unknown }) =>
+    q.field_key === FORMAT_FIELD_KEY && emptyOptions(q);
+  if (!eventId || !questions.some((q) => derivableTrack(q) || derivableFormat(q))) return questions;
+  const trackOpts = questions.some(derivableTrack) ? await trackOptions(db, eventId) : [];
+  const formatOpts = questions.some(derivableFormat) ? await formatOptions(db, eventId) : [];
+  return questions.map((q) =>
+    derivableTrack(q) ? { ...q, options: trackOpts } : derivableFormat(q) ? { ...q, options: formatOpts } : q,
+  );
 }
 
 async function getForm(db: D1Database, eventId: string, id: string) {

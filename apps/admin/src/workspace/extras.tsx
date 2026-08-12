@@ -7,6 +7,7 @@ import {
   addSubmissionParticipant,
   getSubmissionDetail,
   getSubmissionRevisions,
+  listFormats,
   listRooms,
   listTracks,
   PARTICIPANT_ROLES,
@@ -1329,6 +1330,7 @@ export function SubmissionEditForm({ initialValues, onSubmit, onCancel, onDelete
   const [loadError, setLoadError] = useState<string | null>(null)
   const [tracks, setTracks] = useState<TrackRow[]>([])
   const [rooms, setRooms] = useState<RoomRow[]>([])
+  const [formatNames, setFormatNames] = useState<string[]>([])
   // The `track_id` the record actually holds, kept apart from the picker's
   // value so Save can tell "the organiser chose a different track" from "the
   // picker never had an option for what was stored". See `handleSubmit`.
@@ -1369,6 +1371,9 @@ export function SubmissionEditForm({ initialValues, onSubmit, onCancel, onDelete
       .catch(() => {})
     listRooms()
       .then((r) => { if (!cancelled) setRooms(r.items) })
+      .catch(() => {})
+    listFormats()
+      .then((f) => { if (!cancelled) setFormatNames(f.items.map((x) => x.name)) })
       .catch(() => {})
     return () => { cancelled = true }
   }, [])
@@ -1520,7 +1525,17 @@ export function SubmissionEditForm({ initialValues, onSubmit, onCancel, onDelete
         </div>
         <div className="record-form-field">
           <label htmlFor="sub-edit-format">Format</label>
-          <input id="sub-edit-format" value={fields.format} disabled={isSubmitting} onChange={(e) => setField('format', e.target.value)} />
+          {/* Managed vocabulary (CFP-S1) — but a submission may carry a name
+              that predates a rename/delete, so the stored value is appended
+              rather than silently dropped (the track picker's unmatched-answer
+              rule, applied to a name-keyed column). */}
+          <select id="sub-edit-format" value={fields.format} disabled={isSubmitting} onChange={(e) => setField('format', e.target.value)}>
+            <option value="">— No format —</option>
+            {fields.format !== '' && !formatNames.includes(fields.format) && (
+              <option value={fields.format}>{fields.format} (no longer offered)</option>
+            )}
+            {formatNames.map((name) => <option key={name} value={name}>{name}</option>)}
+          </select>
         </div>
         <div className="record-form-field">
           <label htmlFor="sub-edit-level">Level</label>

@@ -592,3 +592,37 @@
     transition: none;
   }
 }
+
+/* CFP-14: the send-decisions review dialog's email previews. */
+.decision-preview {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  margin: 0 0 12px;
+}
+
+.decision-preview h4 {
+  margin: 0 0 4px;
+  font-size: 13px;
+  font-family: var(--font-display);
+}
+
+.decision-preview-meta {
+  color: var(--text-muted);
+  font-size: 12px;
+  margin: 0 0 8px;
+}
+
+.decision-preview-body {
+  max-height: 220px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  background: var(--surface);
+  font-size: 13px;
+}
+
+.decision-preview-body p {
+  margin: 0 0 8px;
+}

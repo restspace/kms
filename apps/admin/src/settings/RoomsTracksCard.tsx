@@ -1,18 +1,30 @@
 import { useCallback, useEffect, useState } from 'react'
 import {
+  createFormat,
   createRoom,
   createTrack,
+  deleteFormat,
   deleteRoom,
   deleteTrack,
+  listFormats,
   listRooms,
   listTracks,
+  updateFormat,
   updateRoom,
   updateTrack,
+  type FormatRow,
   type RoomRow,
   type TrackRow,
 } from '../api'
 import { appConfirm } from '../components/dialogs'
-import { RoomRowEditor, TrackRowEditor, type RoomDraftRow, type TrackDraftRow } from '../components/RoomsTracksFields'
+import {
+  FormatRowEditor,
+  RoomRowEditor,
+  TrackRowEditor,
+  type FormatDraftRow,
+  type RoomDraftRow,
+  type TrackDraftRow,
+} from '../components/RoomsTracksFields'
 import '../components/RoomsTracksFields.css'
 
 /**
@@ -32,10 +44,12 @@ const asDraftRoom = (r: RoomRow): RoomDraftRow => ({
   capacity: r.capacity === null ? '' : String(r.capacity),
 })
 const asDraftTrack = (t: TrackRow): TrackDraftRow => ({ key: t.id, name: t.name, color: t.color ?? '' })
+const asDraftFormat = (f: FormatRow): FormatDraftRow => ({ key: f.id, name: f.name })
 
 export function RoomsTracksCard() {
   const [rooms, setRooms] = useState<RoomDraftRow[] | null>(null)
   const [tracks, setTracks] = useState<TrackDraftRow[] | null>(null)
+  const [formats, setFormats] = useState<FormatDraftRow[] | null>(null)
   // Item 3 fix: previously a single shared `error` string with no matching
   // "did this list ever resolve?" state — a rejected `listRooms()`/`listTracks()`
   // left `rooms`/`tracks` at their initial `null` forever, and the `=== null`
@@ -45,8 +59,10 @@ export function RoomsTracksCard() {
   // successful load, and each gets an explicit Retry.
   const [roomsError, setRoomsError] = useState<string | null>(null)
   const [tracksError, setTracksError] = useState<string | null>(null)
+  const [formatsError, setFormatsError] = useState<string | null>(null)
   const [savingRoom, setSavingRoom] = useState<string | null>(null)
   const [savingTrack, setSavingTrack] = useState<string | null>(null)
+  const [savingFormat, setSavingFormat] = useState<string | null>(null)
 
   const loadRooms = useCallback(() => {
     setRoomsError(null)
@@ -62,10 +78,18 @@ export function RoomsTracksCard() {
       .catch((e: unknown) => setTracksError(e instanceof Error ? e.message : 'Failed to load tracks'))
   }, [])
 
+  const loadFormats = useCallback(() => {
+    setFormatsError(null)
+    listFormats()
+      .then((r) => setFormats(r.items.map(asDraftFormat)))
+      .catch((e: unknown) => setFormatsError(e instanceof Error ? e.message : 'Failed to load formats'))
+  }, [])
+
   useEffect(() => {
     loadRooms()
     loadTracks()
-  }, [loadRooms, loadTracks])
+    loadFormats()
+  }, [loadRooms, loadTracks, loadFormats])
 
   const handleAddRoom = async () => {
     try {
@@ -173,11 +197,54 @@ export function RoomsTracksCard() {
     }
   }
 
+  const handleAddFormat = async () => {
+    try {
+      const n = (formats?.length ?? 0) + 1
+      const created = await createFormat({ name: `New format ${n}` })
+      setFormats((cur) => [...(cur ?? []), asDraftFormat(created)])
+    } catch (e) {
+      setFormatsError(e instanceof Error ? e.message : 'Failed to add the format.')
+    }
+  }
+
+  const handleFormatNameBlur = async (row: FormatDraftRow) => {
+    const name = row.name.trim()
+    if (!name) {
+      const fresh = await listFormats()
+      setFormats(fresh.items.map(asDraftFormat))
+      return
+    }
+    setSavingFormat(row.key)
+    try {
+      await updateFormat(row.key, { name })
+    } catch (e) {
+      setFormatsError(e instanceof Error ? e.message : 'Failed to rename the format.')
+    } finally {
+      setSavingFormat(null)
+    }
+  }
+
+  const handleRemoveFormat = async (row: FormatDraftRow) => {
+    const confirmed = await appConfirm(
+      `Delete "${row.name || 'this format'}"? Existing submissions and sessions keep the format name; it just stops being offered.`,
+      { title: 'Delete format', confirmLabel: 'Delete', danger: true },
+    )
+    if (!confirmed) return
+    try {
+      await deleteFormat(row.key)
+      setFormats((cur) => (cur ?? []).filter((f) => f.key !== row.key))
+    } catch (e) {
+      setFormatsError(e instanceof Error ? e.message : 'Failed to delete the format.')
+    }
+  }
+
   return (
     <section className="settings-card">
-      <h2>Rooms & tracks</h2>
+      <h2>Rooms, tracks & formats</h2>
       <p className="settings-hint">
-        Changes here appear in the agenda builder&rsquo;s Add Session dialog immediately.
+        Changes here appear in the agenda builder&rsquo;s Add Session dialog immediately. Formats also
+        drive the submission form&rsquo;s Format dropdown; put the default length in the name (e.g.
+        &ldquo;Talk (30 min)&rdquo;) and new sessions pick it up.
       </p>
 
       <div className="settings-rt-columns">
@@ -247,6 +314,39 @@ export function RoomsTracksCard() {
               ))}
               <button type="button" className="rt-add" onClick={() => void handleAddTrack()}>
                 + Add track
+              </button>
+            </div>
+            </>
+          )}
+        </div>
+
+        <div>
+          <h3>Formats</h3>
+          {formatsError && formats === null ? (
+            <div className="settings-error">
+              {formatsError}{' '}
+              <button type="button" className="settings-ghost" onClick={() => loadFormats()}>
+                Retry
+              </button>
+            </div>
+          ) : formats === null ? (
+            <div className="settings-hint">Loading…</div>
+          ) : (
+            <>
+              {formatsError && <div className="settings-error">{formatsError}</div>}
+            <div className="rt-field">
+              {formats.map((row) => (
+                <div key={row.key} className={savingFormat === row.key ? 'rt-row-saving' : undefined}>
+                  <FormatRowEditor
+                    row={row}
+                    onNameChange={(name) => setFormats((cur) => (cur ?? []).map((f) => (f.key === row.key ? { ...f, name } : f)))}
+                    onNameBlur={() => void handleFormatNameBlur(row)}
+                    onRemove={() => void handleRemoveFormat(row)}
+                  />
+                </div>
+              ))}
+              <button type="button" className="rt-add" onClick={() => void handleAddFormat()}>
+                + Add format
               </button>
             </div>
             </>

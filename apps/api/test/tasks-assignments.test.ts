@@ -175,3 +175,89 @@ describe('POST /app/api/tasks with targets', () => {
     expect((await listTasks(admin.cookie)).total).toBe(0);
   });
 });
+
+// CNT-01: named audiences ("all speakers") as an assignment target, expanding
+// server-side via messagingAdmin's resolveAudience with requireEmail: false —
+// a deliverable is owed even by a contact with no address.
+describe('POST /app/api/tasks with an audience', () => {
+  /** submitter + participant + a roster-only contact + a no-email participant. */
+  const seedSpeakers = async (eventId: string) => {
+    const submitter = await seedContact(eventId, { email: 'speaker1@example.com', first_name: 'Priya' });
+    const participant = await seedContact(eventId, { email: 'speaker2@example.com', first_name: 'Marcus' });
+    // contacts.email is NOT NULL — "no address" is the empty string, which is
+    // exactly what the messaging hasEmail filter excludes and tasks keep.
+    const noEmail = await seedContact(eventId, { email: '', first_name: 'Nomail' });
+    const rosterOnly = await seedContact(eventId, { email: 'roster@example.com', first_name: 'Rae' });
+    const submissionId = await seedSubmission(eventId, { submitter_contact_id: submitter, status: 'accepted' });
+    await env.DB.prepare(
+      `INSERT INTO submission_participants (id, submission_id, contact_id, role) VALUES (?, ?, ?, 'speaker')`,
+    ).bind(`sp-${submissionId}-1`, submissionId, participant).run();
+    await env.DB.prepare(
+      `INSERT INTO submission_participants (id, submission_id, contact_id, role) VALUES (?, ?, ?, 'speaker')`,
+    ).bind(`sp-${submissionId}-2`, submissionId, noEmail).run();
+    return { submitter, participant, noEmail, rosterOnly, submissionId };
+  };
+
+  it('audience: speakers assigns everyone attached to a submission, email or not', async () => {
+    const eventId = await seedEvent();
+    const admin = await seedStaff(eventId, 'admin');
+    const { submitter, participant, noEmail, rosterOnly } = await seedSpeakers(eventId);
+
+    const res = await api('/tasks', admin.cookie, {
+      title: 'Upload Session Presentation',
+      target: 'contact',
+      action_type: 'file_upload',
+      audience: 'speakers',
+    });
+    expect(res.status).toBe(201);
+    expect(((await res.json()) as Record<string, unknown>).assignments_created).toBe(3);
+
+    const rows = await env.DB.prepare(
+      `SELECT ta.contact_id FROM task_assignments ta JOIN tasks t ON t.id = ta.task_id WHERE t.event_id = ?`,
+    ).bind(eventId).all<{ contact_id: string }>();
+    const assigned = new Set(rows.results.map((r) => r.contact_id));
+    expect(assigned).toEqual(new Set([submitter, participant, noEmail]));
+    expect(assigned.has(rosterOnly)).toBe(false);
+  });
+
+  it('merges an audience with explicitly picked ids, de-duplicated', async () => {
+    const eventId = await seedEvent();
+    const admin = await seedStaff(eventId, 'admin');
+    const { submitter, rosterOnly } = await seedSpeakers(eventId);
+
+    const res = await api('/tasks', admin.cookie, {
+      title: 'Headshot',
+      audience: 'speakers',
+      assignee_contact_ids: [submitter, rosterOnly],
+    });
+    expect(res.status).toBe(201);
+    // 3 speakers + rosterOnly; submitter counted once.
+    expect(((await res.json()) as Record<string, unknown>).assignments_created).toBe(4);
+  });
+
+  it('rejects an unknown audience', async () => {
+    const eventId = await seedEvent();
+    const admin = await seedStaff(eventId, 'admin');
+    const res = await api('/tasks', admin.cookie, { title: 'Nope', audience: 'sponsors' });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: 'invalid_audience' });
+  });
+
+  it('GET /tasks/audiences reports task-flavored counts (no email filter)', async () => {
+    const eventId = await seedEvent();
+    const admin = await seedStaff(eventId, 'admin');
+    await seedSpeakers(eventId);
+
+    const res = await SELF.fetch('https://example.com/app/api/tasks/audiences', {
+      headers: { cookie: admin.cookie },
+    });
+    expect(res.status).toBe(200);
+    const { audiences } = (await res.json()) as { audiences: Array<{ audience: string; count: number }> };
+    const byName = new Map(audiences.map((a) => [a.audience, a.count]));
+    // The no-email participant counts here (unlike the messaging counts).
+    expect(byName.get('speakers')).toBe(3);
+    expect(byName.get('accepted_speakers')).toBe(3);
+    // seedStaff's contact is on the event too: 4 seeded + the admin.
+    expect(byName.get('all_contacts')).toBe(5);
+  });
+});

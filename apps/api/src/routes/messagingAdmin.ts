@@ -174,12 +174,19 @@ export interface ComposeRecipient {
  * Resolution happens once, at compose time, and the ids are frozen into the
  * job — the same snapshot discipline expandSendDecisions uses, so a contact
  * created while the job drains doesn't silently join the send.
+ *
+ * `opts.requireEmail` (default true) keeps the messaging behaviour: someone
+ * without an address cannot be emailed, so compose drops them. Task
+ * assignment (CNT-01) resolves the same audiences with `requireEmail: false`
+ * — an assignee needn't be reachable by email to owe a deliverable, and the
+ * portal shows the task either way.
  */
 export async function resolveAudience(
   db: D1Database,
   eventId: string,
   audience: ComposeAudience,
   contactIds: string[],
+  opts: { requireEmail?: boolean } = {},
 ): Promise<ComposeRecipient[]> {
   // 0015: `contacts` is org-level identity, `event_contacts` is membership AND
   // the per-event profile. The join therefore does both jobs every audience
@@ -190,7 +197,7 @@ export async function resolveAudience(
   const select = `SELECT c.id, c.email, c.first_name, c.last_name, ec.company, ec.job_title
        FROM event_contacts ec
        JOIN contacts c ON c.id = ec.contact_id`;
-  const hasEmail = "c.email IS NOT NULL AND TRIM(c.email) != ''";
+  const hasEmail = opts.requireEmail === false ? '1=1' : "c.email IS NOT NULL AND TRIM(c.email) != ''";
   // Contacts-hygiene item 4: a contact staked out by the public submission
   // wizard's Account step (submit.tsx) before any name is collected — or
   // left over from a form that never collects one — can end up on the roster

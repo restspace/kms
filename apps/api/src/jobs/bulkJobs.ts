@@ -159,8 +159,9 @@ interface SendDecisionsParams {
 }
 
 /** The {{approval_ask}} block (workplan 13 W3): prerendered system HTML, so it
- * rides the raw {{{…}}} slot family like decision_summary's blocks. */
-const APPROVAL_ASK_HTML =
+ * rides the raw {{{…}}} slot family like decision_summary's blocks. Exported
+ * for the send-decisions preview (CFP-14), which must render the same block. */
+export const APPROVAL_ASK_HTML =
   '<p>One thing before you confirm: if this talk needs sign-off from your employer ' +
   '(manager, PR or legal), please start that conversation now and let us know once ' +
   'it&rsquo;s granted — pending approvals are the most common reason accepted talks ' +
@@ -216,7 +217,16 @@ async function expandSendDecisions(env: Env, job: BulkJobRow, limit: number): Pr
          JOIN contacts c2 ON c2.id = sp.contact_id
          WHERE NULLIF(c2.email, '') IS NOT NULL
        ) fb ON fb.submission_id = s.id AND fb.rn = 1
-       WHERE s.event_id = ? AND s.id IN (${placeholders}) AND s.status IN ('accept_queue', 'decline_queue')`;
+       WHERE s.event_id = ? AND s.id IN (${placeholders})
+         AND (s.status IN ('accept_queue', 'decline_queue')
+              OR (s.status IN ('accepted', 'declined') AND s.notified_at IS NULL
+                  AND COALESCE(NULLIF(c.email, ''), fb.email) IS NOT NULL))`;
+  // CFP-14: the second arm admits rows decided *directly* (no queue step) but
+  // never notified — the route only snapshots such rows when a recipient
+  // exists, and the notified_at IS NULL guard re-evaluated every tick means a row
+  // notified by an earlier tick (or an earlier job) is never re-selected. The
+  // mailer idempotency key (entityId = submission id) is the second layer for
+  // two overlapping jobs racing the stamp.
   // ORDER BY submitter_contact_id makes a speaker's decisions adjacent, so
   // grouping is a single pass; over-fetch by one row to detect a group
   // straddling the tick boundary.
@@ -264,6 +274,10 @@ async function expandSendDecisions(env: Env, job: BulkJobRow, limit: number): Pr
 
   const ts = nowIso();
   const send = queueSend(db, job.id);
+  // Rows this tick actually handled (flipped queue rows + directly-decided
+  // rows it attempted to notify) — the job's incremental progress unit; see
+  // the progress write at the bottom.
+  let processedCount = 0;
   const gatherFeedback = async (submissionId: string): Promise<string> => {
     // Reviewer rationales live in the submission_comments thread since
     // workplan 7 (reviews.comment is deprecated). Feedback is each
@@ -303,12 +317,20 @@ async function expandSendDecisions(env: Env, job: BulkJobRow, limit: number): Pr
     // the rows already flipped and skips (D5's safety argument).
     const flipped: DecisionRow[] = [];
     for (const s of group) {
+      if (s.status === 'accepted' || s.status === 'declined') {
+        // Directly-decided row (CFP-14): no flip to perform — the tick-time
+        // notified_at IS NULL select guard plus the mailer idempotency key
+        // stand in for the conditional UPDATE as its reprocessing gate.
+        flipped.push(s);
+        continue;
+      }
       const res = await db
         .prepare(`UPDATE submissions SET status = ?, updated_at = ? WHERE id = ? AND status IN ('accept_queue', 'decline_queue')`)
         .bind(s.status === 'accept_queue' ? 'accepted' : 'declined', ts, s.id)
         .run();
       if (res.meta.changes > 0) flipped.push(s);
     }
+    processedCount += flipped.length;
     if (flipped.length === 0) continue;
 
     // W3: the organiser asked this batch for employer approval — flag every
@@ -317,7 +339,7 @@ async function expandSendDecisions(env: Env, job: BulkJobRow, limit: number): Pr
     // (the flag is what puts the talk on the tracking board's approval list).
     if (params.approval_ask) {
       for (const s of flipped) {
-        if (s.status === 'accept_queue') {
+        if (s.status === 'accept_queue' || s.status === 'accepted') {
           await db
             .prepare(`UPDATE submissions SET approval_state = COALESCE(approval_state, 'pending') WHERE id = ?`)
             .bind(s.id)
@@ -341,7 +363,9 @@ async function expandSendDecisions(env: Env, job: BulkJobRow, limit: number): Pr
         // email (D6), so 'duplicate' handling against pre-change sends is
         // unchanged.
         const s = flipped[0]!;
-        const isAccept = s.status === 'accept_queue';
+        // `s.status` is the pre-flip snapshot: 'accepted' means a directly-
+        // decided row riding this batch (CFP-14), same side as accept_queue.
+        const isAccept = s.status === 'accept_queue' || s.status === 'accepted';
         const reviewerFeedback = feedbackFor.get(s.id) ?? '';
         ({ outcome, payload } = await queueTemplated(db, {
           templateKey: isAccept ? 'decision_accepted' : 'decision_declined',
@@ -361,8 +385,8 @@ async function expandSendDecisions(env: Env, job: BulkJobRow, limit: number): Pr
         }));
       } else {
         // ≥2 decisions: one merged decision_summary email. Accepts first.
-        const accepts = flipped.filter((s) => s.status === 'accept_queue');
-        const declines = flipped.filter((s) => s.status !== 'accept_queue');
+        const accepts = flipped.filter((s) => s.status === 'accept_queue' || s.status === 'accepted');
+        const declines = flipped.filter((s) => s.status !== 'accept_queue' && s.status !== 'accepted');
         const line = (s: DecisionRow, verdict: string) => {
           const feedback = feedbackFor.get(s.id) ?? '';
           return (
@@ -472,6 +496,9 @@ async function expandSendDecisions(env: Env, job: BulkJobRow, limit: number): Pr
       if (outcome === 'queued' && payload) await deliverNow(db, env, payload.log_key, payload);
     }
     // Accept side-effects stay per-submission by nature (D7 note in plan).
+    // Deliberately queue-rows only (not 'accepted'): a directly-decided row
+    // had its on-accept side effects at decision time, and a resend of the
+    // notification must never re-run task auto-assignment.
     for (const s of flipped) {
       if (s.status === 'accept_queue') {
         await autoAssignAcceptTasksCore(db, job.event_id, s, event.name, event.slug, env.APP_URL, send);
@@ -479,11 +506,14 @@ async function expandSendDecisions(env: Env, job: BulkJobRow, limit: number): Pr
     }
   }
 
-  const progress = await db
-    .prepare(`SELECT COUNT(*) AS n FROM submissions WHERE id IN (${placeholders}) AND status IN ('accepted', 'declined')`)
-    .bind(...params.ids)
-    .first<{ n: number }>();
-  const enqueued = progress?.n ?? 0;
+  // Incremental progress (CFP-14): the old recomputed COUNT(status IN
+  // accepted/declined) over the snapshot would count directly-decided rows as
+  // done on tick zero — flipping the job 'done' before their emails ever
+  // queued (the exact premature-done class the 0016 comment describes) and
+  // never terminating for a template_disabled decided row, which leaves no
+  // state change behind at all. Accumulating what each tick actually handled
+  // is race-free because the 0016 claim lease guarantees one expander per job.
+  const enqueued = (job.enqueued ?? 0) + processedCount;
   const total = job.total ?? params.ids.length;
   await db
     .prepare(`UPDATE bulk_jobs SET enqueued = ?, status = ?, updated_at = ? WHERE id = ?`)

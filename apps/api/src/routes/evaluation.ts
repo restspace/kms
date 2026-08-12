@@ -9,8 +9,8 @@ import { ALL_PARTICIPANT_ROLES } from '@kms/core';
 import { createDb } from '@kms/db';
 import type { AppEnv, Env } from '../env';
 import type { SendTemplatedArgs } from '../mailer';
-import { sendTemplated } from '../mailer';
-import { sweepBulkJobs } from '../jobs/bulkJobs';
+import { renderTemplatedPreview, sendTemplated } from '../mailer';
+import { APPROVAL_ASK_HTML, sweepBulkJobs } from '../jobs/bulkJobs';
 import { requestMagicLink } from './auth';
 import { mintToken } from '../tokens';
 import { bumpEventRevision, entityRevisionInsert } from '../revision';
@@ -319,12 +319,13 @@ evaluationRoutes.post('/submissions/send-decisions', async (c) => {
   // skipped_no_submitter versus what actually sends.
   const { results } = await db
     .prepare(
-      `SELECT s.id, s.status, s.notified_at, s.submitter_contact_id,
-              COALESCE(NULLIF(c.email, ''), fb.email) AS submitter_email
+      `SELECT s.id, s.title, s.code, s.status, s.notified_at, s.submitter_contact_id,
+              COALESCE(NULLIF(c.email, ''), fb.email) AS submitter_email,
+              COALESCE(c.first_name, fb.first_name) AS submitter_first_name
        FROM submissions s
        LEFT JOIN contacts c ON c.id = s.submitter_contact_id
        LEFT JOIN (
-         SELECT sp.submission_id, c2.email,
+         SELECT sp.submission_id, c2.email, c2.first_name,
                 ROW_NUMBER() OVER (PARTITION BY sp.submission_id ORDER BY sp.position) AS rn
          FROM submission_participants sp
          JOIN contacts c2 ON c2.id = sp.contact_id
@@ -334,23 +335,32 @@ evaluationRoutes.post('/submissions/send-decisions', async (c) => {
     )
     .bind(session.eventId, ...ids)
     .all<{
-      id: string; status: string; notified_at: string | null;
-      submitter_contact_id: string | null; submitter_email: string | null;
+      id: string; title: string; code: string; status: string; notified_at: string | null;
+      submitter_contact_id: string | null; submitter_email: string | null; submitter_first_name: string | null;
     }>();
 
-  // Rows outside the queues are skipped; split out those already notified so
-  // the UI can say "nothing re-sent" rather than a bare zero (docs/06 §5).
-  const allQueued = results.filter((s) => s.status === 'accept_queue' || s.status === 'decline_queue');
-  const skippedNotified = results.filter(
-    (s) => s.status !== 'accept_queue' && s.status !== 'decline_queue' && s.notified_at !== null,
-  ).length;
+  // Send-eligible (CFP-14): queue rows as always, PLUS rows already decided
+  // directly (status set to accepted/declined without the queue step) that
+  // were never notified — previously these were silently skipped. A decided
+  // row with no reachable email is excluded here rather than in the expander:
+  // it has no status flip to perform and no email to send, so admitting it
+  // would leave the job a row it can never make progress on.
+  const isQueue = (s: { status: string }) => s.status === 'accept_queue' || s.status === 'decline_queue';
+  const isDecided = (s: { status: string }) => s.status === 'accepted' || s.status === 'declined';
+  const allQueued = results.filter(isQueue);
+  const decidedUnnotified = results.filter((s) => isDecided(s) && s.notified_at === null && s.submitter_email);
+  const decidedNoEmail = results.filter((s) => isDecided(s) && s.notified_at === null && !s.submitter_email).length;
+  const allEligible = [...allQueued, ...decidedUnnotified];
+  // Already-notified decided rows stay skipped, and are reported so the UI
+  // can say "nothing re-sent" rather than a bare zero (docs/06 §5).
+  const skippedNotified = results.filter((s) => !isQueue(s) && s.notified_at !== null).length;
 
   if (preflight) {
-    // For each distinct submitter in the queued selection: their *other*
+    // For each distinct submitter in the eligible selection: their *other*
     // submissions still undecided — status not in (accepted, declined,
     // withdrawn) and not part of this selection. `draft` is excluded by
     // decision (§4): a never-submitted draft shouldn't hold a decision email.
-    const speakerIds = [...new Set(allQueued.map((s) => s.submitter_contact_id).filter((x): x is string => x !== null))];
+    const speakerIds = [...new Set(allEligible.map((s) => s.submitter_contact_id).filter((x): x is string => x !== null))];
     const speakersWithPending: Array<{
       contact_id: string; name: string; pending_count: number; pending_titles: string[];
     }> = [];
@@ -384,16 +394,60 @@ evaluationRoutes.post('/submissions/send-decisions', async (c) => {
         }
       }
     }
+    // CFP-14 review step: `preview: true` additionally renders the accept and
+    // decline emails for a real sample recipient — through the exact
+    // override/theme/template pipeline the expander uses
+    // (renderTemplatedPreview), so what the dialog shows cannot drift from
+    // what sends. `null` on a side means no rows there, or the template is
+    // disabled (the dialog warns). `merged_speakers` counts speakers with ≥2
+    // eligible rows, who receive one combined decision_summary instead.
+    let previews: Record<string, unknown> | undefined;
+    if (body.preview === true) {
+      const portalUrl = `${c.env.APP_URL}/portal/${event.slug}`;
+      const renderFor = async (s: (typeof allEligible)[number] | undefined, accept: boolean) => {
+        if (!s || !s.submitter_email) return null;
+        const rendered = await renderTemplatedPreview(db, {
+          templateKey: accept ? 'decision_accepted' : 'decision_declined',
+          eventId: session.eventId,
+          context: {
+            event: { name: event.name },
+            speaker: { first_name: s.submitter_first_name ?? 'there' },
+            submission: { title: s.title, code: s.code },
+            portal_url: portalUrl,
+            ...(accept && approvalAsk ? { approval_ask: APPROVAL_ASK_HTML } : {}),
+          },
+        });
+        return rendered ? { ...rendered, sample_to: s.submitter_email } : null;
+      };
+      const bySpeaker = new Map<string, number>();
+      for (const s of allEligible) {
+        if (s.submitter_contact_id) bySpeaker.set(s.submitter_contact_id, (bySpeaker.get(s.submitter_contact_id) ?? 0) + 1);
+      }
+      previews = {
+        accepted: await renderFor(
+          allEligible.find((s) => (s.status === 'accept_queue' || s.status === 'accepted') && s.submitter_email),
+          true,
+        ),
+        declined: await renderFor(
+          allEligible.find((s) => (s.status === 'decline_queue' || s.status === 'declined') && s.submitter_email),
+          false,
+        ),
+        merged_speakers: [...bySpeaker.values()].filter((n) => n >= 2).length,
+      };
+    }
+
     return c.json({
       ok: true,
       preflight: true,
-      accepted: allQueued.filter((s) => s.status === 'accept_queue').length,
-      declined: allQueued.filter((s) => s.status === 'decline_queue').length,
+      accepted: allEligible.filter((s) => s.status === 'accept_queue' || s.status === 'accepted').length,
+      declined: allEligible.filter((s) => s.status === 'decline_queue' || s.status === 'declined').length,
+      resend: decidedUnnotified.length,
       tasks_assigned: 0,
-      skipped: ids.length - allQueued.length,
+      skipped: ids.length - allEligible.length,
       skipped_notified: skippedNotified,
-      skipped_no_submitter: allQueued.filter((s) => !s.submitter_email).length,
+      skipped_no_submitter: allQueued.filter((s) => !s.submitter_email).length + decidedNoEmail,
       speakers_with_pending: speakersWithPending,
+      ...(previews ? { previews } : {}),
       job_id: null,
     });
   }
@@ -405,11 +459,12 @@ evaluationRoutes.post('/submissions/send-decisions', async (c) => {
   // forever. Held rows simply never enter the job; they stay queued.
   const holdSet = new Set(holdContactIds);
   const queued = holdSet.size > 0
-    ? allQueued.filter((s) => s.submitter_contact_id === null || !holdSet.has(s.submitter_contact_id))
-    : allQueued;
-  const held = allQueued.length - queued.length;
-  const accepted = queued.filter((s) => s.status === 'accept_queue').length;
-  const declined = queued.filter((s) => s.status === 'decline_queue').length;
+    ? allEligible.filter((s) => s.submitter_contact_id === null || !holdSet.has(s.submitter_contact_id))
+    : allEligible;
+  const held = allEligible.length - queued.length;
+  const accepted = queued.filter((s) => s.status === 'accept_queue' || s.status === 'accepted').length;
+  const declined = queued.filter((s) => s.status === 'decline_queue' || s.status === 'declined').length;
+  const resend = queued.filter((s) => isDecided(s)).length;
   // CFP-14: a submission with no submitter contact (or a submitter with no
   // email — common on admin-created records) still gets its status flipped
   // by the expander, but no email ever queues and notified_at stays unset.
@@ -452,10 +507,11 @@ evaluationRoutes.post('/submissions/send-decisions', async (c) => {
     ok: true,
     accepted,
     declined,
+    resend,
     tasks_assigned: 0,
-    skipped: ids.length - allQueued.length,
+    skipped: ids.length - allEligible.length,
     skipped_notified: skippedNotified,
-    skipped_no_submitter: queuedNoSubmitter,
+    skipped_no_submitter: queuedNoSubmitter + decidedNoEmail,
     held,
     job_id: jobId,
   });

@@ -31,6 +31,7 @@ const DEFAULT_FIELDS: FieldSpec[] = [
   { key: 'title', type: 'text', scope: 'submission', section: 'abstract', required: true },
   { key: 'description', type: 'textarea', scope: 'submission', section: 'abstract' },
   { key: 'track', type: 'multiselect', scope: 'submission', section: 'abstract' },
+  { key: 'format', type: 'dropdown', scope: 'submission', section: 'abstract' },
   { key: 'first_name', type: 'text', scope: 'contact', section: 'participant', required: true },
   { key: 'last_name', type: 'text', scope: 'contact', section: 'participant', required: true },
   { key: 'email', type: 'email', scope: 'contact', section: 'participant', required: true },
@@ -138,6 +139,14 @@ export async function createTrack(eventId: string, name: string): Promise<string
   const id = `trk-${crypto.randomUUID()}`;
   await env.DB.prepare('INSERT INTO tracks (id, event_id, name, position) VALUES (?, ?, ?, 0)')
     .bind(id, eventId, name)
+    .run();
+  return id;
+}
+
+export async function createFormat(eventId: string, name: string, position = 0): Promise<string> {
+  const id = `fmt-${crypto.randomUUID()}`;
+  await env.DB.prepare('INSERT INTO formats (id, event_id, name, position) VALUES (?, ?, ?, ?)')
+    .bind(id, eventId, name, position)
     .run();
   return id;
 }
