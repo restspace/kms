@@ -636,6 +636,10 @@ interface DataListRowData<T> {
   handleRowDragLeave: (item: T, event: React.DragEvent<HTMLDivElement>) => void;
   handleRowDrop: (item: T, event: React.DragEvent<HTMLDivElement>) => void;
   handleItemClick: (item: T, index: number, event: React.MouseEvent) => void;
+  /** Opens the record: title link click or Enter on the row. */
+  handleItemActivate: (item: T, index: number, event: React.MouseEvent) => void;
+  /** Arrow-key selection move from the row at `index` by `delta` rows. */
+  handleItemArrowNav: (index: number, delta: number) => void;
   /** Present only when the host wired `onItemActivate` — drives the title link. */
   canActivate: boolean;
   titleField: string | null;
@@ -645,6 +649,38 @@ interface DataListRowData<T> {
   handleCellChange: (index: number, column: ColumnDefinition<T>, nextValue: unknown) => void;
   getEditAccess?: (item: T) => boolean | { allowed: boolean; message?: string };
 }
+
+/**
+ * Keyboard interaction for a focused row: Enter opens the record, Space
+ * selects, ArrowUp/ArrowDown move the selection. Keys originating inside an
+ * embedded control (inline editor, checkbox, link button) are left alone.
+ */
+const handleRowKeyDown = <T,>(
+  event: React.KeyboardEvent,
+  item: T,
+  index: number,
+  data: DataListRowData<T>
+): void => {
+  const target = event.target as HTMLElement | null;
+  if (target && target !== event.currentTarget
+    && target.closest('input, textarea, select, button, [contenteditable="true"]')) {
+    return;
+  }
+  if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+    event.preventDefault();
+    data.handleItemArrowNav(index, event.key === 'ArrowDown' ? 1 : -1);
+    return;
+  }
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    data.handleItemActivate(item, index, event as unknown as React.MouseEvent);
+    return;
+  }
+  if (event.key === ' ') {
+    event.preventDefault();
+    data.handleItemClick(item, index, event as unknown as React.MouseEvent);
+  }
+};
 
 /**
  * Generic windowed list component with infinite scrolling, sorting, and filtering.
@@ -1429,16 +1465,43 @@ export const DataList = <T extends Record<string, any>, TFilters extends Record<
     if (onItemClick) {
       onItemClick(item, index);
     }
-    // Primary activation (open the record). Deliberately on the *first* click:
-    // detail used to be reachable only through a right-click context menu or a
-    // double-click, neither of which is discoverable — a browser agent (and a
-    // first-time user) clicked rows for dozens of turns without ever opening
-    // one. Shift+click and the second click of a double-click return above, so
-    // the global-filter and edit gestures are untouched.
+  }, [fireItemDoubleClick, getItemId, onItemClick, onShiftClick, selectItem]);
+
+  /**
+   * Open the record. Reachable from the title link and Enter on a focused row;
+   * a plain click elsewhere on the row only selects (handleItemClick), so
+   * moving the selection never yanks the workspace into a detail tab.
+   */
+  const handleItemActivate = useCallback((item: T, index: number, event: React.MouseEvent) => {
+    pendingClickRef.current = null;
+    selectItem(item);
     if (onItemActivate) {
       onItemActivate(item, index, event);
     }
-  }, [fireItemDoubleClick, getItemId, onItemActivate, onItemClick, onShiftClick, selectItem]);
+  }, [onItemActivate, selectItem]);
+
+  /**
+   * Arrow-key row navigation: move the selection (and focus) to the adjacent
+   * row, keeping it scrolled into view.
+   */
+  const handleItemArrowNav = useCallback((index: number, delta: number) => {
+    const nextIndex = index + delta;
+    if (nextIndex < 0 || nextIndex >= items.length) {
+      return;
+    }
+    const next = items[nextIndex];
+    if (!next) {
+      return;
+    }
+    selectItem(next);
+    if (typeof listRef.current?.scrollToItem === 'function') {
+      listRef.current.scrollToItem(nextIndex);
+    }
+    requestAnimationFrame(() => {
+      const row = wrapperRef.current?.querySelector<HTMLElement>('[role="option"][aria-selected="true"]');
+      row?.focus();
+    });
+  }, [items, selectItem]);
 
   /**
    * Handle item context menu
@@ -1877,6 +1940,8 @@ export const DataList = <T extends Record<string, any>, TFilters extends Record<
     handleRowDragLeave,
     handleRowDrop,
     handleItemClick,
+    handleItemActivate,
+    handleItemArrowNav,
     canActivate: Boolean(onItemActivate),
     titleField: resolvedTitleField,
     handleItemNativeDoubleClick,
@@ -1907,6 +1972,8 @@ export const DataList = <T extends Record<string, any>, TFilters extends Record<
     handleRowDragLeave,
     handleRowDrop,
     handleItemClick,
+    handleItemActivate,
+    handleItemArrowNav,
     onItemActivate,
     resolvedTitleField,
     handleItemNativeDoubleClick,
@@ -1989,9 +2056,8 @@ export const DataList = <T extends Record<string, any>, TFilters extends Record<
     /**
      * Wrap the title column's content in a link-styled button when the host
      * wired activation, so "open this record" is a visible, focusable,
-     * automation-discoverable target rather than an invisible row gesture.
-     * The click is stopped from bubbling and replayed through the row handler
-     * so selection + activation stay on exactly one code path.
+     * automation-discoverable target. The link is the only click that opens
+     * the record — a click elsewhere on the row just moves the selection.
      */
     const withTitleLink = (fieldName: string, content: React.ReactNode): React.ReactNode => {
       if (!data.canActivate || data.titleField !== fieldName) {
@@ -2004,7 +2070,7 @@ export const DataList = <T extends Record<string, any>, TFilters extends Record<
           title="Open details"
           onClick={(event) => {
             event.stopPropagation();
-            data.handleItemClick(item, index, event);
+            data.handleItemActivate(item, index, event);
           }}
         >
           {content}
@@ -2056,12 +2122,7 @@ export const DataList = <T extends Record<string, any>, TFilters extends Record<
           aria-label={ariaLabel}
           title={editDisabledMessage}
           tabIndex={0}
-          onKeyDown={(event) => {
-            if (event.key === 'Enter' || event.key === ' ') {
-              event.preventDefault();
-              data.handleItemClick(item, index, event as unknown as React.MouseEvent);
-            }
-          }}
+          onKeyDown={(event) => handleRowKeyDown(event, item, index, data)}
         >
           <div className="data-list-mobile-row1">
             {data.onChecklist && (
@@ -2100,12 +2161,7 @@ export const DataList = <T extends Record<string, any>, TFilters extends Record<
         aria-selected={isSelected}
         aria-label={ariaLabel}
         tabIndex={0}
-        onKeyDown={(event) => {
-          if (event.key === 'Enter' || event.key === ' ') {
-            event.preventDefault();
-            data.handleItemClick(item, index, event as unknown as React.MouseEvent);
-          }
-        }}
+        onKeyDown={(event) => handleRowKeyDown(event, item, index, data)}
       >
         {data.onChecklist && (
           <div className="data-list-cell data-list-check-cell">

@@ -88,7 +88,8 @@ describe('EvaluationSection', () => {
     render(<EvaluationSection />)
 
     expect(await screen.findByDisplayValue('Round 1')).toBeTruthy()
-    expect(screen.getByText('Relevance')).toBeTruthy()
+    // Criteria render as a "name: weight" summary line until edited.
+    expect(screen.getByText(/Relevance: 2/)).toBeTruthy()
     expect(screen.getByText(/3 submissions/)).toBeTruthy()
     expect(screen.getByText('Ada Lovelace')).toBeTruthy()
     expect(screen.queryByText('Loading…')).toBeNull()
@@ -209,6 +210,8 @@ describe('EvaluationSection — round editor (lane L3)', () => {
   it('explains a zero-submission Assign instead of silently doing nothing', async () => {
     await openCard()
     const { fireEvent } = await import('@testing-library/preact')
+    // Assign lives in the reviewers editor, behind the ✎ toggle.
+    fireEvent.click(screen.getByLabelText('Edit reviewers'))
     fireEvent.click(screen.getByRole('button', { name: 'Assign' }))
 
     await waitFor(() => expect(assignReviewers).toHaveBeenCalled())
@@ -218,6 +221,7 @@ describe('EvaluationSection — round editor (lane L3)', () => {
   it('creates a reviewer from name + email and pools them on the plan', async () => {
     await openCard()
     const { fireEvent } = await import('@testing-library/preact')
+    fireEvent.click(screen.getByLabelText('Edit reviewers'))
     fireEvent.input(screen.getByLabelText('Reviewer name'), { target: { value: 'New Person' } })
     fireEvent.input(screen.getByLabelText('Reviewer email'), { target: { value: 'new@example.com' } })
     fireEvent.click(screen.getByRole('button', { name: '+ Add reviewer' }))
@@ -243,6 +247,10 @@ describe('EvaluationSection — round editor (lane L3)', () => {
 
   it('persists the review window dates', async () => {
     await openCard()
+    const { fireEvent } = await import('@testing-library/preact')
+    // The window shows as a summary line until its ✎ opens the fields.
+    expect(screen.getByText('Always open')).toBeTruthy()
+    fireEvent.click(screen.getByLabelText('Edit timing'))
     const closes = screen.getByLabelText('Reviews close') as HTMLInputElement
     closes.value = '2026-09-01T17:00'
     // preact/compat maps onBlur to a focusout listener; fireEvent.blur
@@ -350,13 +358,16 @@ describe('EvaluationSection — round editor (lane L3)', () => {
     const { unmount } = render(<EvaluationSection />)
     await screen.findByDisplayValue('Round 1')
 
+    // r1 has assignments only in p1, so p2's row only appears in its editor.
+    const { fireEvent } = await import('@testing-library/preact')
+    for (const pencil of screen.getAllByLabelText('Edit reviewers')) fireEvent.click(pencil)
+
     const ticks = screen.getAllByLabelText('Ada Lovelace in this round') as HTMLInputElement[]
     expect(ticks).toHaveLength(2)
     expect(ticks[0].checked).toBe(true) // p1: pooled
     expect(ticks[1].checked).toBe(false) // p2: not pooled — must not "leak" from p1
 
     // Uncheck in p1; the server's pool for p1 is now empty.
-    const { fireEvent } = await import('@testing-library/preact')
     getEvaluationOverview.mockResolvedValue({ ...twoPlans, pool: [] })
     fireEvent.click(ticks[0])
     await waitFor(() => expect(removePlanReviewer).toHaveBeenCalledWith('p1', 'r1'))
@@ -366,6 +377,7 @@ describe('EvaluationSection — round editor (lane L3)', () => {
     unmount()
     render(<EvaluationSection />)
     await screen.findByDisplayValue('Round 1')
+    for (const pencil of screen.getAllByLabelText('Edit reviewers')) fireEvent.click(pencil)
     for (const box of screen.getAllByLabelText('Ada Lovelace in this round') as HTMLInputElement[]) {
       expect(box.checked).toBe(false)
     }
@@ -395,6 +407,7 @@ describe('EvaluationSection — round editor (lane L3)', () => {
   it('never double-submits a criterion', async () => {
     await openCard()
     const { fireEvent } = await import('@testing-library/preact')
+    fireEvent.click(screen.getByLabelText('Edit criteria'))
     const field = screen.getByLabelText('New criterion name')
     fireEvent.input(field, { target: { value: 'Originality' } })
 

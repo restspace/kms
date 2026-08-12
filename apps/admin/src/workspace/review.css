@@ -14,7 +14,8 @@
 
 .chip-filter button {
   height: 22px;
-  padding: 0 var(--space-2);
+  /* 1px bottom padding raises the label to sit optically centred in the pill */
+  padding: 0 var(--space-2) 1px;
   border-radius: 999px;
   border: 1px solid var(--border-strong);
   background: var(--surface);
@@ -391,6 +392,47 @@
 }
 .crit-add input[type='text'], .crit-add input:not([type]) { flex: 1 1 auto; min-width: 0; }
 .crit-add input[type='number'] { width: 56px; }
+
+/* Summary line + ✎ toggle for each plan-card section (timing, criteria,
+   reviewers): text until edited. */
+.eval-inline {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) 0;
+}
+.eval-inline .eval-inline-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--text-muted);
+  font-size: var(--text-label);
+}
+.eval-editicon { flex: 0 0 auto; padding: 0 4px; }
+
+/* Reviewer progress table: checkbox | Name | Done | All Plans, with the
+   per-row action links sitting under their values. */
+.eval-revtable {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--text-grid);
+}
+.eval-revtable th {
+  text-align: left;
+  font-size: var(--text-label);
+  font-weight: 600;
+  color: var(--text-faint);
+  padding: var(--space-1) var(--space-2) var(--space-1) 0;
+}
+.eval-revtable td {
+  border-top: 1px solid var(--border);
+  padding: var(--space-1) var(--space-2) var(--space-1) 0;
+  vertical-align: top;
+}
+.eval-revtable td .fbtn-link {
+  display: block;
+  padding: 0;
+  font-size: var(--text-label);
+}
 
 /* --- reviewer workspace --- */
 

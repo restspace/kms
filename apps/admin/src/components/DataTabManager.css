@@ -137,6 +137,27 @@
   border-bottom-color: var(--accent);
 }
 
+/* Anchors the receiver pin to the filter dot without disturbing its layout */
+.data-tab-filter-dot-wrap {
+  position: relative;
+  display: inline-flex;
+  flex-shrink: 0;
+}
+
+/* Vertical pushpin shown on tabs whose list is being filtered by the global
+   filter. `bottom: 50%` of the dot-sized wrapper puts the needle tip (the
+   bottom edge of the SVG) exactly at the centre of the dot. */
+.data-tab-filter-pin {
+  position: absolute;
+  left: 50%;
+  bottom: 50%;
+  transform: translateX(-50%);
+  width: 10px;
+  height: 18px;
+  color: var(--accent);
+  pointer-events: none;
+}
+
 /* Global filter dot indicator on tab headers */
 .data-tab-filter-dot {
   width: 10px;

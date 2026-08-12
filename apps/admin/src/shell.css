@@ -416,6 +416,20 @@
   cursor: default;
 }
 
+/* Workspace scope title: heading above the tabs naming the active global
+   filter(s) — "All Events", "Event: <name>" and/or "<Tab>: <row>". */
+
+.ws-scope-title {
+  padding: var(--space-3) var(--space-3) var(--space-1);
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 0 0 auto;
+}
+
 /* Dashboard deep-link preset chip (M5 stretch) */
 
 .ws-preset-bar {

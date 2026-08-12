@@ -1,11 +1,11 @@
 /**
  * Opening a record's detail tab (L1/A + L1/B).
  *
- * Two ways in, both previously unreliable:
+ * Two ways in:
  *
- *  - a single left click on a row. It used to only move the selection; detail
- *    lived behind a right-click "View details" or a double-click, so the eval
- *    agent (and any first-time user) never found it.
+ *  - the row's title link (a visible, focusable button). A plain click
+ *    elsewhere on the row only moves the selection — opening detail on every
+ *    click made selecting a row impossible without a workspace jump.
  *  - `?rec=<id>` in the URL, which the shell resolves and hands over as
  *    `detailRequest`. The tab has to render *and* become the active tab, even
  *    when the request arrives before the list tabs have been initialised.
@@ -88,8 +88,8 @@ const findEl = (container: Element, selector: string) =>
   });
 
 describe('DataTabManager row click', () => {
-  it('opens and activates the record detail tab on a single left click', async () => {
-    const { container, getByTestId } = render(
+  it('keeps the list tab active on a plain row click (selection only)', async () => {
+    const { container } = render(
       <DataTabManager config={makeConfig()} defaultTabs={['speakers']} />
     );
 
@@ -97,11 +97,9 @@ describe('DataTabManager row click', () => {
 
     row.click();
 
-    await waitFor(() => {
-      expect(activeTabTitle(container)).toContain('Detail: Priya Raman');
-    });
-    // Rendered, not merely opened somewhere off-screen.
-    expect(getByTestId('detail-panel').textContent).toContain('Priya Raman');
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(activeTabTitle(container)).toContain('Speakers');
+    expect(container.querySelector('[data-testid="detail-panel"]')).toBeNull();
   });
 
   it('opens the detail tab from the row title link', async () => {

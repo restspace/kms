@@ -122,6 +122,15 @@ function fromLocalInput(value: string): string | null {
   return Number.isNaN(d.getTime()) ? null : d.toISOString()
 }
 
+/** ISO → a short human-readable local date-time for the summary lines. */
+function fmtWhen(iso: string | null | undefined): string {
+  if (!iso) return ''
+  const d = new Date(iso)
+  return Number.isNaN(d.getTime())
+    ? ''
+    : d.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })
+}
+
 export function EvaluationSection() {
   const [overview, setOverview] = useState<Overview | null>(null)
   const [loading, setLoading] = useState(true)
@@ -297,6 +306,10 @@ function PlanCard({
   const [critName, setCritName] = useState('')
   const [critWeight, setCritWeight] = useState('1')
   const [addingCrit, setAddingCrit] = useState(false)
+  // Each section reads as a one-line summary until its ✎ opens the editor.
+  const [editTiming, setEditTiming] = useState(false)
+  const [editCriteria, setEditCriteria] = useState(false)
+  const [editReviewers, setEditReviewers] = useState(false)
 
   const pct = stats && stats.assignments > 0 ? Math.round((stats.completed / stats.assignments) * 100) : 0
 
@@ -385,6 +398,25 @@ function PlanCard({
       </label>
 
       {/* ABS-01 — optional window. Leave both blank for "always open". */}
+      <div className="eval-inline">
+        <span className="eval-inline-text">
+          {plan.opens_at || plan.closes_at
+            ? [
+                plan.opens_at ? `Opens ${fmtWhen(plan.opens_at)}` : null,
+                plan.closes_at ? `Closes ${fmtWhen(plan.closes_at)}` : null,
+              ].filter(Boolean).join(' · ')
+            : 'Always open'}
+        </span>
+        <button
+          className="fbtn-link eval-editicon"
+          aria-label="Edit timing"
+          aria-expanded={editTiming}
+          onClick={() => setEditTiming((v) => !v)}
+        >
+          ✎
+        </button>
+      </div>
+      {editTiming && (
       <div className="eval-window" style={{ display: 'flex', gap: 8, flexWrap: 'wrap', margin: '6px 0' }}>
         <label style={{ fontSize: 11, display: 'grid', gap: 2 }}>
           Reviews open
@@ -415,7 +447,24 @@ function PlanCard({
           />
         </label>
       </div>
+      )}
 
+      <div className="eval-inline">
+        <strong style={{ fontSize: 12 }}>Criteria</strong>
+        <span className="eval-inline-text">
+          {criteria.length > 0 ? criteria.map((c) => `${c.name}: ${c.weight}`).join(', ') : 'None'}
+        </span>
+        <button
+          className="fbtn-link eval-editicon"
+          aria-label="Edit criteria"
+          aria-expanded={editCriteria}
+          onClick={() => setEditCriteria((v) => !v)}
+        >
+          ✎
+        </button>
+      </div>
+      {editCriteria && (
+      <>
       {criteria.length === 0 && <p className="pane-sub">No criteria yet — reviewers will only be able to comment.</p>}
       {criteria.map((c) => (
         <div className="crit-row" key={c.id}>
@@ -468,97 +517,140 @@ function PlanCard({
           {addingCrit ? 'Adding…' : '+ Add criterion'}
         </button>
       </div>
+      </>
+      )}
 
       <SubmissionPicker plan={plan} run={run} />
 
       <div className="eval-assign">
-        <strong style={{ fontSize: 12 }}>Reviewers</strong>
+        <div className="eval-inline">
+          <strong style={{ fontSize: 12 }}>Reviewers</strong>
+          <span className="eval-inline-text" />
+          <button
+            className="fbtn-link eval-editicon"
+            aria-label="Edit reviewers"
+            aria-expanded={editReviewers}
+            onClick={() => setEditReviewers((v) => !v)}
+          >
+            ✎
+          </button>
+        </div>
         {overview.reviewers.length === 0 && (
-          <p className="pane-sub">No reviewers on this event yet — add one below.</p>
+          <p className="pane-sub">No reviewers on this event yet — use ✎ to add one.</p>
         )}
-        {overview.reviewers.map((r) => {
-          const load = overview.workload.find((w) => w.plan_id === plan.id && w.contact_id === r.id)
-          const outstanding = load ? load.assigned - load.completed : 0
-          const queueTotal = overview.queue_totals.find((q) => q.contact_id === r.id)
+        {(() => {
+          // Default view: only reviewers the round has actually dealt
+          // submissions to — which keeps showing someone who was unticked
+          // after assignment (their reviews still exist). The editor (✎)
+          // lists everyone.
+          const shown = editReviewers
+            ? overview.reviewers
+            : overview.reviewers.filter((r) =>
+                overview.workload.some(
+                  (w) => w.plan_id === plan.id && w.contact_id === r.id && w.assigned > 0,
+                ),
+              )
+          if (shown.length === 0) {
+            return !editReviewers && overview.reviewers.length > 0 ? (
+              <p className="pane-sub">No reviewers have assignments in this round yet — use ✎ to assign.</p>
+            ) : null
+          }
           return (
-            <div key={r.id} className="eval-reviewer" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-              <label style={{ flex: 1 }}>
-                <input
-                  type="checkbox"
-                  aria-label={`${r.name ?? r.email} in this round`}
-                  checked={chosen.includes(r.id)}
-                  onChange={(e) => {
-                    const on = (e.target as HTMLInputElement).checked
-                    // Persist immediately (the pool is server state), and put
-                    // the tick back if the write fails.
-                    setChosen((prev) =>
-                      on ? [...new Set([...prev, r.id])] : prev.filter((id) => id !== r.id),
-                    )
-                    const who = r.name ?? r.email
-                    run(
-                      on ? `${who} added to ${plan.name}` : `${who} removed from ${plan.name}`,
-                      () =>
-                        (on ? addPlanReviewer(plan.id, r.id) : removePlanReviewer(plan.id, r.id)).catch(
-                          (err: unknown) => {
+            <table className="eval-revtable">
+              <thead>
+                <tr>
+                  <th />
+                  <th>Name</th>
+                  <th>Done</th>
+                  <th>All Plans</th>
+                </tr>
+              </thead>
+              <tbody>
+                {shown.map((r) => {
+                  const load = overview.workload.find((w) => w.plan_id === plan.id && w.contact_id === r.id)
+                  const outstanding = load ? load.assigned - load.completed : 0
+                  const queueTotal = overview.queue_totals.find((q) => q.contact_id === r.id)
+                  const who = r.name ?? r.email
+                  return (
+                    <tr key={r.id} className="eval-reviewer">
+                      <td>
+                        <input
+                          type="checkbox"
+                          aria-label={`${who} in this round`}
+                          checked={chosen.includes(r.id)}
+                          onChange={(e) => {
+                            const on = (e.target as HTMLInputElement).checked
+                            // Persist immediately (the pool is server state), and put
+                            // the tick back if the write fails.
                             setChosen((prev) =>
-                              on ? prev.filter((id) => id !== r.id) : [...new Set([...prev, r.id])],
+                              on ? [...new Set([...prev, r.id])] : prev.filter((id) => id !== r.id),
                             )
-                            throw err
-                          },
-                        ),
-                    )
-                  }}
-                />
-                {r.name ?? r.email}
-                {load && (
-                  <span className="pane-sub" style={{ marginLeft: 6 }}>
-                    {load.completed}/{load.assigned} done
-                  </span>
-                )}
-                {queueTotal && queueTotal.assigned !== load?.assigned && (
-                  <span className="pane-sub" style={{ marginLeft: 6 }} title="Assignments across every active plan — matches this reviewer's actual queue">
-                    ({queueTotal.assigned} across all active plans)
-                  </span>
-                )}
-              </label>
-              <button
-                className="fbtn-link"
-                aria-label={`Send sign-in link to ${r.name ?? r.email}`}
-                onClick={() => {
-                  sendReviewerSigninLink(r.id)
-                    .then((res) => {
-                      // The panel is labelled with the identity the *server*
-                      // minted the link for, not the row that was clicked.
-                      if (res.dev_link) {
-                        setSignin({ who: res.name ?? r.name ?? res.email, email: res.email, link: res.dev_link })
-                      } else {
-                        setSignin(null)
-                        onNote(`Sign-in link sent to ${res.email}`)
-                      }
-                    })
-                    .catch((e: unknown) => onError(message(e)))
-                }}
-              >
-                Send sign-in link
-              </button>
-              {outstanding > 0 && (
-                <button
-                  className="fbtn-link"
-                  aria-label={`Remind ${r.name ?? r.email}`}
-                  onClick={() =>
-                    remindReviewers(plan.id, [r.id])
-                      .then((res) =>
-                        onNote(res.sent > 0 ? `Reminder sent to ${r.name ?? r.email}` : 'Already reminded today'),
-                      )
-                      .catch((e: unknown) => onError(message(e)))
-                  }
-                >
-                  Remind
-                </button>
-              )}
-            </div>
+                            run(
+                              on ? `${who} added to ${plan.name}` : `${who} removed from ${plan.name}`,
+                              () =>
+                                (on ? addPlanReviewer(plan.id, r.id) : removePlanReviewer(plan.id, r.id)).catch(
+                                  (err: unknown) => {
+                                    setChosen((prev) =>
+                                      on ? prev.filter((id) => id !== r.id) : [...new Set([...prev, r.id])],
+                                    )
+                                    throw err
+                                  },
+                                ),
+                            )
+                          }}
+                        />
+                      </td>
+                      <td>
+                        {who}
+                        <button
+                          className="fbtn-link"
+                          aria-label={`Send sign-in link to ${who}`}
+                          onClick={() => {
+                            sendReviewerSigninLink(r.id)
+                              .then((res) => {
+                                // The panel is labelled with the identity the *server*
+                                // minted the link for, not the row that was clicked.
+                                if (res.dev_link) {
+                                  setSignin({ who: res.name ?? r.name ?? res.email, email: res.email, link: res.dev_link })
+                                } else {
+                                  setSignin(null)
+                                  onNote(`Sign-in link sent to ${res.email}`)
+                                }
+                              })
+                              .catch((e: unknown) => onError(message(e)))
+                          }}
+                        >
+                          Send sign-in link
+                        </button>
+                      </td>
+                      <td>
+                        {load ? `${load.completed}/${load.assigned}` : '—'}
+                        {outstanding > 0 && (
+                          <button
+                            className="fbtn-link"
+                            aria-label={`Remind ${who}`}
+                            onClick={() =>
+                              remindReviewers(plan.id, [r.id])
+                                .then((res) =>
+                                  onNote(res.sent > 0 ? `Reminder sent to ${who}` : 'Already reminded today'),
+                                )
+                                .catch((e: unknown) => onError(message(e)))
+                            }
+                          >
+                            Remind
+                          </button>
+                        )}
+                      </td>
+                      <td title="Assignments across every active plan — matches this reviewer's actual queue">
+                        {queueTotal ? `${queueTotal.completed}/${queueTotal.assigned}` : '—'}
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
           )
-        })}
+        })()}
 
         {/* CFP-11: on the demo instance a reviewer account is only reachable
             through this link, so it is shown as a durable, copyable panel
@@ -617,6 +709,8 @@ function PlanCard({
           </div>
         )}
 
+        {editReviewers && (
+        <>
         <AddReviewer planId={plan.id} run={run} />
 
         <div className="assign-controls">
@@ -661,23 +755,25 @@ function PlanCard({
           >
             {assigning ? 'Assigning…' : 'Assign'}
           </button>
-          <button
-            className="fbtn-link"
-            onClick={() =>
-              remindReviewers(plan.id)
-                .then((res) =>
-                  onNote(
-                    res.lagging.length === 0
-                      ? 'Nobody is behind on this round.'
-                      : `Reminded ${res.sent} of ${res.lagging.length} lagging reviewer(s)`,
-                  ),
-                )
-                .catch((e: unknown) => onError(message(e)))
-            }
-          >
-            Remind all lagging
-          </button>
         </div>
+        </>
+        )}
+        <button
+          className="fbtn-link"
+          onClick={() =>
+            remindReviewers(plan.id)
+              .then((res) =>
+                onNote(
+                  res.lagging.length === 0
+                    ? 'Nobody is behind on this round.'
+                    : `Reminded ${res.sent} of ${res.lagging.length} lagging reviewer(s)`,
+                ),
+              )
+              .catch((e: unknown) => onError(message(e)))
+          }
+        >
+          Remind all lagging
+        </button>
       </div>
     </div>
   )

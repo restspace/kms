@@ -2949,6 +2949,20 @@ export const DataTabManager: React.FC<DataTabManagerProps> = ({
               )}
             </div>
             {tab.type === 'list' && (
+              <span className="data-tab-filter-dot-wrap">
+              {Object.keys(globalFiltersByTab[tab.id] ?? {}).length > 0 && (
+                /* Vertical pushpin marking a tab whose list is filtered by the
+                   global filter; the needle tip lands on the dot's centre. */
+                <svg
+                  className="data-tab-filter-pin"
+                  viewBox="0 0 10 18"
+                  aria-hidden="true"
+                  focusable="false"
+                >
+                  <path d="M2 1h6v5l1.5 2h-9L2 6z" fill="currentColor" />
+                  <line x1="5" y1="8" x2="5" y2="18" stroke="currentColor" strokeWidth="1.5" />
+                </svg>
+              )}
               <button
                 type="button"
                 tabIndex={-1}
@@ -2971,6 +2985,7 @@ export const DataTabManager: React.FC<DataTabManagerProps> = ({
                 }
                 aria-label="Toggle global filter"
               />
+              </span>
             )}
             {(tab.type === 'detail' || tab.type === 'create' || tab.type === 'edit') && (
               <button

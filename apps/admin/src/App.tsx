@@ -1,5 +1,5 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { DataTabManager, TabConfig, type CreateFormProps } from './components/DataTabManager'
+import { DataTabManager, TabConfig, type CreateFormProps, type GlobalFilterChangeEvent } from './components/DataTabManager'
 import type {
   DataSourceParams,
   DataSourceResult,
@@ -77,8 +77,8 @@ import {
 import { HeadshotUploadControl } from './workspace/headshotUpload'
 import { resolveTargetEventId } from './utils/importTarget'
 import {
-  EventFilterChip,
   EventFilterSelect,
+  eventFilterLabel,
   EventScopeNote,
   EventScopeProvider,
   type EventFilter,
@@ -1784,6 +1784,9 @@ export default function App() {
   // Dashboard deep-link state (M5 stretch): seeded workspace filters + which
   // tab to land on. The tab itself now travels in the URL.
   const [wsPreset, setWsPreset] = useState<{ seeds: WorkspaceSeeds; label: string | null } | null>(null)
+  // Workspace scope title: mirrors DataTabManager's global-filter sources so
+  // the heading above the tabs can read "<Tab>: <row>" (see render below).
+  const [wsGlobalFilter, setWsGlobalFilter] = useState<GlobalFilterChangeEvent | null>(null)
   const [wsTabRequest, setWsTabRequest] = useState<{ configKey: string; token: number } | undefined>(undefined)
   const [detailRequest, setDetailRequest] = useState<{ configKey: string; item: unknown; token: number } | undefined>(undefined)
 
@@ -2070,8 +2073,18 @@ export default function App() {
    */
   const handleActiveTabChange = useCallback((tab: { type: string; configKey: string } | null) => {
     if (!tab || tab.type !== 'list') return
+    const previousTab = currentRoute().tab
     reportedTab.current = tab.configKey
-    navigate({ tab: tab.configKey }, { replace: currentRoute().tab === null })
+    // Moving to a different list tab must also drop `?rec=`: the stale record
+    // id under the new tab key otherwise reads as a fresh deep link, and the
+    // rec effect above immediately re-opens (and activates) that record's
+    // detail tab on the tab the user just switched to.
+    const tabChanged = previousTab !== null && previousTab !== tab.configKey
+    if (tabChanged) handledRec.current = null
+    navigate(
+      tabChanged ? { tab: tab.configKey, rec: null } : { tab: tab.configKey },
+      { replace: previousTab === null },
+    )
   }, [])
 
   /**
@@ -2291,6 +2304,18 @@ export default function App() {
     switching,
   }
 
+  // Workspace heading: names every active global filter — the event filter
+  // first, then each DataTabManager filter source as "<Tab>: <row>". With no
+  // filters at all it reads "All Events".
+  const wsScopeTitleParts: string[] = []
+  if (filter !== 'all') {
+    wsScopeTitleParts.push(`Event: ${eventFilterLabel(scope)}`)
+  }
+  for (const source of wsGlobalFilter?.sources ?? []) {
+    wsScopeTitleParts.push(`${source.sourceTabTitle}: ${source.valueLabel || 'selected row'}`)
+  }
+  const wsScopeTitle = wsScopeTitleParts.length > 0 ? wsScopeTitleParts.join(' · ') : 'All Events'
+
   return (
     <EventScopeProvider value={scope}>
     <div className="shell">
@@ -2399,6 +2424,9 @@ export default function App() {
         <AdminErrorBoundary section={NAV_ITEMS.find((i) => i.key === view)?.label ?? view} resetKey={`${view}:${me.event.id}`}>
         {view === 'workspace' && !isReviewer ? (
           <>
+            <div className="ws-scope-title" role="status" title={wsScopeTitle}>
+              {wsScopeTitle}
+            </div>
             {wsPreset?.label && (
               <div className="ws-preset-bar" role="status">
                 Filtered from dashboard: <strong>{wsPreset.label}</strong>
@@ -2418,8 +2446,7 @@ export default function App() {
               detailRequest={detailRequest}
               onActiveTabChange={handleActiveTabChange}
               onSelectionChange={handleWorkspaceSelection}
-              globalFilterIndicator
-              headerTrailing={<EventFilterChip scope={scope} />}
+              onGlobalFilterChange={setWsGlobalFilter}
               searchValue={route.q ?? ''}
               onSearchChange={handleSearchChange}
             />

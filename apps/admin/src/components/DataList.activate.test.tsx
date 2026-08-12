@@ -1,11 +1,11 @@
 /**
  * Row activation (L1/A) and the reload-loop regression (L1/C).
  *
- * A: detail used to be reachable only from a right-click "View details" or a
- * double-click. Neither is discoverable — an automated browser agent clicked
- * rows for dozens of turns without ever opening a record, and a human has no
- * cue either. A plain left click now activates the row, and the title column
- * renders as a real link so the affordance is visible and focusable.
+ * A: the title column renders as a real link that opens the record — visible,
+ * focusable and automation-discoverable. A plain left click elsewhere on the
+ * row only moves the selection (opening detail on every click made selecting
+ * a row impossible without a workspace jump); Enter on a focused row also
+ * opens, and ArrowUp/ArrowDown move the selection.
  *
  * C: DataList treats a new `dataSource` identity as "reload from scratch", and
  * hosts hand out a fresh closure whenever the config behind them is rebuilt.
@@ -75,13 +75,35 @@ async function renderList(extra: Record<string, unknown> = {}) {
 }
 
 describe('DataList row activation', () => {
-  it('opens the record on a plain left click anywhere on the row', async () => {
-    const { container, onItemActivate } = await renderList();
+  it('selects but does not open the record on a plain left click on the row', async () => {
+    const onSelectionChange = vi.fn();
+    const { container, onItemActivate } = await renderList({ onSelectionChange });
 
     const row = container.querySelectorAll('.data-list-row')[0] as HTMLElement;
     expect(row.className).toContain('data-list-row-activatable');
     row.click();
 
+    expect(onSelectionChange).toHaveBeenCalled();
+    expect(onSelectionChange.mock.calls[onSelectionChange.mock.calls.length - 1]?.[0]?.id).toBe('a');
+    expect(onItemActivate).not.toHaveBeenCalled();
+  });
+
+  it('opens the record on Enter and moves the selection with the arrow keys', async () => {
+    const onSelectionChange = vi.fn();
+    const { container, onItemActivate } = await renderList({ onSelectionChange });
+
+    const firstRow = container.querySelectorAll('.data-list-row')[0] as HTMLElement;
+    firstRow.click();
+    firstRow.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+    expect(onSelectionChange.mock.calls[onSelectionChange.mock.calls.length - 1]?.[0]?.id).toBe('b');
+
+    const secondRow = container.querySelectorAll('.data-list-row')[1] as HTMLElement;
+    secondRow.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true }));
+    expect(onSelectionChange.mock.calls[onSelectionChange.mock.calls.length - 1]?.[0]?.id).toBe('a');
+    expect(onItemActivate).not.toHaveBeenCalled();
+
+    const selectedRow = container.querySelectorAll('.data-list-row')[0] as HTMLElement;
+    selectedRow.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
     expect(onItemActivate).toHaveBeenCalledTimes(1);
     expect(onItemActivate.mock.calls[0][0].id).toBe('a');
   });

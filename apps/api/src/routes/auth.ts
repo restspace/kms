@@ -111,9 +111,13 @@ export async function requestMagicLink(
   await statement.run();
   const hash = await sha256hex(token);
 
-  const link = `${c.env.APP_URL}/auth/callback?t=${token}`;
-
   const dev = c.env.DEV_MODE === 'on';
+  // Local dev can run two wrangler instances off the same .dev.vars (`dev` on
+  // 8787, `dev:kms2` on 8788), so a single APP_URL can only ever match one of
+  // them. In DEV_MODE the link follows the origin the request arrived on, so
+  // each instance links back to itself.
+  const origin = dev ? new URL(c.req.url).origin : c.env.APP_URL;
+  const link = `${origin}/auth/callback?t=${token}`;
   // Demo carve-out (docs/12 §2): the landing page's one-click logins use seeded
   // contacts whose @example.com addresses can't receive mail, so on the public
   // demo instance (DEMO_RESET=on) the link is shown inline and the email is
