@@ -60,6 +60,7 @@ import { EvaluationSection } from './evaluation/EvaluationSection'
 import { AgendaSection } from './agenda/AgendaSection'
 import { DashboardSection, type AppNavTarget } from './dashboard/DashboardSection'
 import { GreenRoomSection } from './greenroom/GreenRoomSection'
+import { PipelineSection } from './crm/PipelineSection'
 import { ReviewerWorkspace } from './review/ReviewerWorkspace'
 import { EmbedsSection } from './embeds/EmbedsSection'
 import {
@@ -328,6 +329,7 @@ const NAV_ITEMS: ReadonlyArray<{ key: ViewKey; label: string; soon: string | nul
   { key: 'review', label: 'Review', soon: null },
   { key: 'agenda', label: 'Agenda', soon: null },
   { key: 'greenroom', label: 'Green Room', soon: null },
+  { key: 'pipeline', label: 'Pipeline', soon: null },
   { key: 'embeds', label: 'Embeds', soon: null },
   { key: 'settings', label: 'Settings', soon: null },
 ]
@@ -3113,6 +3115,10 @@ export default function App() {
           />
         ) : view === 'greenroom' && !isReviewer ? (
           <GreenRoomSection key={me.event.id} />
+        ) : view === 'pipeline' && !isReviewer ? (
+          // CRM-07/08: org-wide like the All-events directory — no event key,
+          // no EventScopeNote; switching events must not remount the board.
+          <PipelineSection me={me} />
         ) : view === 'dashboard' && !isReviewer ? (
           // The dashboard is per-event (session-bound), like Forms/Settings.
           // The EventScopeNote pins which event it shows — without it, an

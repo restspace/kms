@@ -733,3 +733,30 @@ INSERT INTO tasks (id, event_id, title, description, target, assignment_mode, "t
   ('task0000-0000-4000-8000-000000000008', 'evt00000-0000-4000-8000-000000000001', 'Invite Colleagues with Discount',
    '<p>Your speaker discount code gives colleagues 20% off registration — share it with your network.</p>',
    'contact', 'manual', 'none', 'acknowledge', NULL, NULL, '2026-09-28T07:00:00Z', '[7]', 0, '2026-08-08T12:00:00Z', '2026-08-08T12:00:00Z');
+
+-- ---------------------------------------------------------------------------
+-- Speaker sourcing pipeline (spec-gap CRM-07/08): a lived-in board so the
+-- demo opens with prospects mid-flight rather than an empty grid. Two
+-- org-only prospects (on no event roster — the directory-first shape) plus
+-- one existing speaker already confirmed.
+-- ---------------------------------------------------------------------------
+
+INSERT INTO contacts (id, org_id, email, first_name, last_name, created_at, updated_at) VALUES
+  ('con00000-0000-4000-8000-000000000012', 'org00000-0000-4000-8000-000000000001', 'katherine.johnson@example.com', 'Katherine', 'Johnson', '2026-08-08T12:00:00Z', '2026-08-08T12:00:00Z'),
+  ('con00000-0000-4000-8000-000000000013', 'org00000-0000-4000-8000-000000000001', 'donald.knuth@example.com',      'Donald',    'Knuth',   '2026-08-08T12:00:00Z', '2026-08-08T12:00:00Z');
+
+INSERT INTO pipeline_cards (id, org_id, contact_id, stage, score, rationale, position, created_at, updated_at) VALUES
+  ('plc00000-0000-4000-8000-000000000001', 'org00000-0000-4000-8000-000000000001', 'con00000-0000-4000-8000-000000000012',
+   'contacted', 90, 'Trajectory-computation deep dives always fill the room; ideal opening keynote material.', 1, '2026-08-09T10:00:00Z', '2026-08-10T09:30:00Z'),
+  ('plc00000-0000-4000-8000-000000000002', 'org00000-0000-4000-8000-000000000001', 'con00000-0000-4000-8000-000000000013',
+   'researching', 70, 'Literate-programming angle for the DX track; checking availability around the book deadline.', 1, '2026-08-10T14:00:00Z', '2026-08-10T14:00:00Z'),
+  ('plc00000-0000-4000-8000-000000000003', 'org00000-0000-4000-8000-000000000001', 'con00000-0000-4000-8000-000000000003',
+   'confirmed', 95, 'Returning speaker — compilers keynote landed top-3 feedback last year.', 1, '2026-08-08T13:00:00Z', '2026-08-11T16:00:00Z');
+
+INSERT INTO pipeline_activity (id, card_id, kind, from_stage, to_stage, body, author_name, created_at) VALUES
+  ('pla00000-0000-4000-8000-000000000001', 'plc00000-0000-4000-8000-000000000001', 'enrolled',     NULL,          'identified', NULL, 'James Ellis-Jones', '2026-08-09T10:00:00Z'),
+  ('pla00000-0000-4000-8000-000000000002', 'plc00000-0000-4000-8000-000000000001', 'stage_change', 'identified',  'contacted',  NULL, 'James Ellis-Jones', '2026-08-10T09:30:00Z'),
+  ('pla00000-0000-4000-8000-000000000003', 'plc00000-0000-4000-8000-000000000001', 'note',         NULL,          NULL,         'Intro email sent via the NASA alumni list; waiting on availability.', 'James Ellis-Jones', '2026-08-10T09:32:00Z'),
+  ('pla00000-0000-4000-8000-000000000004', 'plc00000-0000-4000-8000-000000000002', 'enrolled',     NULL,          'researching', NULL, 'James Ellis-Jones', '2026-08-10T14:00:00Z'),
+  ('pla00000-0000-4000-8000-000000000005', 'plc00000-0000-4000-8000-000000000003', 'enrolled',     NULL,          'interested', NULL, 'James Ellis-Jones', '2026-08-08T13:00:00Z'),
+  ('pla00000-0000-4000-8000-000000000006', 'plc00000-0000-4000-8000-000000000003', 'stage_change', 'interested',  'confirmed',  NULL, 'James Ellis-Jones', '2026-08-11T16:00:00Z');

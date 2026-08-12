@@ -149,6 +149,12 @@ const ERROR_MESSAGES: Record<string, string> = {
   cannot_merge_self: 'A contact cannot be merged into itself.',
   merge_conflict: 'The merge could not be applied — reload and try again.',
   loser_id_required: 'The merge needs to know which record to fold in.',
+  already_enrolled: 'They are already on the pipeline board.',
+  invalid_stage: 'That pipeline stage is not recognised.',
+  invalid_score: 'The score must be a whole number between 0 and 100.',
+  body_required: 'A note needs some text.',
+  contact_required: 'Choose a contact to enroll.',
+  event_required: 'Choose an event to add them to.',
 }
 
 function readableError(code: string): string {
@@ -582,6 +588,70 @@ export const searchOrgContacts = (q: string) =>
  * from their most recent event in the same org. */
 export const attachOrgContact = (id: string) =>
   request<ContactRow>(`/app/api/contacts/${id}/attach`, { method: 'POST' })
+
+// ---------------------------------------------------------------------------
+// Speaker sourcing pipeline (spec-gap CRM-07/08) — org-wide kanban of
+// prospects. Writer-only server-side; stages travel with the board payload.
+// ---------------------------------------------------------------------------
+
+export interface PipelineCard {
+  id: string
+  contact_id: string
+  stage: string
+  score: number | null
+  rationale: string | null
+  position: number
+  created_at: string
+  updated_at: string
+  first_name: string | null
+  last_name: string | null
+  email: string
+  /** From the contact's most recent membership in the org — same coalesce
+   * rule the directory grid uses. */
+  company: string | null
+  job_title: string | null
+}
+
+export interface PipelineActivityRow {
+  id: string
+  kind: 'enrolled' | 'stage_change' | 'note'
+  from_stage: string | null
+  to_stage: string | null
+  body: string | null
+  author_name: string | null
+  created_at: string
+}
+
+export const fetchPipeline = () =>
+  request<{ stages: string[]; cards: PipelineCard[] }>('/app/api/crm/pipeline')
+
+export const enrollPipelineCard = (data: {
+  contact_id: string
+  stage?: string
+  score?: number | null
+  rationale?: string | null
+}) => request<PipelineCard>('/app/api/crm/pipeline/cards', { method: 'POST', body: JSON.stringify(data) })
+
+export const fetchPipelineCard = (id: string) =>
+  request<PipelineCard & { activity: PipelineActivityRow[] }>(`/app/api/crm/pipeline/cards/${id}`)
+
+export const updatePipelineCard = (id: string, data: Record<string, unknown>) =>
+  request<PipelineCard>(`/app/api/crm/pipeline/cards/${id}`, { method: 'PATCH', body: JSON.stringify(data) })
+
+export const addPipelineNote = (id: string, body: string) =>
+  request<PipelineActivityRow>(`/app/api/crm/pipeline/cards/${id}/notes`, {
+    method: 'POST',
+    body: JSON.stringify({ body }),
+  })
+
+export const deletePipelineCard = (id: string) =>
+  request<{ ok: boolean }>(`/app/api/crm/pipeline/cards/${id}`, { method: 'DELETE' })
+
+export const assignPipelineCard = (id: string, eventId: string) =>
+  request<{ ok: boolean; event_id: string; contact_id: string }>(`/app/api/crm/pipeline/cards/${id}/assign`, {
+    method: 'POST',
+    body: JSON.stringify({ event_id: eventId }),
+  })
 
 export interface ContactHistorySubmission {
   id: string

@@ -1,0 +1,354 @@
+/* Speaker sourcing pipeline (CRM-07/08). Tokens only — dark mode and the
+   paper ground come free. The board scrolls horizontally inside its own
+   container; columns keep a fixed width so six stages stay legible. */
+
+.pl-shell {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  padding: var(--space-4);
+  overflow: hidden;
+}
+
+.pl-header {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--space-3);
+  margin-bottom: var(--space-3);
+}
+
+.pl-header-main { flex: 1 1 auto; min-width: 0; }
+
+.pl-header h2 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 1.35rem;
+  line-height: 1.2;
+}
+
+.pl-header-sub {
+  color: var(--text-muted);
+  font-size: var(--text-label);
+  margin-top: var(--space-1);
+}
+
+.pl-loading,
+.pl-detail-loading {
+  color: var(--text-muted);
+  padding: var(--space-4);
+}
+
+/* --- board ---------------------------------------------------------------- */
+
+.pl-board {
+  flex: 1 1 auto;
+  display: flex;
+  gap: var(--space-3);
+  overflow-x: auto;
+  overflow-y: hidden;
+  align-items: stretch;
+  padding-bottom: var(--space-2);
+}
+
+.pl-column {
+  flex: 0 0 220px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--chrome);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.pl-column.drag-over {
+  border-color: var(--accent-border);
+  background: var(--accent-soft);
+}
+
+.pl-column-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--border);
+}
+
+.pl-column-name {
+  font-size: var(--text-label);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-label);
+}
+
+.pl-column.terminal .pl-column-name { color: var(--text-muted); }
+
+.pl-column-count {
+  margin-left: auto;
+  font-size: var(--text-label);
+  color: var(--text-muted);
+}
+
+.pl-column-cards {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: var(--space-2);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.pl-column-empty {
+  color: var(--text-faint);
+  font-size: var(--text-label);
+  padding: var(--space-2);
+}
+
+/* --- cards ---------------------------------------------------------------- */
+
+.pl-card {
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--space-2);
+  cursor: grab;
+}
+
+.pl-card:active { cursor: grabbing; }
+
+.pl-card-open {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+}
+
+.pl-card-name { display: block; font-weight: 600; }
+
+.pl-card-open:hover .pl-card-name { color: var(--accent); text-decoration: underline; }
+
+.pl-card-meta {
+  display: block;
+  color: var(--text-muted);
+  font-size: var(--text-label);
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pl-card-foot {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
+
+.pl-score {
+  display: inline-block;
+  padding: 0 var(--space-2);
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  border: 1px solid var(--accent-border);
+  font-size: var(--text-label);
+  font-weight: 600;
+}
+
+.pl-move { margin-left: auto; }
+
+.pl-move select {
+  font-size: var(--text-label);
+  color: var(--text-secondary);
+  max-width: 110px;
+}
+
+.pl-visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+/* --- enroll dialog -------------------------------------------------------- */
+
+.pl-enroll { display: flex; flex-direction: column; gap: var(--space-3); }
+
+.pl-field { display: flex; flex-direction: column; gap: var(--space-1); }
+
+.pl-field-label {
+  font-size: var(--text-label);
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.pl-enroll-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-3);
+}
+
+.pl-enroll-results {
+  max-height: 180px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-raised);
+}
+
+.pl-enroll-row {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
+  border-bottom: 1px solid var(--border);
+  padding: var(--space-2) var(--space-3);
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+}
+
+.pl-enroll-row:last-child { border-bottom: none; }
+.pl-enroll-row:hover:not(:disabled) { background: var(--surface-hover); }
+.pl-enroll-row.selected { background: var(--accent-soft); }
+.pl-enroll-row:disabled { color: var(--text-faint); cursor: default; }
+
+.pl-enroll-name { display: block; font-weight: 600; }
+
+.pl-enroll-meta {
+  display: block;
+  font-size: var(--text-label);
+  color: var(--text-muted);
+}
+
+.pl-enroll-empty {
+  padding: var(--space-3);
+  color: var(--text-muted);
+  font-size: var(--text-label);
+}
+
+.pl-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+
+/* --- detail dialog -------------------------------------------------------- */
+
+.pl-detail { display: flex; flex-direction: column; gap: var(--space-3); }
+
+.pl-detail-contact { display: flex; flex-direction: column; gap: var(--space-1); }
+
+.pl-detail-line.muted { color: var(--text-muted); }
+
+.pl-detail-rationale {
+  border-left: 3px solid var(--accent-border);
+  padding-left: var(--space-3);
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+}
+
+.pl-linklike {
+  align-self: flex-start;
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--accent);
+  text-decoration: underline;
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--text-label);
+}
+
+.pl-detail-controls {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-3);
+}
+
+.pl-assign { display: flex; gap: var(--space-2); }
+.pl-assign select { flex: 1 1 auto; min-width: 0; }
+
+.pl-notes-compose { display: flex; gap: var(--space-2); align-items: flex-start; }
+.pl-notes-compose textarea { flex: 1 1 auto; }
+
+.pl-activity-title {
+  margin: 0;
+  font-size: var(--text-label);
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-label);
+  color: var(--text-muted);
+}
+
+.pl-activity {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.pl-activity-row {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--space-2) var(--space-3);
+  background: var(--surface-raised);
+}
+
+.pl-activity-row.pl-activity-note { border-left: 3px solid var(--notice-strong); }
+.pl-activity-row.pl-activity-stage_change { border-left: 3px solid var(--accent); }
+.pl-activity-row.pl-activity-enrolled { border-left: 3px solid var(--border-strong); }
+
+.pl-activity-head {
+  display: flex;
+  gap: var(--space-2);
+  font-size: var(--text-caption);
+  color: var(--text-muted);
+  margin-bottom: 2px;
+}
+
+.pl-activity-note { white-space: pre-wrap; }
+
+.pl-activity-empty { color: var(--text-faint); font-size: var(--text-label); }
+
+.pl-detail-footer {
+  display: flex;
+  justify-content: flex-end;
+  border-top: 1px solid var(--border);
+  padding-top: var(--space-3);
+}
+
+.pl-notice {
+  background: var(--status-accepted-bg);
+  color: var(--status-accepted-text);
+  border-radius: var(--radius);
+  padding: var(--space-2) var(--space-3);
+  font-size: var(--text-label);
+}
+
+.pl-error {
+  background: var(--danger-soft);
+  color: var(--danger-strong);
+  border: 1px solid var(--danger-border);
+  border-radius: var(--radius);
+  padding: var(--space-2) var(--space-3);
+  font-size: var(--text-label);
+}
+
+/* Small screens: the board becomes vertically stacked columns. */
+@media (max-width: 768px) {
+  .pl-board { flex-direction: column; overflow-x: hidden; overflow-y: auto; }
+  .pl-column { flex: 0 0 auto; }
+  .pl-column-cards { max-height: 300px; }
+  .pl-enroll-grid, .pl-detail-controls { grid-template-columns: 1fr; }
+}

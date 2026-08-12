@@ -34,6 +34,7 @@ import { resolveAudience, type ComposeAudience } from './messagingAdmin';
 import { sendTaskReminderNow } from '../jobs/reminders';
 import { dashboardRoutes } from './dashboard';
 import { greenroomRoutes } from './greenroom';
+import { crmRoutes } from './crmAdmin';
 
 type ApiEnv = AccessEnv;
 
@@ -114,6 +115,9 @@ adminApiRoutes.route('/dashboard', dashboardRoutes);
 
 // Green room / run-of-show (workplan 12) — day-of board, check-in, nudge.
 adminApiRoutes.route('/greenroom', greenroomRoutes);
+
+// Speaker CRM: sourcing pipeline (spec-gap CRM-07/08) — org-wide kanban.
+adminApiRoutes.route('/crm', crmRoutes);
 
 // Last-resort safety net: any exception that escapes a route handler below
 // (this file's own, or a mounted sub-router's) used to propagate past Hono
