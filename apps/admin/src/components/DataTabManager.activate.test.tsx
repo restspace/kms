@@ -15,14 +15,6 @@ import { describe, expect, it, vi, beforeAll } from 'vitest';
 import { render, waitFor } from '@testing-library/preact';
 import { useState } from 'react';
 
-// @tanstack/react-query resolves the real React inside node_modules, which
-// preact/compat cannot host; the manager only uses it for tab-count badges,
-// which this test doesn't assert on.
-vi.mock('@tanstack/react-query', () => ({
-  useQueries: () => [],
-  useQueryClient: () => ({ setQueryData: () => {}, invalidateQueries: () => {} }),
-}));
-
 vi.mock('react-window', () => ({
   FixedSizeList: ({ itemCount, itemData, children: Row }: any) => (
     <div data-testid="list">
@@ -114,6 +106,15 @@ function MirroringHost({
 }
 
 describe('DataTabManager activate requests', () => {
+  it('loads only the active list and learns its badge count from that page response', async () => {
+    const { config, sources } = makeConfig();
+    const { container } = render(<DataTabManager config={config} defaultTabs={['speakers', 'submissions']} />);
+
+    await waitFor(() => expect(sources.speakers).toHaveBeenCalledTimes(1));
+    expect(sources.submissions).not.toHaveBeenCalled();
+    expect(container.querySelector('.data-tab-label.active')?.textContent).toContain('1');
+  });
+
   it('never reports a tab it is only passing through', async () => {
     const { config, sources } = makeConfig();
     const reports: string[] = [];

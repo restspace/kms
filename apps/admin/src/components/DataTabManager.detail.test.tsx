@@ -14,11 +14,6 @@ import { describe, expect, it, vi, beforeAll } from 'vitest';
 import { render, waitFor } from '@testing-library/preact';
 import { useEffect, useState } from 'react';
 
-vi.mock('@tanstack/react-query', () => ({
-  useQueries: () => [],
-  useQueryClient: () => ({ setQueryData: () => {}, invalidateQueries: () => {} }),
-}));
-
 vi.mock('react-window', () => ({
   FixedSizeList: ({ itemCount, itemData, children: Row }: any) => (
     <div data-testid="list">

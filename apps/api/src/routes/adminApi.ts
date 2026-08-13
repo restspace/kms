@@ -300,22 +300,18 @@ const RESOURCE_SPECS: Record<string, Omit<ResourceDef, 'fromSql'>> = {
         (SELECT json_group_object(d.key, v.value) FROM contact_field_values v
          JOIN contact_field_definitions d ON d.id = v.field_id
          WHERE v.contact_id = c.id AND d.event_id = ec.event_id) AS custom_fields_json,
-        (CASE
-           WHEN EXISTS (SELECT 1 FROM submission_participants sp JOIN submissions s ON s.id = sp.submission_id
-                         WHERE sp.contact_id = c.id AND s.event_id = ec.event_id AND sp.confirmed_at IS NOT NULL) THEN 'confirmed'
-           WHEN EXISTS (SELECT 1 FROM submission_participants sp JOIN submissions s ON s.id = sp.submission_id
-                         WHERE sp.contact_id = c.id AND s.event_id = ec.event_id) THEN 'awaiting'
+         (CASE
+           WHEN ec.confirmed_participant_count > 0 THEN 'confirmed'
+           WHEN ec.participant_count > 0 THEN 'awaiting'
            ELSE NULL
          END) AS confirmation,
         -- SPK-04: the settable speaker workflow status. ec.speaker_status wins
         -- when set; otherwise this derives the same confirmed/awaiting_reply
         -- read the (published, untouched) confirmation column above already
         -- computes, just under the new vocabulary's spelling.
-        COALESCE(ec.speaker_status, CASE
-           WHEN EXISTS (SELECT 1 FROM submission_participants sp JOIN submissions s ON s.id = sp.submission_id
-                         WHERE sp.contact_id = c.id AND s.event_id = ec.event_id AND sp.confirmed_at IS NOT NULL) THEN 'confirmed'
-           WHEN EXISTS (SELECT 1 FROM submission_participants sp JOIN submissions s ON s.id = sp.submission_id
-                         WHERE sp.contact_id = c.id AND s.event_id = ec.event_id) THEN 'awaiting_reply'
+         COALESCE(ec.speaker_status, CASE
+           WHEN ec.confirmed_participant_count > 0 THEN 'confirmed'
+           WHEN ec.participant_count > 0 THEN 'awaiting_reply'
            ELSE NULL
          END) AS speaker_status`,
     eventExpr: 'ec.event_id',
@@ -365,25 +361,19 @@ const RESOURCE_SPECS: Record<string, Omit<ResourceDef, 'fromSql'>> = {
       // row is one PERSON): a no-op here rather than an unknown-filter silence,
       // so it still documents itself through GET /meta.
       events: () => null,
-      // SPK-04: roster filter mirroring the `confirmation` column above —
-      // kept as its own EXISTS pair rather than wrapping the column expression
-      // so it stays sargable (no correlated subquery inside a WHERE on a
-      // computed SELECT column).
+      // SPK-04: the filter reuses the membership counters maintained by 0044,
+      // just like the displayed confirmation and speaker_status columns.
       confirmation: (value) => {
         const v = asText(value);
         if (v === 'confirmed') {
           return {
-            sql: `EXISTS (SELECT 1 FROM submission_participants sp JOIN submissions s ON s.id = sp.submission_id
-                           WHERE sp.contact_id = c.id AND s.event_id = ec.event_id AND sp.confirmed_at IS NOT NULL)`,
+            sql: `ec.confirmed_participant_count > 0`,
             params: [],
           };
         }
         if (v === 'awaiting') {
           return {
-            sql: `EXISTS (SELECT 1 FROM submission_participants sp JOIN submissions s ON s.id = sp.submission_id
-                           WHERE sp.contact_id = c.id AND s.event_id = ec.event_id)
-                  AND NOT EXISTS (SELECT 1 FROM submission_participants sp JOIN submissions s ON s.id = sp.submission_id
-                                   WHERE sp.contact_id = c.id AND s.event_id = ec.event_id AND sp.confirmed_at IS NOT NULL)`,
+            sql: `ec.participant_count > 0 AND ec.confirmed_participant_count = 0`,
             params: [],
           };
         }
@@ -433,10 +423,8 @@ const RESOURCE_SPECS: Record<string, Omit<ResourceDef, 'fromSql'>> = {
         if (v === null || v.length === 0 || v.length > 40) return null;
         return {
           sql: `COALESCE(ec.speaker_status, CASE
-                  WHEN EXISTS (SELECT 1 FROM submission_participants sp JOIN submissions s ON s.id = sp.submission_id
-                                WHERE sp.contact_id = c.id AND s.event_id = ec.event_id AND sp.confirmed_at IS NOT NULL) THEN 'confirmed'
-                  WHEN EXISTS (SELECT 1 FROM submission_participants sp JOIN submissions s ON s.id = sp.submission_id
-                                WHERE sp.contact_id = c.id AND s.event_id = ec.event_id) THEN 'awaiting_reply'
+                  WHEN ec.confirmed_participant_count > 0 THEN 'confirmed'
+                  WHEN ec.participant_count > 0 THEN 'awaiting_reply'
                   ELSE NULL
                 END) = ?`,
           params: [v],
@@ -483,7 +471,10 @@ const RESOURCE_SPECS: Record<string, Omit<ResourceDef, 'fromSql'>> = {
                 -- and filtering on that column blanked the Ratings column for
                 -- exactly those (reviews recorded, nothing shown).
                 --
-                -- Rating normalization: a raw AVG(weighted_total) pools rounds
+                -- rating_cache contains each plan's maintained mean. Normalizing
+                -- those cached means avoids re-reading reviews for every row and
+                -- keeps the displayed value identical to the cached sort value.
+                -- A raw AVG(weighted_total) would pool rounds
                 -- on different scoring_scale_min/max as if they were the same
                 -- unit — a 9/10 and a 4/5 are both "near the top" but pool to
                 -- a meaningless 6.5. Each plan's mean is first mapped onto a
@@ -491,12 +482,10 @@ const RESOURCE_SPECS: Record<string, Omit<ResourceDef, 'fromSql'>> = {
                 -- then those normalized per-plan means are themselves averaged.
                 -- For the common case of a single 1-5 plan this is numerically
                 -- identical to the old raw average: 1 + (avg - 1) * 4 / 4 = avg.
-                (SELECT ROUND(AVG(plan_avg), 2) FROM (
-                   SELECT 1 + (AVG(r.weighted_total) - p.scoring_scale_min) * 4.0
-                            / (p.scoring_scale_max - p.scoring_scale_min) AS plan_avg
-                   FROM reviews r JOIN evaluation_plans p ON p.id = r.plan_id
-                   WHERE r.submission_id = s.id AND r.weighted_total IS NOT NULL
-                   GROUP BY r.plan_id)) AS rating,
+                ROUND((SELECT AVG(1 + (je.value - p.scoring_scale_min) * 4.0
+                                      / (p.scoring_scale_max - p.scoring_scale_min))
+                        FROM json_each(COALESCE(s.rating_cache, '{}')) je
+                        JOIN evaluation_plans p ON p.id = je.key), 2) AS rating,
                 (SELECT COUNT(*) FROM reviews r
                  WHERE r.submission_id = s.id) AS review_count`,
     sortable: {

@@ -240,14 +240,15 @@ describe('POST /app/api/:resource/query — contacts confirmation (SPK-04)', () 
     ).bind(`sp-confirmed-${tag}`, submission, confirmed).run();
 
     const awaiting = await seedContact(eventId, { email: 'awaiting@example.com', last_name: 'Baboon' });
+    const awaitingParticipant = `sp-awaiting-${tag}`;
     await env.DB.prepare(
       `INSERT INTO submission_participants (id, submission_id, contact_id, role, position)
        VALUES (?, ?, ?, 'co-speaker', 1)`,
-    ).bind(`sp-awaiting-${tag}`, submission, awaiting).run();
+    ).bind(awaitingParticipant, submission, awaiting).run();
 
     const bystander = await seedContact(eventId, { email: 'bystander@example.com', last_name: 'Coyote' });
 
-    return { admin, confirmed, awaiting, bystander };
+    return { admin, confirmed, awaiting, awaitingParticipant, bystander };
   }
 
   it('reports the confirmation column: confirmed / awaiting / none', async () => {
@@ -274,6 +275,21 @@ describe('POST /app/api/:resource/query — contacts confirmation (SPK-04)', () 
 
     const emails = body.items.map((r) => r.email);
     expect(emails).toEqual(['awaiting@example.com']);
+  });
+
+  it('keeps cached confirmation counters current when a participant is confirmed or removed', async () => {
+    const { admin, awaitingParticipant } = await seedRoster();
+
+    await env.DB.prepare('UPDATE submission_participants SET confirmed_at = ? WHERE id = ?')
+      .bind('2026-08-02T00:00:00Z', awaitingParticipant)
+      .run();
+    const confirmed = await query(admin.cookie, 'contacts', { size: 50, filters: { confirmation: 'confirmed' } });
+    expect(confirmed.body.items.map((r) => r.email)).toContain('awaiting@example.com');
+
+    await env.DB.prepare('DELETE FROM submission_participants WHERE id = ?').bind(awaitingParticipant).run();
+    const all = await query(admin.cookie, 'contacts', { size: 50, filters: {} });
+    const row = all.body.items.find((r) => r.email === 'awaiting@example.com');
+    expect(row?.confirmation).toBeNull();
   });
 });
 

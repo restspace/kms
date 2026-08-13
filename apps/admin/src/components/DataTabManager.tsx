@@ -1,5 +1,4 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useReducer, useRef, useState } from 'react';
-import { useQueries, useQueryClient } from '@tanstack/react-query';
 import { breakpoints } from '@kms/theme';
 import { DataList, ColumnDefinition, DataListQuery, DataSourceParams, DataSourceResult } from './DataList';
 import { appAlert, ModalDialog } from './dialogs';
@@ -1224,7 +1223,9 @@ export const DataTabManager: React.FC<DataTabManagerProps> = ({
     typeof window !== 'undefined' ? window.matchMedia(MEDIUM_MEDIA_QUERY).matches : false
   );
   const isMobileSplitRef = useRef(isMobileSplit);
-  const queryClient = useQueryClient();
+  /** Counts learned from real list responses, keyed by config and filters. */
+  const [tabCounts, setTabCounts] = useState<Record<string, number>>({});
+  const invalidateTabCounts = useCallback(() => setTabCounts({}), []);
   const lastGlobalFilterSignature = useRef<string | null>(null);
 
   const applyReceiverActive = useCallback((active: boolean) => {
@@ -1493,7 +1494,7 @@ export const DataTabManager: React.FC<DataTabManagerProps> = ({
           if (deleted) {
             notifyRecordsChanged(configKey);
             dispatch({ type: 'INVALIDATE_LIST', payload: { tabId } });
-            queryClient.invalidateQueries({ queryKey: ['tab-counts'] });
+            invalidateTabCounts();
           }
         }
       : undefined;
@@ -1538,7 +1539,7 @@ export const DataTabManager: React.FC<DataTabManagerProps> = ({
       : [];
 
     return [...tabOptions, ...detailOption, filterOption];
-  }, [config, listContextMenu, notifyRecordsChanged, queryClient, state.globalFilterSources, requestChildTabReplace, resolveItemTitle]);
+  }, [config, listContextMenu, notifyRecordsChanged, invalidateTabCounts, state.globalFilterSources, requestChildTabReplace, resolveItemTitle]);
 
   /**
    * Handle tab close - checks for unsaved changes before closing
@@ -2147,10 +2148,16 @@ export const DataTabManager: React.FC<DataTabManagerProps> = ({
    */
   const getTotalChangeHandler = useCallback((tabId: string, configKey: string) => {
     return (total: number) => {
-      const filterSig = stableSerialize(getEffectiveTabFilters(tabId, configKey));
-      queryClient.setQueryData(['tab-counts', configKey, filterSig], total);
+      const filters = getEffectiveTabFilters(tabId, configKey);
+      const isActiveList = tabId === state.tabs[state.activeTabIndex]?.id;
+      const effectiveFilters = isActiveList && committedSearch.trim()
+        ? { ...filters, q: committedSearch.trim() }
+        : filters;
+      const filterSig = stableSerialize(effectiveFilters);
+      const key = `${configKey}:${filterSig}`;
+      setTabCounts((prev) => (prev[key] === total ? prev : { ...prev, [key]: total }));
     };
-  }, [getEffectiveTabFilters, queryClient]);
+  }, [committedSearch, getEffectiveTabFilters, state.activeTabIndex, state.tabs]);
 
   /**
    * Handle add button click in a list
@@ -2239,7 +2246,7 @@ export const DataTabManager: React.FC<DataTabManagerProps> = ({
         // Invalidate the parent list to trigger refresh
         if (tab.parentTabId) {
           dispatch({ type: 'INVALIDATE_LIST', payload: { tabId: tab.parentTabId } });
-          queryClient.invalidateQueries({ queryKey: ['tab-counts'] });
+          invalidateTabCounts();
         }
 
         return true;
@@ -2251,7 +2258,7 @@ export const DataTabManager: React.FC<DataTabManagerProps> = ({
         throw err;
       }
     };
-  }, [config, queryClient, notifyRecordsChanged]);
+  }, [config, invalidateTabCounts, notifyRecordsChanged]);
 
   /**
    * Handle cancel/close of create form - checks for unsaved changes
@@ -2324,7 +2331,7 @@ export const DataTabManager: React.FC<DataTabManagerProps> = ({
         // Invalidate the parent list to trigger refresh
         if (tab.parentTabId) {
           dispatch({ type: 'INVALIDATE_LIST', payload: { tabId: tab.parentTabId } });
-          queryClient.invalidateQueries({ queryKey: ['tab-counts'] });
+          invalidateTabCounts();
         }
 
         return true;
@@ -2334,7 +2341,7 @@ export const DataTabManager: React.FC<DataTabManagerProps> = ({
         throw err;
       }
     };
-  }, [config, queryClient, notifyRecordsChanged, resolveItemTitle]);
+  }, [config, invalidateTabCounts, notifyRecordsChanged, resolveItemTitle]);
 
   /**
    * Handle cancel/close of edit form - checks for unsaved changes
@@ -2461,65 +2468,20 @@ export const DataTabManager: React.FC<DataTabManagerProps> = ({
   );
 
   /**
-   * Stable list of list-type tabs for count queries.
-   */
-  const listTabs = useMemo(
-    () => state.tabs.filter((tab) => tab.type === 'list'),
-    [state.tabs]
-  );
-
-  /**
-   * Prefetch list-tab totals using React Query.
-   *
-   * Query keys encode the configKey and serialized filter values, so counts only refetch
-   * when the actual global filter changes — not when unrelated config properties
-   * (pricingPins, clientOrgOptions, etc.) cause the config object to be recreated.
-   *
-   * After record create/edit/delete, call queryClient.invalidateQueries({ queryKey: ['tab-counts'] })
-   * to trigger a refresh.
-   */
-  const tabCountQueries = useQueries({
-    queries: listTabs.map((tab) => {
-      const tabConfig = config[tab.configKey];
-      const baseFilters = getEffectiveTabFilters(tab.id, tab.configKey);
-      const isActiveList = tab.id === state.tabs[state.activeTabIndex]?.id;
-      const filters = isActiveList && committedSearch.trim()
-        ? { ...baseFilters, q: committedSearch.trim() }
-        : baseFilters;
-      const filterSig = stableSerialize(filters);
-      return {
-        queryKey: ['tab-counts', tab.configKey, filterSig],
-        queryFn: async (): Promise<number> => {
-          if (!tabConfig) return 0;
-          const response = await tabConfig.dataSource({ from: 0, size: 1, filters });
-          return response.total ?? 0;
-        },
-        staleTime: 60_000,
-        enabled: !!tabConfig,
-      };
-    }),
-  });
-
-  const tabCounts = useMemo(() => {
-    const counts: Record<string, number> = {};
-    listTabs.forEach((tab, i) => {
-      const data = tabCountQueries[i]?.data;
-      if (data !== undefined) {
-        counts[tab.id] = data;
-      }
-    });
-    return counts;
-  }, [listTabs, tabCountQueries]);
-
-  /**
-   * Get tab count from React Query results.
+   * Return a badge only after this list has supplied a total with a real page.
+   * Inactive, unvisited tabs stay request-free and deliberately show no count.
    */
   const getTabCount = useCallback((tab: DataTabState) => {
-    if (tab.type === 'list' && tabCounts[tab.id] !== undefined) {
-      return tabCounts[tab.id].toLocaleString();
-    }
+    if (tab.type !== 'list') return null;
+    const filters = getEffectiveTabFilters(tab.id, tab.configKey);
+    const isActiveList = tab.id === state.tabs[state.activeTabIndex]?.id;
+    const effectiveFilters = isActiveList && committedSearch.trim()
+      ? { ...filters, q: committedSearch.trim() }
+      : filters;
+    const total = tabCounts[`${tab.configKey}:${stableSerialize(effectiveFilters)}`];
+    if (total !== undefined) return total.toLocaleString();
     return null;
-  }, [tabCounts]);
+  }, [committedSearch, getEffectiveTabFilters, state.activeTabIndex, state.tabs, tabCounts]);
 
   /**
    * Wrap toolbar actions to add export status feedback. When the files-zip
@@ -2722,7 +2684,7 @@ export const DataTabManager: React.FC<DataTabManagerProps> = ({
         notifyRecordsChanged(tab.configKey);
         if (tab.parentTabId) {
           dispatch({ type: 'INVALIDATE_LIST', payload: { tabId: tab.parentTabId } });
-          queryClient.invalidateQueries({ queryKey: ['tab-counts'] });
+          invalidateTabCounts();
         }
       };
       return (
@@ -2791,7 +2753,7 @@ export const DataTabManager: React.FC<DataTabManagerProps> = ({
               notifyRecordsChanged(tab.configKey);
               if (tab.parentTabId) {
                 dispatch({ type: 'INVALIDATE_LIST', payload: { tabId: tab.parentTabId } });
-                queryClient.invalidateQueries({ queryKey: ['tab-counts'] });
+                invalidateTabCounts();
               }
             }
           }
@@ -2861,6 +2823,7 @@ export const DataTabManager: React.FC<DataTabManagerProps> = ({
     itemReceiverPanel?.leftPaneDataListClassNameWhenActive,
     isReceiverActive,
     handleSelectionChange,
+    invalidateTabCounts,
     notifyRecordsChanged,
     onListQueryChange,
     resolveItemTitle,

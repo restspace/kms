@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   DataTabManager,
   TabConfig,
@@ -56,15 +56,7 @@ import { appAlert, appConfirm, ModalDialog } from './components/dialogs'
 import { RecordFormActionableError, type FormWarningResult } from './components/RecordForm'
 import { TaskCreateForm } from './workspace/TaskCreateForm'
 import { CreateEventDialog } from './components/CreateEventDialog'
-import { FormsSection } from './forms/FormsSection'
-import { SettingsSection } from './settings/SettingsSection'
-import { EvaluationSection } from './evaluation/EvaluationSection'
-import { AgendaSection } from './agenda/AgendaSection'
-import { DashboardSection, type AppNavTarget } from './dashboard/DashboardSection'
-import { GreenRoomSection } from './greenroom/GreenRoomSection'
-import { PipelineSection } from './crm/PipelineSection'
-import { ReviewerWorkspace } from './review/ReviewerWorkspace'
-import { EmbedsSection } from './embeds/EmbedsSection'
+import type { AppNavTarget } from './dashboard/DashboardSection'
 import {
   BulkBar,
   ContactsFilter,
@@ -83,15 +75,18 @@ import {
   describeSettledJob,
   pollBulkJob,
 } from './workspace/messaging'
-import { openImportWizard } from './workspace/ImportWizard'
+import {
+  openDuplicatesPanel,
+  openImportWizard,
+  openMessageSelectedDialog,
+  openSaveSegmentPanel,
+  openSegmentsPanel,
+} from './workspace/lazyPanels'
 import {
   ContactCrossEventHistory,
   DeleteFromOrgButton,
   openContactPicker,
 } from './workspace/contactOrg'
-import { openDuplicatesPanel } from './workspace/contactMerge'
-import { openSaveSegmentPanel, openSegmentsPanel } from './workspace/segments'
-import { openMessageSelectedDialog } from './workspace/messageSelected'
 import { HeadshotUploadControl } from './workspace/headshotUpload'
 import { ContactProfileHistory } from './workspace/entityHistory'
 import { resolveTargetEventId } from './utils/importTarget'
@@ -104,12 +99,25 @@ import {
   type EventScopeValue,
 } from './eventScope'
 import { currentRoute, navigate, stableStringify, useRoute, type ViewKey } from './router'
-import { HelpSection } from './help/HelpSection'
 import { helpSlugFor } from './help/helpTopics'
 import { MANUAL_PAGE_META } from './help/manualNav.generated'
 import { AdminErrorBoundary } from './components/AdminErrorBoundary'
 import { eventDays, formatEventDateRange } from './agenda/timeUtils'
 import './shell.css'
+
+// Each major screen is its own Vite chunk. The workspace shell remains eager
+// because it is the default route; specialist surfaces are downloaded only
+// when navigation first reaches them.
+const FormsSection = lazy(() => import('./forms/FormsSection').then((m) => ({ default: m.FormsSection })))
+const SettingsSection = lazy(() => import('./settings/SettingsSection').then((m) => ({ default: m.SettingsSection })))
+const EvaluationSection = lazy(() => import('./evaluation/EvaluationSection').then((m) => ({ default: m.EvaluationSection })))
+const AgendaSection = lazy(() => import('./agenda/AgendaSection').then((m) => ({ default: m.AgendaSection })))
+const DashboardSection = lazy(() => import('./dashboard/DashboardSection').then((m) => ({ default: m.DashboardSection })))
+const GreenRoomSection = lazy(() => import('./greenroom/GreenRoomSection').then((m) => ({ default: m.GreenRoomSection })))
+const PipelineSection = lazy(() => import('./crm/PipelineSection').then((m) => ({ default: m.PipelineSection })))
+const ReviewerWorkspace = lazy(() => import('./review/ReviewerWorkspace').then((m) => ({ default: m.ReviewerWorkspace })))
+const EmbedsSection = lazy(() => import('./embeds/EmbedsSection').then((m) => ({ default: m.EmbedsSection })))
+const HelpSection = lazy(() => import('./help/HelpSection').then((m) => ({ default: m.HelpSection })))
 
 /**
  * Admin SPA shell (docs/12 M0.5→M3, workspace redesign): slim sidebar + event
@@ -3537,6 +3545,7 @@ export default function App() {
             already the manual and has its own contents rail. */}
         {view !== 'help' && <HelpButton view={view} tab={route.tab} />}
         <AdminErrorBoundary section={NAV_ITEMS.find((i) => i.key === view)?.label ?? view} resetKey={`${view}:${me.event.id}`}>
+        <Suspense fallback={<div className="shell-placeholder" role="status">Loading section…</div>}>
         {view === 'help' ? (
           // Available to reviewers as well as organisers, and event-independent:
           // no EventScopeNote, and no `key` that would reset the reader on an
@@ -3681,6 +3690,7 @@ export default function App() {
             <p>This section arrives with a later milestone.</p>
           </div>
         )}
+        </Suspense>
         </AdminErrorBoundary>
       </main>
     </div>

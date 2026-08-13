@@ -16,11 +16,6 @@
 import { describe, expect, it, vi, beforeAll } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/preact';
 
-vi.mock('@tanstack/react-query', () => ({
-  useQueries: () => [],
-  useQueryClient: () => ({ setQueryData: () => {}, invalidateQueries: () => {} }),
-}));
-
 const getFileLibrary = vi.fn();
 
 vi.mock('./api', async (importOriginal) => {
