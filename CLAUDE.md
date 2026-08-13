@@ -1,0 +1,1 @@
+- When running evals from C:\dev\killmysaas-evals on production, ensure that the event is published before starting 

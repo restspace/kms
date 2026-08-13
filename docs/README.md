@@ -11,6 +11,12 @@ conflict-free agenda by drag and drop, and watch it all on a live dashboard.
 
 ---
 
+**Looking for the user manual instead?** This document set is the technical specification. The
+plain-language guide for organisers, reviewers and speakers lives in
+[manual/README.md](manual/README.md).
+
+---
+
 ## Read in this order
 
 | Doc | What it answers |

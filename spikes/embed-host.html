@@ -1,0 +1,185 @@
+<!--
+  Embed test host (spikes/embed-host.html).
+
+  A throwaway HTML page that lets you paste the snippets the admin Embeds
+  screen hands out and watch the cross-origin loader actually do its
+  job — i.e. the third-party-host side of the EMB-15 surface that neither
+  the screen's own Live preview (<iframe src=pageUrl>) nor the workers
+  vitest pool in apps/api/test/embed.test.ts can exercise.
+
+  How to use:
+    1. Start the dev server:                     npm run dev
+       (or: npm run dev:kms2 if 8787 is taken)
+    2. Start the host on a separate port:
+            node spikes/serve-embed-host.mjs
+       Default port 9091; override with PORT=… The two pages must run on
+       different origins because that is the real third-party scenario
+       — a `file://` host is blocked by the embedded page's
+       `frame-ancestors *` CSP (CSP3: `*` matches only network schemes),
+       and a same-origin host skips the postMessage origin check that
+       this page exists to exercise.
+    3. Make sure the agenda is published — the demo seed sets
+       agenda_published=0, so by default every embed here will show the
+       public "isn't published" message. Use the admin Settings tab on
+       the running app to flip it (or publish via SQL).
+    4. Open the host in a browser:
+            http://localhost:9091/embed-host.html
+    5. Copy a snippet from /app/embeds admin (EmbedsSection.tsx) and
+       paste it into one of the slots below.
+
+  Hard-coded to the demo seed event so the file works with zero edits on
+  a fresh checkout. Change the slug in the script tags / iframe srcs /
+  feed links below (or override the origin + slug <code>s in <header>)
+  to point at any other event you've seeded or deployed.
+
+  For feed URLs (JSON / XML / .ics), curl/import the link from the
+  "Feed URLs" section — this page does not render them itself.
+-->
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Embed test host</title>
+    <style>
+      :root { color-scheme: light; }
+      body {
+        font: 14px/1.45 -apple-system, "Segoe UI", system-ui, sans-serif;
+        margin: 0; padding: 24px; max-width: 980px;
+        background: #fafafa; color: #222;
+      }
+      header { border-bottom: 1px solid #ddd; padding-bottom: 12px; margin-bottom: 24px; }
+      header h1 { margin: 0 0 4px; font-size: 18px; }
+      header p { margin: 0; color: #666; font-size: 13px; }
+      section { margin: 0 0 40px; }
+      section h2 { font-size: 15px; margin: 0 0 4px; }
+      section p.note { margin: 0 0 12px; color: #666; font-size: 12px; }
+      .slot {
+        background: #fff; border: 1px dashed #c4c4c4; border-radius: 6px;
+        padding: 12px 14px; margin: 0 0 12px;
+      }
+      .slot-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: #888; display: block; margin-bottom: 6px; }
+      hr { border: 0; border-top: 1px solid #e5e5e5; margin: 24px 0; }
+      code { font: 12px/1.4 ui-monospace, "Cascadia Mono", "Consolas", monospace; background: #f0f0f0; padding: 1px 5px; border-radius: 3px; }
+      pre { font: 12px/1.45 ui-monospace, "Cascadia Mono", "Consolas", monospace; background: #f5f5f5; border: 1px solid #e0e0e0; padding: 8px 10px; border-radius: 4px; margin: 8px 0 0; overflow-x: auto; }
+      a.feed { display: inline-block; margin: 0 6px 6px 0; padding: 4px 8px; background: #fff; border: 1px solid #c4c4c4; border-radius: 4px; color: #2c4a73; text-decoration: none; font-size: 12px; }
+      a.feed:hover { background: #eef3fa; }
+      #log { font: 11px/1.4 ui-monospace, "Cascadia Mono", "Consolas", monospace; background: #1a1a1a; color: #b9e; padding: 8px 10px; border-radius: 4px; max-height: 160px; overflow: auto; margin: 8px 0 0; white-space: pre-wrap; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Embed test host</h1>
+      <p>Third-party origin: <code id="host">http://localhost:9091</code> · Embeds origin (KMS): <code id="origin">http://localhost:8787</code> · Event slug: <code id="slug">ai-engineer-sandbox-event</code></p>
+    </header>
+
+    <section>
+      <h2>A. Styled embed — &lt;script&gt; tag</h2>
+      <p class="note">The exact shape the admin Embeds section emits when "Output format" is <code>Styled embed (&lt;script&gt;)</code>. The loader reads <code>document.currentScript.data-*</code> at parse time, so the &lt;script&gt; tag must stay inline, not be created by another script.</p>
+
+      <div class="slot">
+        <span class="slot-label">A1. Default agenda — what the generator outputs with every option at its default</span>
+        <script src="http://localhost:8787/embed.js"
+                data-event="ai-engineer-sandbox-event"
+                data-widget="agenda"
+                data-height="640"></script>
+      </div>
+
+      <div class="slot">
+        <span class="slot-label">A2. With accent + theme + a hidden field — exercises every channel the loader reads</span>
+        <script src="http://localhost:8787/embed.js"
+                data-event="ai-engineer-sandbox-event"
+                data-widget="agenda"
+                data-header="0"
+                data-accent="#ff0055"
+                data-track="agents"
+                data-show-room="0"
+                data-show-track="0"
+                data-font="serif"
+                data-radius="8"
+                data-spacing="compact"
+                data-height="540"></script>
+      </div>
+
+      <div class="slot">
+        <span class="slot-label">A3. Schedule widget — confirms the non-default widget keys (sessions, speakers, agenda, schedule, gallery) still load</span>
+        <script src="http://localhost:8787/embed.js"
+                data-event="ai-engineer-sandbox-event"
+                data-widget="schedule"
+                data-height="480"></script>
+      </div>
+    </section>
+
+    <hr>
+
+    <section>
+      <h2>B. Basic HTML — &lt;iframe&gt; snippet</h2>
+      <p class="note">The shape the admin Embeds section emits when "Output format" is <code>Basic HTML (link + iframe)</code>. Pastes straight into a CMS that strips &lt;script&gt;.</p>
+
+      <div class="slot">
+        <span class="slot-label">B1. Default iframe — no embed params, full public page</span>
+        <iframe src="http://localhost:8787/e/ai-engineer-sandbox-event/agenda"
+                title="AI.Engineer Sandbox Event — Agenda grid"
+                width="100%" height="640"
+                style="border:0;display:block" loading="lazy"></iframe>
+        <p><a href="http://localhost:8787/e/ai-engineer-sandbox-event/agenda">AI.Engineer Sandbox Event — Agenda grid</a></p>
+      </div>
+
+      <div class="slot">
+        <span class="slot-label">B2. Iframe with embed params — the same options A2 carries, expressed without a &lt;script&gt;</span>
+        <iframe src="http://localhost:8787/e/ai-engineer-sandbox-event/agenda?embed=1&header=0&accent=%23ff0055&track=agents&show_room=0&show_track=0&theme=font%3Aserif%2Cradius%3A8%2Cspacing%3Acompact"
+                title="AI.Engineer Sandbox Event — Agenda grid"
+                width="100%" height="540"
+                style="border:0;display:block" loading="lazy"></iframe>
+        <p><a href="http://localhost:8787/e/ai-engineer-sandbox-event/agenda">AI.Engineer Sandbox Event — Agenda grid</a></p>
+      </div>
+    </section>
+
+    <hr>
+
+    <section>
+      <h2>C. Feed URLs</h2>
+      <p class="note">Click to verify the JSON / XML / .ics feeds parse correctly in the browser, or paste the .ics URL into a calendar client. The admin Embeds section shows these as the snippet output when the format is JSON / XML / iCal.</p>
+      <a class="feed" href="http://localhost:8787/e/ai-engineer-sandbox-event/agenda.json" target="_blank" rel="noreferrer">agenda.json</a>
+      <a class="feed" href="http://localhost:8787/e/ai-engineer-sandbox-event/agenda.xml" target="_blank" rel="noreferrer">agenda.xml</a>
+      <a class="feed" href="http://localhost:8787/e/ai-engineer-sandbox-event/agenda.ics" target="_blank" rel="noreferrer">agenda.ics</a>
+      <a class="feed" href="http://localhost:8787/e/ai-engineer-sandbox-event/sessions.json" target="_blank" rel="noreferrer">sessions.json</a>
+      <a class="feed" href="http://localhost:8787/e/ai-engineer-sandbox-event/sessions.xml" target="_blank" rel="noreferrer">sessions.xml</a>
+      <a class="feed" href="http://localhost:8787/e/ai-engineer-sandbox-event/sessions.ics" target="_blank" rel="noreferrer">sessions.ics</a>
+      <a class="feed" href="http://localhost:8787/e/ai-engineer-sandbox-event/speakers.json" target="_blank" rel="noreferrer">speakers.json</a>
+    </section>
+
+    <hr>
+
+    <section>
+      <h2>D. postMessage log</h2>
+      <p class="note">The embedded pages send <code>{type:'kms:embed:height', height:N}</code> back to their host in embed mode, and the loader applies the height to its iframe. A working embed should log a few entries within ~1s of load.</p>
+      <div id="log">(no messages yet)</div>
+    </section>
+
+    <script>
+      // The loader only honours height messages whose origin matches its own
+      // (which it derived from the script's src) AND whose source matches the
+      // iframe it injected. Listening at window-top level is fine for this
+      // fixture because all three embeds on this page come from the same origin.
+      // In a real third-party page you'd compare event.source to your own
+      // <iframe> elements — see embed.ts postMessage handler.
+      window.addEventListener('message', function (event) {
+        if (event.origin !== 'http://localhost:8787') return;
+        var data = event.data;
+        if (!data || typeof data !== 'object') return;
+        var line;
+        if (data.type === 'kms:embed:height') {
+          line = '[h] ' + data.height + 'px';
+        } else {
+          return;
+        }
+        var log = document.getElementById('log');
+        if (log.firstChild && log.firstChild.nodeValue === '(no messages yet)') {
+          log.textContent = '';
+        }
+        log.textContent += line + '\n';
+      });
+    </script>
+  </body>
+</html>
