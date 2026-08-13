@@ -10,7 +10,7 @@ import { createDb } from '@kms/db';
 import type { AppEnv, Env } from '../env';
 import type { SendTemplatedArgs } from '../mailer';
 import { renderTemplatedPreview, sendTemplated } from '../mailer';
-import { APPROVAL_ASK_HTML, sweepBulkJobs } from '../jobs/bulkJobs';
+import { acceptConditionHtml, APPROVAL_ASK_HTML, sweepBulkJobs } from '../jobs/bulkJobs';
 import { requestMagicLink } from './auth';
 import { mintToken } from '../tokens';
 import { bumpEventRevision } from '../revision';
@@ -42,6 +42,16 @@ const SUBMISSION_STATUSES = new Set([
 // vocabulary can grow here without a migration.
 export const APPROVAL_STATES = new Set(['pending', 'granted', 'refused']);
 
+// Workplan 15 W3 (D5): "revise and resubmit" is a third decision outcome
+// stored as a flag, because submissions.status carries a CHECK from
+// 0001_init.sql that SQLite cannot widen without rebuilding a table 14 child
+// tables reference. The 0026 precedent (scoring_criteria.kind) is the house
+// style for a vocabulary with no CHECK: an exported set, validated in the
+// route. A 'revise' row keeps its decline_queue/declined status, so every
+// existing state machine is untouched — only the letter and the exported
+// `outcome` column differ.
+export const DECISION_OUTCOMES = new Set(['revise']);
+
 // F14/ABS-11 — kept as a Set for O(1) membership checks; ALL_PARTICIPANT_ROLES
 // (packages/core) is the canonical ordered vocabulary, in lockstep with the
 // submission_participants.role CHECK constraint (0008 migration).
@@ -53,19 +63,132 @@ const nowIso = () => new Date().toISOString();
 // Submission status operations
 // ---------------------------------------------------------------------------
 
+/** Workplan 15 W2: the proviso an accept carries ("needs a business
+ *  co-presenter — Ann to follow up"). Free text, one line in every surface
+ *  that writes it; the same ceiling as the approval note. */
+const ACCEPT_CONDITION_MAX_CHARS = 2000;
+
+/** Normalise a free-text condition/guidance field off a request body: absent
+ *  means "leave it alone", null/blank means clear it. */
+function parseFreeText(value: unknown, max: number): string | null | undefined {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  return trimmed === '' ? null : trimmed.slice(0, max);
+}
+
 // PUT /submissions/:id/status — the grid's inline status edit.
+//
+// W2: the condition rides the accept itself rather than waiting for a later
+// edit. The document's complaint is that this note is the decision meeting's
+// actual work product and currently lands nowhere, so the surface that makes
+// the accept is the surface that has to capture it.
 evaluationRoutes.put('/submissions/:id/status', async (c) => {
   const session = c.get('session');
   const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
   const status = typeof body.status === 'string' ? body.status : '';
   if (!SUBMISSION_STATUSES.has(status)) return c.json({ error: 'invalid_status' }, 400);
+  const condition = parseFreeText(body.accept_condition, ACCEPT_CONDITION_MAX_CHARS);
   const result = await c.env.DB.prepare(
-    'UPDATE submissions SET status = ?, updated_at = ? WHERE id = ? AND event_id = ?',
+    `UPDATE submissions SET status = ?${condition === undefined ? '' : ', accept_condition = ?'},
+            updated_at = ? WHERE id = ? AND event_id = ?`,
   )
-    .bind(status, nowIso(), c.req.param('id'), session.eventId)
+    .bind(status, ...(condition === undefined ? [] : [condition]), nowIso(), c.req.param('id'), session.eventId)
     .run();
   if (result.meta.changes === 0) return c.json({ error: 'not_found' }, 404);
   return c.json({ ok: true, status });
+});
+
+// PUT /submissions/:id/condition { accept_condition?, condition_met? } — the
+// detail panel's edit and the tracking board's one-click "Mark met" (W2).
+// Status is never touched by anything here: accepted and owing a co-presenter
+// are independent axes (D4), and marking a condition met does not re-decide
+// the talk.
+evaluationRoutes.put('/submissions/:id/condition', async (c) => {
+  const session = c.get('session');
+  if (!isWriter(session.role)) return c.json({ error: 'forbidden' }, 403);
+  const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+
+  const sets: string[] = [];
+  const params: unknown[] = [];
+  const condition = parseFreeText(body.accept_condition, ACCEPT_CONDITION_MAX_CHARS);
+  if (condition !== undefined) {
+    sets.push('accept_condition = ?');
+    params.push(condition);
+    // Clearing the condition clears the timestamp too — an outstanding-ness
+    // stamp on a submission with no condition would keep the panel's filter
+    // honest but read as nonsense on the record.
+    if (condition === null) sets.push('condition_met_at = NULL');
+  }
+  if ('condition_met' in body) {
+    sets.push('condition_met_at = ?');
+    params.push(body.condition_met === false ? null : nowIso());
+  }
+  if (sets.length === 0) return c.json({ error: 'no_fields' }, 400);
+
+  const result = await c.env.DB.prepare(
+    `UPDATE submissions SET ${sets.join(', ')}, updated_at = ? WHERE id = ? AND event_id = ?`,
+  )
+    .bind(...params, nowIso(), c.req.param('id'), session.eventId)
+    .run();
+  if (result.meta.changes === 0) return c.json({ error: 'not_found' }, 404);
+  await bumpEventRevision(c.env, session.eventId);
+  const row = await c.env.DB.prepare(
+    'SELECT accept_condition, condition_met_at FROM submissions WHERE id = ? AND event_id = ?',
+  )
+    .bind(c.req.param('id'), session.eventId)
+    .first<{ accept_condition: string | null; condition_met_at: string | null }>();
+  return c.json({ ok: true, ...row });
+});
+
+/** Speaker-facing, so it gets room to say something useful. */
+const REVISE_GUIDANCE_MAX_CHARS = 4000;
+
+// PUT /submissions/:id/decision { decision_outcome?, revise_guidance? } —
+// "Ask to revise" (W3). Per D5 the row keeps its decline_queue/declined
+// status: scheduling, notification and the queue counts are all state
+// machines that already work, and a status value would have to widen a CHECK
+// this migration deliberately does not touch.
+evaluationRoutes.put('/submissions/:id/decision', async (c) => {
+  const session = c.get('session');
+  if (!isWriter(session.role)) return c.json({ error: 'forbidden' }, 403);
+  const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+
+  const sets: string[] = [];
+  const params: unknown[] = [];
+  if ('decision_outcome' in body) {
+    const v = body.decision_outcome;
+    if (v === null || v === '') {
+      sets.push('decision_outcome = ?');
+      params.push(null);
+    } else if (typeof v === 'string' && DECISION_OUTCOMES.has(v)) {
+      sets.push('decision_outcome = ?');
+      params.push(v);
+    } else {
+      return c.json({ error: 'invalid_decision_outcome', allowed: [...DECISION_OUTCOMES] }, 400);
+    }
+  }
+  const guidance = parseFreeText(body.revise_guidance, REVISE_GUIDANCE_MAX_CHARS);
+  if (guidance !== undefined) {
+    sets.push('revise_guidance = ?');
+    params.push(guidance);
+  }
+  if (sets.length === 0) return c.json({ error: 'no_fields' }, 400);
+
+  const result = await c.env.DB.prepare(
+    `UPDATE submissions SET ${sets.join(', ')}, updated_at = ? WHERE id = ? AND event_id = ?`,
+  )
+    .bind(...params, nowIso(), c.req.param('id'), session.eventId)
+    .run();
+  if (result.meta.changes === 0) return c.json({ error: 'not_found' }, 404);
+  await bumpEventRevision(c.env, session.eventId);
+  const row = await c.env.DB.prepare(
+    'SELECT decision_outcome, revise_guidance FROM submissions WHERE id = ? AND event_id = ?',
+  )
+    .bind(c.req.param('id'), session.eventId)
+    .first<{ decision_outcome: string | null; revise_guidance: string | null }>();
+  return c.json({ ok: true, ...row });
 });
 
 const APPROVAL_NOTE_MAX_CHARS = 2000;
@@ -176,6 +299,10 @@ function parseIsoOrNull(raw: unknown): { ok: true; value: string | null } | { ok
 export { reviewWindowState, type ReviewWindow } from '../reviewWindow';
 
 // POST /submissions/bulk-status — queue moves from the bulk-action bar.
+// `accept_condition` is the meeting's proviso captured in the accept action
+// itself (W2); it is written whatever the target status, because the bar's
+// field is only ever filled when the organiser is queueing an accept and a
+// blank field must not silently wipe a condition set elsewhere.
 evaluationRoutes.post('/submissions/bulk-status', async (c) => {
   const session = c.get('session');
   const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
@@ -183,12 +310,52 @@ evaluationRoutes.post('/submissions/bulk-status', async (c) => {
   const status = typeof body.status === 'string' ? body.status : '';
   if (ids.length === 0) return c.json({ error: 'ids_required' }, 400);
   if (!SUBMISSION_STATUSES.has(status)) return c.json({ error: 'invalid_status' }, 400);
+  const condition = parseFreeText(body.accept_condition, ACCEPT_CONDITION_MAX_CHARS);
   const placeholders = ids.map(() => '?').join(', ');
   const result = await c.env.DB.prepare(
-    `UPDATE submissions SET status = ?, updated_at = ? WHERE event_id = ? AND id IN (${placeholders})`,
+    `UPDATE submissions SET status = ?${condition === undefined || condition === null ? '' : ', accept_condition = ?'},
+            updated_at = ? WHERE event_id = ? AND id IN (${placeholders})`,
   )
-    .bind(status, nowIso(), session.eventId, ...ids)
+    .bind(
+      status,
+      ...(condition === undefined || condition === null ? [] : [condition]),
+      nowIso(),
+      session.eventId,
+      ...ids,
+    )
     .run();
+  return c.json({ ok: true, changed: result.meta.changes });
+});
+
+// POST /submissions/bulk-decision { ids, decision_outcome, revise_guidance }
+// — "Ask to revise" over a selection from the decline queue (W3). Statuses
+// are deliberately untouched: the rows stay exactly where every downstream
+// state machine already expects them (D5).
+evaluationRoutes.post('/submissions/bulk-decision', async (c) => {
+  const session = c.get('session');
+  if (!isWriter(session.role)) return c.json({ error: 'forbidden' }, 403);
+  const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+  const ids = parseIds(body.ids);
+  if (ids.length === 0) return c.json({ error: 'ids_required' }, 400);
+  const outcome = body.decision_outcome;
+  if (!(outcome === null || outcome === '' || (typeof outcome === 'string' && DECISION_OUTCOMES.has(outcome)))) {
+    return c.json({ error: 'invalid_decision_outcome', allowed: [...DECISION_OUTCOMES] }, 400);
+  }
+  const guidance = parseFreeText(body.revise_guidance, REVISE_GUIDANCE_MAX_CHARS);
+  const placeholders = ids.map(() => '?').join(', ');
+  const result = await c.env.DB.prepare(
+    `UPDATE submissions SET decision_outcome = ?${guidance === undefined ? '' : ', revise_guidance = ?'},
+            updated_at = ? WHERE event_id = ? AND id IN (${placeholders})`,
+  )
+    .bind(
+      outcome === '' ? null : outcome,
+      ...(guidance === undefined ? [] : [guidance]),
+      nowIso(),
+      session.eventId,
+      ...ids,
+    )
+    .run();
+  await bumpEventRevision(c.env, session.eventId);
   return c.json({ ok: true, changed: result.meta.changes });
 });
 
@@ -321,6 +488,7 @@ evaluationRoutes.post('/submissions/send-decisions', async (c) => {
   const { results } = await db
     .prepare(
       `SELECT s.id, s.title, s.code, s.status, s.notified_at, s.submitter_contact_id,
+              s.accept_condition, s.decision_outcome, s.revise_guidance,
               COALESCE(NULLIF(c.email, ''), fb.email) AS submitter_email,
               COALESCE(c.first_name, fb.first_name) AS submitter_first_name
        FROM submissions s
@@ -338,6 +506,7 @@ evaluationRoutes.post('/submissions/send-decisions', async (c) => {
     .all<{
       id: string; title: string; code: string; status: string; notified_at: string | null;
       submitter_contact_id: string | null; submitter_email: string | null; submitter_first_name: string | null;
+      accept_condition: string | null; decision_outcome: string | null; revise_guidance: string | null;
     }>();
 
   // Send-eligible (CFP-14): queue rows as always, PLUS rows already decided
@@ -405,10 +574,14 @@ evaluationRoutes.post('/submissions/send-decisions', async (c) => {
     let previews: Record<string, unknown> | undefined;
     if (body.preview === true) {
       const portalUrl = `${c.env.APP_URL}/portal/${event.slug}`;
-      const renderFor = async (s: (typeof allEligible)[number] | undefined, accept: boolean) => {
+      // The template key is chosen here exactly as expandSendDecisions chooses
+      // it, so the dialog can never preview a letter the expander would not
+      // send — including W3's third one.
+      const renderFor = async (s: (typeof allEligible)[number] | undefined, templateKey: string) => {
         if (!s || !s.submitter_email) return null;
+        const accept = templateKey === 'decision_accepted';
         const rendered = await renderTemplatedPreview(db, {
-          templateKey: accept ? 'decision_accepted' : 'decision_declined',
+          templateKey,
           eventId: session.eventId,
           context: {
             event: { name: event.name },
@@ -416,30 +589,77 @@ evaluationRoutes.post('/submissions/send-decisions', async (c) => {
             submission: { title: s.title, code: s.code },
             portal_url: portalUrl,
             ...(accept && approvalAsk ? { approval_ask: APPROVAL_ASK_HTML } : {}),
+            ...(accept && s.accept_condition ? { accept_condition: acceptConditionHtml(s.accept_condition) } : {}),
+            ...(templateKey === 'decision_revise' ? { revise_guidance: s.revise_guidance ?? '' } : {}),
           },
         });
         return rendered ? { ...rendered, sample_to: s.submitter_email } : null;
       };
+      const isDeclineSide = (s: (typeof allEligible)[number]) =>
+        s.status === 'decline_queue' || s.status === 'declined';
       const bySpeaker = new Map<string, number>();
       for (const s of allEligible) {
         if (s.submitter_contact_id) bySpeaker.set(s.submitter_contact_id, (bySpeaker.get(s.submitter_contact_id) ?? 0) + 1);
       }
+      // A revise row is a decline row wearing a flag (D5), so it is excluded
+      // from the declined sample — otherwise the dialog could show the plain
+      // rejection letter for a batch where nobody receives one.
+      const reviseSample = allEligible.find(
+        (s) => isDeclineSide(s) && s.decision_outcome === 'revise' && s.submitter_email,
+      );
       previews = {
         accepted: await renderFor(
           allEligible.find((s) => (s.status === 'accept_queue' || s.status === 'accepted') && s.submitter_email),
-          true,
+          'decision_accepted',
         ),
         declined: await renderFor(
-          allEligible.find((s) => (s.status === 'decline_queue' || s.status === 'declined') && s.submitter_email),
-          false,
+          allEligible.find((s) => isDeclineSide(s) && s.decision_outcome !== 'revise' && s.submitter_email),
+          'decision_declined',
         ),
+        ...(reviseSample ? { revise: await renderFor(reviseSample, 'decision_revise') } : {}),
         merged_speakers: [...bySpeaker.values()].filter((n) => n >= 2).length,
       };
+    }
+
+    // Workplan 15 W4: the near-miss cohort this batch is about to lose —
+    // declined rows rated at or above the mean of what the event accepted.
+    // Reported only when there is one, so the dialog's pipeline offer is
+    // absent unless the moment actually warrants it.
+    const declinedIds = allEligible
+      .filter((s) => s.status === 'decline_queue' || s.status === 'declined')
+      .map((s) => s.id);
+    let nearMiss: { count: number; ids: string[]; threshold: number } | undefined;
+    if (declinedIds.length > 0) {
+      const { results: near } = await db
+        .prepare(
+          `WITH rated AS (
+             SELECT s.id, s.status,
+                    (SELECT ROUND(AVG(plan_avg), 2) FROM (
+                       SELECT 1 + (AVG(r.weighted_total) - p.scoring_scale_min) * 4.0
+                                / (p.scoring_scale_max - p.scoring_scale_min) AS plan_avg
+                       FROM reviews r JOIN evaluation_plans p ON p.id = r.plan_id
+                       WHERE r.submission_id = s.id AND r.weighted_total IS NOT NULL
+                       GROUP BY r.plan_id)) AS rating
+               FROM submissions s WHERE s.event_id = ?
+           )
+           SELECT id, (SELECT AVG(rating) FROM rated
+                        WHERE status IN ('accepted', 'accept_queue') AND rating IS NOT NULL) AS threshold
+             FROM rated
+            WHERE rating IS NOT NULL AND id IN (${declinedIds.map(() => '?').join(', ')})
+              AND rating >= (SELECT AVG(rating) FROM rated
+                              WHERE status IN ('accepted', 'accept_queue') AND rating IS NOT NULL)`,
+        )
+        .bind(session.eventId, ...declinedIds)
+        .all<{ id: string; threshold: number | null }>();
+      if (near.length > 0 && near[0]!.threshold !== null) {
+        nearMiss = { count: near.length, ids: near.map((r) => r.id), threshold: Math.round(near[0]!.threshold * 10) / 10 };
+      }
     }
 
     return c.json({
       ok: true,
       preflight: true,
+      ...(nearMiss ? { near_miss: nearMiss } : {}),
       accepted: allEligible.filter((s) => s.status === 'accept_queue' || s.status === 'accepted').length,
       declined: allEligible.filter((s) => s.status === 'decline_queue' || s.status === 'declined').length,
       resend: decidedUnnotified.length,
@@ -2077,6 +2297,45 @@ evaluationRoutes.get('/review/queue', async (c) => {
       }
     }
 
+    // W7 (D11): last year's attendee rating, read-only and never scored — a
+    // chip on the reviewer screen, not a column of any aggregate. Org-scoped
+    // contacts (0015) make "an earlier event's row for this speaker" a single
+    // join; anonymised submissions get none, same guard as `participants`.
+    if (submissionIds.length > 0) {
+      const placeholders = submissionIds.map(() => '?').join(', ');
+      const { results: priorRows } = await db
+        .prepare(
+          `SELECT sp.submission_id, ec.prior_rating, ec.prior_rating_note, c.id AS prior_rating_contact_id,
+                  pe.id AS prior_event_id, pe.name AS prior_event_name
+             FROM submission_participants sp
+             JOIN contacts c ON c.id = sp.contact_id
+             JOIN event_contacts ec ON ec.contact_id = c.id AND ec.prior_rating IS NOT NULL
+             JOIN events pe ON pe.id = ec.event_id
+                            AND pe.org_id = (SELECT org_id FROM events WHERE id = ?)
+                            AND pe.starts_at < (SELECT starts_at FROM events WHERE id = ?)
+            WHERE sp.submission_id IN (${placeholders})
+            ORDER BY sp.submission_id, pe.starts_at DESC`,
+        )
+        .bind(session.eventId, session.eventId, ...submissionIds)
+        .all<{ submission_id: string; prior_rating: number; prior_rating_note: string | null; prior_rating_contact_id: string; prior_event_id: string; prior_event_name: string }>();
+      // Most recent earlier event wins when a speaker (or a co-speaker) has
+      // ratings from several — ORDER BY above puts it first per
+      // submission_id, so the first row seen for an id is the one kept.
+      const priorBySubmission = new Map<string, (typeof priorRows)[number]>();
+      for (const row of priorRows) {
+        if (!priorBySubmission.has(row.submission_id)) priorBySubmission.set(row.submission_id, row);
+      }
+      for (const a of assignments) {
+        const row = priorBySubmission.get(a.submission_id as string);
+        if (!row) continue;
+        a.prior_rating = row.prior_rating;
+        a.prior_rating_note = row.prior_rating_note;
+        a.prior_rating_contact_id = row.prior_rating_contact_id;
+        a.prior_rating_event_id = row.prior_event_id;
+        a.prior_rating_event_name = row.prior_event_name;
+      }
+    }
+
     return c.json({ assignments, criteria, participants });
   } catch (err) {
     console.error('GET /review/queue failed', err);
@@ -2321,4 +2580,70 @@ evaluationRoutes.post('/review/assignments/:id/comments', async (c) => {
     id: commentId,
     comments: assignment.anonymise_submitters === 1 ? pseudonymiseReviewerAuthors(thread) : thread,
   });
+});
+
+// ---------------------------------------------------------------------------
+// The lobby queue (workplan 15 W1b) — "my top-ranked, not yet accepted", the
+// per-human list a committee member lobbies from during the decision call.
+// ---------------------------------------------------------------------------
+
+// GET /evaluation/lobby — a purpose-built endpoint rather than a new sortable
+// on the submissions resource (D3). `sortable` maps a field name to a *static*
+// SQL expression and the ORDER BY builder carries no binds (adminApi.ts
+// ResourceDef), but "my score" needs reviewer_contact_id = session.contactId
+// inside the ordering; widening the registry for this one consumer would cost
+// far more than the query below. The bindable half of the idea — a
+// `reviewed_by` filter — does live in the registry.
+//
+// Reviewer-facing despite the /evaluation/ path, so the shared guard carves it
+// out of the admin-only prefix explicitly (adminApi.ts). A caller with no
+// reviewer seat never reaches this handler.
+evaluationRoutes.get('/evaluation/lobby', async (c) => {
+  const session = c.get('session');
+  const { results } = await c.env.DB.prepare(
+    `SELECT s.id, s.code, s.title, s.status, r.weighted_total AS my_score,
+            s.rating_cache, t.name AS track_name,
+            (SELECT COUNT(*) FROM reviews r2 WHERE r2.submission_id = s.id) AS review_count
+       FROM reviews r
+       JOIN submissions s ON s.id = r.submission_id
+       LEFT JOIN tracks t ON t.id = s.track_id
+      WHERE r.reviewer_contact_id = ? AND s.event_id = ?
+        AND r.weighted_total IS NOT NULL
+        AND s.status NOT IN ('accepted', 'accept_queue', 'withdrawn', 'draft')
+      ORDER BY r.weighted_total DESC, s.code`,
+  )
+    .bind(session.contactId, session.eventId)
+    .all<{
+      id: string; code: string; title: string; status: string; my_score: number;
+      rating_cache: string | null; track_name: string | null; review_count: number;
+    }>();
+
+  // One row per submission: a reviewer sitting on two active plans (0012) can
+  // hold two reviews of the same talk, and the lobby list is a list of talks.
+  // ORDER BY above puts their better score first — the one they will argue
+  // from.
+  const seen = new Set<string>();
+  // rating_cache is `{ "<plan_id>": <mean> }` (0001_init.sql) — the committee
+  // mean this reviewer is arguing against. Averaged here rather than sent raw
+  // so the panel shows one comparable number beside "my score"; a submission
+  // only ever scored by this reviewer reads the same on both.
+  const items = results
+    .filter((r) => {
+      if (seen.has(r.id)) return false;
+      seen.add(r.id);
+      return true;
+    })
+    .map(({ rating_cache, ...row }) => {
+      let mean: number | null = null;
+      try {
+        const values = Object.values(JSON.parse(rating_cache ?? '{}') as Record<string, unknown>)
+          .filter((v): v is number => typeof v === 'number');
+        if (values.length > 0) {
+          mean = Math.round((values.reduce((a, b) => a + b, 0) / values.length) * 100) / 100;
+        }
+      } catch { /* a malformed cache is a missing mean, not a failed request */ }
+      return { ...row, submission_rating: mean };
+    });
+
+  return c.json({ items });
 });

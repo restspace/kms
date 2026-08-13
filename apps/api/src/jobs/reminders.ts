@@ -33,6 +33,20 @@ interface TaskReminderRow {
   chase_mode: string | null;
 }
 
+interface MaterialsReminderRow {
+  submission_id: string;
+  code: string;
+  title: string;
+  materials_state_at: string;
+  contact_id: string;
+  email: string;
+  first_name: string | null;
+  event_id: string;
+  event_name: string;
+  event_slug: string;
+  chase_mode: string | null;
+}
+
 interface DraftReminderRow {
   submission_id: string;
   form_id: string;
@@ -80,6 +94,7 @@ export async function sweepReminders(env: Env): Promise<void> {
   const now = Date.now();
   await sweepTaskReminders(env, now);
   await sweepDraftReminders(env, now);
+  await sweepMaterialsReminders(env, now);
 }
 
 async function sweepTaskReminders(env: Env, now: number): Promise<void> {
@@ -241,6 +256,75 @@ async function sweepDraftReminders(env: Env, now: number): Promise<void> {
         speaker: { first_name: row.first_name ?? 'there' },
         form: { name: row.form_name, close_at: closeText },
         submission_url: `${env.APP_URL}/submit/${row.event_slug}/${row.form_id}`,
+      },
+    });
+  }
+}
+
+/**
+ * Days since the revision was asked for. Unlike the two sweeps above there is
+ * no due date to count back from — the offset the doc's archive describes is
+ * "how long has this deck owed me a v2", so the arithmetic runs forward from
+ * `materials_state_at`.
+ */
+const MATERIALS_OFFSETS_MS: Array<{ key: string; ms: number }> = [
+  { key: '3d', ms: 3 * DAY_MS },
+  { key: '7d', ms: 7 * DAY_MS },
+  { key: '14d', ms: 14 * DAY_MS },
+];
+
+/**
+ * Workplan 15 W5b (D9): the second chase. `revision_requested` re-arms *this*
+ * detector rather than starting a parallel one — same stageChase seam, same
+ * idem_key shape, same assisted inbox and rungs, so the no-double-nudge
+ * guarantee is the one that already exists.
+ *
+ * The chase resolves the way the first one does: when a file lands. The state
+ * itself is deliberately NOT cleared by the upload (a v2 still needs a human
+ * to say it is good — fileVersions.ts keeps 'revision_requested' in place), so
+ * "has a newer upload than the request" is what stops the sweep, not the flag.
+ */
+async function sweepMaterialsReminders(env: Env, now: number): Promise<void> {
+  const { results } = await env.DB.prepare(
+    `SELECT s.id AS submission_id, s.code, s.title, s.materials_state_at,
+            c.id AS contact_id, c.email, c.first_name,
+            e.id AS event_id, e.name AS event_name, e.slug AS event_slug, e.chase_mode
+     FROM submissions s
+     JOIN contacts c ON c.id = COALESCE(
+            s.submitter_contact_id,
+            (SELECT sp.contact_id FROM submission_participants sp
+              WHERE sp.submission_id = s.id ORDER BY sp.position LIMIT 1))
+     JOIN events e ON e.id = s.event_id
+     WHERE s.status = 'accepted' AND s.materials_state = 'revision_requested'
+       AND s.materials_state_at IS NOT NULL
+       AND NOT EXISTS (SELECT 1 FROM file_request_uploads u
+                        WHERE u.submission_id = s.id AND u.is_current = 1
+                          AND u.uploaded_at > s.materials_state_at)`,
+  ).all<MaterialsReminderRow>();
+
+  for (const row of results) {
+    const asked = new Date(row.materials_state_at).getTime();
+    if (Number.isNaN(asked)) continue;
+    // Widest elapsed window wins, the mirror image of the draft sweep's
+    // narrowest-open rule: a sweep that first runs a fortnight late nudges
+    // once at 14d rather than firing all three offsets in one pass.
+    const active = [...MATERIALS_OFFSETS_MS].reverse().find((o) => now >= asked + o.ms);
+    if (!active) continue;
+
+    await stageChase(env.DB, {
+      templateKey: 'materials_revision',
+      subjectOf: 'materials',
+      subjectId: row.submission_id,
+      version: active.key,
+      eventId: row.event_id,
+      contactId: row.contact_id,
+      toEmail: row.email,
+      chaseMode: row.chase_mode,
+      context: {
+        event: { name: row.event_name },
+        speaker: { first_name: row.first_name ?? 'there' },
+        submission: { code: row.code, title: row.title },
+        portal_url: `${env.APP_URL}/portal/${row.event_slug}`,
       },
     });
   }

@@ -23,6 +23,14 @@
   width: 6rem;
 }
 
+/* Narrower than .rt-row-extra: a track row already spends 2.6rem on the
+   colour swatch, and the settings card lays its tracks out in one of three
+   columns (workplan 15 W1a). */
+.rt-row-slots {
+  flex: 0 0 4.5rem;
+  width: 4.5rem;
+}
+
 .rt-row-color {
   flex: 0 0 2.6rem;
   width: 2.6rem;

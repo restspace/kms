@@ -27,7 +27,7 @@ import { hashPassword, MIN_PASSWORD_LENGTH } from '../password';
 import { IMAGE_TYPES, MAX_HEADSHOT_BYTES, saveFile } from '../filestore';
 import { appendUploadVersion } from '../fileVersions';
 import { formsAdminRoutes } from './formsAdmin';
-import { APPROVAL_STATES, evaluationRoutes } from './evaluation';
+import { APPROVAL_STATES, DECISION_OUTCOMES, evaluationRoutes } from './evaluation';
 import { agendaRoutes } from './agenda';
 import { stageAirtableDeletes } from '../airtableStage';
 import { resolveAudience, type ComposeAudience } from './messagingAdmin';
@@ -48,7 +48,13 @@ adminApiRoutes.use('*', async (c, next) => {
   if (!session) return c.json({ error: 'unauthenticated' }, 401);
   const actor: Actor = { contactId: session.contactId, email: session.email, role: session.role };
   if (!can(actor, 'review.view')) return c.json({ error: 'forbidden' }, 403);
-  const reviewerSurface = c.req.path.startsWith('/app/api/review/') || c.req.path === '/app/api/me';
+  // The lobby queue (workplan 15 W1b, D3) is a reviewer's own scores and
+  // nothing else — it belongs to the reviewer surface even though its path
+  // sits under /evaluation/ with the rest of the round administration.
+  const reviewerSurface =
+    c.req.path.startsWith('/app/api/review/') ||
+    c.req.path === '/app/api/evaluation/lobby' ||
+    c.req.path === '/app/api/me';
   if (!reviewerSurface && !can(actor, 'admin.view')) return c.json({ error: 'forbidden' }, 403);
   c.set('session', session);
   // Every route behind this guard can reach the workspace's accessible-event
@@ -231,6 +237,19 @@ const like = (expr: string): FilterBuilder => (value) => {
 const SUBMISSION_STATUSES = new Set([
   'draft', 'pending', 'accept_queue', 'accepted', 'decline_queue', 'declined', 'withdrawn',
 ]);
+
+/**
+ * Workplan 15 W5a (D9): the post-accept editorial state, a flag alongside
+ * `accepted` exactly as approval_state is. No CHECK in 0041 (the 0026
+ * precedent) — the vocabulary is enforced here, the way evaluation.ts's
+ * APPROVAL_STATES enforces its own. It lives in this file rather than beside
+ * APPROVAL_STATES because this is where its write route and its grid
+ * filter/sort both are.
+ *
+ * NULL (nothing uploaded) is the fifth member of the vocabulary and is
+ * deliberately not in the set: it is reached by clearing, never by setting.
+ */
+export const MATERIALS_STATES = new Set(['received', 'reviewed', 'revision_requested', 'final']);
 
 // Sort fields whose SQL expression is a REAL/numeric column rather than text
 // (currently just `rating`) — used by the keyset-pagination branch of
@@ -481,6 +500,12 @@ const RESOURCE_SPECS: Record<string, Omit<ResourceDef, 'fromSql'>> = {
       created_at: 's.created_at',
       notified_at: 's.notified_at',
       approval_state: 's.approval_state',
+      // Workplan 15 W2: sorting the conditions by when they were signed off —
+      // NULL (still outstanding) sorts to one end, which is the worklist.
+      condition_met_at: 's.condition_met_at',
+      materials_state: 's.materials_state',
+      // W5c's "who owes me a v2, longest first" is this sortable ascending.
+      materials_state_at: 's.materials_state_at',
       // Never NULL, so the NULL-ordering wrapper in queryResource does not
       // bite: an unreviewed submission sorts as 0, first on ASC — which is
       // the coverage worklist ("fewest ratings first", workplan 13 W2).
@@ -524,6 +549,40 @@ const RESOURCE_SPECS: Record<string, Omit<ResourceDef, 'fromSql'>> = {
         if (v === 'none') return { sql: 's.approval_state IS NULL', params: [] };
         return APPROVAL_STATES.has(v) ? { sql: 's.approval_state = ?', params: [v] } : null;
       },
+      materials_state: (value) => {
+        const v = asText(value);
+        if (v === null) return null;
+        if (v === 'none') return { sql: 's.materials_state IS NULL', params: [] };
+        return MATERIALS_STATES.has(v) ? { sql: 's.materials_state = ?', params: [v] } : null;
+      },
+      // Workplan 15 W2 (D4): both axes of the conditional accept. A yes/no
+      // pair rather than a vocabulary, because that is the shape of the
+      // question the organiser is asking.
+      has_condition: (value) => {
+        const v = asText(value);
+        if (v === null) return null;
+        return v === 'false'
+          ? { sql: "COALESCE(TRIM(s.accept_condition), '') = ''", params: [] }
+          : { sql: "COALESCE(TRIM(s.accept_condition), '') != ''", params: [] };
+      },
+      condition_outstanding: (value) => {
+        const v = asText(value);
+        if (v === null) return null;
+        const met = v === 'false';
+        return {
+          sql: `(COALESCE(TRIM(s.accept_condition), '') != '' AND s.condition_met_at IS ${met ? 'NOT NULL' : 'NULL'})`,
+          params: [],
+        };
+      },
+      // Workplan 15 W3 (D5): the third outcome, filtered off the flag. A
+      // status=declined filter still matches a revise row — deliberately, it
+      // is one.
+      decision_outcome: (value) => {
+        const v = asText(value);
+        if (v === null) return null;
+        if (v === 'none') return { sql: 's.decision_outcome IS NULL', params: [] };
+        return DECISION_OUTCOMES.has(v) ? { sql: 's.decision_outcome = ?', params: [v] } : null;
+      },
       track_id: eq('s.track_id'),
       tag_id: (value) => {
         const v = asText(value);
@@ -557,6 +616,29 @@ const RESOURCE_SPECS: Record<string, Omit<ResourceDef, 'fromSql'>> = {
           params: [v, v],
         };
       },
+      // Workplan 15 W1b: the cheap half of the lobby queue. Sorting by the
+      // caller's own score needs a bind in the ORDER BY and so cannot live in
+      // this registry (D3), but "reviewed by this person" is an ordinary
+      // bindable predicate.
+      reviewed_by: (value) => {
+        const v = asText(value);
+        if (v === null) return null;
+        return {
+          sql: `EXISTS (SELECT 1 FROM reviews r
+                        WHERE r.submission_id = s.id AND r.reviewer_contact_id = ?)`,
+          params: [v],
+        };
+      },
+      // Workplan 15 W1a (D2): the slot counter's notion of "accepted" —
+      // decided, whether or not the letter has left. The counter runs *during*
+      // the decision meeting, where the last ten minutes of accepts are still
+      // sitting in accept_queue; counting only 'accepted' would read zero on
+      // the one screen it exists for. Named rather than expressed as a status
+      // list so the counter and the grid share one definition.
+      decision_accepted: (value) =>
+        value === true || value === 'true'
+          ? { sql: `s.status IN ('accepted', 'accept_queue')`, params: [] }
+          : null,
     },
     filterDocs: {
       q: 'Free-text match over title and code.',
@@ -567,6 +649,14 @@ const RESOURCE_SPECS: Record<string, Omit<ResourceDef, 'fromSql'>> = {
         'Submissions with at most this many recorded reviews — max_reviews=1 is the coverage worklist ("everything with fewer than two reads").',
       approval_state:
         'Exact employer-approval flag: pending | granted | refused, or none for submissions where approval was never asked (NULL). Independent of status (D4).',
+      materials_state:
+        'Exact post-accept materials flag: received | reviewed | revision_requested | final, or none for an accepted talk with no upload at all (NULL). Independent of status (D9).',
+      has_condition:
+        'true → the accept carries a condition ("accepted if you bring a business co-presenter"); false → it does not. Independent of status (D4).',
+      condition_outstanding:
+        'true → carries a condition nobody has marked met yet (condition_met_at IS NULL) — the chase list; false → carries one that has been met.',
+      decision_outcome:
+        'Exact third-outcome flag: revise, or none for the ordinary accept/decline (NULL). A revise row keeps its declined/decline_queue status (D5), so filter on this rather than on status to find it.',
       track_id: 'Submissions on this track.',
       tag_id: 'Submissions carrying this tag.',
       submitter_contact_id: 'Submissions this contact submitted (the narrow relation).',
@@ -574,6 +664,9 @@ const RESOURCE_SPECS: Record<string, Omit<ResourceDef, 'fromSql'>> = {
         'Submissions this contact appears on as a participant, any role (the narrow relation).',
       contact_id:
         "Submissions that are this contact's in the broad sense: submitted by them OR with them as a participant. The global anchor filter uses this.",
+      reviewed_by: 'Submissions this contact has recorded a review on.',
+      decision_accepted:
+        "true → submissions already decided as accepted, queued or sent (status accepted or accept_queue). The slot counter's count (workplan 15 D2).",
     },
   },
 
@@ -1235,12 +1328,25 @@ async function lookupIn<T>(
  *
  * Criterion names are looked up per *plan*: two rounds may each have a
  * "Relevance", so the map is keyed (plan_id, criterion_id), never by name.
+ *
+ * Submissions get the derived `outcome` column (workplan 15 D6). D5 stores
+ * "revise and resubmit" as a flag on a row whose status still reads
+ * `declined`, because widening the 0001 CHECK would mean rebuilding a table
+ * 14 others reference. That is a storage compromise the *product* made; a
+ * reader of the CSV must not have to know about it, so the export answers the
+ * question directly instead of asking them to join two columns.
  */
-async function shapeExportRows(
+export async function shapeExportRows(
   db: D1Database,
   resource: string,
   items: Record<string, unknown>[],
 ): Promise<Record<string, unknown>[]> {
+  if (resource === 'submissions') {
+    return items.map((row) => ({
+      ...row,
+      outcome: row.decision_outcome === 'revise' ? 'revise_requested' : String(row.status ?? ''),
+    }));
+  }
   if (resource !== 'reviews' || items.length === 0) return items;
   const text = (v: unknown): string | null => (typeof v === 'string' && v !== '' ? v : null);
   const uniq = (values: Array<string | null>) => [...new Set(values.filter((v): v is string => v !== null))];
@@ -2804,6 +2910,115 @@ adminApiRoutes.put('/submissions/:id/notes', async (c) => {
   return c.json({ ok: true, notes });
 });
 
+/** PUT /submissions/:id/intro-script { intro_script } — W6/D10: the host's
+ * read-out line. Also writable from the green room screen (greenroom.ts);
+ * this is the detail-panel backstop for whoever fills it in ahead of the day. */
+adminApiRoutes.put('/submissions/:id/intro-script', async (c) => {
+  const session = c.get('session');
+  if (!isWriter(session.role)) return c.json({ error: 'forbidden' }, 403);
+
+  const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+  if (!('intro_script' in body)) return c.json({ error: 'intro_script_required' }, 400);
+  const raw = body.intro_script;
+  if (raw !== null && typeof raw !== 'string') return c.json({ error: 'invalid_intro_script' }, 400);
+  const trimmed = raw === null ? null : raw.trim();
+  const introScript = trimmed === null || trimmed === '' ? null : trimmed;
+
+  const result = await c.env.DB.prepare(
+    'UPDATE submissions SET intro_script = ?, updated_at = ? WHERE id = ? AND event_id = ?',
+  )
+    .bind(introScript, new Date().toISOString(), c.req.param('id'), session.eventId)
+    .run();
+  if (result.meta.changes === 0) return c.json({ error: 'not_found' }, 404);
+  await bumpEventRevision(c.env, session.eventId);
+  return c.json({ ok: true, intro_script: introScript });
+});
+
+/**
+ * PUT /submissions/:id/materials { materials_state?, materials_owner_id? }
+ * — workplan 15 W5a (D9). `received` is never set here: an upload sets it
+ * (fileVersions.ts) because that transition needs no human. The three states
+ * a person does own — reviewed, revision_requested, final — plus the deck's
+ * reviewer, are this route. Setting the state stamps materials_state_at,
+ * which is what the second chase counts days from (jobs/reminders.ts) and
+ * what the tracking board sorts "who owes me a v2" by.
+ *
+ * The two fields are independently optional: reassigning an owner must not
+ * disturb the state (and so must not restart the chase clock), and vice versa.
+ */
+adminApiRoutes.put('/submissions/:id/materials', async (c) => {
+  const session = c.get('session');
+  if (!isWriter(session.role)) return c.json({ error: 'forbidden' }, 403);
+
+  const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+  const sets: string[] = [];
+  const params: unknown[] = [];
+
+  if ('materials_state' in body) {
+    const raw = body.materials_state;
+    const state = raw === null || raw === '' ? null : raw;
+    if (state !== null && (typeof state !== 'string' || !MATERIALS_STATES.has(state))) {
+      return c.json({ error: 'invalid_materials_state', allowed: [...MATERIALS_STATES] }, 400);
+    }
+    sets.push('materials_state = ?', 'materials_state_at = ?');
+    params.push(state, state === null ? null : new Date().toISOString());
+  }
+  if ('materials_owner_id' in body) {
+    const raw = body.materials_owner_id;
+    const ownerId = raw === null || raw === '' ? null : raw;
+    if (ownerId !== null && typeof ownerId !== 'string') {
+      return c.json({ error: 'invalid_materials_owner_id' }, 400);
+    }
+    if (ownerId !== null) {
+      // A deck reviewer is a seat on this event, not any contact in the org.
+      const seat = await c.env.DB.prepare(
+        'SELECT 1 AS ok FROM event_users WHERE event_id = ? AND contact_id = ?',
+      )
+        .bind(session.eventId, ownerId)
+        .first<{ ok: number }>();
+      if (!seat) return c.json({ error: 'owner_not_on_event' }, 400);
+    }
+    sets.push('materials_owner_id = ?');
+    params.push(ownerId);
+  }
+  if (sets.length === 0) return c.json({ error: 'nothing_to_update' }, 400);
+
+  const result = await c.env.DB.prepare(
+    `UPDATE submissions SET ${sets.join(', ')}, updated_at = ? WHERE id = ? AND event_id = ?`,
+  )
+    .bind(...params, new Date().toISOString(), c.req.param('id'), session.eventId)
+    .run();
+  if (result.meta.changes === 0) return c.json({ error: 'not_found' }, 404);
+  await bumpEventRevision(c.env, session.eventId);
+
+  const row = await c.env.DB.prepare(
+    'SELECT materials_state, materials_state_at, materials_owner_id FROM submissions WHERE id = ?',
+  )
+    .bind(c.req.param('id'))
+    .first<{ materials_state: string | null; materials_state_at: string | null; materials_owner_id: string | null }>();
+  return c.json({ ok: true, ...row });
+});
+
+/**
+ * GET /submissions/materials-owners — the seats a deck can be handed to.
+ * The doc's sharpest structural point is that this work never scaled ("divide
+ * up slide deck reviews and share the load", 2016, still one person in 2026),
+ * so the picker deliberately offers reviewers alongside organisers — the same
+ * seat set evaluation.ts's overview treats as reviewable.
+ */
+adminApiRoutes.get('/submissions/materials-owners', async (c) => {
+  const session = c.get('session');
+  const { results } = await c.env.DB.prepare(
+    `SELECT c.id, c.email, NULLIF(TRIM(COALESCE(c.first_name, '') || ' ' || COALESCE(c.last_name, '')), '') AS name
+     FROM event_users eu JOIN contacts c ON c.id = eu.contact_id
+     WHERE eu.event_id = ? AND eu.role IN ('reviewer', 'admin', 'owner')
+     ORDER BY c.last_name, c.first_name`,
+  )
+    .bind(session.eventId)
+    .all<{ id: string; email: string; name: string | null }>();
+  return c.json({ items: results });
+});
+
 // ---------------------------------------------------------------------------
 // Tasks CRUD (manual review: tasks were read-only in admin)
 // ---------------------------------------------------------------------------
@@ -3355,11 +3570,19 @@ function pickTrackFields(raw: unknown, { requireName }: { requireName: boolean }
     else if (typeof v === 'string') values.color = v.trim().slice(0, 20);
     else return fail('invalid_color');
   }
+  // Workplan 15 W1a (D1): a target, never a cap. Nothing downstream compares
+  // it to the accepted count and refuses anything — the counter just renders
+  // an over-target track in the error tone. NULL = untracked.
+  if ('target_slots' in body) {
+    const target = parseCapacityValue(body.target_slots);
+    if (target === undefined) return fail('invalid_target_slots');
+    values.target_slots = target;
+  }
   return { values };
 }
 
 const trackRow = (db: D1Database, id: string, eventId: string) =>
-  db.prepare('SELECT id, event_id, name, color, position FROM tracks WHERE id = ? AND event_id = ?')
+  db.prepare('SELECT id, event_id, name, color, target_slots, position FROM tracks WHERE id = ? AND event_id = ?')
     .bind(id, eventId)
     .first();
 
@@ -3367,7 +3590,7 @@ const trackRow = (db: D1Database, id: string, eventId: string) =>
 adminApiRoutes.get('/tracks', async (c) => {
   const session = c.get('session');
   const { results } = await c.env.DB.prepare(
-    'SELECT id, event_id, name, color, position FROM tracks WHERE event_id = ? ORDER BY position',
+    'SELECT id, event_id, name, color, target_slots, position FROM tracks WHERE event_id = ? ORDER BY position',
   )
     .bind(session.eventId)
     .all();
@@ -3382,10 +3605,10 @@ adminApiRoutes.post('/tracks', async (c) => {
 
   const id = crypto.randomUUID();
   await c.env.DB.prepare(
-    `INSERT INTO tracks (id, event_id, name, color, position, updated_at)
-     SELECT ?1, ?2, ?3, ?4, COALESCE((SELECT MAX(position) + 1 FROM tracks WHERE event_id = ?2), 0), ?5`,
+    `INSERT INTO tracks (id, event_id, name, color, target_slots, position, updated_at)
+     SELECT ?1, ?2, ?3, ?4, ?5, COALESCE((SELECT MAX(position) + 1 FROM tracks WHERE event_id = ?2), 0), ?6`,
   )
-    .bind(id, session.eventId, values.name, values.color ?? null, new Date().toISOString())
+    .bind(id, session.eventId, values.name, values.color ?? null, values.target_slots ?? null, new Date().toISOString())
     .run();
   await bumpEventRevision(c.env, session.eventId);
   return c.json(await trackRow(c.env.DB, id, session.eventId), 201);
@@ -4263,6 +4486,9 @@ function settingsChanged(before: Record<string, string | null>, incoming: Record
 interface NamedRow {
   name: string;
   extra: string | number | null;
+  /** Track rows only: the W1a slot target, carried beside the colour so the
+   * create-event dialog and the settings card write the same row shape. */
+  target: number | null;
 }
 
 /** Repeatable rooms/tracks rows from the create-event dialog. Blank rows (an
@@ -4275,6 +4501,7 @@ function parseNamedRows(raw: unknown, extraKey: 'capacity' | 'color'): NamedRow[
   for (const item of raw) {
     let name = '';
     let extra: string | number | null = null;
+    let target: number | null = null;
     if (typeof item === 'string') {
       name = item.trim();
     } else if (item && typeof item === 'object' && !Array.isArray(item)) {
@@ -4291,12 +4518,17 @@ function parseNamedRows(raw: unknown, extraKey: 'capacity' | 'color'): NamedRow[
         if (color === null || color === undefined || color === '') extra = null;
         else if (typeof color === 'string') extra = color.trim().slice(0, 20);
         else return null;
+        if ('target_slots' in obj) {
+          const parsed = parseCapacityValue(obj.target_slots);
+          if (parsed === undefined) return null;
+          target = parsed;
+        }
       }
     } else {
       return null;
     }
     if (!name) continue;
-    out.push({ name: name.slice(0, ROOM_TRACK_NAME_MAX_CHARS), extra });
+    out.push({ name: name.slice(0, ROOM_TRACK_NAME_MAX_CHARS), extra, target });
   }
   return out;
 }
@@ -4432,8 +4664,8 @@ adminApiRoutes.post('/events', async (c) => {
           .bind(crypto.randomUUID(), id, r.name, r.extra, i, ts),
       ),
       ...tracks.map((t, i) =>
-        db.prepare('INSERT INTO tracks (id, event_id, name, color, position, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
-          .bind(crypto.randomUUID(), id, t.name, t.extra, i, ts),
+        db.prepare('INSERT INTO tracks (id, event_id, name, color, target_slots, position, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+          .bind(crypto.randomUUID(), id, t.name, t.extra, t.target, i, ts),
       ),
       // Default format vocabulary — the form's format dropdown and the agenda
       // dialog both derive from these rows (CFP-S1), so a fresh event must not

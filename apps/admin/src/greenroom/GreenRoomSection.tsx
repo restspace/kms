@@ -11,7 +11,9 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   fetchGreenRoom,
   greenroomCheckin,
+  greenroomIntroScript,
   greenroomNudge,
+  showflowExportUrl,
   type GreenRoomPayload,
   type GreenRoomSession,
   type GreenRoomSpeaker,
@@ -124,9 +126,33 @@ interface SessionCardProps {
   nudgeNotes: Record<string, string>
   onToggleArrived: (contactId: string, arrived: boolean) => void
   onNudge: (contactId: string) => void
+  introDrafts: Record<string, string>
+  introBusyIds: ReadonlySet<string>
+  introErrors: Record<string, string>
+  onIntroChange: (sessionId: string, value: string) => void
+  onIntroSave: (sessionId: string) => void
 }
 
-function SessionCard({ session, tz, kind, label, speakers, busyIds, nudgeNotes, onToggleArrived, onNudge }: SessionCardProps) {
+function SessionCard({
+  session,
+  tz,
+  kind,
+  label,
+  speakers,
+  busyIds,
+  nudgeNotes,
+  onToggleArrived,
+  onNudge,
+  introDrafts,
+  introBusyIds,
+  introErrors,
+  onIntroChange,
+  onIntroSave,
+}: SessionCardProps) {
+  const introDraft = introDrafts[session.id] ?? ''
+  const introDirty = introDraft !== (session.intro_script ?? '')
+  const introBusy = introBusyIds.has(session.id)
+  const introError = introErrors[session.id] ?? null
   return (
     <article className={`gr-card gr-card-${kind}`}>
       <header className="gr-card-head">
@@ -160,6 +186,32 @@ function SessionCard({ session, tz, kind, label, speakers, busyIds, nudgeNotes, 
           ) : null,
         )}
       </div>
+      {/* W6/D10: the read-out line, editable here because it lands late and
+          from whoever is nearest — the green room screen is the point, the
+          detail panel is the backup. */}
+      <div className="gr-card-intro">
+        <label htmlFor={`gr-intro-${session.id}`}>Intro script</label>
+        <textarea
+          id={`gr-intro-${session.id}`}
+          className="gr-intro-field"
+          rows={2}
+          value={introDraft}
+          disabled={introBusy}
+          onChange={(e) => onIntroChange(session.id, (e.target as HTMLTextAreaElement).value)}
+          placeholder="What the host reads out to introduce this session…"
+        />
+        <div className="gr-intro-actions">
+          <button
+            type="button"
+            className="gr-action"
+            disabled={!introDirty || introBusy}
+            onClick={() => onIntroSave(session.id)}
+          >
+            {introBusy ? 'Saving…' : 'Save intro'}
+          </button>
+          {introError && <span className="gr-chip gr-chip-warn">{introError}</span>}
+        </div>
+      </div>
     </article>
   )
 }
@@ -174,6 +226,12 @@ export function GreenRoomSection() {
   const [busyIds, setBusyIds] = useState<ReadonlySet<string>>(new Set())
   const [nudgeNotes, setNudgeNotes] = useState<Record<string, string>>({})
   const [note, setNote] = useState<string | null>(null)
+  // W6/D10: local drafts of the intro script, keyed by session id. Seeded
+  // from the server value the first time a session is seen and left alone
+  // after that, so a background poll never clobbers an organiser mid-edit.
+  const [introDrafts, setIntroDrafts] = useState<Record<string, string>>({})
+  const [introBusyIds, setIntroBusyIds] = useState<ReadonlySet<string>>(new Set())
+  const [introErrors, setIntroErrors] = useState<Record<string, string>>({})
   const etagRef = useRef<string | null>(null)
   // Bumped by every write; a poll that resolves across a write is stale and
   // must not clobber the write's optimistic (or adopted) state.
@@ -234,6 +292,23 @@ export function GreenRoomSection() {
     const t = window.setInterval(() => setNowMs(Date.now()), NOW_TICK_MS)
     return () => window.clearInterval(t)
   }, [])
+
+  // Seed a draft the first time each session is seen; never overwrite one
+  // already in progress (see the state comment above).
+  useEffect(() => {
+    if (!data) return
+    setIntroDrafts((prev) => {
+      let changed = false
+      const next = { ...prev }
+      for (const s of data.sessions) {
+        if (!(s.id in next)) {
+          next[s.id] = s.intro_script ?? ''
+          changed = true
+        }
+      }
+      return changed ? next : prev
+    })
+  }, [data])
 
   const toggleArrived = useCallback((contactId: string, arrived: boolean) => {
     writeSeqRef.current += 1
@@ -308,6 +383,40 @@ export function GreenRoomSection() {
       })
   }, [])
 
+  const changeIntro = useCallback((sessionId: string, value: string) => {
+    setIntroDrafts((prev) => ({ ...prev, [sessionId]: value }))
+  }, [])
+
+  const saveIntro = useCallback((sessionId: string) => {
+    setIntroErrors((prev) => {
+      if (!(sessionId in prev)) return prev
+      const next = { ...prev }
+      delete next[sessionId]
+      return next
+    })
+    setIntroBusyIds((prev) => new Set(prev).add(sessionId))
+    const text = introDrafts[sessionId] ?? ''
+    void greenroomIntroScript(sessionId, text.trim() === '' ? null : text)
+      .then((res) => {
+        const { ok: _ok, etag, ...payload } = res
+        setData(payload as GreenRoomPayload)
+        etagRef.current = etag
+        setUpdatedAt(Date.now())
+        const saved = payload.sessions.find((s) => s.id === sessionId)
+        setIntroDrafts((prev) => ({ ...prev, [sessionId]: saved?.intro_script ?? '' }))
+      })
+      .catch((err) => {
+        setIntroErrors((prev) => ({ ...prev, [sessionId]: err instanceof Error ? err.message : 'Save failed' }))
+      })
+      .finally(() => {
+        setIntroBusyIds((prev) => {
+          const next = new Set(prev)
+          next.delete(sessionId)
+          return next
+        })
+      })
+  }, [introDrafts])
+
   if (error && !data) {
     return (
       <div className="gr-shell">
@@ -355,6 +464,13 @@ export function GreenRoomSection() {
             {data.event.name}
             {shownDay ? ` — ${fmtDay(shownDay)} (${tzAbbr(tz, data.now)})` : ''}
           </div>
+        </div>
+        {/* W6/D10: the whole handoff leaves as one generated file, not a
+            bespoke run-of-show editor — CSV/XLSX, cookie-authenticated plain
+            downloads like the other export links in this app. */}
+        <div className="gr-header-exports">
+          <a className="gr-action" href={showflowExportUrl('csv')}>Show flow (CSV)</a>
+          <a className="gr-action" href={showflowExportUrl('xlsx')}>Show flow (XLSX)</a>
         </div>
         <span className="gr-updated" role="status">{agoLabel(updatedAt)}</span>
       </header>
@@ -415,6 +531,11 @@ export function GreenRoomSection() {
                 nudgeNotes,
                 onToggleArrived: toggleArrived,
                 onNudge: nudge,
+                introDrafts,
+                introBusyIds,
+                introErrors,
+                onIntroChange: changeIntro,
+                onIntroSave: saveIntro,
               }
               return (
                 <section key={room.id} className="gr-room" aria-label={room.name}>
@@ -461,6 +582,11 @@ export function GreenRoomSection() {
                     nudgeNotes={nudgeNotes}
                     onToggleArrived={toggleArrived}
                     onNudge={nudge}
+                    introDrafts={introDrafts}
+                    introBusyIds={introBusyIds}
+                    introErrors={introErrors}
+                    onIntroChange={changeIntro}
+                    onIntroSave={saveIntro}
                   />
                 ))}
               </section>

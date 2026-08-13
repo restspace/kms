@@ -128,6 +128,23 @@ export async function appendUploadVersion(
       )
       .bind(uploadId, key.fileRequestId, key.contactId, key.submissionId, opts.assetId, opts.uploadedAt, version),
   ]);
+
+  // Workplan 15 W5a (D9): a deck landing against a submission IS the
+  // 'received' transition — it needs no human, and pretending otherwise adds
+  // a click to every deck. Guarded on materials_state IS NULL so a v2 arriving
+  // against a 'revision_requested' row cannot silently regress it (the second
+  // chase resolves off the upload's timestamp instead, jobs/reminders.ts). The
+  // standing per-event headshot request is not a deliverable and is excluded
+  // the same way the tracking board's slides column excludes it.
+  if (key.submissionId && !key.fileRequestId.startsWith('file-request-headshots-')) {
+    await db
+      .prepare(
+        `UPDATE submissions SET materials_state = 'received', materials_state_at = ?
+         WHERE id = ? AND materials_state IS NULL`,
+      )
+      .bind(opts.uploadedAt, key.submissionId)
+      .run();
+  }
   return { uploadId, version };
 }
 

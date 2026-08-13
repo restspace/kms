@@ -30,8 +30,11 @@ export const CHASE_RUNGS = ['tool_email', 'personal_email', 'cc_chair', 'text', 
 
 export interface ChaseStageArgs {
   templateKey: string;
-  /** what is being chased — mirrors chase_drafts.subject_of */
-  subjectOf: 'task' | 'draft_close';
+  /** what is being chased — mirrors chase_drafts.subject_of. 'materials' is
+   * workplan 15 W5b (D9): the second chase for a deck sitting in
+   * revision_requested is the *same* chase — same staging seam, same idem_key
+   * story, same inbox and rungs — not a parallel reminder path. */
+  subjectOf: 'task' | 'draft_close' | 'materials';
   /** the entity id today's send key carries (assignment id, submission id) */
   subjectId: string;
   /** offset / overdue-day index — the version segment of today's send key */

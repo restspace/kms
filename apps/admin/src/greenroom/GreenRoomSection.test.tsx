@@ -9,11 +9,15 @@ import { fireEvent } from '@testing-library/preact'
 const fetchGreenRoom = vi.fn()
 const greenroomCheckin = vi.fn()
 const greenroomNudge = vi.fn()
+const greenroomIntroScript = vi.fn()
 
 vi.mock('../api', () => ({
   fetchGreenRoom: (...a: unknown[]) => fetchGreenRoom(...a),
   greenroomCheckin: (...a: unknown[]) => greenroomCheckin(...a),
   greenroomNudge: (...a: unknown[]) => greenroomNudge(...a),
+  greenroomIntroScript: (...a: unknown[]) => greenroomIntroScript(...a),
+  // W6/D10: plain download links — a static path, not worth a fetch mock.
+  showflowExportUrl: (format: string) => `/app/api/greenroom/showflow.${format}`,
 }))
 
 import { GreenRoomSection } from './GreenRoomSection'
@@ -37,11 +41,11 @@ const payload = (): GreenRoomPayload => ({
   sessions: [
     {
       id: 's-now', code: 'SESS-1', title: 'Live on stage', format: 'Talk', track_name: 'AI',
-      room_id: 'room-a', starts_at: iso(-30), ends_at: iso(30), speaker_ids: ['c-1'],
+      room_id: 'room-a', starts_at: iso(-30), ends_at: iso(30), speaker_ids: ['c-1'], intro_script: null,
     },
     {
       id: 's-next', code: 'SESS-2', title: 'Coming right up', format: null, track_name: null,
-      room_id: 'room-a', starts_at: iso(90), ends_at: iso(150), speaker_ids: ['c-2'],
+      room_id: 'room-a', starts_at: iso(90), ends_at: iso(150), speaker_ids: ['c-2'], intro_script: null,
     },
   ],
   speakers: {
@@ -60,6 +64,7 @@ beforeEach(() => {
   fetchGreenRoom.mockReset()
   greenroomCheckin.mockReset()
   greenroomNudge.mockReset()
+  greenroomIntroScript.mockReset()
 })
 
 describe('GreenRoomSection', () => {
@@ -119,6 +124,33 @@ describe('GreenRoomSection', () => {
     fireEvent.click(screen.getByText('Nudge'))
     await waitFor(() => expect(screen.getByText('reminder sent')).toBeTruthy())
     expect(greenroomNudge).toHaveBeenCalledWith('c-1')
+  })
+
+  it('saves an edited intro script and exposes the show-flow export links', async () => {
+    fetchGreenRoom.mockResolvedValue({ fresh: true, payload: payload(), etag: '"r1"' })
+    let resolveSave: (v: unknown) => void = () => {}
+    greenroomIntroScript.mockReturnValue(new Promise((resolve) => { resolveSave = resolve }))
+    render(<GreenRoomSection />)
+    await waitFor(() => expect(screen.getByText('Live on stage')).toBeTruthy())
+
+    // W6/D10: the export is a plain link, not a fetch-driven control.
+    const csvLink = screen.getByText('Show flow (CSV)') as HTMLAnchorElement
+    expect(csvLink.getAttribute('href')).toBe('/app/api/greenroom/showflow.csv')
+    expect((screen.getByText('Show flow (XLSX)') as HTMLAnchorElement).getAttribute('href')).toBe(
+      '/app/api/greenroom/showflow.xlsx',
+    )
+
+    const [introField] = screen.getAllByLabelText('Intro script') as HTMLTextAreaElement[]
+    fireEvent.input(introField, { target: { value: 'Please welcome our next speaker.' } })
+    const [saveButton] = screen.getAllByText('Save intro') as HTMLButtonElement[]
+    expect(saveButton.disabled).toBe(false)
+    fireEvent.click(saveButton)
+    expect(greenroomIntroScript).toHaveBeenCalledWith('s-now', 'Please welcome our next speaker.')
+
+    const server = payload()
+    server.sessions[0]!.intro_script = 'Please welcome our next speaker.'
+    resolveSave({ ok: true, etag: '"r2"', ...server })
+    await waitFor(() => expect(saveButton.disabled).toBe(true))
   })
 
   it('points at the agenda when nothing is scheduled', async () => {

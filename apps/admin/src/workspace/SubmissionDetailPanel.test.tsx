@@ -39,6 +39,9 @@ const api = vi.hoisted(() => ({
   setSubmissionParticipantConfirmed: vi.fn(),
   contactSearch: vi.fn(),
   addSubmissionComment: vi.fn(),
+  getMaterialsOwners: vi.fn(),
+  getSubmissionFileComments: vi.fn(),
+  updateSubmissionMaterials: vi.fn(),
 }))
 
 vi.mock('../api', () => ({
@@ -58,6 +61,11 @@ vi.mock('../api', () => ({
   // Content history (eval defect fix): fetched by ContentHistorySection,
   // which renders inside the detail panel but is not under test here.
   getSubmissionRevisions: async () => ({ items: [] }),
+  // Workplan 15 W5: the deck-reviewer options and the deck thread, both
+  // fetched on mount. Exercised in materialsThread.test.tsx alongside this.
+  getMaterialsOwners: api.getMaterialsOwners,
+  getSubmissionFileComments: api.getSubmissionFileComments,
+  updateSubmissionMaterials: api.updateSubmissionMaterials,
 }))
 
 // The files sub-panel does its own fetching and is not under test here.
@@ -122,6 +130,9 @@ beforeEach(() => {
   api.removeSubmissionParticipant.mockResolvedValue({ ok: true })
   api.contactSearch.mockResolvedValue({ items: [], total: 0 })
   api.addSubmissionComment.mockResolvedValue({ ok: true, id: 'sc-2', comments: [] })
+  api.getMaterialsOwners.mockResolvedValue({ items: [] })
+  api.getSubmissionFileComments.mockResolvedValue({ items: [] })
+  api.updateSubmissionMaterials.mockResolvedValue({ ok: true })
 })
 
 describe('SubmissionDetailPanel — edit affordance (CNT-09)', () => {

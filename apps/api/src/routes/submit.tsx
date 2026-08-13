@@ -387,7 +387,7 @@ submitRoutes.get('/:slug/:formId', async (c) => {
       .bind(event.id, session.contactId)
       .first<{ email: string; first_name: string | null; last_name: string | null; mobile_phone: string | null; biography: string | null }>();
     if (contact) {
-      const [count, draft] = await Promise.all([
+      const [count, draft, reviseInvites] = await Promise.all([
         countForLimit(c.env.DB, form.id, session.contactId),
         c.env.DB.prepare(
           `SELECT id, title, description, format, level, language, capacity, ceu_credits,
@@ -398,6 +398,23 @@ submitRoutes.get('/:slug/:formId', async (c) => {
         )
           .bind(form.id, session.contactId)
           .first<{ id: string; title: string | null } & SystemColumnRow>(),
+        // Workplan 15 W3/D7: guidance this person was given on an earlier
+        // proposal, looked up at render time and never copied between events
+        // — a copy forks the moment someone edits it. Org-scoped because 0015
+        // gives one person one contact id across every event in the org, which
+        // is exactly what makes "shown back next year" a single join.
+        c.env.DB.prepare(
+          `SELECT s.id, s.title, s.revise_guidance, ev.name AS event_name
+             FROM submissions s
+             JOIN events ev ON ev.id = s.event_id
+            WHERE s.submitter_contact_id = ?
+              AND ev.org_id = (SELECT org_id FROM events WHERE id = ?)
+              AND s.decision_outcome = 'revise'
+              AND COALESCE(TRIM(s.revise_guidance), '') != ''
+            ORDER BY s.updated_at DESC LIMIT 3`,
+        )
+          .bind(session.contactId, event.id)
+          .all<{ id: string; title: string; revise_guidance: string; event_name: string }>(),
       ]);
       let draftAnswers: Answers | null = null;
       if (draft) {
@@ -428,6 +445,12 @@ submitRoutes.get('/:slug/:formId', async (c) => {
         // title falls back the same way the draft endpoint's own default does,
         // so the resume-vs-new prompt never shows a blank title.
         draft: draft && draftAnswers ? { id: draft.id, title: draft.title || 'Untitled draft', answers: draftAnswers } : null,
+        revise_invites: reviseInvites.results.map((r) => ({
+          submission_id: r.id,
+          title: r.title,
+          guidance: r.revise_guidance,
+          event_name: r.event_name,
+        })),
       };
     }
   }
@@ -612,6 +635,23 @@ submitRoutes.post('/:slug/:formId/draft', async (c) => {
   // so a submitter cannot use it to evade their quota.
   const forceNew = body.force_new === true;
 
+  // Workplan 15 W3 (D7): lineage, so "did they act on the guidance?" is
+  // answerable. Only ever stamped at create, and only against a prior
+  // submission of this same contact that actually carries a revise flag —
+  // the client sends an id, so it is validated rather than trusted.
+  const resubmissionOfRaw = typeof body.resubmission_of === 'string' ? body.resubmission_of : null;
+  const resubmissionOf = resubmissionOfRaw
+    ? (
+        await db
+          .prepare(
+            `SELECT id FROM submissions
+              WHERE id = ? AND submitter_contact_id = ? AND decision_outcome = 'revise'`,
+          )
+          .bind(resubmissionOfRaw, session.contactId)
+          .first<{ id: string }>()
+      )?.id ?? null
+    : null;
+
   let submissionId = typeof body.submission_id === 'string' ? body.submission_id : null;
   if (submissionId) {
     const owned = await db
@@ -668,9 +708,9 @@ submitRoutes.post('/:slug/:formId/draft', async (c) => {
         .prepare(
           `INSERT INTO submissions (id, event_id, form_id, code, kind, title, description, status,
              format, level, language, capacity, ceu_credits, client_session_id,
-             submitter_contact_id, source, created_at, updated_at)
+             submitter_contact_id, source, created_at, updated_at, resubmission_of)
            SELECT ?1, ?2, ?3, ${nextSessionCodeSql('?2')}, ?4, ?5, ?6, 'draft',
-                  ?7, ?8, ?9, ?10, ?11, ?12, ?13, 'form', ?14, ?14
+                  ?7, ?8, ?9, ?10, ?11, ?12, ?13, 'form', ?14, ?14, ?16
            WHERE (SELECT COUNT(*) FROM submissions q
                   WHERE q.form_id = ?3 AND q.submitter_contact_id = ?13 AND q.status != 'withdrawn') < ?15`,
         )
@@ -690,6 +730,7 @@ submitRoutes.post('/:slug/:formId/draft', async (c) => {
           session.contactId,
           ts,
           ctx.limit ?? NO_LIMIT,
+          resubmissionOf,
         )
     : db
         .prepare(
@@ -1088,6 +1129,21 @@ submitRoutes.post('/:slug/:formId/submit', async (c) => {
     }
   }
   const isCreate = submissionId === null && replayOf === null;
+  // W3/D7 lineage, validated exactly as the draft path validates it — the
+  // straight-through submitter (no autosave ever fired) is the case this
+  // covers; a promoted draft already carries the stamp.
+  const resubmissionOfRaw = typeof body.resubmission_of === 'string' ? body.resubmission_of : null;
+  const resubmissionOf = isCreate && resubmissionOfRaw
+    ? (
+        await db
+          .prepare(
+            `SELECT id FROM submissions
+              WHERE id = ? AND submitter_contact_id = ? AND decision_outcome = 'revise'`,
+          )
+          .bind(resubmissionOfRaw, session.contactId)
+          .first<{ id: string }>()
+      )?.id ?? null
+    : null;
   // Only the submitter's own draft reaches the update path here, and promoting
   // a draft is the submission's *first* appearance to organisers — so it
   // notifies as a create even though the row already existed. (Edits after
@@ -1313,9 +1369,9 @@ submitRoutes.post('/:slug/:formId/submit', async (c) => {
           .prepare(
             `INSERT INTO submissions (id, event_id, form_id, code, kind, title, description, status,
                format, level, language, capacity, ceu_credits, client_session_id, track_id,
-               evaluation_plan_id, submitter_contact_id, source, created_at, updated_at)
+               evaluation_plan_id, submitter_contact_id, source, created_at, updated_at, resubmission_of)
              SELECT ?1, ?2, ?3, ${nextSessionCodeSql('?2')}, ?4, ?5, ?6, ?7,
-                    ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, 'form', ?17, ?17
+                    ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, 'form', ?17, ?17, ?21
              WHERE (SELECT COUNT(*) FROM submissions q
                     WHERE q.form_id = ?3 AND q.submitter_contact_id = ?16 AND q.status != 'withdrawn') < ?18
                AND ${nextSessionCodeSql('?2')} = ?19
@@ -1345,6 +1401,7 @@ submitRoutes.post('/:slug/:formId/submit', async (c) => {
             ctx.limit ?? NO_LIMIT,
             code,
             dupCutoff,
+            resubmissionOf,
           ),
       );
     } else {

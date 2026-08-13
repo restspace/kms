@@ -30,10 +30,14 @@ export interface TrackDraftRow {
   key: string
   name: string
   color: string
+  /** Workplan 15 W1a — the decision meeting's slot target. Held as text for
+   * the same reason capacity is; empty = untracked, and it is a target rather
+   * than a cap (D1), so nothing here or downstream refuses a save. */
+  targetSlots: string
 }
 
 export const emptyRoomRow = (): RoomDraftRow => ({ key: crypto.randomUUID(), name: '', capacity: '' })
-export const emptyTrackRow = (): TrackDraftRow => ({ key: crypto.randomUUID(), name: '', color: '' })
+export const emptyTrackRow = (): TrackDraftRow => ({ key: crypto.randomUUID(), name: '', color: '', targetSlots: '' })
 
 interface RoomRowEditorProps {
   row: RoomDraftRow
@@ -99,9 +103,11 @@ interface TrackRowEditorProps {
   row: TrackDraftRow
   onNameChange: (name: string) => void
   onColorChange: (color: string) => void
+  onTargetSlotsChange: (targetSlots: string) => void
   onRemove: () => void
   onNameBlur?: () => void
   onColorBlur?: () => void
+  onTargetSlotsBlur?: () => void
   disabled?: boolean
   nameLabel?: string
   removeLabel?: string
@@ -111,9 +117,11 @@ export function TrackRowEditor({
   row,
   onNameChange,
   onColorChange,
+  onTargetSlotsChange,
   onRemove,
   onNameBlur,
   onColorBlur,
+  onTargetSlotsBlur,
   disabled,
   nameLabel = 'Track name',
   removeLabel = 'Remove track',
@@ -137,6 +145,19 @@ export function TrackRowEditor({
         value={row.color || DEFAULT_TRACK_COLOR}
         onChange={(e) => onColorChange((e.target as HTMLInputElement).value)}
         onBlur={onColorBlur}
+        disabled={disabled}
+      />
+      <input
+        type="number"
+        min={0}
+        step={1}
+        className="rt-row-slots"
+        placeholder="Slots"
+        aria-label="Track slot target"
+        title="How many talks this track expects to accept — a target the decision-meeting counter counts against, never a cap"
+        value={row.targetSlots}
+        onChange={(e) => onTargetSlotsChange((e.target as HTMLInputElement).value)}
+        onBlur={onTargetSlotsBlur}
         disabled={disabled}
       />
       <button
@@ -247,6 +268,9 @@ export function TracksRepeatableField({ rows, onChange, disabled }: TracksRepeat
           disabled={disabled}
           onNameChange={(name) => onChange(rows.map((r) => (r.key === row.key ? { ...r, name } : r)))}
           onColorChange={(color) => onChange(rows.map((r) => (r.key === row.key ? { ...r, color } : r)))}
+          onTargetSlotsChange={(targetSlots) =>
+            onChange(rows.map((r) => (r.key === row.key ? { ...r, targetSlots } : r)))
+          }
           onRemove={() => onChange(rows.filter((r) => r.key !== row.key))}
         />
       ))}
