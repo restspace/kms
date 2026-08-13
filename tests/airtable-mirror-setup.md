@@ -106,9 +106,14 @@ Steady state after that is one cron tick (~1 minute) of latency per change.
 kick it:
 
 ```sh
-wrangler dev --test-scheduled
-curl "http://localhost:8787/__scheduled?cron=*+*+*+*+*"
+curl "http://localhost:8787/cdn-cgi/local/scheduled?cron=*+*+*+*+*"
 ```
+
+(Older wrangler used `--test-scheduled` and `/__scheduled?cron=…`; that path 404s on the
+current version. Wrangler prints the correct URL for your version at startup.)
+
+Progress goes to the `wrangler dev` console. A table is logged only when it has rows to push,
+so a sweep with nothing to do is **silent** — that is the steady state, not a failure.
 
 Local secrets go in `.dev.vars` (see `.dev.vars.example`), paired with `AIRTABLE_SYNC = "on"`
 there. Note the local D1 also needs `npm run migrate` for 0017. Don't point local dev at the

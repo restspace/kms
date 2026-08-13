@@ -21,6 +21,90 @@ export function seedStatements(): string[] {
     .filter((statement) => statement.length > 0);
 }
 
+interface MirrorRow {
+  id: string;
+  airtable_record_id: string;
+}
+
+/**
+ * What the Airtable mirror needs to survive a seed replay, per mirrored table.
+ *
+ * The replay deletes the demo organisation with raw SQL and lets FK cascades do
+ * the rest, so none of the delete routes' staging (airtableStage.ts) fires. Left
+ * alone, every mirrored row would come back with a NULL airtable_record_id and
+ * the next sweep would create a second Airtable record for it, orphaning the
+ * first — a full duplicate set of the demo data every night.
+ *
+ * The seed's ids are deterministic, so the fix is to carry the record ids across
+ * the replay rather than to delete and re-create: rows that come back keep their
+ * Airtable record (the sweep updates it in place), and only rows that do *not*
+ * come back — created by demo users during the day — are staged for deletion.
+ */
+async function snapshotMirrorIds(db: D1Database): Promise<Map<string, MirrorRow[]>> {
+  const snapshot = new Map<string, MirrorRow[]>();
+  for (const table of MIRRORED_TABLES) {
+    const rows = await db
+      .prepare(`SELECT id, airtable_record_id FROM ${table} WHERE airtable_record_id IS NOT NULL`)
+      .all<MirrorRow>();
+    if (rows.results.length > 0) snapshot.set(table, rows.results);
+  }
+  return snapshot;
+}
+
+/**
+ * Put the record ids back on the rows the replay re-created, and stage the rest
+ * for deletion. Survivor detection rides on the UPDATE's own `changes` count —
+ * a re-created row matches by id, a row that is gone for good matches nothing —
+ * so this costs one statement per snapshotted row and no extra reads.
+ *
+ * Finally the watermarks are cleared. The seed carries fixed timestamps in the
+ * past, so without this the next sweep would consider every restored row older
+ * than its watermark and push nothing, leaving Airtable showing whatever the
+ * demo's users had edited it to. Cleared, the sweep re-pushes from epoch — over
+ * the restored record ids, so it is an update in place, not a second copy.
+ */
+async function restoreMirrorIds(db: D1Database, snapshot: Map<string, MirrorRow[]>): Promise<void> {
+  const queuedAt = new Date().toISOString();
+  const orphaned: Array<{ table: string; recordId: string }> = [];
+
+  for (const [table, rows] of snapshot) {
+    for (let i = 0; i < rows.length; i += MIRROR_CHUNK) {
+      const chunk = rows.slice(i, i + MIRROR_CHUNK);
+      const results = await db.batch(
+        chunk.map((row) =>
+          db
+            .prepare(`UPDATE ${table} SET airtable_record_id = ? WHERE id = ?`)
+            .bind(row.airtable_record_id, row.id),
+        ),
+      );
+      results.forEach((result, j) => {
+        if ((result.meta?.changes ?? 0) === 0) {
+          orphaned.push({ table, recordId: chunk[j]!.airtable_record_id });
+        }
+      });
+    }
+  }
+
+  for (let i = 0; i < orphaned.length; i += MIRROR_CHUNK) {
+    await db.batch(
+      orphaned.slice(i, i + MIRROR_CHUNK).map((o) =>
+        db
+          .prepare(
+            `INSERT OR IGNORE INTO airtable_pending_deletes (table_name, record_id, queued_at)
+             VALUES (?, ?, ?)`,
+          )
+          .bind(o.table, o.recordId, queuedAt),
+      ),
+    );
+  }
+
+  await db.prepare('DELETE FROM airtable_sync_state').run();
+}
+
+/** Mirrored tables, in SYNC_TABLES order — interpolated into SQL, so a closed list. */
+const MIRRORED_TABLES = ['events', 'contacts', 'submissions', 'tasks', 'reviews', 'tracks', 'rooms', 'tags'];
+const MIRROR_CHUNK = 50;
+
 interface TokenSnapshot {
   id: string;
   org_id: string;
@@ -53,10 +137,24 @@ export async function resetDemoData(db: D1Database, redirectEmail?: string | nul
     )
     .all<TokenSnapshot>();
 
+  // Read before the replay wipes them; applied after. Empty whenever the mirror
+  // has never run, which makes the whole thing a no-op on a normal deployment.
+  const mirrorIds = await snapshotMirrorIds(db);
+
   const statements = seedStatements();
   const chunkSize = 40;
   for (let i = 0; i < statements.length; i += chunkSize) {
     await db.batch(statements.slice(i, i + chunkSize).map((statement) => db.prepare(statement)));
+  }
+
+  if (mirrorIds.size > 0) {
+    // Bookkeeping for an optional integration: a failure here leaves the demo
+    // reset itself intact, so report rather than throw (as with the redirect).
+    try {
+      await restoreMirrorIds(db, mirrorIds);
+    } catch (error) {
+      console.error('demo reset: airtable record-id restore failed', error);
+    }
   }
 
   if (tokens.results.length > 0) {
