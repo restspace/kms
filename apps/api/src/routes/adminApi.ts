@@ -41,14 +41,25 @@ type ApiEnv = AccessEnv;
 export const adminApiRoutes = new Hono<ApiEnv>();
 
 // Guard every /app/api route with JSON errors (the /app HTML gate is separate).
-// Reviewers (docs/06 §4) reach only /me and /app/api/review/*; everything else
-// requires admin.
+// Reviewers (docs/06 §4) reach only /me, /app/api/review/* and /switch-event;
+// everything else requires admin.
 adminApiRoutes.use('*', async (c, next) => {
   const session = await getRevalidatedPrivilegedSession(c);
   if (!session) return c.json({ error: 'unauthenticated' }, 401);
   const actor: Actor = { contactId: session.contactId, email: session.email, role: session.role };
   if (!can(actor, 'review.view')) return c.json({ error: 'forbidden' }, 403);
-  const reviewerSurface = c.req.path.startsWith('/app/api/review/') || c.req.path === '/app/api/me';
+  // #1: reviewers land on whichever event their sign-in link named, but they
+  // can hold seats on more than one event (docs/06 §4) and the sidebar's event
+  // filter (EventFilterSelect) renders for them too — it must be able to
+  // actually move their session, not just display accessible events it then
+  // 403s on. switch-event re-validates the target against requireEventAccess
+  // (access.ts), which already restricts a reviewer to events where they hold
+  // a real seat, so widening the gate here does not let them switch anywhere
+  // an admin/owner-only route would refuse them.
+  const reviewerSurface =
+    c.req.path.startsWith('/app/api/review/') ||
+    c.req.path === '/app/api/me' ||
+    c.req.path === '/app/api/switch-event';
   if (!reviewerSurface && !can(actor, 'admin.view')) return c.json({ error: 'forbidden' }, 403);
   c.set('session', session);
   // Every route behind this guard can reach the workspace's accessible-event
@@ -866,12 +877,19 @@ const CONTACTS_ORG_SPEC: Omit<ResourceDef, 'fromSql'> = {
   // event_id/event_name stay in the row shape (NULL) so one grid can render
   // both modes; custom_fields_json and confirmation are per-event concepts with
   // no org-level answer at all, and read NULL rather than an arbitrary event's.
+  // Both event_count and events_json now join through `events`, so a
+  // membership row left behind by a deleted event (orphaned event_contacts)
+  // counts in neither — the eval-caught mismatch (#6b) was event_count
+  // counting via bare event_contacts while events_json required a live
+  // events row, so a contact with one orphaned + zero live memberships
+  // showed "1 event" in the grid and "On no event yet" in the detail panel.
   selectSql: `SELECT c.*,
         NULL AS event_id, NULL AS event_name,
         NULL AS custom_fields_json, NULL AS confirmation,
         m.company, m.job_title, m.biography, m.notes, m.headshot_asset_id,
         m.added_at, m.source, m.extra,
-        (SELECT COUNT(*) FROM event_contacts ec WHERE ec.contact_id = c.id) AS event_count,
+        (SELECT COUNT(*) FROM event_contacts ec JOIN events ev ON ev.id = ec.event_id
+          WHERE ec.contact_id = c.id) AS event_count,
         (SELECT json_group_array(ev.name ORDER BY ec.added_at DESC, ec.event_id DESC)
            FROM event_contacts ec JOIN events ev ON ev.id = ec.event_id
           WHERE ec.contact_id = c.id) AS events_json`,
@@ -1957,6 +1975,12 @@ adminApiRoutes.get('/contacts/:id/history', async (c) => {
     eventId = requestedEventId;
   }
 
+  // `accessibleEventIds` computed up front (moved ahead of the roster guard)
+  // so the org-directory fallback below can reuse it rather than issuing a
+  // second query.
+  const eventIds = await accessibleEventIds(c);
+  const marks = eventIds.map(() => '?').join(', ');
+
   // Ordinary event guard first, identical to the headshot route's: the panel
   // opens off that event's roster, so a contact with no row there is absent.
   const onRoster = await db
@@ -1967,7 +1991,35 @@ adminApiRoutes.get('/contacts/:id/history', async (c) => {
     )
     .bind(eventId, id)
     .first();
-  if (!onRoster) return c.json({ error: 'not_found' }, 404);
+  if (!onRoster) {
+    // Eval defect #6a: the org-level contact directory (CONTACTS_ORG_SPEC)
+    // deliberately hands the SPA `event_id: null` on every row — a person is
+    // one row org-wide, not tied to any single event — so a directory-opened
+    // profile has no event to send here and falls back to `session.eventId`
+    // above. That default is frequently wrong for a person the directory is
+    // the whole point of surfacing: someone on other events but not the
+    // caller's current one. Rather than 404 a contact who plainly exists (the
+    // SPA rendered "The record no longer exists"), fall back to ANY event the
+    // caller can access that this contact actually belongs to — same
+    // `accessibleEventIds` set the org-wide read below clips to, so this adds
+    // no visibility beyond what the response already discloses. Only applies
+    // when the caller didn't name a specific event; an explicit ?event_id=
+    // that isn't on the roster still 404s, unchanged.
+    let fallbackEventId: string | null = null;
+    if (!requestedEventId && eventIds.length > 0) {
+      const anyRoster = await db
+        .prepare(
+          `SELECT ec.event_id FROM event_contacts ec
+            WHERE ec.contact_id = ? AND ec.event_id IN (${marks})
+            LIMIT 1`,
+        )
+        .bind(id, ...eventIds)
+        .first<{ event_id: string }>();
+      fallbackEventId = anyRoster?.event_id ?? null;
+    }
+    if (!fallbackEventId) return c.json({ error: 'not_found' }, 404);
+    eventId = fallbackEventId;
+  }
 
   // THE ONE DELIBERATELY ORG-WIDE READ IN THIS FILE. Everything else joins
   // event_contacts to stay pinned to the session's event; this joins on
@@ -1976,15 +2028,13 @@ adminApiRoutes.get('/contacts/:id/history', async (c) => {
   // widening the sweep warns about:
   //
   //  1. the roster check above — you can only ask about someone already
-  //     standing in front of you on this event;
+  //     standing in front of you on some accessible event;
   //  2. `accessibleEventIds` (access.ts) — the answer is clipped to events
   //     where this staff email holds an owner/admin/reviewer seat, so an admin
   //     of event A never learns that event B exists, never mind that the
   //     contact is on it. There is deliberately no "…and N events you cannot
   //     see" tally either: the count alone discloses the existence this is
   //     withholding.
-  const eventIds = await accessibleEventIds(c);
-  const marks = eventIds.map(() => '?').join(', ');
 
   const memberships = await db
     .prepare(
@@ -3103,6 +3153,30 @@ adminApiRoutes.post('/tasks', async (c) => {
   )
     .bind(id, session.eventId, now, now, ...cols.map((k) => values[k]))
     .run();
+
+  // #18: seed the task's standing file request with the event's default
+  // allowed types, when it has one configured. Without this, a file_upload
+  // task with no explicit file_request_id gets no file_requests row until a
+  // speaker's first upload lazily creates one via ensureTaskFileRequestId
+  // (portal.ts) with allowed_types left null — always falling back to the
+  // generic document-type allow-list, with no way for an event-level default
+  // to ever reach it. Seeding here (same `file-request-task-<taskId>` id
+  // that lazy path uses, INSERT OR IGNORE so it's a genuine seed rather than
+  // a second source of truth) lets the default apply from the moment the
+  // task is created.
+  if (values.action_type === 'file_upload' && !values.file_request_id) {
+    const event = await c.env.DB.prepare('SELECT default_file_allowed_types FROM events WHERE id = ?')
+      .bind(session.eventId)
+      .first<{ default_file_allowed_types: string | null }>();
+    if (event?.default_file_allowed_types) {
+      await c.env.DB.prepare(
+        `INSERT OR IGNORE INTO file_requests (id, event_id, title, type, allowed_types, created_at)
+         VALUES (?, ?, ?, 'contacts', ?, ?)`,
+      )
+        .bind(`file-request-task-${id}`, session.eventId, String(values.title ?? 'Task upload').slice(0, 200), event.default_file_allowed_types, now)
+        .run();
+    }
+  }
 
   // OR IGNORE: 0005_integrity added a unique logical index over
   // (task_id, contact_id, COALESCE(submission_id,'')), and a submission's
@@ -4868,7 +4942,11 @@ adminApiRoutes.post('/switch-event', async (c) => {
   const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
   const eventId = typeof body.event_id === 'string' ? body.event_id : '';
   const seat = await requireEventAccess(c, eventId);
-  if (!seat) return c.json({ error: 'not_an_admin_of_event' }, 403);
+  // Renamed from 'not_an_admin_of_event' (#1): requireEventAccess spans
+  // owner/admin/reviewer, so a reviewer with no seat at the target hit this
+  // exact branch too — the old name was simply wrong for them, not just
+  // imprecise wording in the toast.
+  if (!seat) return c.json({ error: 'no_seat_at_event' }, 403);
   const target = await c.env.DB.prepare('SELECT slug FROM events WHERE id = ?')
     .bind(eventId)
     .first<{ slug: string }>();

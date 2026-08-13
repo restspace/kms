@@ -11,9 +11,11 @@ import userEvent from '@testing-library/user-event';
 
 const queryResource = vi.fn();
 const getTaskAudiences = vi.fn();
+const getFileCollectionDefaults = vi.fn();
 vi.mock('../api', () => ({
   queryResource: (resource: string) => (params: unknown) => queryResource(resource, params),
   getTaskAudiences: () => getTaskAudiences(),
+  getFileCollectionDefaults: () => getFileCollectionDefaults(),
 }));
 vi.mock('../components/dialogs', () => ({ appAlert: vi.fn(() => Promise.resolve()) }));
 
@@ -34,6 +36,7 @@ beforeEach(() => {
       { audience: 'all_contacts', count: 6 },
     ],
   });
+  getFileCollectionDefaults.mockReset().mockResolvedValue({ enabled: false, allowed_types: [] });
   vi.mocked(appAlert).mockClear();
 });
 
@@ -60,6 +63,62 @@ describe('TaskCreateForm', () => {
       assignee_contact_ids: ['c1'],
     });
     expect(appAlert).not.toHaveBeenCalled();
+  });
+
+  // #18: the event-level file-collection default pre-fills Action type on a
+  // brand-new task, but must never override an explicit initial value or a
+  // choice the organiser makes before the fetch resolves.
+  it('pre-fills Action type to File upload when the event default is enabled', async () => {
+    getFileCollectionDefaults.mockResolvedValue({ enabled: true, allowed_types: ['application/pdf'] });
+    const onSubmit = vi.fn().mockResolvedValue(true);
+    render(<TaskCreateForm onSubmit={onSubmit} onCancel={() => {}} title="New task" />);
+
+    await waitFor(() =>
+      expect((screen.getByLabelText('Action type') as HTMLSelectElement).value).toBe('file_upload'),
+    );
+  });
+
+  it('leaves Action type at Acknowledge when the event default is off', async () => {
+    getFileCollectionDefaults.mockResolvedValue({ enabled: false, allowed_types: [] });
+    const onSubmit = vi.fn().mockResolvedValue(true);
+    render(<TaskCreateForm onSubmit={onSubmit} onCancel={() => {}} title="New task" />);
+
+    await waitFor(() => expect(getFileCollectionDefaults).toHaveBeenCalled());
+    expect((screen.getByLabelText('Action type') as HTMLSelectElement).value).toBe('acknowledge');
+  });
+
+  it('does not override an organiser-picked Action type once the default arrives late', async () => {
+    const user = userEvent.setup();
+    let resolveDefaults: (v: { enabled: boolean; allowed_types: string[] }) => void = () => {};
+    getFileCollectionDefaults.mockReturnValue(new Promise((resolve) => { resolveDefaults = resolve; }));
+    const onSubmit = vi.fn().mockResolvedValue(true);
+    render(<TaskCreateForm onSubmit={onSubmit} onCancel={() => {}} title="New task" />);
+
+    await user.selectOptions(screen.getByLabelText('Action type'), 'portal_form');
+    resolveDefaults({ enabled: true, allowed_types: [] });
+    await waitFor(() => expect(getFileCollectionDefaults).toHaveBeenCalled());
+    // A tick for the resolved promise to settle before asserting nothing changed.
+    await new Promise((r) => setTimeout(r, 0));
+    expect((screen.getByLabelText('Action type') as HTMLSelectElement).value).toBe('portal_form');
+  });
+
+  it('never overrides an explicit initial Action type (editing an existing task)', async () => {
+    getFileCollectionDefaults.mockResolvedValue({ enabled: true, allowed_types: [] });
+    const onSubmit = vi.fn().mockResolvedValue(true);
+    render(
+      <TaskCreateForm
+        onSubmit={onSubmit}
+        onCancel={() => {}}
+        title="Edit task"
+        initialValues={{ action_type: 'portal_form' }}
+      />,
+    );
+
+    // An explicit initial value skips the default fetch entirely — it's
+    // already known there's nothing for the default to usefully pre-fill.
+    await new Promise((r) => setTimeout(r, 0));
+    expect(getFileCollectionDefaults).not.toHaveBeenCalled();
+    expect((screen.getByLabelText('Action type') as HTMLSelectElement).value).toBe('portal_form');
   });
 
   it('refuses to save a manual task with no assignee', async () => {

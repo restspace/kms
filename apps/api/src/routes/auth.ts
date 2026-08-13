@@ -366,30 +366,72 @@ authRoutes.post('/signup', async (c) => {
   );
 });
 
+/**
+ * #17: the only door in used to be a single-use 15-minute link the organiser
+ * relayed by hand — expire it (or replay it) and the reviewer was stuck with
+ * no self-service way back in. `consumeToken` already returns null for every
+ * failure mode alike (missing/expired/replayed/wrong-purpose) so the caller
+ * can't be told apart from those; this looks the *same* row up read-only
+ * (the token was already sent to this address, so surfacing it back to
+ * whoever holds the link is not a new disclosure) purely to prefill a
+ * "resend" form. A token that never matched any row at all (typo, tampered
+ * query string) still gets the plain expired page with no form to prefill.
+ */
+async function expiredLinkContext(
+  db: D1Database,
+  rawToken: string,
+): Promise<{ email: string; eventSlug: string; eventName: string } | null> {
+  const hash = await sha256hex(rawToken);
+  const row = await db
+    .prepare(
+      `SELECT c.email AS email, e.slug AS event_slug, e.name AS event_name
+         FROM auth_tokens t
+         JOIN contacts c ON c.id = t.contact_id
+         JOIN events e ON e.id = t.event_id
+        WHERE t.token_hash = ?`,
+    )
+    .bind(hash)
+    .first<{ email: string; event_slug: string; event_name: string }>();
+  return row ? { email: row.email, eventSlug: row.event_slug, eventName: row.event_name } : null;
+}
+
 // GET /auth/callback?t=… — verify + consume the token, set the session cookie, redirect.
 authRoutes.get('/callback', async (c) => {
   const token = c.req.query('t');
-  const expired = () =>
-    c.html(
+  const expired = async () => {
+    const context = token ? await expiredLinkContext(c.env.DB, token) : null;
+    // The resend form posts straight to /auth/request with the same address
+    // and event pre-filled — one click, no need to remember either, and no
+    // detour through the portal's own login page (which a reviewer, who
+    // never has a password, has no reason to know exists).
+    const resendForm = context
+      ? `<form method="post" action="/auth/request">
+  <input type="hidden" name="email" value="${esc(context.email)}">
+  <input type="hidden" name="event_slug" value="${esc(context.eventSlug)}">
+  <button type="submit">Email me a new sign-in link for ${esc(context.eventName)}</button>
+</form>`
+      : `<p>Please request a new one from the portal login page.</p>`;
+    return c.html(
       page(
         'Link expired',
         `<h1>This link has expired</h1>
 <p>Sign-in links are valid for 15 minutes and can only be used once.</p>
-<p>Please request a new one from the portal login page.</p>`,
+${resendForm}`,
       ),
       410,
     );
+  };
 
-  if (!token) return expired();
+  if (!token) return await expired();
 
   // Single atomic UPDATE: exactly one concurrent caller can win, and replays,
   // expired rows and wrong-purpose tokens all come back null.
   const consumed = await consumeToken(c.env.DB, token, CALLBACK_PURPOSES);
-  if (!consumed) return expired();
+  if (!consumed) return await expired();
 
   const db = createDb(c.env.DB);
   const event = await db.events.getById(consumed.event_id);
-  if (!event) return expired();
+  if (!event) return await expired();
 
   // Consuming the token proves the caller received mail at this contact's
   // address, which is what earns them a place on the event's roster. Attaching
@@ -414,7 +456,7 @@ authRoutes.get('/callback', async (c) => {
     .run();
 
   const contact = await db.contacts.getById(consumed.event_id, consumed.contact_id);
-  if (!contact) return expired();
+  if (!contact) return await expired();
 
   const role = await db.eventUsers.getRole(event.id, contact.id);
   const sessionToken = await createSessionToken(

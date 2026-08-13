@@ -79,21 +79,28 @@ function SessionCard({
         {fmtDayShort(session.day)} · {fmtTimeRange(session.starts_at, session.ends_at, tz)}
         {showRoom && roomName ? ` · ${roomName}` : ''}
       </div>
-      {showAbstract && description && (
-        <p className="sessions-card-desc">
-          {shown}
-          {isLong && (
-            <button
-              type="button"
-              className="sessions-showmore"
-              onClick={() => setExpanded((v) => !v)}
-              aria-expanded={expanded}
-            >
-              {expanded ? 'Show less' : 'Show more'}
-            </button>
-          )}
-        </p>
-      )}
+      {showAbstract &&
+        (description ? (
+          <p className="sessions-card-desc">
+            {shown}
+            {isLong && (
+              <button
+                type="button"
+                className="sessions-showmore"
+                onClick={() => setExpanded((v) => !v)}
+                aria-expanded={expanded}
+              >
+                {expanded ? 'Show less' : 'Show more'}
+              </button>
+            )}
+          </p>
+        ) : (
+          // A description-less session used to omit this whole block, so the
+          // card looked broken next to siblings with a description + "Show
+          // more" (eval defect #28) — same "don't hide the gap" fix as the
+          // speakerless-session placeholder below.
+          <p className="sessions-card-desc muted sessions-card-desc-empty">No description provided.</p>
+        ))}
       {showSpeakers &&
         (session.speaker_details.length > 0 ? (
           <div className="sessions-card-speakers muted">
@@ -293,6 +300,7 @@ const sessionsWidgetCss = `
 .sessions-tag-track { background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent); }
 .sessions-card-meta { margin-top: .3rem; font-size: .85rem; }
 .sessions-card-desc { margin: .55rem 0 0; line-height: 1.5; }
+.sessions-card-desc-empty { font-style: italic; }
 .sessions-showmore { margin-left: .35rem; background: none; border: none; padding: 0; color: var(--accent); cursor: pointer; font-size: inherit; text-decoration: underline; }
 .sessions-card-speakers { margin-top: .45rem; font-size: .88rem; }
 .sessions-card-speakers-tba { font-style: italic; }

@@ -13,6 +13,7 @@ import {
   type ImportSource,
   type ImportTarget,
 } from '../api'
+import { openDuplicatesPanel } from './contactMerge'
 import './import.css'
 
 /**
@@ -75,6 +76,45 @@ const pending: ImportRequest[] = []
 export function openImportWizard(request: ImportRequest): void {
   if (enqueue) enqueue(request)
   else pending.push(request)
+}
+
+/**
+ * Eval defect #13: dedupe on import is strictly by email, so re-importing the
+ * same person under a different address used to silently create a second
+ * contact with no signal at all. `plan.possibleDuplicates` (importer.ts) is
+ * advisory only — it never blocks or changes what the import does — so this
+ * just names the pairs and opens the org's existing Duplicates/merge panel
+ * (the same "Merge instead?" entry point the speaker form's duplicate-name
+ * warning already uses), rather than inventing a second review surface.
+ */
+export function ImportDuplicatesNotice({ plan, onMerged }: { plan: ImportPlan; onMerged: () => void }) {
+  const dupes = plan.possibleDuplicates
+  if (!dupes || dupes.length === 0) return null
+  return (
+    <div className="import-duplicates-notice" role="status">
+      <p>
+        <strong>
+          {dupes.length} possible duplicate{dupes.length === 1 ? '' : 's'} by name
+        </strong>{' '}
+        — same name as {dupes.some((d) => d.matchContactId === null) ? 'another row in this file or ' : ''}an
+        existing contact, but a different email. The import proceeds and creates them separately; review before
+        merging, since legitimate namesakes exist too.
+      </p>
+      <ul className="import-duplicate-pairs">
+        {dupes.slice(0, PREVIEW_LIMIT).map((d, i) => (
+          <li key={`${d.row}-${i}`}>
+            Row {d.row}: <strong>{d.label}</strong> <span className="detail-sub">({d.email})</span>
+            {' ↔ '}
+            <strong>{d.matchLabel}</strong> <span className="detail-sub">({d.matchEmail})</span>
+            {d.matchContactId === null && <span className="detail-sub"> · also in this file</span>}
+          </li>
+        ))}
+      </ul>
+      <button type="button" className="settings-ghost" onClick={() => openDuplicatesPanel({ onMerged })}>
+        Review in the Duplicates panel
+      </button>
+    </div>
+  )
 }
 
 function summaryLine(plan: ImportPlan): string {
@@ -258,6 +298,9 @@ function ImportWizard({ request, onClose }: { request: ImportRequest; onClose: (
               {undoError && <div className="import-error" role="alert">{undoError}</div>}
             </div>
           )}
+          {/* The dry run's flags still apply post-commit — the rows really
+            * were created separately, not merged automatically. */}
+          {plan && <ImportDuplicatesNotice plan={plan} onMerged={() => {}} />}
         </div>
       ) : !plan ? (
         <div className="import-file-step">
@@ -358,13 +401,31 @@ function ImportWizard({ request, onClose }: { request: ImportRequest; onClose: (
               {[...plan.newTracks.map((t) => `track “${t}”`), ...plan.newRooms.map((r) => `room “${r}”`)].join(', ')}.
             </p>
           )}
-          {plan.warnings && plan.warnings.length > 0 && (
+          {/* The possible-duplicates line also rides along in `plan.warnings`
+            * (importer.ts) for callers/tests that only read that generic
+            * list; filtered back out here so it isn't said twice — the richer
+            * pairs-plus-Duplicates-panel notice below replaces it. */}
+          {plan.warnings && plan.warnings.filter((w) => !w.includes('possible duplicate')).length > 0 && (
             <ul className="import-warnings" role="alert">
-              {plan.warnings.map((w, i) => (
+              {plan.warnings.filter((w) => !w.includes('possible duplicate')).map((w, i) => (
                 <li key={i}>{w}</li>
               ))}
             </ul>
           )}
+          <ImportDuplicatesNotice
+            plan={plan}
+            onMerged={() =>
+              // A merge from the Duplicates panel can turn what the dry run
+              // called `create` into `merge`/`attach` (the row's email now
+              // resolves to the surviving contact) — re-plan against the same
+              // uploaded data/mapping rather than leaving a stale preview.
+              void run(async () => {
+                setPlan(
+                  await importPreviewMapping(request.target, request.eventId, plan.headers, plan.rows_raw, plan.mapping, source),
+                )
+              })
+            }
+          />
           <div className="import-preview" role="region" aria-label="Dry-run preview">
             <table>
               <thead>

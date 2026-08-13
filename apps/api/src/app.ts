@@ -16,6 +16,7 @@ import { publicAssetRoutes } from './routes/publicAssets';
 import { embedRoutes } from './routes/embed';
 import { messagingAdminRoutes } from './routes/messagingAdmin';
 import { chaseRoutes } from './chase';
+import { airtableAdminRoutes } from './routes/airtableAdmin';
 
 export function createApp() {
   const app = new Hono<AppEnv>();
@@ -47,6 +48,8 @@ export function createApp() {
   app.route('/app/api/messaging', messagingAdminRoutes);
   // Assisted chasing inbox (workplan-13 W4c); same mount convention again.
   app.route('/app/api/chase', chaseRoutes);
+  // Airtable mirror settings (Settings page); same mount convention again.
+  app.route('/app/api/airtable', airtableAdminRoutes);
   app.get('/app/', (c) => c.redirect('/app')); // strict routing: normalise the slash form
   app.route('/app', adminRoutes);
   app.route('/hello', publicRoutes); // SSR + island proof page (commit 8454ce6)

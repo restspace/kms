@@ -155,9 +155,13 @@ describe('GET /app/api/contacts/:id/history event scoping (F7)', () => {
   it('honours the row\'s event_id for the roster guard (All-events grid)', async () => {
     const { eventB, admin, speaker } = await seedCrossEventPair();
 
-    // Blind read against the session's event: the speaker has no row there.
+    // Blind read against the session's event: the speaker has no row there, so
+    // the guard falls back to the caller's accessible events and resolves the
+    // contact's own event (eval defect #6 — the org directory sends no event_id).
     const blind = await api(`/contacts/${speaker}/history`, admin.cookie, undefined, 'GET');
-    expect(blind.status).toBe(404);
+    expect(blind.status).toBe(200);
+    const blindBody = (await blind.json()) as { current_event_id: string };
+    expect(blindBody.current_event_id).toBe(eventB);
 
     const scoped = await api(`/contacts/${speaker}/history?event_id=${eventB}`, admin.cookie, undefined, 'GET');
     expect(scoped.status).toBe(200);

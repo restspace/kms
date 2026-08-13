@@ -4,6 +4,7 @@ import {
   getBulkJob,
   getComposeAudiences,
   invitePortal,
+  listEmailTemplates,
   previewMessage,
   queryResource,
   retryMessage,
@@ -11,6 +12,7 @@ import {
   type ComposeAudience,
   type ComposeAudienceCount,
   type ContactRow,
+  type EmailTemplateRow,
   type MergeField,
   type MessageRow,
 } from '../api'
@@ -348,7 +350,40 @@ const AUDIENCE_LABELS: Record<NamedAudience, string> = {
   roster: 'All contacts on roster',
   speakers: 'Speakers (anyone attached to a submission)',
   accepted_speakers: 'Accepted speakers',
+  declined_speakers: 'Declined speakers',
 }
+
+/**
+ * Crude but dependable HTML→text, trimmed down from packages/email's
+ * `htmlToText` (apps/admin has no dependency on @kms/email so this is a
+ * client-side copy, not a shared import). System template bodies are HTML
+ * fragments (docs/08 §1), but the compose textarea is edited as plain text —
+ * `composeBodyToHtml` re-escapes and re-paragraphs it on send — so picking a
+ * template needs to land readable plain text with merge fields intact, not
+ * raw markup (2026-08-13 eval sweep, defect #19).
+ */
+function templateBodyToPlainText(html: string): string {
+  return html
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/(p|div|h[1-6]|li)>/gi, '\n\n')
+    .replace(/<li[^>]*>/gi, '- ')
+    .replace(/<a[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/gi, (_match, href: string, label: string) => {
+      const text = label.replace(/<[^>]*>/g, '').trim()
+      return text && text !== href ? `${text} (${href})` : href
+    })
+    .replace(/<[^>]*>/g, '')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+}
+
+const titleCaseTemplateKey = (key: string): string => key.replace(/_/g, ' ').replace(/^./, (ch) => ch.toUpperCase())
 
 type ComposePhase =
   | { kind: 'editing' }
@@ -394,17 +429,53 @@ export function ComposeForm({ onSubmit, onCancel, title }: CreateFormProps) {
       .catch(() => setCounts([]))
   }, [])
 
-  // Loaded once, lazily, the first time either "Choose recipients" or the
-  // preview picker below needs a contact to point at — most sends use a
-  // named audience and never touch the multi-select, but the preview control
-  // needs *some* contact list regardless of audience (workplan-14 F2).
-  const [previewNeedsContacts, setPreviewNeedsContacts] = useState(false)
+  // Template picker (2026-08-13 eval sweep, defect #19): compose had no way
+  // to start from a system template — every send was typed from scratch even
+  // though every event already has a full set (SPK-14's Settings → Email
+  // templates card). Reuses that same store/render seam (GET
+  // /app/api/messaging/templates) rather than inventing compose-specific
+  // storage; picking one is a one-shot "fill the fields", not a binding, so
+  // the organiser can still edit — or pick a different one — before send.
+  const [templates, setTemplates] = useState<EmailTemplateRow[] | null>(null)
+  const [templateKey, setTemplateKey] = useState('')
   useEffect(() => {
-    if ((audience !== 'selected' && !previewNeedsContacts) || contacts !== null) return
+    listEmailTemplates()
+      .then((r) => setTemplates(r.items))
+      .catch(() => setTemplates([]))
+  }, [])
+
+  const applyTemplate = (key: string) => {
+    setTemplateKey(key)
+    if (!key) return
+    const t = templates?.find((row) => row.key === key)
+    if (!t) return
+    setSubject(t.subject ?? t.default_subject ?? '')
+    setBody(templateBodyToPlainText(t.body_richtext ?? t.default_body ?? ''))
+    setPreviewResult(null)
+    setPreviewError(null)
+  }
+
+  // Loaded once, on mount, unconditionally: both "Choose recipients" and the
+  // "Preview as" picker below need a contact list regardless of which named
+  // audience is selected (workplan-14 F2). This used to be gated behind an
+  // `onFocus` handler on the preview <select> so the fetch was deferred until
+  // the control was actually touched — but a focus event is not guaranteed to
+  // fire before a value is chosen (programmatic selection, keyboard-only
+  // interaction, some automation drivers), so that gate could leave the
+  // picker stuck on "Loading recipients…" forever with no way to trigger the
+  // fetch (2026-08-13 eval sweep, defect #8). Fetching eagerly costs one
+  // request per compose open either way `contacts` was going to be needed for
+  // most sessions, and `contactsError` below means a failed fetch is visible
+  // instead of silently hanging.
+  const [contactsError, setContactsError] = useState<string | null>(null)
+  useEffect(() => {
     queryResource<ContactRow>('contacts')({ from: 0, size: 500, filters: {} })
       .then((r) => setContacts(r.items))
-      .catch(() => setContacts([]))
-  }, [audience, contacts, previewNeedsContacts])
+      .catch((err) => {
+        setContacts([])
+        setContactsError(err instanceof Error ? err.message : 'Recipients could not be loaded.')
+      })
+  }, [])
 
   // Preview as <recipient> (workplan-14 F2/D3): rendered server-side through
   // the exact code path a real send uses, so it can never show something a
@@ -550,6 +621,8 @@ export function ComposeForm({ onSubmit, onCancel, title }: CreateFormProps) {
             <label htmlFor="compose-contacts">Contacts</label>
             {contacts === null ? (
               <p className="record-form-help">Loading contacts…</p>
+            ) : contactsError && contacts.length === 0 ? (
+              <p role="alert" className="compose-note-error">{contactsError}</p>
             ) : (
               <select
                 id="compose-contacts"
@@ -571,6 +644,28 @@ export function ComposeForm({ onSubmit, onCancel, title }: CreateFormProps) {
             <p className="record-form-help">Ctrl/Cmd-click to pick more than one.</p>
           </div>
         )}
+
+        <div className="record-form-field">
+          <label htmlFor="compose-template">Start from a template</label>
+          <select
+            id="compose-template"
+            value={templateKey}
+            onChange={(e) => applyTemplate((e.target as HTMLSelectElement).value)}
+          >
+            <option value="">
+              {templates === null ? 'Loading templates…' : 'Blank message'}
+            </option>
+            {(templates ?? []).map((t) => (
+              <option key={t.key} value={t.key}>
+                {titleCaseTemplateKey(t.key)}{t.overridden ? ' (customised)' : ''}
+              </option>
+            ))}
+          </select>
+          <p className="record-form-help">
+            Fills the subject and message below from that template's current wording — still fully editable, and
+            picking a different one replaces them again.
+          </p>
+        </div>
 
         <div className="record-form-field">
           <label htmlFor="compose-subject">Subject</label>
@@ -614,7 +709,6 @@ export function ComposeForm({ onSubmit, onCancel, title }: CreateFormProps) {
             <select
               id="compose-preview-contact"
               value={previewContactId}
-              onFocus={() => setPreviewNeedsContacts(true)}
               onChange={(e) => {
                 setPreviewContactId((e.target as HTMLSelectElement).value)
                 setPreviewResult(null)
@@ -622,7 +716,13 @@ export function ComposeForm({ onSubmit, onCancel, title }: CreateFormProps) {
               }}
             >
               <option value="">
-                {contacts === null ? 'Loading recipients…' : previewCandidates.length === 0 ? 'No recipients yet' : 'Choose a recipient…'}
+                {contacts === null
+                  ? 'Loading recipients…'
+                  : contactsError && previewCandidates.length === 0
+                    ? 'Recipients failed to load'
+                    : previewCandidates.length === 0
+                      ? 'No recipients yet'
+                      : 'Choose a recipient…'}
               </option>
               {previewCandidates.map((c) => (
                 <option key={c.id} value={c.id}>
@@ -642,6 +742,11 @@ export function ComposeForm({ onSubmit, onCancel, title }: CreateFormProps) {
             <p className="record-form-help">
               Shows how the message would render for any contact on this event — the{' '}
               {AUDIENCE_LABELS[audience]} audience itself is only resolved when you send.
+            </p>
+          )}
+          {contactsError && (
+            <p role="alert" className="compose-note-error">
+              {contactsError}
             </p>
           )}
           {previewError && (

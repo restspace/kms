@@ -65,6 +65,16 @@ export class AirtableClient {
     }
   }
 
+  /**
+   * Cheap read — the Settings page's "Test connection" probe. Lists at most
+   * `maxRecords` rows from `table`; a 2xx proves the PAT is valid, scoped to
+   * the base, and the table exists. Any failure throws with status + body.
+   */
+  async listRecords(table: string, maxRecords = 1): Promise<unknown[]> {
+    const body = await this.request('GET', `${table}?maxRecords=${maxRecords}`);
+    return (body as { records: unknown[] }).records;
+  }
+
   /** Delete records by Airtable record id. */
   async deleteRecords(table: string, ids: string[]): Promise<void> {
     for (let i = 0; i < ids.length; i += BATCH) {

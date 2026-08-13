@@ -52,11 +52,21 @@ filesAdminRoutes.use('*', async (c, next) => {
  * whoever clicked upload, so `uploaded_by_name`/`uploaded_by_email` are
  * added from fa.uploaded_by_contact_id — the actual uploader saveFile always
  * records — to keep "for" and "uploaded by" distinguishable in the UI.
+ *
+ * `session_id`/`session_code`/`session_title` (#9): u.submission_id is only
+ * ever stamped when the task the upload came from was itself targeted at a
+ * submission (target='submission') — a task assigned directly to a contact
+ * can leave it NULL even when that contact has exactly one session, so a
+ * library row for a plainly session-linked upload could otherwise show no
+ * session at all. Falls back to the submission of *any* task_assignment for
+ * the same (contact, chain) pair — the same file_request_id/contact_id
+ * identity loadChainVersions keys a chain on — before giving up.
  */
 const LIBRARY_SELECT = `SELECT u.id AS upload_id, u.file_asset_id, u.uploaded_at, u.version,
        u.submission_id, u.file_request_id, u.contact_id,
        fa.filename, fa.content_type, fa.size_bytes, fa.event_id,
        fr.title AS request_title,
+       s.id AS session_id, s.code AS session_code, s.title AS session_title,
        s.code AS submission_code, s.title AS submission_title,
        NULLIF(TRIM(COALESCE(c.first_name, '') || ' ' || COALESCE(c.last_name, '')), '') AS uploader_name,
        c.email AS uploader_email,
@@ -72,7 +82,13 @@ const LIBRARY_SELECT = `SELECT u.id AS upload_id, u.file_asset_id, u.uploaded_at
 FROM file_request_uploads u
 JOIN file_assets fa ON fa.id = u.file_asset_id
 LEFT JOIN file_requests fr ON fr.id = u.file_request_id
-LEFT JOIN submissions s ON s.id = u.submission_id
+LEFT JOIN submissions s ON s.id = COALESCE(
+  u.submission_id,
+  (SELECT ta.submission_id FROM task_assignments ta JOIN tasks t2 ON t2.id = ta.task_id
+    WHERE ta.contact_id = u.contact_id AND ta.submission_id IS NOT NULL
+      AND (t2.file_request_id = u.file_request_id OR ('file-request-task-' || t2.id) = u.file_request_id)
+    LIMIT 1)
+)
 LEFT JOIN contacts c ON c.id = u.contact_id
 LEFT JOIN contacts ub ON ub.id = fa.uploaded_by_contact_id`;
 
@@ -98,8 +114,25 @@ filesAdminRoutes.get('/library', async (c) => {
   }
   const submissionId = c.req.query('submission_id');
   if (submissionId) {
-    where.push('u.submission_id = ?');
-    params.push(submissionId);
+    // #9: u.submission_id is stamped from task_assignments.submission_id at
+    // upload time (portal.ts), which is only ever set when the task itself
+    // was targeted at that submission — a task assigned directly to a
+    // contact (expandTaskTargets' single-match fallback) can leave it NULL
+    // even though the upload plainly belongs to that speaker's session. Also
+    // match via the task-assignment chain identity (file_request_id +
+    // contact_id, the same pair loadChainVersions keys a chain on) so a
+    // session's Files section finds uploads made against any of that
+    // session's tasks, not only the ones whose upload row got the
+    // submission_id column stamped directly.
+    where.push(`(u.submission_id = ? OR (
+      u.submission_id IS NULL AND EXISTS (
+        SELECT 1 FROM task_assignments ta
+        JOIN tasks t2 ON t2.id = ta.task_id
+        WHERE ta.contact_id = u.contact_id AND ta.submission_id = ?
+          AND (t2.file_request_id = u.file_request_id OR ('file-request-task-' || t2.id) = u.file_request_id)
+      )
+    ))`);
+    params.push(submissionId, submissionId);
   }
   const contactId = c.req.query('contact_id');
   if (contactId) {
@@ -108,14 +141,25 @@ filesAdminRoutes.get('/library', async (c) => {
   }
   const q = c.req.query('q');
   if (q) {
-    where.push('(fa.filename LIKE ? OR c.email LIKE ? OR c.first_name LIKE ? OR c.last_name LIKE ?)');
+    // #9: session code/title are searchable too, so the library's free-text
+    // box doubles as a session filter (the same resolved-session join
+    // LIBRARY_SELECT uses, so a match here is exactly a match on what the
+    // Session column displays).
+    where.push('(fa.filename LIKE ? OR c.email LIKE ? OR c.first_name LIKE ? OR c.last_name LIKE ? OR s.code LIKE ? OR s.title LIKE ?)');
     const like = `%${q}%`;
-    params.push(like, like, like, like);
+    params.push(like, like, like, like, like, like);
   }
   const size = Math.min(Math.max(Number(c.req.query('size') ?? 50) || 50, 1), 200);
   const from = Math.max(Number(c.req.query('from') ?? 0) || 0, 0);
 
   const clause = where.join(' AND ');
+  const resolvedSessionJoin = `LEFT JOIN submissions s ON s.id = COALESCE(
+      u.submission_id,
+      (SELECT ta.submission_id FROM task_assignments ta JOIN tasks t3 ON t3.id = ta.task_id
+        WHERE ta.contact_id = u.contact_id AND ta.submission_id IS NOT NULL
+          AND (t3.file_request_id = u.file_request_id OR ('file-request-task-' || t3.id) = u.file_request_id)
+        LIMIT 1)
+    )`;
   const [list, count] = await Promise.all([
     c.env.DB.prepare(`${LIBRARY_SELECT} WHERE ${clause} ORDER BY u.uploaded_at DESC LIMIT ? OFFSET ?`)
       .bind(...params, size, from)
@@ -124,6 +168,7 @@ filesAdminRoutes.get('/library', async (c) => {
       `SELECT COUNT(*) AS n FROM file_request_uploads u
        JOIN file_assets fa ON fa.id = u.file_asset_id
        LEFT JOIN contacts c ON c.id = u.contact_id
+       ${q ? resolvedSessionJoin : ''}
        WHERE ${clause}`,
     )
       .bind(...params)
@@ -378,4 +423,53 @@ filesAdminRoutes.post('/uploads/:uploadId/comments', async (c) => {
   if (!id) return c.json({ error: 'empty_body' }, 400);
   const versions = await loadChainForUpload(c.env.DB, upload.id);
   return c.json({ ok: true, id, comments: await loadThread(c.env.DB, versions) });
+});
+
+// ---------------------------------------------------------------------------
+// #18: event-level file-collection defaults — a modest per-event setting so
+// an organiser doesn't have to configure "Action type = File upload" and its
+// allowed types from scratch on every task. Two columns on `events`
+// (0040_event_file_defaults.sql), following the same small-dedicated-route
+// pattern as chase.ts's GET/PUT /app/api/chase/settings, rather than folding
+// into the generic PATCH /events form (adminApi.ts's pickEventFields) —
+// `default_file_upload_enabled` and `default_file_allowed_types` are a
+// task-creation nicety, not settings-history content.
+// ---------------------------------------------------------------------------
+
+interface FileDefaultsRow {
+  default_file_upload_enabled: number;
+  default_file_allowed_types: string | null;
+}
+
+/** GET /app/api/files/settings — the current event's file-collection defaults. */
+filesAdminRoutes.get('/settings', async (c) => {
+  const session = c.get('session');
+  const row = await c.env.DB.prepare(
+    'SELECT default_file_upload_enabled, default_file_allowed_types FROM events WHERE id = ?',
+  )
+    .bind(session.eventId)
+    .first<FileDefaultsRow>();
+  if (!row) return c.json({ error: 'not_found' }, 404);
+  return c.json({
+    enabled: row.default_file_upload_enabled === 1,
+    allowed_types: row.default_file_allowed_types ? (JSON.parse(row.default_file_allowed_types) as string[]) : [],
+  });
+});
+
+/** PUT /app/api/files/settings { enabled, allowed_types } */
+filesAdminRoutes.put('/settings', async (c) => {
+  const session = c.get('session');
+  if (session.role !== 'owner' && session.role !== 'admin') return c.json({ error: 'forbidden' }, 403);
+  const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+  const enabled = body.enabled === true;
+  const allowedTypes = Array.isArray(body.allowed_types)
+    ? body.allowed_types.filter((t): t is string => typeof t === 'string' && t.trim() !== '')
+    : [];
+
+  await c.env.DB.prepare(
+    'UPDATE events SET default_file_upload_enabled = ?, default_file_allowed_types = ?, updated_at = ? WHERE id = ?',
+  )
+    .bind(enabled ? 1 : 0, allowedTypes.length > 0 ? JSON.stringify(allowedTypes) : null, new Date().toISOString(), session.eventId)
+    .run();
+  return c.json({ ok: true, enabled, allowed_types: allowedTypes });
 });

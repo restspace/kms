@@ -126,6 +126,56 @@ describe('GET /auth/callback', () => {
     expect((await callback('not-a-real-token')).status).toBe(410);
   });
 
+  // #17: an expired/replayed link must not strand the person with nothing to
+  // do but ask an organiser to relay another one by hand.
+  describe('self-service resend on the expired-link page', () => {
+    it('offers a one-click resend prefilled with the same email and event once a real link has expired', async () => {
+      const contactId = await createContact(eventId, { email: 'late2@example.com' });
+      const { raw, statement } = await mintToken(env.DB, {
+        contactId,
+        eventId,
+        purpose: 'portal-login',
+        ttlSeconds: -60,
+      });
+      await statement.run();
+      const res = await callback(raw);
+      expect(res.status).toBe(410);
+      const body = await res.text();
+      expect(body).toContain('Email me a new sign-in link for Magic Link Conf');
+      expect(body).toContain('value="late2@example.com"');
+      expect(body).toContain(`value="${slug}"`);
+
+      // The button really works: posting it mints a fresh, usable link.
+      const resend = await SELF.fetch(`${ORIGIN}/auth/request`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', accept: 'application/json' },
+        body: JSON.stringify({ email: 'late2@example.com', event_slug: slug }),
+      });
+      expect(resend.status).toBe(200);
+      const { dev_link } = (await resend.json()) as { dev_link: string };
+      expect((await callback(tokenOf(dev_link))).status).toBe(302);
+    });
+
+    it('replaying an already-consumed link still offers the resend form', async () => {
+      const link = await requestDevLink('speaker@example.com');
+      const token = tokenOf(link);
+      expect((await callback(token)).status).toBe(302);
+      const replay = await callback(token);
+      expect(replay.status).toBe(410);
+      const body = await replay.text();
+      expect(body).toContain('Email me a new sign-in link');
+      expect(body).toContain('value="speaker@example.com"');
+    });
+
+    it('falls back to the plain message for a token that never existed', async () => {
+      const res = await callback('not-a-real-token-either');
+      expect(res.status).toBe(410);
+      const body = await res.text();
+      expect(body).not.toContain('Email me a new sign-in link');
+      expect(body).toContain('Please request a new one from the portal login page.');
+    });
+  });
+
   it('authenticates a submission-confirmation link straight into the portal', async () => {
     const contactId = await createContact(eventId, { email: 'submitter@example.com' });
     const { raw, statement } = await mintToken(env.DB, {

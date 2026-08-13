@@ -601,29 +601,32 @@ async function expandRemindTasks(env: Env, job: BulkJobRow, limit: number): Prom
   if (slice.length > 0) {
     const placeholders = slice.map(() => '?').join(', ');
     // LEFT JOIN contacts, not the inner join this used to be: an inner join
-    // silently dropped an overdue assignment whose contact has no email (or
-    // was deleted) from `rows` with no trace anywhere, which is exactly the
-    // "disqualified with no explanation" shape CNT-08 described. Every id
-    // still matching the same overdue predicate the dashboard panel and
-    // POST /remind use (t.event_id, ta.status != 'complete', t.due_at) now
-    // comes back, so a missing email is a countable, reportable skip instead
-    // of a silent no-op.
+    // silently dropped an outstanding assignment whose contact has no email
+    // (or was deleted) from `rows` with no trace anywhere, which is exactly
+    // the "disqualified with no explanation" shape CNT-08 described. Every id
+    // still matching the same "outstanding" predicate the dashboard panel and
+    // POST /remind use (t.event_id, ta.status != 'complete', t.due_at IS NOT
+    // NULL — deliberately *not* filtered to overdue-only; see #7) now comes
+    // back, so a missing email is a countable, reportable skip instead of a
+    // silent no-op.
     const { results: rows } = await db
       .prepare(
-        `SELECT ta.id AS assignment_id, ta.contact_id, c.email, c.first_name, t.title AS task_title
+        `SELECT ta.id AS assignment_id, ta.contact_id, c.email, c.first_name, t.title AS task_title, t.due_at AS due_at
          FROM task_assignments ta
          JOIN tasks t ON t.id = ta.task_id
          LEFT JOIN contacts c ON c.id = ta.contact_id
-         WHERE t.event_id = ? AND ta.status != 'complete' AND t.due_at IS NOT NULL AND t.due_at < ?
+         WHERE t.event_id = ? AND ta.status != 'complete' AND t.due_at IS NOT NULL
            AND ta.id IN (${placeholders})`,
       )
-      .bind(job.event_id, now, ...slice)
+      .bind(job.event_id, ...slice)
       .all<{
         assignment_id: string; contact_id: string; email: string | null; first_name: string | null; task_title: string;
+        due_at: string;
       }>();
 
     for (const row of rows) {
       if (!row.email || row.email.trim() === '') continue; // no address to mail — counted by GET /bulk-jobs/:id's skipped_no_email
+      const isOverdue = row.due_at < now;
       const { outcome, payload } = await queueTemplated(db, {
         templateKey: 'task_reminder',
         eventId: job.event_id,
@@ -635,7 +638,11 @@ async function expandRemindTasks(env: Env, job: BulkJobRow, limit: number): Prom
         context: {
           event: { name: event.name },
           speaker: { first_name: row.first_name ?? 'there' },
-          task: { title: row.task_title, due_line: ' — now overdue', url: `${env.APP_URL}/portal/${event.slug}/tasks` },
+          task: {
+            title: row.task_title,
+            due_line: isOverdue ? ' — now overdue' : '',
+            url: `${env.APP_URL}/portal/${event.slug}/tasks`,
+          },
         },
       });
       // Deliver inline rather than waiting for the next cron tick's
@@ -673,6 +680,13 @@ interface ComposeParams {
    * accounted-for message_log row instead of silently disappearing between
    * "Send to N" and the Messages tab. Optional: pre-fix jobs lack it. */
   emails?: Record<string, string>;
+  /** contact id → event id, snapshotted at compose time for recipients whose
+   * OWN event differs from the job's `event_id` (eval defect #10 — a
+   * `selected` audience can span every event the caller can access, see
+   * messagingAdmin.ts's resolveAudience). Only entries that differ from the
+   * job's event are written, so most jobs carry this as absent/empty and
+   * every recipient resolves against `job.event_id` exactly as before. */
+  contact_events?: Record<string, string>;
 }
 
 /**
@@ -704,31 +718,70 @@ async function expandCompose(env: Env, job: BulkJobRow, limit: number): Promise<
   const slice = params.contact_ids.slice(job.enqueued, job.enqueued + limit);
   let duplicates = 0;
   if (slice.length > 0) {
-    const placeholders = slice.map(() => '?').join(', ');
-    const { results: contacts } = await db
-      // 0015: mirrors resolveAudience's shape. The event_contacts join re-pins
-      // the frozen ids to this job's event — a contact removed from the roster
-      // between compose and expansion drops out, exactly as the deleted-contact
-      // case below does — and supplies company/job_title, which are per-event
-      // profile now: the merge fields must render the title this event holds.
-      .prepare(
-        `SELECT c.id, c.email, c.first_name, c.last_name, ec.company, ec.job_title
-         FROM event_contacts ec
-         JOIN contacts c ON c.id = ec.contact_id
-         WHERE ec.event_id = ? AND c.id IN (${placeholders})`,
-      )
-      .bind(job.event_id, ...slice)
-      .all<{
-        id: string; email: string; first_name: string | null; last_name: string | null;
-        company: string | null; job_title: string | null;
-      }>();
-    const byId = new Map(contacts.map((c) => [c.id, c]));
+    // Eval defect #10: most recipients resolve against the job's own event,
+    // but a `selected` audience composed from the org-wide "All events"
+    // directory can carry recipients whose OWN event (messagingAdmin.ts's
+    // resolveAudience) differs from it — `contact_events` (compose-time
+    // snapshot) says which. Group the slice by the event each recipient
+    // actually resolves to, so every recipient is looked up (and later
+    // logged/sent) against THEIR event's roster and profile, not the job's.
+    const eventFor = (contactId: string): string => params.contact_events?.[contactId] ?? job.event_id;
+    const byEvent = new Map<string, string[]>();
+    for (const contactId of slice) {
+      const eid = eventFor(contactId);
+      const bucket = byEvent.get(eid);
+      if (bucket) bucket.push(contactId);
+      else byEvent.set(eid, [contactId]);
+    }
+
+    // Event metadata (name/slug, for the merge context and portal_url) for
+    // every distinct event referenced this tick — job.event_id plus any
+    // recipient-specific ones. Fetched once per tick, not per recipient.
+    const events = new Map<string, { id: string; name: string; slug: string }>([[event.id, event]]);
+    const otherEventIds = [...byEvent.keys()].filter((id) => id !== event.id);
+    if (otherEventIds.length > 0) {
+      const evPlaceholders = otherEventIds.map(() => '?').join(', ');
+      const { results: otherEvents } = await db
+        .prepare(`SELECT id, name, slug FROM events WHERE id IN (${evPlaceholders})`)
+        .bind(...otherEventIds)
+        .all<{ id: string; name: string; slug: string }>();
+      for (const e of otherEvents) events.set(e.id, e);
+    }
+
+    const byId = new Map<
+      string,
+      { id: string; email: string; first_name: string | null; last_name: string | null; company: string | null; job_title: string | null; event_id: string }
+    >();
+    for (const [eid, ids] of byEvent) {
+      const placeholders = ids.map(() => '?').join(', ');
+      const { results: contacts } = await db
+        // 0015: mirrors resolveAudience's shape. The event_contacts join
+        // re-pins each id to ITS resolved event — a contact removed from
+        // that roster between compose and expansion drops out, exactly as
+        // the deleted-contact case below does — and supplies company/
+        // job_title, which are per-event profile now: the merge fields must
+        // render the title held at the event the recipient is actually
+        // logged against.
+        .prepare(
+          `SELECT c.id, c.email, c.first_name, c.last_name, ec.company, ec.job_title
+           FROM event_contacts ec
+           JOIN contacts c ON c.id = ec.contact_id
+           WHERE ec.event_id = ? AND c.id IN (${placeholders})`,
+        )
+        .bind(eid, ...ids)
+        .all<{
+          id: string; email: string; first_name: string | null; last_name: string | null;
+          company: string | null; job_title: string | null;
+        }>();
+      for (const c of contacts) byId.set(c.id, { ...c, event_id: eid });
+    }
 
     // Iterate the *snapshot* order, not the query results: a contact deleted
     // between compose and expansion is skipped without shifting the offset,
     // so `enqueued` stays a truthful cursor into contact_ids.
     for (const contactId of slice) {
       const contact = byId.get(contactId);
+      const resolvedEventId = eventFor(contactId);
       if (!contact) {
         // 2026-08-12 sweep, defects 2/3: this used to `continue` with no
         // trace — one of N selected recipients simply never appeared in the
@@ -736,7 +789,9 @@ async function expandCompose(env: Env, job: BulkJobRow, limit: number): Promise<
         // "Send to N". Every selected recipient must land a log row with a
         // status, so write a 'failed' row (with the reason in `error`) using
         // the email snapshotted at compose time. Pre-fix jobs without the
-        // snapshot still skip, but new composes always carry it.
+        // snapshot still skip, but new composes always carry it. Logged
+        // against the recipient's own resolved event, not the job's, so the
+        // failure lands where the organiser will actually look for it.
         const snapshotEmail = params.emails?.[contactId];
         if (snapshotEmail) {
           await db
@@ -750,7 +805,7 @@ async function expandCompose(env: Env, job: BulkJobRow, limit: number): Promise<
             )
             .bind(
               crypto.randomUUID(),
-              job.event_id,
+              resolvedEventId,
               snapshotEmail,
               contactId,
               params.subject,
@@ -763,6 +818,7 @@ async function expandCompose(env: Env, job: BulkJobRow, limit: number): Promise<
         }
         continue;
       }
+      const recipientEvent = events.get(contact.event_id) ?? event;
       const fullName = [contact.first_name, contact.last_name].filter(Boolean).join(' ') || contact.email;
       const recipientContext = {
         first_name: contact.first_name ?? 'there',
@@ -774,7 +830,10 @@ async function expandCompose(env: Env, job: BulkJobRow, limit: number): Promise<
       };
       const { outcome, payload } = await queueTemplated(db, {
         templateKey: 'compose',
-        eventId: job.event_id,
+        // Eval defect #10: logged (message_log.event_id) and rendered
+        // against the recipient's OWN event, not the job's — see the
+        // grouping above.
+        eventId: contact.event_id,
         contactId: contact.id,
         toEmail: contact.email,
         entityId: contact.id,
@@ -799,8 +858,8 @@ async function expandCompose(env: Env, job: BulkJobRow, limit: number): Promise<
           // organiser copying wording out of a template keeps working.
           speaker: recipientContext,
           contact: recipientContext,
-          event: { name: event.name },
-          portal_url: `${env.APP_URL}/portal/${event.slug}`,
+          event: { name: recipientEvent.name },
+          portal_url: `${env.APP_URL}/portal/${recipientEvent.slug}`,
         },
       });
       // Deliver inline rather than waiting for the next cron tick's

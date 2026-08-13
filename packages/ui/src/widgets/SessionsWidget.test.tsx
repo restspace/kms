@@ -110,4 +110,45 @@ describe('SessionsWidget', () => {
     await user.click(closeButton);
     expect(screen.queryByRole('dialog')).toBeNull();
   });
+
+  // Defect #28: a published session with no description rendered nothing
+  // where siblings show description + "Show more" — the whole block was
+  // conditioned on `description && (...)`, so an empty one silently
+  // vanished instead of getting the same graceful placeholder the
+  // speakerless-session case ("Speaker TBA") already had.
+  it('shows a placeholder, not a missing block, for a session with no description', async () => {
+    const noDescFeed: AgendaFeed = {
+      ...feed,
+      sessions: [
+        ...feed.sessions,
+        {
+          id: 's2',
+          code: 'SESS-2',
+          title: 'Lightning: Retrieval Tricks',
+          description: '',
+          format: 'Lightning',
+          level: null,
+          capacity: null,
+          track_id: null,
+          room_id: null,
+          starts_at: '2027-05-12T18:00:00.000Z',
+          ends_at: '2027-05-12T18:10:00.000Z',
+          day: '2027-05-12',
+          speakers: [],
+          speaker_details: [],
+        },
+      ],
+    };
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({ ok: true, json: async () => noDescFeed }) as Response),
+    );
+
+    render(<SessionsWidget eventSlug="devflow" />);
+    await waitFor(() => expect(screen.getByText(/Lightning: Retrieval Tricks/)).toBeTruthy());
+
+    expect(screen.getByText('No description provided.')).toBeTruthy();
+    // The sibling card with a real description is unaffected.
+    expect(screen.getByRole('button', { name: 'Show more' })).toBeTruthy();
+  });
 });

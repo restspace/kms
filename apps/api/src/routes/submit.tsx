@@ -343,6 +343,20 @@ function answerStatements(db: D1Database, submissionId: string, answers: Answers
   return statements;
 }
 
+/** Never-renamed placeholder some rows still carry literally in the column
+ *  (formsAdmin.ts's old create-form default, before defect #23's fix). */
+const UNTITLED_FORM_PLACEHOLDER = 'Untitled form';
+
+/** The public wizard's H1: the form's own title when it has one, otherwise
+ *  the event's name — never the bare "Untitled form" placeholder (defect
+ *  #23), whether that placeholder is stored as external_title or (via the
+ *  external_title ?? internal_name fallback) as internal_name. */
+function resolveFormTitle(externalTitle: string | null, internalName: string, eventName: string): string {
+  const candidate = externalTitle ?? internalName;
+  const trimmed = candidate.trim();
+  return trimmed && trimmed !== UNTITLED_FORM_PLACEHOLDER ? trimmed : eventName;
+}
+
 function parseAnswers(raw: unknown): Answers {
   if (!raw || typeof raw !== 'object') return {};
   const out: Answers = {};
@@ -436,7 +450,12 @@ submitRoutes.get('/:slug/:formId', async (c) => {
     event: { name: event.name, slug: event.slug, timezone: event.timezone },
     form: {
       id: form.id,
-      external_title: form.external_title ?? form.internal_name,
+      // Defect #23: a form with no real title (never renamed past the
+      // internal_name/external_title placeholder — old rows literally have
+      // "Untitled form" stored) rendered that placeholder as the branded
+      // page's H1. The event's own name is always a truthful, present
+      // fallback, unlike a form name nobody has set yet.
+      external_title: resolveFormTitle(form.external_title, form.internal_name, event.name),
       page_heading: form.page_heading ?? '',
       welcome_message: sanitizeRichHtml(form.welcome_message),
       welcome_message_visible: form.welcome_message_visible === 1,

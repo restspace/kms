@@ -133,13 +133,20 @@ export const COMPOSE_MERGE_FIELDS: ReadonlyArray<{ field: string; description: s
   { field: 'portal_url', description: 'Link to the speaker portal' },
 ];
 
-export type ComposeAudience = 'all_contacts' | 'roster' | 'speakers' | 'accepted_speakers' | 'selected';
+export type ComposeAudience =
+  | 'all_contacts'
+  | 'roster'
+  | 'speakers'
+  | 'accepted_speakers'
+  | 'declined_speakers'
+  | 'selected';
 
 const COMPOSE_AUDIENCES: readonly ComposeAudience[] = [
   'all_contacts',
   'roster',
   'speakers',
   'accepted_speakers',
+  'declined_speakers',
   'selected',
 ];
 
@@ -150,6 +157,12 @@ export interface ComposeRecipient {
   last_name: string | null;
   company: string | null;
   job_title: string | null;
+  /** Only populated for the `selected` audience (see its branch below) —
+   * the event whose membership actually produced this recipient's row,
+   * which is not necessarily `eventId` the caller resolved against. Named
+   * audiences are inherently single-event, so they leave this unset and
+   * callers fall back to the resolution event. */
+  event_id?: string;
 }
 
 /**
@@ -167,6 +180,10 @@ export interface ComposeRecipient {
  *                        `submission_participants` row) — the workspace's
  *                        working definition of "speaker"
  *  - `accepted_speakers` the same, narrowed to accepted submissions
+ *  - `declined_speakers` the same, narrowed to declined submissions — so a
+ *                        rejection follow-up (or a "sorry, maybe next year")
+ *                        no longer requires hand-picking recipients out of
+ *                        `speakers` (2026-08-13 eval sweep, defect #14)
  *  - `selected`          exactly the ids the organiser checked, filtered to
  *                        this event (a foreign id is dropped rather than
  *                        erroring: the selection may come from a stale grid)
@@ -208,9 +225,42 @@ export async function resolveAudience(
   if (audience === 'selected') {
     if (contactIds.length === 0) return [];
     const placeholders = contactIds.map(() => '?').join(', ');
+    // Eval defect #10: the compose UI's "Choose recipients…" picker loads
+    // contacts unscoped by event (a compose opened from the org-wide "All
+    // events" directory has no single event to scope it to), so a selected
+    // id is not necessarily on THIS `eventId` at all. Resolving strictly
+    // against `eventId` here used to either drop such a recipient outright,
+    // or (worse) silently attribute their send to the wrong event — all 12
+    // sends from an org-wide compose landed on the seeded default event
+    // instead of whichever event each recipient actually belonged to.
+    //
+    // Each selected recipient is instead resolved against THEIR OWN event —
+    // the most-recently-added membership, the same "most recent wins" rule
+    // CONTACTS_ORG_SPEC (the org directory) and the pipeline cards already
+    // use — scoped to this caller's organisation (derived from `eventId`,
+    // never the request) so a foreign contact id resolves to nothing rather
+    // than leaking across tenants. The caller (POST /compose) uses the
+    // returned `event_id` to log each recipient's send against their own
+    // event instead of the compose session's.
+    const org = await db
+      .prepare('SELECT org_id FROM events WHERE id = ?')
+      .bind(eventId)
+      .first<{ org_id: string }>();
+    if (!org) return [];
     const { results } = await db
-      .prepare(`${select} WHERE ec.event_id = ? AND c.id IN (${placeholders}) AND ${hasEmail} ORDER BY c.id`)
-      .bind(eventId, ...contactIds)
+      .prepare(
+        `SELECT c.id, c.email, c.first_name, c.last_name, m.company, m.job_title, m.event_id
+           FROM contacts c
+           JOIN event_contacts m
+             ON m.contact_id = c.id
+            AND m.event_id = (SELECT ec2.event_id FROM event_contacts ec2
+                                WHERE ec2.contact_id = c.id
+                                ORDER BY ec2.added_at DESC, ec2.event_id DESC
+                                LIMIT 1)
+          WHERE c.org_id = ? AND c.id IN (${placeholders}) AND ${hasEmail}
+          ORDER BY c.id`,
+      )
+      .bind(org.org_id, ...contactIds)
       .all<ComposeRecipient>();
     return results;
   }
@@ -228,7 +278,12 @@ export async function resolveAudience(
       .all<ComposeRecipient>();
     return results;
   }
-  const statusClause = audience === 'accepted_speakers' ? "AND s.status = 'accepted'" : '';
+  const statusClause =
+    audience === 'accepted_speakers'
+      ? "AND s.status = 'accepted'"
+      : audience === 'declined_speakers'
+        ? "AND s.status = 'declined'"
+        : '';
   const { results } = await db
     .prepare(
       `${select} WHERE ec.event_id = ?1 AND ${hasEmail} AND ${hasName} AND c.id IN (
@@ -318,6 +373,17 @@ messagingAdminRoutes.post('/compose', async (c) => {
         // 'failed' log row instead of silently sending to fewer people than
         // the button said.
         emails: Object.fromEntries(recipients.map((r) => [r.id, r.email])),
+        // Eval defect #10: per-recipient event snapshot, for the same reason
+        // as `emails` above — a `selected` audience can span every event the
+        // caller can access (resolveAudience's doc comment), so the job's own
+        // single `event_id` (fixed to the composing session's event, which
+        // the bulk-jobs status poll relies on) is not necessarily where any
+        // given recipient belongs. Only entries that differ from the job's
+        // event are worth carrying; named audiences never populate this since
+        // resolveAudience resolves them against `session.eventId` already.
+        ...(recipients.some((r) => r.event_id && r.event_id !== session.eventId)
+          ? { contact_events: Object.fromEntries(recipients.filter((r) => r.event_id).map((r) => [r.id, r.event_id])) }
+          : {}),
       }),
       recipients.length,
       session.contactId,
@@ -347,7 +413,7 @@ messagingAdminRoutes.get('/compose/audiences', async (c) => {
   const session = c.get('session');
   const db = c.env.DB;
   const items = await Promise.all(
-    (['all_contacts', 'roster', 'speakers', 'accepted_speakers'] as const).map(async (audience) => ({
+    (['all_contacts', 'roster', 'speakers', 'accepted_speakers', 'declined_speakers'] as const).map(async (audience) => ({
       audience,
       count: (await resolveAudience(db, session.eventId, audience, [])).length,
     })),
@@ -384,10 +450,14 @@ messagingAdminRoutes.post('/preview', async (c) => {
 
   const [event, recipients] = await Promise.all([
     db.prepare('SELECT id, name, slug FROM events WHERE id = ?').bind(session.eventId).first<{ id: string; name: string; slug: string }>(),
-    // `resolveAudience('selected', …)` is the same event_contacts-scoped
-    // lookup `compose` and `expandCompose` use — a contact not on this event
-    // (or on someone else's event entirely) resolves to no rows, same
-    // tenancy guard as every other route here.
+    // `resolveAudience('selected', …)` is the same lookup `compose` and
+    // `expandCompose` use — since the #10 fix it resolves against the
+    // recipient's OWN (most-recent) event rather than requiring `eventId`
+    // specifically, scoped to `eventId`'s organisation; a contact outside
+    // that org resolves to no rows, same tenancy guard as every other route
+    // here. This preview still renders event.name/portal_url from the
+    // session's own event, same as before — it is a wording check, not a
+    // send, and does not carry the recipient's resolved event forward.
     resolveAudience(db, session.eventId, 'selected', [contactId]),
   ]);
   if (!event) return c.json({ error: 'not_found' }, 404);

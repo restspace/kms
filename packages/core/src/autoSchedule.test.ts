@@ -251,6 +251,70 @@ describe('autoSchedule — preferences', () => {
   });
 });
 
+describe('autoSchedule — realistic-day preference (eval #20)', () => {
+  it('places a lone lightning talk in the 09:00–18:00 window, not at the raw 06:00 axis start', () => {
+    const rooms = [room('r1')];
+    const window = { starts_at: '2027-05-12T00:00:00.000Z', ends_at: '2027-05-12T23:59:59.999Z' };
+    const result = autoSchedule(
+      [mk('lightning', { format: 'Lightning Talk (10 min)' })],
+      [],
+      rooms,
+      window,
+      UTC,
+    );
+    expect(result.skipped).toEqual([]);
+    const placement = result.placements[0];
+    expect(placement).toBeDefined();
+    const local = utcToLocal(placement?.starts_at as string, 'UTC');
+    expect(local.minutes).toBeGreaterThanOrEqual(9 * 60);
+    expect(local.minutes).toBeLessThan(18 * 60);
+  });
+
+  it('widens the realistic window to include an early already-scheduled session, rather than shrinking to it', () => {
+    const rooms = [room('r1'), room('r2')];
+    const window = { starts_at: '2027-05-12T00:00:00.000Z', ends_at: '2027-05-12T23:59:59.999Z' };
+    const scheduled: AgendaSessionInput[] = [
+      {
+        ...mk('early-bird'),
+        starts_at: '2027-05-12T07:00:00.000Z',
+        ends_at: '2027-05-12T07:30:00.000Z',
+        room_id: 'r1',
+      },
+    ];
+    // A free-floating session should still land inside the widened window
+    // (07:00–18:00), not get squeezed into exactly 07:00–07:30.
+    const result = autoSchedule([mk('s1', { format: '60 min' })], scheduled, rooms, window, UTC);
+    expect(result.skipped).toEqual([]);
+    const local = utcToLocal(result.placements[0]?.starts_at as string, 'UTC');
+    expect(local.minutes).toBeGreaterThanOrEqual(7 * 60);
+    expect(local.minutes).toBeLessThan(18 * 60);
+  });
+
+  it('still places outside the window when the realistic day is packed solid, rather than skipping', () => {
+    const rooms = [room('r1')];
+    const window = { starts_at: '2027-05-12T00:00:00.000Z', ends_at: '2027-05-12T23:59:59.999Z' };
+    // Fill the whole 09:00–18:00 window with one back-to-back block so the
+    // only remaining candidate for a second session is outside it.
+    const scheduled: AgendaSessionInput[] = [
+      {
+        ...mk('filler'),
+        starts_at: '2027-05-12T09:00:00.000Z',
+        ends_at: '2027-05-12T18:00:00.000Z',
+        room_id: 'r1',
+      },
+    ];
+    const result = autoSchedule(
+      [mk('overflow', { format: '30 min' })],
+      scheduled,
+      rooms,
+      window,
+      { timezone: 'UTC', dayStartMin: 6 * 60, dayEndMin: 20 * 60, stepMin: 15 },
+    );
+    expect(result.skipped).toEqual([]);
+    expect(result.placements).toHaveLength(1);
+  });
+});
+
 describe('autoSchedule — skipped reasons', () => {
   it('reports no_rooms when the event has no rooms at all', () => {
     const result = autoSchedule([mk('s1'), mk('s2')], [], [], WINDOW, UTC);

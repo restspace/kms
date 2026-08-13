@@ -224,6 +224,56 @@ describe('GET /app/api/contacts/:id/history', () => {
     );
     expect(res.status).toBe(404);
   });
+
+  // Eval defect #6a: the org-level directory (scope: 'org') hands every row
+  // `event_id: null` — a person is org-wide there, not tied to one event —
+  // so the SPA's cross-event panel opens with no ?event_id= to send and the
+  // route fell back to session.eventId, which is frequently NOT one of this
+  // contact's events when they were found through the org directory rather
+  // than a roster. That read as "The record no longer exists" for a contact
+  // who plainly does. The route should fall back to any event the caller can
+  // access that the contact is actually on.
+  it('falls back to another accessible event when the caller omits ?event_id and is not on the contact’s roster', async () => {
+    const orgId = `org-${crypto.randomUUID()}`;
+    const eventA = await seedEvent({ org_id: orgId, name: 'Alpha Conf' });
+    const eventB = await seedEvent({ org_id: orgId, name: 'Beta Summit' });
+    const admin = await seedStaff(eventA, 'admin');
+    // The admin also has a writer seat on B (so B is in accessibleEventIds),
+    // but the contact is ONLY on B, never on the admin's home event A.
+    await attachContactToEvent(eventB, admin.contactId);
+    await seedEventUser(eventB, admin.contactId, 'admin');
+    const contactId = await seedContact(eventB, { email: 'beta-only@example.com', last_name: 'Lovelace' });
+    await seedSubmission(eventB, { submitter_contact_id: contactId, title: 'Beta Only Talk' });
+
+    const res = await SELF.fetch(
+      `https://example.com/app/api/contacts/${contactId}/history`,
+      jsonReq(admin.cookie, undefined, 'GET'),
+    );
+    expect(res.status, await res.clone().text()).toBe(200);
+    const parsed = (await res.json()) as {
+      events: Array<{ event_id: string; submissions: Array<{ title: string }> }>;
+      current_event_id: string;
+    };
+    expect(parsed.current_event_id).toBe(eventB);
+    expect(parsed.events.map((e) => e.event_id)).toEqual([eventB]);
+    expect(parsed.events[0].submissions.map((s) => s.title)).toEqual(['Beta Only Talk']);
+  });
+
+  it('still 404s an explicit ?event_id= the contact is not on, even with another accessible event that would have matched', async () => {
+    const orgId = `org-${crypto.randomUUID()}`;
+    const eventA = await seedEvent({ org_id: orgId, name: 'Alpha Conf' });
+    const eventB = await seedEvent({ org_id: orgId, name: 'Beta Summit' });
+    const admin = await seedStaff(eventA, 'admin');
+    await attachContactToEvent(eventB, admin.contactId);
+    await seedEventUser(eventB, admin.contactId, 'admin');
+    const contactId = await seedContact(eventB, { email: 'beta-only-2@example.com' });
+
+    const res = await SELF.fetch(
+      `https://example.com/app/api/contacts/${contactId}/history?event_id=${eventA}`,
+      jsonReq(admin.cookie, undefined, 'GET'),
+    );
+    expect(res.status).toBe(404);
+  });
 });
 
 describe('DELETE /app/api/contacts/:id/org', () => {

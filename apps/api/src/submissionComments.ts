@@ -22,7 +22,12 @@ export interface SubmissionCommentRow {
   created_at: string;
 }
 
-/** The whole thread for one submission, oldest first. */
+/**
+ * The whole thread for one submission, oldest first. This is the organiser
+ * detail panel's view (workplan 13 #1: "one comment thread per proposal,
+ * shared by the whole committee") — every round's rationale and discussion
+ * pooled together, which is exactly what an organiser comparing rounds wants.
+ */
 export async function loadThread(db: D1Database, submissionId: string): Promise<SubmissionCommentRow[]> {
   const { results } = await db
     .prepare(
@@ -33,6 +38,37 @@ export async function loadThread(db: D1Database, submissionId: string): Promise<
        ORDER BY created_at, id`,
     )
     .bind(submissionId)
+    .all<SubmissionCommentRow>();
+  return results;
+}
+
+/**
+ * The thread a reviewer scoring one round should see (eval defect #11): every
+ * round has its own evaluation_plans row, and a submission that passed
+ * through an earlier round (e.g. "Program Committee") before landing in the
+ * one a reviewer is currently working ("Initial Review") keeps that earlier
+ * round's rationale/discussion rows in `submission_comments` — they are a
+ * record of real work, never deleted. `loadThread` pools every round
+ * together, which is right for the organiser's cross-round view but wrong
+ * here: it read as the *current* round's rationale bleeding across rounds.
+ * Scoped to rows tagged with this round's plan_id, plus untagged
+ * (`plan_id IS NULL`) rows — organiser notes posted outside any specific
+ * round via POST /submissions/:id/comments — which stay visible everywhere.
+ */
+export async function loadThreadForPlan(
+  db: D1Database,
+  submissionId: string,
+  planId: string,
+): Promise<SubmissionCommentRow[]> {
+  const { results } = await db
+    .prepare(
+      `SELECT id, submission_id, plan_id, assignment_id, author_contact_id,
+              author_role, author_name, kind, body, created_at
+       FROM submission_comments
+       WHERE submission_id = ? AND (plan_id = ? OR plan_id IS NULL)
+       ORDER BY created_at, id`,
+    )
+    .bind(submissionId, planId)
     .all<SubmissionCommentRow>();
   return results;
 }

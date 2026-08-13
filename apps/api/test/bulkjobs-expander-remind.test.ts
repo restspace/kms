@@ -23,6 +23,7 @@ import { createContact, createEvent, createEventUser, sessionCookieFor } from '.
 
 const ts = '2026-08-01T00:00:00Z';
 const past = '2026-01-01T00:00:00Z';
+const future = '2099-01-01T00:00:00Z';
 
 const clearPendingJobs = () =>
   env.DB.prepare("DELETE FROM bulk_jobs WHERE status IN ('pending', 'running')").run();
@@ -32,6 +33,21 @@ async function seedOverdueAssignment(eventId: string, contactId: string): Promis
   await env.DB.prepare(
     `INSERT INTO tasks (id, event_id, title, due_at, created_at) VALUES (?, ?, 'Submit slides', ?, ?)`,
   ).bind(taskId, eventId, past, ts).run();
+  const assignId = `ta-${crypto.randomUUID()}`;
+  await env.DB.prepare(
+    `INSERT INTO task_assignments (id, task_id, contact_id, status) VALUES (?, ?, ?, 'not_started')`,
+  ).bind(assignId, taskId, contactId).run();
+  return { taskId, assignId };
+}
+
+// #7: "Remind all outstanding" must reach not-yet-due tasks too, not just
+// overdue ones — the dashboard button's label/count (dashboard.ts) has always
+// included any not-complete task with a due date, overdue or not.
+async function seedNotYetDueAssignment(eventId: string, contactId: string): Promise<{ taskId: string; assignId: string }> {
+  const taskId = `task-${crypto.randomUUID()}`;
+  await env.DB.prepare(
+    `INSERT INTO tasks (id, event_id, title, due_at, created_at) VALUES (?, ?, 'Submit slides', ?, ?)`,
+  ).bind(taskId, eventId, future, ts).run();
   const assignId = `ta-${crypto.randomUUID()}`;
   await env.DB.prepare(
     `INSERT INTO task_assignments (id, task_id, contact_id, status) VALUES (?, ?, ?, 'not_started')`,
@@ -161,6 +177,56 @@ describe('sweepBulkJobs / remind-tasks', () => {
       `SELECT COUNT(*) AS n FROM message_log WHERE template_key = 'task_reminder' AND bulk_job_id = ?`,
     ).bind(jobId).first<{ n: number }>();
     expect(messages?.n).toBe(0);
+  });
+
+  // #7: eval-caught defect — "Remind all outstanding (3)" reported "0
+  // reminders sent" because the expander's SELECT added an `AND t.due_at <
+  // now` clause the dashboard's count/target-resolution never had, silently
+  // narrowing "outstanding" down to "overdue" at send time. A not-yet-due
+  // outstanding task must still get a reminder, and its email shouldn't claim
+  // the task is overdue.
+  it('sends reminders for outstanding tasks that are not yet overdue (#7)', async () => {
+    await clearPendingJobs();
+    const eventId = await createEvent();
+    const speaker = await createContact(eventId, { email: 'notdue@example.com' });
+    const { assignId } = await seedNotYetDueAssignment(eventId, speaker);
+    const jobId = await seedRemindJob(eventId, [assignId]);
+
+    await sweepBulkJobs(env, 50);
+
+    const job = await env.DB.prepare('SELECT status, enqueued, total FROM bulk_jobs WHERE id = ?')
+      .bind(jobId)
+      .first<{ status: string; enqueued: number; total: number }>();
+    expect(job).toEqual({ status: 'done', enqueued: 1, total: 1 });
+
+    const message = await env.DB.prepare(
+      `SELECT status, body_text FROM message_log WHERE template_key = 'task_reminder' AND bulk_job_id = ?`,
+    ).bind(jobId).first<{ status: string; body_text: string }>();
+    expect(message?.status).toBe('sent');
+    expect(message?.body_text ?? '').not.toContain('overdue');
+  });
+
+  // A mixed batch (one overdue, one not-yet-due) must send to both.
+  it('sends reminders to a mixed batch of overdue and not-yet-due outstanding tasks (#7)', async () => {
+    await clearPendingJobs();
+    const eventId = await createEvent();
+    const overdueSpeaker = await createContact(eventId, { email: 'mixed-overdue@example.com' });
+    const notDueSpeaker = await createContact(eventId, { email: 'mixed-notdue@example.com' });
+    const { assignId: a1 } = await seedOverdueAssignment(eventId, overdueSpeaker);
+    const { assignId: a2 } = await seedNotYetDueAssignment(eventId, notDueSpeaker);
+    const jobId = await seedRemindJob(eventId, [a1, a2]);
+
+    await sweepBulkJobs(env, 50);
+
+    const job = await env.DB.prepare('SELECT status, enqueued, total FROM bulk_jobs WHERE id = ?')
+      .bind(jobId)
+      .first<{ status: string; enqueued: number; total: number }>();
+    expect(job).toEqual({ status: 'done', enqueued: 2, total: 2 });
+
+    const sent = await env.DB.prepare(
+      `SELECT COUNT(*) AS n FROM message_log WHERE status = 'sent' AND bulk_job_id = ?`,
+    ).bind(jobId).first<{ n: number }>();
+    expect(sent?.n).toBe(2);
   });
 
   it('a job with zero targets finishes immediately instead of hanging', async () => {

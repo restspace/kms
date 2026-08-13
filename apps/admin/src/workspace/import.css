@@ -179,6 +179,30 @@
   margin: 2px 0;
 }
 
+/* Eval defect #13: same-name/different-email candidates flagged on import —
+   advisory, not an error, so it gets its own (non-red) treatment distinct
+   from .import-warnings above. */
+.import-duplicates-notice {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px 10px;
+  margin: 8px 0;
+  font-size: 12px;
+}
+
+.import-duplicates-notice p {
+  margin: 0 0 6px;
+}
+
+.import-duplicate-pairs {
+  margin: 0 0 8px;
+  padding-left: 18px;
+}
+
+.import-duplicate-pairs li {
+  margin: 2px 0;
+}
+
 .import-batch-outcome {
   display: flex;
   align-items: center;

@@ -448,10 +448,66 @@ async function loadPortalCtx(c: Context<AppEnv>): Promise<PortalCtx | Response> 
       .first<ContactRow>(),
   );
   if (!contact) return c.html(loginPage(event), 401);
+  // Defect #12: the profile bio (event_contacts.biography, above) and the
+  // biography a speaker typed into a submission's Participant step
+  // (submission_participants.answers_json, keyed by that form's biography
+  // question) are two different stores that are *supposed* to merge back
+  // together at submit time (participants.ts's bioMerge). When they don't —
+  // a draft never promoted, a participant added through a path that skips
+  // the merge, data seeded directly — the portal warned "bio missing" even
+  // though the speaker plainly supplied one. Rather than chase every write
+  // path that could leave the two out of sync, fall back to the newest
+  // submission-participant bio for this contact/event and backfill the
+  // profile with it so the warning (and the profile view) tell the truth.
+  if (!contact.biography) {
+    const fallback = await findSubmissionParticipantBio(c.env.DB, event.id, contact.id);
+    if (fallback) {
+      contact.biography = fallback;
+      await c.env.DB.prepare(
+        `UPDATE event_contacts SET biography = ? WHERE event_id = ? AND contact_id = ? AND (biography IS NULL OR biography = '')`,
+      )
+        .bind(fallback, event.id, contact.id)
+        .run();
+    }
+  }
   // One extra query per portal render, for the header switcher. Gated on a real
   // relationship rather than roster membership — see getPortalEvents.
   const portalEvents = await getPortalEvents(c.env.DB, { email: contact.email, eventId: event.id });
   return { event, session, contactId: contact.id, contact, portalEvents };
+}
+
+/**
+ * Newest non-empty biography a submission's Participant step captured for
+ * this contact on this event, read back out of submission_participants'
+ * answers_json (keyed by that submission's form's biography question id —
+ * the same field every form's Participant step biography question resolves
+ * to, per field_definitions.key = 'biography'). Returns null when the
+ * contact has never typed one anywhere.
+ */
+async function findSubmissionParticipantBio(db: D1Database, eventId: string, contactId: string): Promise<string | null> {
+  const { results } = await db
+    .prepare(
+      `SELECT sp.answers_json, fq.id AS bio_question_id
+         FROM submission_participants sp
+         JOIN submissions s ON s.id = sp.submission_id
+         JOIN form_questions fq ON fq.form_id = s.form_id AND fq.section = 'participant'
+         JOIN field_definitions fd ON fd.id = fq.field_id AND fd.key = 'biography'
+        WHERE sp.contact_id = ?1 AND s.event_id = ?2 AND sp.answers_json IS NOT NULL
+        ORDER BY s.updated_at DESC
+        LIMIT 10`,
+    )
+    .bind(contactId, eventId)
+    .all<{ answers_json: string; bio_question_id: string }>();
+  for (const row of results) {
+    try {
+      const answers = JSON.parse(row.answers_json) as Record<string, unknown>;
+      const value = answers[row.bio_question_id];
+      if (typeof value === 'string' && value.trim() !== '') return value;
+    } catch {
+      // malformed json for this row — try the next one
+    }
+  }
+  return null;
 }
 
 const flashOf = (c: Context<AppEnv>): string | null => c.req.query('m') ?? null;

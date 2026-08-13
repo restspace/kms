@@ -1,6 +1,13 @@
-import { useEffect, useState, type FormEvent } from 'react'
+import { useEffect, useRef, useState, type FormEvent } from 'react'
 import type { CreateFormProps } from '../components/DataTabManager'
-import { getTaskAudiences, queryResource, type ContactRow, type SubmissionRow, type TaskAudience } from '../api'
+import {
+  getFileCollectionDefaults,
+  getTaskAudiences,
+  queryResource,
+  type ContactRow,
+  type SubmissionRow,
+  type TaskAudience,
+} from '../api'
 import { appAlert } from '../components/dialogs'
 
 /**
@@ -53,6 +60,26 @@ export function TaskCreateForm({ initialValues, onSubmit, onCancel, title, onDir
   const [submitError, setSubmitError] = useState<string | null>(null)
   const [isSubmitting, setIsSubmitting] = useState(false)
 
+  // #18: event-level file-collection default — pre-fill Action type to File
+  // upload for a brand-new task (never overrides an explicit initialValues
+  // or a choice the organiser has already made; `actionTypeTouched` guards
+  // the race between this fetch and the organiser touching the select first,
+  // the same shape as the #29 track-select hydration race).
+  const actionTypeTouched = useRef(typeof initialValues?.action_type === 'string')
+  useEffect(() => {
+    if (actionTypeTouched.current) return
+    let cancelled = false
+    getFileCollectionDefaults()
+      .then((d) => {
+        if (cancelled || actionTypeTouched.current || !d.enabled) return
+        setFields((prev) => (prev.action_type === 'acknowledge' ? { ...prev, action_type: 'file_upload' } : prev))
+      })
+      .catch(() => {
+        /* no event default configured, or the fetch failed — Acknowledge stays the default */
+      })
+    return () => { cancelled = true }
+  }, [])
+
   // --- Target pickers -----------------------------------------------------
   const [query, setQuery] = useState('')
   const [contactResults, setContactResults] = useState<ContactRow[]>([])
@@ -87,6 +114,7 @@ export function TaskCreateForm({ initialValues, onSubmit, onCancel, title, onDir
   }
 
   const setField = (key: keyof typeof fields, value: string) => {
+    if (key === 'action_type') actionTypeTouched.current = true
     setFields((prev) => ({ ...prev, [key]: value }))
     onDirtyChange?.(true)
   }

@@ -69,6 +69,13 @@ interface PropertySchema {
   description?: string;
   format?: string;
   enum?: unknown[];
+  /**
+   * Display labels for `enum`, index-aligned (the common JSON-Schema-adjacent
+   * `enumNames` convention). Added for the speaker Status field, whose custom
+   * options carry organiser-written labels that `toReadableText` on the key
+   * can't reproduce. Missing entries fall back to toReadableText(key).
+   */
+  enumNames?: string[];
   readOnly?: boolean;
   default?: unknown;
 }
@@ -290,9 +297,9 @@ export const RecordForm: React.FC<RecordFormProps> = ({
           onChange={(e) => setField(key, e.target.value === '' ? undefined : e.target.value)}
         >
           <option value="">—</option>
-          {prop.enum.map((option) => (
+          {prop.enum.map((option, index) => (
             <option key={String(option)} value={String(option)}>
-              {toReadableText(String(option))}
+              {prop.enumNames?.[index] ?? toReadableText(String(option))}
             </option>
           ))}
         </select>

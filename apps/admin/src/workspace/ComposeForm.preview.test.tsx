@@ -15,6 +15,7 @@ const getComposeAudiences = vi.fn();
 const previewMessage = vi.fn();
 const composeMessage = vi.fn();
 const getBulkJob = vi.fn();
+const listEmailTemplates = vi.fn();
 
 vi.mock('../api', () => ({
   queryResource: (resource: string) => (params: unknown) => queryResource(resource, params),
@@ -22,6 +23,7 @@ vi.mock('../api', () => ({
   previewMessage: (...args: unknown[]) => previewMessage(...args),
   composeMessage: (...args: unknown[]) => composeMessage(...args),
   getBulkJob: (...args: unknown[]) => getBulkJob(...args),
+  listEmailTemplates: (...args: unknown[]) => listEmailTemplates(...args),
   invitePortal: vi.fn(),
   retryMessage: vi.fn(),
 }));
@@ -42,11 +44,28 @@ beforeEach(() => {
   previewMessage.mockReset();
   composeMessage.mockReset();
   getBulkJob.mockReset();
+  listEmailTemplates.mockReset();
   getComposeAudiences.mockResolvedValue({
     items: [
       { audience: 'all_contacts', count: 5 },
       { audience: 'speakers', count: 2 },
       { audience: 'accepted_speakers', count: 1 },
+      { audience: 'declined_speakers', count: 1 },
+    ],
+    merge_fields: [{ field: 'first_name', description: 'Recipient first name' }],
+  });
+  listEmailTemplates.mockResolvedValue({
+    items: [
+      {
+        key: 'decision_declined',
+        default_subject: 'Your {{event.name}} submission: {{submission.title}}',
+        default_body: '<p>Hi {{speaker.first_name}},</p><p>Thank you for submitting.</p>',
+        subject: null,
+        body_richtext: null,
+        enabled: 1,
+        overridden: false,
+        updated_at: null,
+      },
     ],
     merge_fields: [{ field: 'first_name', description: 'Recipient first name' }],
   });
@@ -114,5 +133,66 @@ describe('ComposeForm preview control', () => {
 
     expect((await screen.findByRole('alert')).textContent).toContain('contact_not_found');
     expect(composeMessage).not.toHaveBeenCalled();
+  });
+
+  it('loads recipients into the preview picker without needing focus first (defect #8)', async () => {
+    queryResource.mockResolvedValue({
+      items: [contact('c1', 'Ada', 'ada@example.com')],
+      total: 1,
+    });
+
+    render(<ComposeForm onSubmit={vi.fn()} onCancel={() => {}} title="New message" />);
+
+    // No interaction with the "Preview as" control at all — the contact list
+    // must load on its own so the picker never gets stuck on "Loading
+    // recipients…".
+    await waitFor(() => expect(queryResource).toHaveBeenCalledWith('contacts', { from: 0, size: 500, filters: {} }));
+    const previewSelect = (await screen.findByLabelText('Preview as')) as HTMLSelectElement;
+    await waitFor(() => {
+      const options = Array.from(previewSelect.options).map((o) => o.textContent ?? '');
+      expect(options.some((t) => t.includes('ada@example.com'))).toBe(true);
+    });
+  });
+
+  it('surfaces a recipient-load failure instead of hanging on "Loading recipients…"', async () => {
+    queryResource.mockRejectedValue(new Error('network_error'));
+
+    render(<ComposeForm onSubmit={vi.fn()} onCancel={() => {}} title="New message" />);
+
+    expect(await screen.findByText('network_error')).toBeTruthy();
+    const previewSelect = screen.getByLabelText('Preview as') as HTMLSelectElement;
+    await waitFor(() => expect(previewSelect.options[0].textContent).not.toBe('Loading recipients…'));
+  });
+
+  it('offers a Declined speakers audience preset', async () => {
+    queryResource.mockResolvedValue({ items: [], total: 0 });
+    render(<ComposeForm onSubmit={vi.fn()} onCancel={() => {}} title="New message" />);
+    const audienceSelect = (await screen.findByLabelText('Recipients')) as HTMLSelectElement;
+    const options = Array.from(audienceSelect.options).map((o) => o.textContent ?? '');
+    expect(options.some((t) => t.includes('Declined speakers'))).toBe(true);
+    expect(Array.from(audienceSelect.options).some((o) => o.value === 'declined_speakers')).toBe(true);
+  });
+
+  it('fills subject and body from a picked template, still editable', async () => {
+    const user = userEvent.setup();
+    queryResource.mockResolvedValue({ items: [], total: 0 });
+
+    render(<ComposeForm onSubmit={vi.fn()} onCancel={() => {}} title="New message" />);
+
+    const templateSelect = await screen.findByLabelText('Start from a template');
+    await waitFor(() => expect(listEmailTemplates).toHaveBeenCalled());
+    await user.selectOptions(templateSelect, 'decision_declined');
+
+    const subjectInput = screen.getByLabelText('Subject') as HTMLInputElement;
+    const bodyTextarea = screen.getByLabelText('Message') as HTMLTextAreaElement;
+    await waitFor(() =>
+      expect(subjectInput.value).toBe('Your {{event.name}} submission: {{submission.title}}'),
+    );
+    expect(bodyTextarea.value).toContain('Hi {{speaker.first_name}},');
+    expect(bodyTextarea.value).not.toContain('<p>');
+
+    // Still fully editable after the template fills it in.
+    fireEvent.change(bodyTextarea, { target: { value: 'Hand-edited body' } });
+    expect(bodyTextarea.value).toBe('Hand-edited body');
   });
 });

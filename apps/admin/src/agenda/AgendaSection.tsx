@@ -5,6 +5,7 @@ import {
   computeConflicts,
   computeConflictsForSession,
   type AgendaSessionInput,
+  type Conflict,
   type ConflictIndexes,
 } from '@kms/core'
 import {
@@ -30,6 +31,12 @@ import { appConfirm } from '../components/dialogs'
 import { navigate } from '../router'
 import { createMutationQueue } from './mutationQueue'
 import { ConflictsView } from './ConflictsView'
+import {
+  conflictConfirmMessage,
+  hasBlockingConflict,
+  patchNeedsGuard,
+  publishConflictMessage,
+} from './scheduleGuard'
 import { AddSessionDialog, MoveDialog } from './dialogs'
 import { RoomsBoard } from './RoomsBoard'
 import { TimeGrid, type DropPreview, type GridColumn } from './TimeGrid'
@@ -522,24 +529,94 @@ export function AgendaSection({
   // costs one bucketing pass instead of a full sweep per frame (P2-17).
   const indexCache = useMemo(() => new Map<string, ConflictIndexes>(), [data?.sessions])
 
-  const previewFor = useCallback(
-    (id: string, day: string, startMin: number, durationMin: number, roomId: string | null): DropPreview => {
+  /**
+   * Every live (non-info, non-ignored) conflict a tentative placement would
+   * raise. Shared by the drop-preview ghost (informational) and the
+   * schedule guard below (which blocks on the `error`-severity ones — eval
+   * #22). `excludeId` is the session being moved, so it does not conflict
+   * with its own old slot; pass `null` for a session that does not exist on
+   * the board yet (Add Session).
+   */
+  const computeHits = useCallback(
+    (tentative: AgendaSessionInput, excludeId: string | null) => {
       const current = dataRef.current
-      const session = current?.sessions.find((s) => s.id === id)
-      if (!current || !session) return { bad: false, titles: '' }
-      let indexes = indexCache.get(id)
+      if (!current) return []
+      let indexes = excludeId ? indexCache.get(excludeId) : undefined
       if (!indexes) {
-        indexes = buildConflictIndexes(current.sessions.filter((s) => s.id !== id).map(toEngineSession))
-        indexCache.set(id, indexes)
+        indexes = buildConflictIndexes(
+          current.sessions.filter((s) => s.id !== excludeId).map(toEngineSession),
+        )
+        if (excludeId) indexCache.set(excludeId, indexes)
       }
-      const tentative = { ...toEngineSession(session), ...patchFrom(day, startMin, durationMin, roomId) }
-      const hits = computeConflictsForSession(tentative, indexes, current.rooms, {
+      return computeConflictsForSession(tentative, indexes, current.rooms, {
         starts_at: current.event.starts_at,
         ends_at: current.event.ends_at,
       }).filter((c) => c.severity !== 'info' && !ignoredSignatures.has(c.signature))
+    },
+    [ignoredSignatures, indexCache],
+  )
+
+  const hitsFor = useCallback(
+    (id: string, patch: { starts_at: string | null; ends_at: string | null; room_id: string | null }) => {
+      const session = dataRef.current?.sessions.find((s) => s.id === id)
+      if (!session) return []
+      return computeHits({ ...toEngineSession(session), ...patch }, id)
+    },
+    [computeHits],
+  )
+
+  const previewFor = useCallback(
+    (id: string, day: string, startMin: number, durationMin: number, roomId: string | null): DropPreview => {
+      const hits = hitsFor(id, patchFrom(day, startMin, durationMin, roomId))
       return { bad: hits.length > 0, titles: hits.map((c) => `${c.code}: ${c.message}`).join('\n') }
     },
-    [ignoredSignatures, indexCache, patchFrom],
+    [hitsFor, patchFrom],
+  )
+
+  /**
+   * Room double-booking used to be a passive red ghost — the drop still
+   * went through (eval #22). Any `error`-severity hit (ROOM_DOUBLE_BOOKED is
+   * the one that matters here) now blocks the write behind an explicit
+   * "schedule anyway" confirm; warnings stay passive, same as before. The
+   * severity filtering and message text are pure functions in
+   * `scheduleGuard.ts` so they are unit tested without a DOM.
+   */
+  const confirmScheduleConflict = useCallback(async (hits: Conflict[]): Promise<boolean> => {
+    if (!hasBlockingConflict(hits)) return true
+    return appConfirm(conflictConfirmMessage(hits), {
+      title: 'Scheduling conflict',
+      confirmLabel: 'Schedule anyway',
+      cancelLabel: 'Cancel',
+      danger: true,
+    })
+  }, [])
+
+  /**
+   * `commitSchedule`, gated: a patch that both sets a time and claims a room
+   * is checked for a hard conflict first. Clearing a schedule or leaving the
+   * room unset (day-only pencil) can never double-book anything, so those
+   * skip the check entirely rather than prompt for no reason.
+   */
+  const commitScheduleGuarded = useCallback(
+    (
+      id: string,
+      patch: { starts_at: string | null; ends_at: string | null; room_id: string | null },
+      opts: { pushUndo?: boolean; label?: string; capacity?: number | null } = {},
+    ) => {
+      if (!patchNeedsGuard(patch)) {
+        commitSchedule(id, patch, opts)
+        return
+      }
+      const hits = hitsFor(id, patch)
+      if (!hasBlockingConflict(hits)) {
+        commitSchedule(id, patch, opts)
+        return
+      }
+      void (async () => {
+        if (await confirmScheduleConflict(hits)) commitSchedule(id, patch, opts)
+      })()
+    },
+    [commitSchedule, confirmScheduleConflict, hitsFor],
   )
 
   const filteredSessions = useMemo(() => {
@@ -668,6 +745,24 @@ export function AgendaSection({
           { title: 'Unscheduled sessions will be missing', confirmLabel: 'Publish anyway', cancelLabel: 'Keep as draft' },
         )
         if (!confirmed) return
+      }
+      // Publish-time guard (eval #22): a double-booked room used to publish
+      // silently — a passive red ghost in the grid, nothing in the way of
+      // "go live". List every unresolved error-severity conflict (ignored
+      // ones are, by definition, acknowledged already) and require an
+      // explicit "publish anyway" before the public page can show it.
+      const unresolved = current.conflicts.filter((c) => c.severity === 'error' && !c.ignored)
+      if (unresolved.length > 0) {
+        const confirmed = await appConfirm(publishConflictMessage(unresolved), {
+          title: 'Unresolved conflicts',
+          confirmLabel: 'Publish anyway',
+          cancelLabel: 'Review conflicts',
+          danger: true,
+        })
+        if (!confirmed) {
+          setView('conflicts')
+          return
+        }
       }
     }
     setPublishBusy(true)
@@ -989,13 +1084,13 @@ export function AgendaSection({
               trackColor={trackColor}
               onDrop={(id, col, startMin, dur) => {
                 const roomId = groupBy === 'room' ? col.key : sessionById.get(id)?.room_id ?? null
-                commitSchedule(id, patchFrom(col.day, startMin, dur, roomId))
+                commitScheduleGuarded(id, patchFrom(col.day, startMin, dur, roomId))
               }}
               onResize={(id, dur) => {
                 const s = sessionById.get(id)
                 if (!s?.starts_at) return
                 const local = utcToLocal(s.starts_at, tz)
-                commitSchedule(id, patchFrom(local.day, local.minutes, dur, s.room_id))
+                commitScheduleGuarded(id, patchFrom(local.day, local.minutes, dur, s.room_id))
               }}
               onOpenMove={setMoveId}
               previewDrop={(id, col, startMin, dur) => {
@@ -1029,13 +1124,13 @@ export function AgendaSection({
               conflictNote={conflictNote}
               trackColor={trackColor}
               onDrop={(id, col, startMin, dur) =>
-                commitSchedule(id, patchFrom(col.day, startMin, dur, sessionById.get(id)?.room_id ?? null))
+                commitScheduleGuarded(id, patchFrom(col.day, startMin, dur, sessionById.get(id)?.room_id ?? null))
               }
               onResize={(id, dur) => {
                 const s = sessionById.get(id)
                 if (!s?.starts_at) return
                 const local = utcToLocal(s.starts_at, tz)
-                commitSchedule(id, patchFrom(local.day, local.minutes, dur, s.room_id))
+                commitScheduleGuarded(id, patchFrom(local.day, local.minutes, dur, s.room_id))
               }}
               onOpenMove={setMoveId}
               previewDrop={(id, col, startMin, dur) =>
@@ -1059,7 +1154,7 @@ export function AgendaSection({
               conflictLevel={conflictLevel}
               conflictTitle={conflictTitle}
               trackColor={trackColor}
-              onDrop={(id, roomId, day, startMin, dur) => commitSchedule(id, patchFrom(day, startMin, dur, roomId))}
+              onDrop={(id, roomId, day, startMin, dur) => commitScheduleGuarded(id, patchFrom(day, startMin, dur, roomId))}
               onOpenMove={setMoveId}
               previewDrop={(id, roomId, day, startMin, dur) => previewFor(id, day, startMin, dur, roomId)}
             />
@@ -1113,7 +1208,7 @@ export function AgendaSection({
           defaultDurationMin={defaultDuration(moveSession)}
           onSave={({ day, startMin, durationMin, roomId, capacity }) => {
             setMoveId(null)
-            commitSchedule(moveSession.id, patchFrom(day, startMin, durationMin, roomId), { capacity })
+            commitScheduleGuarded(moveSession.id, patchFrom(day, startMin, durationMin, roomId), { capacity })
           }}
           onUnschedule={() => {
             setMoveId(null)
@@ -1130,23 +1225,56 @@ export function AgendaSection({
           formats={formats}
           days={days}
           onSave={(body) => {
-            setShowAdd(false)
-            runAction(
-              () =>
-                addAgendaSession({
-                  title: body.title,
-                  track_id: body.track_id,
-                  format: body.format,
-                  room_id: body.room_id,
-                  capacity: body.capacity,
-                  starts_at: body.day !== null && body.startMin !== null ? localToUtc(body.day, body.startMin, tz) : null,
-                  ends_at:
-                    body.day !== null && body.startMin !== null
-                      ? localToUtc(body.day, body.startMin + body.durationMin, tz)
-                      : null,
-                }),
-              () => `“${body.title}” added`,
+            const starts_at =
+              body.day !== null && body.startMin !== null ? localToUtc(body.day, body.startMin, tz) : null
+            const ends_at =
+              body.day !== null && body.startMin !== null
+                ? localToUtc(body.day, body.startMin + body.durationMin, tz)
+                : null
+            const addSession = () => {
+              setShowAdd(false)
+              runAction(
+                () =>
+                  addAgendaSession({
+                    title: body.title,
+                    track_id: body.track_id,
+                    format: body.format,
+                    room_id: body.room_id,
+                    capacity: body.capacity,
+                    starts_at,
+                    ends_at,
+                  }),
+                () => `“${body.title}” added`,
+              )
+            }
+            // Same guard as an existing session's drag/move (eval #22): a
+            // brand-new session claiming a room + time slot can double-book
+            // it just as easily as a dragged one.
+            if (!patchNeedsGuard({ starts_at, room_id: body.room_id })) {
+              addSession()
+              return
+            }
+            const hits = computeHits(
+              {
+                id: '__new-session__',
+                code: '',
+                title: body.title,
+                starts_at,
+                ends_at,
+                room_id: body.room_id,
+                track_id: body.track_id,
+                capacity: body.capacity,
+                speakers: [],
+              },
+              null,
             )
+            if (!hasBlockingConflict(hits)) {
+              addSession()
+              return
+            }
+            void (async () => {
+              if (await confirmScheduleConflict(hits)) addSession()
+            })()
           }}
           onClose={() => setShowAdd(false)}
         />

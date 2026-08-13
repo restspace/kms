@@ -379,6 +379,24 @@ export interface PlannedRow {
   extra: Record<string, string> | null;
 }
 
+/**
+ * A same-normalized-name/different-email match flagged by the contacts plan
+ * (eval defect #13) — never blocking, never auto-merged, just surfaced so the
+ * organizer can review it in the existing Duplicates panel (GET
+ * /contacts/duplicates) instead of the import silently minting a second
+ * contact for someone already in the org under another address.
+ */
+export interface PossibleDuplicate {
+  /** the importing row's 1-based data row number */
+  row: number;
+  label: string;
+  email: string;
+  /** null when the match is another row in THIS file, not an existing contact */
+  matchContactId: string | null;
+  matchLabel: string;
+  matchEmail: string;
+}
+
 export interface ImportPlan {
   target: ImportTarget;
   /** which source profile produced this plan ('generic' when none was named) */
@@ -399,6 +417,10 @@ export interface ImportPlan {
    * when there are none, so the generic preview payload gains no key.
    */
   warnings?: string[];
+  /** Contacts-only (eval defect #13): same-name/different-email candidates
+   * among rows that would otherwise create a brand-new contact. Absent when
+   * there are none, or for the sessions target. */
+  possibleDuplicates?: PossibleDuplicate[];
 }
 
 const emptySummary = (): Record<RowAction | 'total', number> => ({
@@ -948,6 +970,101 @@ export async function planContacts(
     };
   });
 
+  // Eval defect #13: dedupe above is strictly by email, so re-importing the
+  // same person under a different address (a work email vs. a personal one,
+  // a typo fixed in a re-upload, …) silently mints a second contact with no
+  // signal at all — every row still reads `create` and nothing in the
+  // preview says otherwise. This does not block or auto-resolve anything —
+  // legitimate namesakes exist, and a same-name/different-email pair is
+  // exactly the WEAK tier the org already has a whole review flow for (GET
+  // /contacts/duplicates, contactMerge.tsx's Duplicates panel — the same
+  // "Merge instead?" entry point the speaker form's duplicate-name warning
+  // already links to). So rather than a second detector, this only *flags*
+  // same-normalized-name/different-email matches among rows that would
+  // otherwise import as brand-new contacts — against both the rest of the
+  // organisation and each other within this same file — and points at that
+  // existing panel.
+  const normName = (first?: string, last?: string): string =>
+    [first, last].filter(Boolean).join(' ').trim().toLowerCase().replace(/\s+/g, ' ');
+  const createRows = rows.filter(
+    (r) => r.action === 'create' && normName(r.values.first_name, r.values.last_name) !== '',
+  );
+  const possibleDuplicates: PossibleDuplicate[] = [];
+  if (createRows.length > 0) {
+    const names = [...new Set(createRows.map((r) => normName(r.values.first_name, r.values.last_name)))];
+    const marks = names.map(() => '?').join(', ');
+    const { results: nameMatches } = await ctx.db
+      .prepare(
+        `SELECT id, email, first_name, last_name
+           FROM contacts
+          WHERE org_id = (SELECT org_id FROM events WHERE id = ?)
+            AND merged_into IS NULL
+            AND lower(trim(COALESCE(first_name, '') || ' ' || COALESCE(last_name, ''))) IN (${marks})`,
+      )
+      .bind(ctx.eventId, ...names)
+      .all<{ id: string; email: string; first_name: string | null; last_name: string | null }>();
+    const byName = new Map<string, Array<{ id: string; email: string; first_name: string | null; last_name: string | null }>>();
+    for (const m of nameMatches) {
+      const key = normName(m.first_name ?? undefined, m.last_name ?? undefined);
+      const bucket = byName.get(key);
+      if (bucket) bucket.push(m);
+      else byName.set(key, [m]);
+    }
+    const seenPairs = new Set<string>();
+    for (const row of createRows) {
+      const key = normName(row.values.first_name, row.values.last_name);
+      const rowEmail = (row.values.email ?? '').toLowerCase();
+      for (const match of byName.get(key) ?? []) {
+        if (match.email.toLowerCase() === rowEmail) continue; // shouldn't happen for `create`, but guard anyway
+        const dedupeKey = `${row.row}:${match.id}`;
+        if (seenPairs.has(dedupeKey)) continue;
+        seenPairs.add(dedupeKey);
+        possibleDuplicates.push({
+          row: row.row,
+          label: row.label,
+          email: row.values.email ?? '',
+          matchContactId: match.id,
+          matchLabel: [match.first_name, match.last_name].filter(Boolean).join(' ') || match.email,
+          matchEmail: match.email,
+        });
+      }
+    }
+    // Two brand-new rows in the same file sharing a name but different
+    // emails: neither has an existing contact yet, so the org lookup above
+    // finds nothing for either — check within the batch itself.
+    const byKeyInFile = new Map<string, PlannedRow[]>();
+    for (const row of createRows) {
+      const key = normName(row.values.first_name, row.values.last_name);
+      const bucket = byKeyInFile.get(key);
+      if (bucket) bucket.push(row);
+      else byKeyInFile.set(key, [row]);
+    }
+    for (const bucket of byKeyInFile.values()) {
+      for (let i = 1; i < bucket.length; i++) {
+        const row = bucket[i] as PlannedRow;
+        const first = bucket[0] as PlannedRow;
+        possibleDuplicates.push({
+          row: row.row,
+          label: row.label,
+          email: row.values.email ?? '',
+          matchContactId: null,
+          matchLabel: first.label,
+          matchEmail: first.values.email ?? '',
+        });
+      }
+    }
+  }
+
+  const warnings: string[] = [];
+  if (possibleDuplicates.length > 0) {
+    warnings.push(
+      `${possibleDuplicates.length} possible duplicate${possibleDuplicates.length === 1 ? '' : 's'} by name — ` +
+        `same name as an existing (or another imported) contact, but a different email. The import will still ` +
+        `proceed and create them separately; review the pairs in the Duplicates panel afterwards if they are the ` +
+        `same person.`,
+    );
+  }
+
   return {
     target: 'contacts',
     source,
@@ -959,6 +1076,8 @@ export async function planContacts(
     newRooms: [],
     newTags: [],
     unmapped: headers.filter((_h, i) => !mapping[i]),
+    ...(warnings.length > 0 ? { warnings } : {}),
+    ...(possibleDuplicates.length > 0 ? { possibleDuplicates } : {}),
   };
 }
 

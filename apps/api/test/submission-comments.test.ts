@@ -366,6 +366,63 @@ describe('submission comment threads (workplan 7)', () => {
     });
   });
 
+  describe('cross-round scoping on the reviewer thread (eval defect #11)', () => {
+    it('a reviewer scoring "Initial Review" does not see rationale from an earlier "Program Committee" round on the same submission', async () => {
+      const eventId = await seedEvent();
+      const reviewer = await seedStaff(eventId, 'reviewer');
+      const submissionId = await seedSubmission(eventId);
+
+      const committeePlan = await seedPlan(eventId, { id: `plan-committee-${crypto.randomUUID()}` });
+      const committeeCriterion = await seedCriterion(committeePlan);
+      const committeeAssignment = await seedAssignment(committeePlan, submissionId, reviewer.contactId);
+      const saveCommittee = await SELF.fetch(
+        `${base}/review/assignments/${committeeAssignment}`,
+        jsonReq(reviewer.cookie, { scores: { [committeeCriterion]: 4 }, comment: 'Program Committee rationale.' }),
+      );
+      expect(saveCommittee.status).toBe(200);
+
+      const initialPlan = await seedPlan(eventId, { id: `plan-initial-${crypto.randomUUID()}` });
+      const initialCriterion = await seedCriterion(initialPlan);
+      const initialAssignment = await seedAssignment(initialPlan, submissionId, reviewer.contactId);
+
+      // Still pending on Initial Review: gate stays closed regardless of the
+      // earlier round's completed status, so hit it via a closed-round plan
+      // instead of scoring it — proves the *pending* screen never leaks the
+      // other round's rationale in the meantime.
+      await env.DB.prepare(`UPDATE evaluation_plans SET status = 'closed' WHERE id = ?`).bind(initialPlan).run();
+
+      const res = await SELF.fetch(
+        `${base}/review/assignments/${initialAssignment}/comments`,
+        { headers: { cookie: reviewer.cookie } },
+      );
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { comments: DetailComment[] };
+      expect(body.comments.some((c) => c.body === 'Program Committee rationale.')).toBe(false);
+
+      // The organiser's cross-round submission-detail thread still pools both
+      // rounds together — that view is unchanged.
+      const admin = await seedStaff(eventId, 'admin');
+      const detailRes = await detail(admin.cookie, submissionId);
+      const detailBody = (await detailRes.json()) as { comments: DetailComment[] };
+      expect(detailBody.comments.some((c) => c.body === 'Program Committee rationale.')).toBe(true);
+
+      // Scoring the Initial Review round and posting there now surfaces its
+      // own rationale/discussion, still without the Program Committee row.
+      await env.DB.prepare(`UPDATE evaluation_plans SET status = 'active' WHERE id = ?`).bind(initialPlan).run();
+      await SELF.fetch(
+        `${base}/review/assignments/${initialAssignment}`,
+        jsonReq(reviewer.cookie, { scores: { [initialCriterion]: 5 }, comment: 'Initial Review rationale.' }),
+      );
+      const afterRes = await SELF.fetch(
+        `${base}/review/assignments/${initialAssignment}/comments`,
+        { headers: { cookie: reviewer.cookie } },
+      );
+      const afterBody = (await afterRes.json()) as { comments: DetailComment[] };
+      expect(afterBody.comments.some((c) => c.body === 'Initial Review rationale.')).toBe(true);
+      expect(afterBody.comments.some((c) => c.body === 'Program Committee rationale.')).toBe(false);
+    });
+  });
+
   describe('reviewer identity redaction on the thread (anonymise_submitters)', () => {
     it('pseudonymises reviewer authors (rationale + discussion) when the plan anonymises, real names otherwise', async () => {
       const eventId = await seedEvent();

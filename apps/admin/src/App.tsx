@@ -89,6 +89,7 @@ import {
 } from './workspace/contactOrg'
 import { openDuplicatesPanel } from './workspace/contactMerge'
 import { openSaveSegmentPanel, openSegmentsPanel } from './workspace/segments'
+import { openMessageSelectedDialog } from './workspace/messageSelected'
 import { HeadshotUploadControl } from './workspace/headshotUpload'
 import { ContactProfileHistory } from './workspace/entityHistory'
 import { resolveTargetEventId } from './utils/importTarget'
@@ -373,8 +374,19 @@ function speakerStatusLabel(key: string, options: SpeakerStatusOption[]): string
 /** SPK-04: the speaker_status <select>, mirroring HeadshotUploadControl's
  * "outside the generic RecordForm schema, persists immediately" pattern —
  * RecordForm has no notion of a select whose options are partly server-
- * extensible (this event's speaker_status_options). */
-function SpeakerStatusControl({
+ * extensible (this event's speaker_status_options).
+ *
+ * Eval defect #3 (SPK-S1): the select used to stay on its OLD value while the
+ * PUT was in flight (it rendered `item.speaker_status`, which only moves once
+ * the parent hears `onUpdated`), so for ~1s a just-picked "Confirmed" still
+ * displayed as blank — and navigating away in that window read as the update
+ * being lost even when the write landed. The save itself has always been
+ * immediate (fired on change, no debounce — nothing to flush on unmount);
+ * what was missing is optimistic display plus a visible pending/saved
+ * indicator, both added here. On failure the select reverts and the error
+ * shows.
+ */
+export function SpeakerStatusControl({
   item,
   options,
   onUpdated,
@@ -385,21 +397,52 @@ function SpeakerStatusControl({
 }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  /** The optimistic selection while (and after) a save is in flight; null = mirror the item. */
+  const [pendingValue, setPendingValue] = useState<string | null>(null)
+  const [justSaved, setJustSaved] = useState(false)
+  const mountedRef = useRef(true)
+  const savedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(
+    () => () => {
+      mountedRef.current = false
+      if (savedTimerRef.current !== null) clearTimeout(savedTimerRef.current)
+    },
+    [],
+  )
 
   const onChange = async (value: string) => {
+    // Optimistic: show the choice immediately, not after the round trip.
+    setPendingValue(value)
     setBusy(true)
     setError(null)
+    setJustSaved(false)
     try {
       // F7 (same reasoning as HeadshotUploadControl): the row's own
       // event_id, so a panel opened from another accessible event's row
       // (All-events grid) writes THAT event's membership row, not the
       // session event's.
       await updateContact(item.id, { speaker_status: value || null, event_id: item.event_id })
+      // Deliberately NOT gated on mountedRef: if the user navigated away
+      // mid-save, the parent still needs to hear about the landed write so
+      // the list behind the panel gets invalidated (defect #3's "navigating
+      // away quickly reverted it" symptom).
       onUpdated(value || null)
+      if (mountedRef.current) {
+        setJustSaved(true)
+        if (savedTimerRef.current !== null) clearTimeout(savedTimerRef.current)
+        savedTimerRef.current = setTimeout(() => {
+          savedTimerRef.current = null
+          if (mountedRef.current) setJustSaved(false)
+        }, 2500)
+      }
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'The status could not be saved.')
+      if (mountedRef.current) {
+        // Revert the optimistic value — the persisted truth is still item's.
+        setPendingValue(null)
+        setError(err instanceof ApiError ? err.message : 'The status could not be saved.')
+      }
     } finally {
-      setBusy(false)
+      if (mountedRef.current) setBusy(false)
     }
   }
 
@@ -407,16 +450,24 @@ function SpeakerStatusControl({
     <div className="speaker-status-control">
       <label>
         Status{' '}
-        <select value={item.speaker_status ?? ''} disabled={busy} onChange={(e) => void onChange(e.currentTarget.value)}>
+        <select
+          value={pendingValue ?? item.speaker_status ?? ''}
+          disabled={busy}
+          onChange={(e) => void onChange(e.currentTarget.value)}
+        >
           <option value="">—</option>
           {SPEAKER_STATUS_BUILTIN_OPTIONS.map((o) => (
             <option key={o.key} value={o.key}>{o.label}</option>
           ))}
-          {options.map((o) => (
-            <option key={o.id} value={o.key}>{o.label}</option>
-          ))}
+          {options
+            .filter((o) => !SPEAKER_STATUS_BUILTIN_OPTIONS.some((b) => b.key === o.key))
+            .map((o) => (
+              <option key={o.id} value={o.key}>{o.label}</option>
+            ))}
         </select>
-      </label>
+      </label>{' '}
+      {busy && <span className="settings-hint" role="status">Saving…</span>}
+      {!busy && justSaved && <span className="settings-hint" role="status">Saved</span>}
       {error && <span className="settings-error" role="alert">{error}</span>}
     </div>
   )
@@ -830,6 +881,298 @@ const splitCustomFieldsFromFormData = (
 }
 
 /**
+ * SPK-15/SPK-04 hydration (eval defects #3/#4 of the 2026-08-13 run): a
+ * contact row is only safe to seed a RecordForm from once BOTH flat-key
+ * families are attached — `cf__<key>` for the event's custom fields and
+ * `link_*` for the social links. The grid's dataSource always did this, but
+ * two other seed paths didn't: the `?rec=` deep-link resolver (custom fields
+ * only — links came up blank) and the row a save echoes back (raw server
+ * shape, neither family), which REFRESH_TAB_ITEMS then stored as the detail
+ * item a subsequent Edit is seeded from. Reopening Edit after a save showed
+ * blank LinkedIn/X inputs even though the Links block right next to it
+ * rendered them. One helper, applied at every seed boundary.
+ */
+export const hydrateContactRow = (item: ContactRow, defs: ContactFieldDef[]): ContactRow =>
+  ({ ...attachCustomFieldFormKeys(item, defs), ...flattenContactLinks(item.links) }) as ContactRow
+
+/**
+ * SPK-04 / eval defects #2, #5, #16: the speaker create/edit form's schema,
+ * event mode. Status is a first-class field now — previously it existed only
+ * as the Detail panel's inline dropdown, so (a) a created/imported contact
+ * could not be given a status ("lands with —") and (b) the Edit form
+ * round-tripped a `speaker_status` it never displayed, silently rewriting it
+ * from whatever (possibly stale) row seeded the form. Options are the
+ * built-in vocabulary plus this event's own speaker_status_options, with
+ * `enumNames` carrying the display labels (RecordForm renders them).
+ */
+export const buildSpeakerFormSchema = (
+  statusOptions: SpeakerStatusOption[],
+  contactFields: ContactFieldDef[],
+): Record<string, any> => {
+  const statusChoices = [
+    ...SPEAKER_STATUS_BUILTIN_OPTIONS,
+    ...statusOptions.filter((o) => !SPEAKER_STATUS_BUILTIN_OPTIONS.some((b) => b.key === o.key)),
+  ]
+  const { first_name, last_name, email, ...rest } = speakerSchema.properties as Record<string, unknown> & {
+    first_name: unknown
+    last_name: unknown
+    email: unknown
+  }
+  return {
+    ...speakerSchema,
+    properties: {
+      first_name,
+      last_name,
+      email,
+      speaker_status: {
+        type: 'string',
+        title: 'Status',
+        enum: statusChoices.map((o) => o.key),
+        enumNames: statusChoices.map((o) => o.label),
+        description: 'Where this speaker stands in your workflow. Leave as “—” to keep it unset.',
+      },
+      ...rest,
+      ...customFieldSchemaProperties(contactFields),
+    },
+  }
+}
+
+/**
+ * Eval defect #2 (CRM-S1: adding an internal note via Edit blanked a
+ * "Confirmed" status): RecordForm submits its WHOLE seeded value object — the
+ * grid row, stale keys included — not just the fields the schema rendered.
+ * The API treats an absent key as "unchanged" but an explicit null/'' as
+ * "clear it", so any stale row key riding along could silently overwrite a
+ * field the organiser never touched. This narrows the payload to exactly the
+ * keys the form presented (schema properties), then re-nests the flat
+ * `link_*` / `cf__*` families into the `links` / `custom_fields` shapes the
+ * API expects. An empty `speaker_status` is dropped rather than sent: sending
+ * ''/null would UNSET a set status, and a blank select is far more often "the
+ * form was seeded before the field had a value" than an explicit clear — the
+ * Detail panel's inline control remains the way to clear a status.
+ */
+export const buildSpeakerSavePayload = (
+  data: Record<string, unknown>,
+  schema: Record<string, any>,
+  contactFields: ContactFieldDef[],
+): Record<string, unknown> => {
+  const rendered: Record<string, unknown> = {}
+  const properties = (schema.properties ?? {}) as Record<string, unknown>
+  for (const key of Object.keys(properties)) {
+    if (key in data) rendered[key] = data[key]
+  }
+  if (!rendered.speaker_status) delete rendered.speaker_status
+  return splitCustomFieldsFromFormData(unflattenContactLinks(rendered), contactFields)
+}
+
+/**
+ * The Speakers tab's detail panel, hoisted to module level (eval defect #25:
+ * panels stuck on "Loading…"). As an inline arrow inside buildWorkspaceConfig
+ * its component *identity* changed on every config rebuild — and a rebuild
+ * happens for reasons wholly unrelated to this panel (a dashboard-bubble seed,
+ * a checklist reset, a route filter change). React treats a new component type
+ * as a different element and remounts the whole subtree, which threw
+ * SpeakerSessions / ContactCrossEventHistory / ContactProfileHistory back to
+ * their loading states and restarted their fetches; under navigation churn the
+ * panels never got to render a settled state. A module-level component (bound
+ * once per input change via useMemo in App — see `speakerDetailComponent`
+ * there) keeps the subtree mounted across config rebuilds.
+ */
+export function SpeakerDetailPanel({
+  item,
+  onClose,
+  onEdit,
+  onItemSaved,
+  orgMode,
+  contactFields,
+  statusOptions,
+}: {
+  item: ContactRow
+  onClose: () => void
+  onEdit?: () => void
+  onItemSaved?: (item: ContactRow) => void
+  orgMode: boolean
+  contactFields: ContactFieldDef[]
+  statusOptions: SpeakerStatusOption[]
+}) {
+  const customValues = parseContactFieldValues(item.custom_fields_json)
+  // Contacts-hygiene item 2: same `links` json the portal profile page
+  // reads/writes, surfaced read-only here (edited via the `link_*` form
+  // fields — see speakerSchema / unflattenContactLinks above).
+  const socialLinks = parseContactFieldValues(item.links)
+  // Org mode: the row is a person, not a membership, so `event_id` is null
+  // and the events line comes from the folded-in `events_json` instead.
+  const eventNames = parseEventNames(item.events_json)
+  return (
+    <div className="detail-panel">
+      <div className="detail-panel-head">
+        <ContactHeadshot item={item} />
+        <div>
+          <h2>{contactName(item)}</h2>
+          <div className="detail-sub">{item.job_title ? `${item.job_title} · ` : ''}{item.company ?? ''}</div>
+          {/*
+            * CNT-10: the speaker edit form (speakerSchema above) is a
+            * generic RecordForm schema with no room for a file control,
+            * so this lives here instead — same reasoning as
+            * PortalInviteButton living outside the form further down.
+            * Hidden in org mode: the headshot pointer is an event_contacts
+            * column, and the row here carries no event to write it to.
+            */}
+          {!orgMode && (
+            <HeadshotUploadControl
+              item={item}
+              onUpdated={(headshot_asset_id) => onItemSaved?.({ ...item, headshot_asset_id })}
+            />
+          )}
+          {/* SPK-04: speaker_status is an event_contacts column, so the
+            * control is event-mode only for the same reason as the
+            * headshot uploader above. */}
+          {!orgMode && (
+            <SpeakerStatusControl
+              item={item}
+              options={statusOptions}
+              onUpdated={(speaker_status) => onItemSaved?.({ ...item, speaker_status })}
+            />
+          )}
+        </div>
+      </div>
+      <dl>
+        <dt>Email</dt><dd>{item.email}</dd>
+        {item.mobile_phone && <><dt>Mobile</dt><dd>{item.mobile_phone}</dd></>}
+        {item.pronouns && <><dt>Pronouns</dt><dd>{item.pronouns}</dd></>}
+        {orgMode ? (
+          <>
+            <dt>Events</dt>
+            <dd>
+              {eventNames.length === 0 ? (
+                <span style={{ color: 'var(--text-faint)' }}>On no event yet</span>
+              ) : (
+                eventNames.join(' · ')
+              )}
+            </dd>
+          </>
+        ) : (
+          item.event_name && <><dt>Event</dt><dd>{item.event_name}</dd></>
+        )}
+        {contactFields.map((def) =>
+          customValues[def.key] ? (
+            <Fragment key={def.id}>
+              <dt>{def.label}</dt><dd>{customValues[def.key]}</dd>
+            </Fragment>
+          ) : null,
+        )}
+        <dt>Created</dt><dd>{fmtDate(item.created_at)}</dd>
+      </dl>
+      {item.biography && <div className="detail-body">{stripHtml(item.biography)}</div>}
+      {item.notes && (
+        <div className="detail-body">
+          <h3>Internal notes</h3>
+          {stripHtml(item.notes)}
+        </div>
+      )}
+      {SOCIAL_LINK_FORM_FIELDS.some(([, key]) => socialLinks[key]) && (
+        <div className="detail-body">
+          <h3>Links</h3>
+          <dl>
+            {SOCIAL_LINK_FORM_FIELDS.map(([, key, label]) =>
+              socialLinks[key] ? (
+                <Fragment key={key}>
+                  <dt>{label}</dt>
+                  <dd><a href={socialLinks[key]} target="_blank" rel="noreferrer">{socialLinks[key]}</a></dd>
+                </Fragment>
+              ) : null,
+            )}
+          </dl>
+        </div>
+      )}
+      <SpeakerSessions contactId={item.id} />
+      {/*
+        * Workplan 5 §4: what this person is to the organisation, next to
+        * what they are to this event. `SpeakerSessions` above stays
+        * event-scoped — it answers the common question — while this one is
+        * the product's single deliberately org-wide read, clipped
+        * server-side to events the caller holds a seat on.
+        */}
+      {/* Keyed off the contact id, so it works for a directory row too —
+        * except for someone on no event at all, where the endpoint's
+        * roster guard has nothing to check them against and there is no
+        * history to show either way. */}
+      {(!orgMode || eventNames.length > 0) && (
+        <ContactCrossEventHistory contactId={item.id} eventId={item.event_id} />
+      )}
+      {/*
+        * Wave E (workplan 14, D8): profile edit history — the same
+        * ContentHistorySection the submission panel mounts, configured for
+        * this event_contacts row (the row's own event, matching where the
+        * contacts PUT writes). Restore goes back through updateContact,
+        * which snapshots the replaced values itself. Org mode has no such
+        * row (profile history is per-event), so it is not offered there.
+        */}
+      {!orgMode && (
+        <ContactProfileHistory
+          contactId={item.id}
+          eventId={item.event_id}
+          onRestored={(fields) => onItemSaved?.({ ...item, ...fields })}
+        />
+      )}
+      {/*
+        * SPK-06: the organiser can now put a known contact into the speaker
+        * portal directly. Deliberately outside the `onEdit` guard — inviting
+        * is not an edit, and the panel renders without `onEdit` in read-only
+        * contexts where the invite is still the useful action.
+        */}
+      <div className="detail-actions">
+        {onEdit && <button onClick={onEdit}>Edit</button>}
+        <PortalInviteButton contactId={item.id} contactName={contactName(item)} />
+        {/*
+          * The tab's own Delete detaches from this event (adminApi.ts's
+          * DELETE /contacts/:id); this destroys the person org-wide, so it
+          * lives here rather than in `onDelete` where the two would be
+          * indistinguishable. `onItemSaved` before `onClose` is what
+          * refreshes the parent list — the tab manager has no "deleted"
+          * channel for a detail panel, and reporting the row it no longer
+          * finds is enough to invalidate the list behind it.
+          */}
+        <DeleteFromOrgButton
+          contactId={item.id}
+          contactName={contactName(item)}
+          onDeleted={() => {
+            onItemSaved?.(item)
+            onClose()
+          }}
+        />
+      </div>
+    </div>
+  )
+}
+
+/**
+ * The Speakers grid's dataSource: hides placeholder stubs and hydrates each
+ * row with the cf__/link_* flat form keys. Built here (and memoized in App on
+ * `[scopedSources, contactFields]` alone) rather than inline in
+ * buildWorkspaceConfig, for the same identity-stability reason as
+ * SpeakerDetailPanel above — DataList answers a new dataSource identity with
+ * a wipe+refetch, which is the roster's flavour of defect #25's stuck
+ * "Loading…" under config-rebuild churn.
+ */
+export const buildSpeakersDataSource =
+  (
+    contacts: (params: DataSourceParams) => Promise<DataSourceResult<ContactRow>>,
+    contactFields: ContactFieldDef[],
+  ) =>
+  async (params: DataSourceParams): Promise<DataSourceResult<ContactRow>> => {
+    const result = await contacts(params)
+    const items = result.items
+      // Contacts-hygiene item 4: keep nameless stub contacts out of the
+      // roster's default view (isPlaceholderContact's doc comment has the
+      // full story). `total` still reflects the unfiltered page count from
+      // the server — a small, accepted discrepancy for a display-layer filter.
+      .filter((item) => !isPlaceholderContact(item))
+      .map((item) => hydrateContactRow(item, contactFields))
+    return { ...result, items }
+  }
+
+/**
  * F14/ABS-11: the base schema for submissions. This drives the "+ New"
  * generic RecordForm (a manual submission has no track/room/participants
  * yet) and satisfies `TabConfig.schema`'s edit-gating requirement; the real
@@ -925,7 +1268,9 @@ async function loadWorkspaceRecord(
       filters: { contact_id: id, ...(eventFilterId ? { event_id: eventFilterId } : {}) },
     })
     const item = result.items[0]
-    return item ? attachCustomFieldFormKeys(item, contactFieldDefs) : null
+    // Full hydration (cf__ AND link_* keys) — this item seeds the detail tab,
+    // and through it the Edit form; see hydrateContactRow's doc comment.
+    return item ? hydrateContactRow(item, contactFieldDefs) : null
   }
   if (tab === 'submissions') {
     const detail = await getSubmissionDetail(id)
@@ -1060,6 +1405,20 @@ export function buildWorkspaceConfig(
    * Optional so existing callers (and App.filesOpenDetails.test) are unchanged. */
   accessibleEvents: Array<{ id: string; name: string }> = [],
   speakerStatusOptions: SpeakerStatusOption[] = [],
+  /**
+   * Eval defect #25: identity-stable pieces the host memoizes independently of
+   * this config's other inputs (seeds, checklist resets). A config rebuild
+   * hands out brand-new closures/components otherwise — DataList answers a new
+   * dataSource identity with wipe+refetch, and React answers a new component
+   * type with a full remount — both of which read as panels stuck "Loading…"
+   * under navigation churn. Optional (falling back to inline construction) so
+   * existing callers and tests are unchanged.
+   */
+  stable: {
+    speakerDetail?: TabConfig<ContactRow>['detailComponent']
+    speakersSource?: (params: DataSourceParams) => Promise<DataSourceResult<ContactRow>>
+    tasksSource?: (params: DataSourceParams) => Promise<DataSourceResult<TaskAssignmentRow>>
+  } = {},
 ): Record<string, TabConfig> {
   // CRM-01: "All events" turns the Speakers tab into the org contact directory.
   const orgMode = eventFilterId === null
@@ -1168,6 +1527,25 @@ export function buildWorkspaceConfig(
   }
 
   /**
+   * Eval defect #15: checkbox multi-select on the org directory, feeding
+   * straight into the existing compose/send seam (`workspace/messageSelected`
+   * calls the same `POST /app/api/messaging/compose` the compose form's
+   * "Choose recipients…" picker uses) as explicit `contact_ids` — a bulk
+   * send no longer has to go through a named audience preset.
+   */
+  const messageSelectedAction = {
+    id: 'message-selected',
+    label: ({ checkedIds }: { checkedIds: string[] }) =>
+      checkedIds.length > 0 ? `✉ MESSAGE SELECTED (${checkedIds.length})` : '✉ MESSAGE SELECTED',
+    title: 'Email the checked contacts',
+    disabled: ({ checkedIds }: { checkedIds: string[] }) =>
+      checkedIds.length === 0 && 'Check one or more contacts to message them',
+    onClick: ({ checkedIds }: { checkedIds: string[] }) => {
+      openMessageSelectedDialog({ contactIds: checkedIds })
+    },
+  }
+
+  /**
    * CRM-09: freeze the roster's checked rows (curated) or its live filters
    * (dynamic) as a named segment. `ctx.filters` is the same live query the
    * export buttons build their URL from (DataListToolbarAction's doc
@@ -1194,23 +1572,19 @@ export function buildWorkspaceConfig(
 
   /** Cross-event provenance column; hidden on mobile where width is scarce. */
   const eventColumn = { field: 'event_name', header: 'Event', width: '140px', sortable: false, mobileHidden: true }
-  // SPK-15: the grid/detail item needs `cf__<key>` flat keys so a subsequent
-  // "Edit" seeds RecordForm's initialValues correctly (see
-  // attachCustomFieldFormKeys' doc comment) — wrapping the shared dataSource
-  // here, rather than in buildScopedSources, keeps that source's identity
-  // stable across a contactFields refetch (it's memoized on eventFilterId
-  // alone; see buildScopedSources' doc comment for why that matters).
-  const speakersDataSource = async (params: DataSourceParams): Promise<DataSourceResult<ContactRow>> => {
-    const result = await scopedSources.contacts(params)
-    const items = result.items
-      // Contacts-hygiene item 4: keep nameless stub contacts out of the
-      // roster's default view (isPlaceholderContact's doc comment has the
-      // full story). `total` still reflects the unfiltered page count from
-      // the server — a small, accepted discrepancy for a display-layer filter.
-      .filter((item) => !isPlaceholderContact(item))
-      .map((item) => ({ ...attachCustomFieldFormKeys(item, contactFields), ...flattenContactLinks(item.links) }))
-    return { ...result, items }
-  }
+  // SPK-15: the grid/detail item needs the cf__/link_* flat keys so a
+  // subsequent "Edit" seeds RecordForm's initialValues correctly — see
+  // hydrateContactRow / buildSpeakersDataSource (module level; the App host
+  // passes a memoized instance in via `stable` so the identity survives
+  // config rebuilds).
+  // The event-mode create/edit schema — status field included (defects #5/#16).
+  const eventSpeakerSchema = buildSpeakerFormSchema(speakerStatusOptions, contactFields)
+  const speakersDataSource = stable.speakersSource ?? buildSpeakersDataSource(scopedSources.contacts, contactFields)
+  const speakerDetailComponent: TabConfig<ContactRow>['detailComponent'] =
+    stable.speakerDetail ??
+    ((props) => (
+      <SpeakerDetailPanel {...props} orgMode={orgMode} contactFields={contactFields} statusOptions={speakerStatusOptions} />
+    ))
   /**
    * Eval defect (no duplicate detection): advisory same-name check for the
    * "+ New" speaker form. Looks across the accessible events' rosters AND the
@@ -1262,6 +1636,15 @@ export function buildWorkspaceConfig(
     dataSource: speakersDataSource,
     getItemId: (item) => item.id,
     getItemTitle: contactName,
+    // Eval defect #15: the org directory had no checkbox multi-select at
+    // all — bulk email only reached the audience-preset paths, never "I
+    // picked these specific N people off the grid". `onChecklist` is the
+    // same mechanism the Submissions tab's "↓ FILES" button already uses
+    // (DataList renders a checkbox column exactly when it is provided); org
+    // mode only, since event mode's roster already has a working bulk-email
+    // path via compose's named audiences and this directory is the surface
+    // the defect named.
+    ...(orgMode ? { onChecklist, checklistResetKey } : {}),
     // SPK-04: roster filter/column on the settable `speaker_status` column
     // (adminApi.ts's COALESCE(ec.speaker_status, <confirmed/awaiting_reply
     // derivation>) — a hand-set value wins, an unset one falls back to the
@@ -1338,157 +1721,7 @@ export function buildWorkspaceConfig(
             eventColumn,
           ]),
     ],
-    detailComponent: ({ item, onClose, onEdit, onItemSaved }) => {
-      const customValues = parseContactFieldValues(item.custom_fields_json)
-      // Contacts-hygiene item 2: same `links` json the portal profile page
-      // reads/writes, surfaced read-only here (edited via the `link_*` form
-      // fields — see speakerSchema / unflattenContactLinks above).
-      const socialLinks = parseContactFieldValues(item.links)
-      // Org mode: the row is a person, not a membership, so `event_id` is null
-      // and the events line comes from the folded-in `events_json` instead.
-      const eventNames = parseEventNames(item.events_json)
-      return (
-        <div className="detail-panel">
-          <div className="detail-panel-head">
-            <ContactHeadshot item={item} />
-            <div>
-              <h2>{contactName(item)}</h2>
-              <div className="detail-sub">{item.job_title ? `${item.job_title} · ` : ''}{item.company ?? ''}</div>
-              {/*
-                * CNT-10: the speaker edit form (speakerSchema below) is a
-                * generic RecordForm schema with no room for a file control,
-                * so this lives here instead — same reasoning as
-                * PortalInviteButton living outside the form further down.
-                * Hidden in org mode: the headshot pointer is an event_contacts
-                * column, and the row here carries no event to write it to.
-                */}
-              {!orgMode && (
-                <HeadshotUploadControl
-                  item={item}
-                  onUpdated={(headshot_asset_id) => onItemSaved?.({ ...item, headshot_asset_id })}
-                />
-              )}
-              {/* SPK-04: speaker_status is an event_contacts column, so the
-                * control is event-mode only for the same reason as the
-                * headshot uploader above. */}
-              {!orgMode && (
-                <SpeakerStatusControl
-                  item={item}
-                  options={speakerStatusOptions}
-                  onUpdated={(speaker_status) => onItemSaved?.({ ...item, speaker_status })}
-                />
-              )}
-            </div>
-          </div>
-          <dl>
-            <dt>Email</dt><dd>{item.email}</dd>
-            {item.mobile_phone && <><dt>Mobile</dt><dd>{item.mobile_phone}</dd></>}
-            {item.pronouns && <><dt>Pronouns</dt><dd>{item.pronouns}</dd></>}
-            {orgMode ? (
-              <>
-                <dt>Events</dt>
-                <dd>
-                  {eventNames.length === 0 ? (
-                    <span style={{ color: 'var(--text-faint)' }}>On no event yet</span>
-                  ) : (
-                    eventNames.join(' · ')
-                  )}
-                </dd>
-              </>
-            ) : (
-              item.event_name && <><dt>Event</dt><dd>{item.event_name}</dd></>
-            )}
-            {contactFields.map((def) =>
-              customValues[def.key] ? (
-                <Fragment key={def.id}>
-                  <dt>{def.label}</dt><dd>{customValues[def.key]}</dd>
-                </Fragment>
-              ) : null,
-            )}
-            <dt>Created</dt><dd>{fmtDate(item.created_at)}</dd>
-          </dl>
-          {item.biography && <div className="detail-body">{stripHtml(item.biography)}</div>}
-          {item.notes && (
-            <div className="detail-body">
-              <h3>Internal notes</h3>
-              {stripHtml(item.notes)}
-            </div>
-          )}
-          {SOCIAL_LINK_FORM_FIELDS.some(([, key]) => socialLinks[key]) && (
-            <div className="detail-body">
-              <h3>Links</h3>
-              <dl>
-                {SOCIAL_LINK_FORM_FIELDS.map(([, key, label]) =>
-                  socialLinks[key] ? (
-                    <Fragment key={key}>
-                      <dt>{label}</dt>
-                      <dd><a href={socialLinks[key]} target="_blank" rel="noreferrer">{socialLinks[key]}</a></dd>
-                    </Fragment>
-                  ) : null,
-                )}
-              </dl>
-            </div>
-          )}
-          <SpeakerSessions contactId={item.id} />
-          {/*
-            * Workplan 5 §4: what this person is to the organisation, next to
-            * what they are to this event. `SpeakerSessions` above stays
-            * event-scoped — it answers the common question — while this one is
-            * the product's single deliberately org-wide read, clipped
-            * server-side to events the caller holds a seat on.
-            */}
-          {/* Keyed off the contact id, so it works for a directory row too —
-            * except for someone on no event at all, where the endpoint's
-            * roster guard has nothing to check them against and there is no
-            * history to show either way. */}
-          {(!orgMode || eventNames.length > 0) && (
-            <ContactCrossEventHistory contactId={item.id} eventId={item.event_id} />
-          )}
-          {/*
-            * Wave E (workplan 14, D8): profile edit history — the same
-            * ContentHistorySection the submission panel mounts, configured for
-            * this event_contacts row (the row's own event, matching where the
-            * contacts PUT writes). Restore goes back through updateContact,
-            * which snapshots the replaced values itself. Org mode has no such
-            * row (profile history is per-event), so it is not offered there.
-            */}
-          {!orgMode && (
-            <ContactProfileHistory
-              contactId={item.id}
-              eventId={item.event_id}
-              onRestored={(fields) => onItemSaved?.({ ...item, ...fields })}
-            />
-          )}
-          {/*
-            * SPK-06: the organiser can now put a known contact into the speaker
-            * portal directly. Deliberately outside the `onEdit` guard — inviting
-            * is not an edit, and the panel renders without `onEdit` in read-only
-            * contexts where the invite is still the useful action.
-            */}
-          <div className="detail-actions">
-            {onEdit && <button onClick={onEdit}>Edit</button>}
-            <PortalInviteButton contactId={item.id} contactName={contactName(item)} />
-            {/*
-              * The tab's own Delete detaches from this event (adminApi.ts's
-              * DELETE /contacts/:id); this destroys the person org-wide, so it
-              * lives here rather than in `onDelete` where the two would be
-              * indistinguishable. `onItemSaved` before `onClose` is what
-              * refreshes the parent list — the tab manager has no "deleted"
-              * channel for a detail panel, and reporting the row it no longer
-              * finds is enough to invalidate the list behind it.
-              */}
-            <DeleteFromOrgButton
-              contactId={item.id}
-              contactName={contactName(item)}
-              onDeleted={() => {
-                onItemSaved?.(item)
-                onClose()
-              }}
-            />
-          </div>
-        </div>
-      )
-    },
+    detailComponent: speakerDetailComponent,
     globalFilterSets: { id: 'contact_id' },
     // contact_id lets any tab that contributes a contact (Tasks and Messages
     // by their assignee/recipient FK) narrow Speakers to that person.
@@ -1502,16 +1735,13 @@ export function buildWorkspaceConfig(
     toolbarActions: [
       orgMode ? newOrgContactAction : addExistingContactAction,
       duplicatesAction,
-      ...(orgMode ? [] : [saveSegmentAction, segmentsAction]),
+      ...(orgMode ? [messageSelectedAction] : [saveSegmentAction, segmentsAction]),
       importAction('contacts', 'speakers'),
     ],
     registerTabActions: orgMode ? registerSpeakerTabActions : undefined,
-    schema: orgMode
-      ? orgContactSchema
-      : {
-          ...speakerSchema,
-          properties: { ...speakerSchema.properties, ...customFieldSchemaProperties(contactFields) },
-        },
+    // Eval defects #5/#16: event-mode schema now carries `speaker_status` (a
+    // proper field on both create and Edit) alongside the custom fields.
+    schema: orgMode ? orgContactSchema : eventSpeakerSchema,
     // Same identity-only shape on edit: the grid's company/job title/bio in org
     // mode are the person's MOST RECENT membership's answer, and the contacts
     // PUT writes profile columns to the event it is aimed at — rendering them
@@ -1551,13 +1781,27 @@ export function buildWorkspaceConfig(
       // what tells the API to make the person without a membership (profile
       // fields there are a 400), and `identityFieldsOnly` on update keeps
       // RecordForm's whole-record submit from smuggling the coalesced profile
-      // columns into whichever event the PUT lands on.
+      // columns into whichever event the PUT lands on. Event mode narrows the
+      // same way now (defect #2): only the fields the form actually rendered
+      // travel — see buildSpeakerSavePayload's doc comment.
       const payload = orgMode
         ? identityFieldsOnly(unflattenContactLinks(data))
-        : splitCustomFieldsFromFormData(unflattenContactLinks(data), contactFields)
+        : buildSpeakerSavePayload(data, eventSpeakerSchema, contactFields)
+      // F7: an edit opened from another accessible event's row must write THAT
+      // event's membership row. Previously the whole-record submit carried the
+      // row's event_id implicitly; the narrowed payload sends it explicitly.
+      if (!orgMode && existing?.event_id) payload.event_id = existing.event_id
       try {
-        if (orgMode && !existing) return await createContact({ ...payload, no_event: true })
-        return existing ? await updateContact(existing.id, payload) : await createContact(payload)
+        const saved = await (orgMode && !existing
+          ? createContact({ ...payload, no_event: true })
+          : existing
+            ? updateContact(existing.id, payload)
+            : createContact(payload))
+        // The server row is the raw shape (no cf__/link_* flat keys). Merge it
+        // over what we already knew and re-hydrate, so the detail/edit tabs
+        // REFRESH_TAB_ITEMS re-seeds from stay form-ready (defect #4) and
+        // row-only extras like event_name survive the save.
+        return hydrateContactRow({ ...(existing ?? {}), ...(saved as ContactRow) }, orgMode ? [] : contactFields)
       } catch (err) {
         if (
           err instanceof ApiError &&
@@ -1868,7 +2112,7 @@ export function buildWorkspaceConfig(
 
   const tasks: TabConfig<TaskAssignmentRow> = {
     displayTitle: 'Tasks',
-    dataSource: tasksDataSourceWithStatusFilter(scopedSources.tasks),
+    dataSource: stable.tasksSource ?? tasksDataSourceWithStatusFilter(scopedSources.tasks),
     getItemId: (item) => item.id,
     getItemTitle: (item) => item.task_title,
     // Baseline defect: no complete/incomplete status filter existed, only
@@ -2207,6 +2451,18 @@ export function buildWorkspaceConfig(
         // submission) shows the speaker it's for instead (SPK-10).
         render: (value: string | null, item) => value ?? item.uploader_name ?? item.uploader_email ?? '',
       },
+      {
+        // #9: a distinct Session column, so an upload's session is visible at
+        // a glance without decoding the "For" code — and searchable via the
+        // library's free-text box (server-side: filesAdmin.ts's GET /library
+        // matches session code/title too).
+        field: 'session_title',
+        header: 'Session',
+        width: '1fr',
+        mobileHidden: true,
+        render: (value: string | null, item) =>
+          item.session_id ? `${item.session_code ?? ''}${value ? ` — ${value}` : ''}`.trim() : '—',
+      },
       { field: 'size_bytes', header: 'Size', width: '90px', render: (value: number | null) => formatBytes(value) },
       { field: 'version_count', header: 'Versions', width: '90px' },
       { field: 'uploaded_at', header: 'Uploaded', width: '110px', render: (value: string) => fmtDate(value) },
@@ -2348,27 +2604,34 @@ export default function App() {
 
   // SPK-15: the Speakers tab's custom-field definitions, scoped to the
   // current session event (new/edited contacts always write there — same
-  // scope adminApiRoutes.post('/contacts') uses). Settings' "Speaker fields"
-  // card writes these live; a manual reload picks up a change made there
-  // mid-session (no revision-bumped polling for this small a surface).
+  // scope adminApiRoutes.post('/contacts') uses). Eval defect #5: these used
+  // to be fetched once per session event, so a field created in Settings >
+  // "Speaker fields" — whose panel says changes appear immediately — never
+  // reached the speaker create/edit form without a full page reload. They are
+  // now re-read every time the workspace view is (re-)entered, which is
+  // exactly the Settings → Workspace path the claim describes. The functional
+  // setState keeps the previous array identity when nothing changed, so a
+  // mere re-visit doesn't rebuild the workspace config (and with it every
+  // grid's dataSource — see buildScopedSources' doc comment for that cost).
   const [contactFields, setContactFields] = useState<ContactFieldDef[]>([])
-  useEffect(() => {
-    if (!me) return
-    listContactFields()
-      .then((r) => setContactFields(r.items))
-      .catch(() => {})
-  }, [me?.event.id])
-
-  // SPK-04: this event's custom speaker_status options, fetched once
-  // alongside contactFields above — same reasoning, same reload story
-  // (Settings' "Speaker statuses" card writes these live).
+  // SPK-04: this event's custom speaker_status options — same scope, same
+  // staleness problem (Settings' "Speaker statuses" card writes these live),
+  // same reload story.
   const [speakerStatusOptions, setSpeakerStatusOptions] = useState<SpeakerStatusOption[]>([])
   useEffect(() => {
     if (!me) return
-    listSpeakerStatuses()
-      .then((r) => setSpeakerStatusOptions(r.items))
+    if (route.v !== 'workspace') return
+    listContactFields()
+      .then((r) =>
+        setContactFields((prev) => (stableStringify(prev) === stableStringify(r.items) ? prev : r.items)),
+      )
       .catch(() => {})
-  }, [me?.event.id])
+    listSpeakerStatuses()
+      .then((r) =>
+        setSpeakerStatusOptions((prev) => (stableStringify(prev) === stableStringify(r.items) ? prev : r.items)),
+      )
+      .catch(() => {})
+  }, [me?.event.id, route.v])
 
   const refreshMe = useCallback(async () => {
     const m = await getMe()
@@ -2517,6 +2780,32 @@ export default function App() {
 
   const openCreateEvent = useCallback(() => setCreateEventOpen(true), [])
 
+  /**
+   * Eval defect #25 ("Loading…" forever): the speaker detail panel and the
+   * speakers/tasks dataSources are memoized here on ONLY the inputs they read,
+   * then handed into buildWorkspaceConfig as its `stable` argument — so a
+   * config rebuild for an unrelated reason (a dashboard-bubble seed, a
+   * checklist reset, a route filter change) no longer remounts an open speaker
+   * detail tab (restarting its Sessions / cross-event / history fetches) or
+   * hands the roster/tasks grids a fresh dataSource identity (which DataList
+   * answers with a wipe+refetch). Same reasoning as `scopedSources` above.
+   */
+  const speakerDetail = useMemo<TabConfig<ContactRow>['detailComponent']>(() => {
+    const orgMode = eventFilterId === null
+    return (props) => (
+      <SpeakerDetailPanel {...props} orgMode={orgMode} contactFields={contactFields} statusOptions={speakerStatusOptions} />
+    )
+  }, [eventFilterId, contactFields, speakerStatusOptions])
+  const speakersSource = useMemo(
+    () => buildSpeakersDataSource(scopedSources.contacts, contactFields),
+    [scopedSources, contactFields],
+  )
+  const tasksSource = useMemo(() => tasksDataSourceWithStatusFilter(scopedSources.tasks), [scopedSources])
+  const stableWorkspacePieces = useMemo(
+    () => ({ speakerDetail, speakersSource, tasksSource }),
+    [speakerDetail, speakersSource, tasksSource],
+  )
+
   // Events tab row click (manual-QA item 1): moves the workspace event filter
   // to the clicked event — the same mechanism as the sidebar's
   // `EventFilterSelect`, so a concrete event also rebinds the session (via
@@ -2541,6 +2830,7 @@ export default function App() {
         eventFilterId,
         eventOptions,
         speakerStatusOptions,
+        stableWorkspacePieces,
       ),
     [
       handleChecklist,
@@ -2555,6 +2845,7 @@ export default function App() {
       contactFields,
       eventOptions,
       speakerStatusOptions,
+      stableWorkspacePieces,
     ],
   )
 

@@ -109,7 +109,11 @@ export function FormsSection({
         <button
           className="fbtn primary"
           onClick={() => {
-            void createForm({ internal_name: 'Untitled form', idempotency_key: crypto.randomUUID() }).then((r) => {
+            // No internal_name: the API defaults a fresh form's name/title to
+            // the event's own name (defect #23) rather than the literal
+            // "Untitled form", which used to flow straight through to both
+            // this list and the public page's H1.
+            void createForm({ idempotency_key: crypto.randomUUID() }).then((r) => {
               setOpenFormId(r.form.id)
             })
           }}

@@ -54,6 +54,18 @@ export interface AutoScheduleResult {
 const DEFAULT_DURATION_MIN = 30;
 
 /**
+ * Sane default working hours (eval #20): a day with nothing scheduled yet
+ * has no "already booked" signal to bound the search, so without a floor the
+ * scorer's earlier-bias term walks a slot all the way to the raw grid axis
+ * start (06:00) — technically legal, but not where a human would ever put a
+ * talk. 09:00–18:00 is the fallback; a day that already has bookings widens
+ * from there rather than shrinking below it, so one 9am meeting does not
+ * squeeze the rest of that day's search.
+ */
+const DEFAULT_REALISTIC_START_MIN = 9 * 60;
+const DEFAULT_REALISTIC_END_MIN = 18 * 60;
+
+/**
  * How the assistant trades off the things a human scheduler trades off.
  * Exported so the tests can reason about *why* a slot won rather than
  * hard-coding the numbers a second time.
@@ -84,7 +96,47 @@ export const AUTO_SCHEDULE_WEIGHTS = {
   backToBackSameRoom: -10,
   /** Tie-breaker with a direction: fill the event from the front. */
   earlierBiasPerMinute: -0.001,
+  /**
+   * Per minute a candidate falls outside that day's realistic window (see
+   * `realisticWindowFor`). Large enough to outweigh the capacity/cluster
+   * bonuses (30 + 25 at most) within a few minutes, so an in-window slot is
+   * always preferred over a nearby out-of-window one — but it is a
+   * preference, not a bound: a day packed solid still lets the assistant
+   * spill outside the window rather than leave a session unplaced.
+   */
+  outsideRealisticWindowPerMinute: -2,
 };
+
+/**
+ * The stretch of a local day a placement should prefer, before falling back
+ * to the full 06:00–20:00 grid axis (eval #20). Bounded by whatever is
+ * already on the books that day — widened, never narrowed, by the
+ * 09:00–18:00 default, and clamped to the actual search axis so a caller
+ * that passes a tighter custom window (tests do) still gets exactly that
+ * window back.
+ */
+function realisticWindowFor(
+  day: string,
+  scheduled: AgendaSessionInput[],
+  tz: string,
+  axisStartMin: number,
+  axisEndMin: number,
+): { start: number; end: number } {
+  let start = DEFAULT_REALISTIC_START_MIN;
+  let end = DEFAULT_REALISTIC_END_MIN;
+  for (const s of scheduled) {
+    if (!s.starts_at || !s.ends_at) continue;
+    const startLocal = utcToLocal(s.starts_at, tz);
+    if (startLocal.day !== day) continue;
+    const endLocal = utcToLocal(s.ends_at, tz);
+    start = Math.min(start, startLocal.minutes);
+    end = Math.max(end, endLocal.minutes);
+  }
+  start = Math.max(start, axisStartMin);
+  end = Math.min(end, axisEndMin);
+  if (end <= start) return { start: axisStartMin, end: axisEndMin };
+  return { start, end };
+}
 
 interface Candidate {
   room: AgendaRoomInput;
@@ -197,6 +249,10 @@ export function autoSchedule(
 
   const windowStart = Date.parse(eventWindow.starts_at);
   const durationOf = (s: AutoScheduleSessionInput) => formatMinutes(s.format) ?? DEFAULT_DURATION_MIN;
+  // Computed once from the board as it stood before this run — "already
+  // scheduled" means the human's existing picture of the day, not slots this
+  // same batch is about to fill in.
+  const realisticByDay = new Map(days.map((day) => [day, realisticWindowFor(day, scheduled, tz, dayStartMin, dayEndMin)]));
   const candidates = new Map<string, Candidate[]>();
   for (const s of unscheduled) {
     candidates.set(
@@ -255,6 +311,11 @@ export function autoSchedule(
       }
       score += AUTO_SCHEDULE_WEIGHTS.backToBackSameRoom * backToBackSpeakers(session, c, indexes.bySpeaker);
       score += AUTO_SCHEDULE_WEIGHTS.earlierBiasPerMinute * ((c.start - windowStart) / 60_000);
+
+      const window = realisticByDay.get(c.day) as { start: number; end: number };
+      const candidateEnd = c.startMin + durationOf(session);
+      const outsideMin = Math.max(0, window.start - c.startMin) + Math.max(0, candidateEnd - window.end);
+      score += AUTO_SCHEDULE_WEIGHTS.outsideRealisticWindowPerMinute * outsideMin;
 
       // Ties are broken by the earliest slot, then by the first room in
       // payload order (candidates are generated room-major, so "keep the

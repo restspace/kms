@@ -5,7 +5,7 @@
 import { env, SELF } from 'cloudflare:test';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { createContact, createEvent, sessionCookieFor } from './fixtures';
-import { addParticipant, createQuestion, createSubmission, createSubmissionForm } from './fixtures-portal';
+import { addParticipant, createFileAsset, createQuestion, createSubmission, createSubmissionForm, setHeadshot } from './fixtures-portal';
 
 const ORIGIN = 'https://kms.test';
 
@@ -258,5 +258,64 @@ describe('locked submissions and closed forms (ABS-11)', () => {
     const rows = await participantsOf(id);
     const res = await postRemove(id, rows[0]!.id);
     expect(res.status).toBe(403);
+  });
+});
+
+// Defect #12: event_contacts.biography (the profile store) and a
+// submission's Participant-step biography answer (submission_participants
+// .answers_json) are supposed to merge at submit time, but any path that
+// leaves them out of sync — an add that predates the bio question, data
+// seeded directly, and so on — used to leave the portal warning "bio
+// missing" even though the speaker plainly supplied one on a submission.
+describe('profile bio falls back to a submission-participant bio (defect #12)', () => {
+  it('backfills an empty profile bio from the newest submission-participant answer and clears the warning', async () => {
+    const bioQuestion = await createQuestion(eventId, formId, {
+      key: 'biography',
+      label: 'Biography',
+      section: 'participant',
+      position: 1,
+    });
+    const id = await seedSubmission();
+    await env.DB.prepare('UPDATE submission_participants SET answers_json = ? WHERE submission_id = ? AND contact_id = ?')
+      .bind(JSON.stringify({ [bioQuestion]: 'A carefully written bio from the wizard.' }), id, speakerId)
+      .run();
+    // A headshot is already on file — isolates this case to the bio half of
+    // the "bio or headshot is missing" warning.
+    await setHeadshot(speakerId, await createFileAsset(eventId));
+    // Profile store still empty — nothing has synced it yet.
+    expect(
+      (await env.DB.prepare('SELECT biography FROM event_contacts WHERE event_id = ? AND contact_id = ?')
+        .bind(eventId, speakerId)
+        .first<{ biography: string | null }>())?.biography,
+    ).toBeNull();
+
+    const html = await (await SELF.fetch(`${ORIGIN}/portal/${slug}`, { headers: { cookie } })).text();
+    expect(html).not.toContain('bio or headshot is missing');
+
+    const profileHtml = await (await SELF.fetch(`${ORIGIN}/portal/${slug}/profile`, { headers: { cookie } })).text();
+    expect(profileHtml).toContain('A carefully written bio from the wizard.');
+
+    // Backfilled onto the profile row so subsequent reads (and the profile
+    // edit form) see it too, not just this one render.
+    const ec = await env.DB.prepare('SELECT biography FROM event_contacts WHERE event_id = ? AND contact_id = ?')
+      .bind(eventId, speakerId)
+      .first<{ biography: string | null }>();
+    expect(ec?.biography).toBe('A carefully written bio from the wizard.');
+  });
+
+  it('leaves an existing profile bio alone rather than overwriting it from a submission', async () => {
+    await createQuestion(eventId, formId, { key: 'biography', label: 'Biography', section: 'participant', position: 1 });
+    await env.DB.prepare('UPDATE event_contacts SET biography = ? WHERE event_id = ? AND contact_id = ?')
+      .bind('The real, current profile bio.', eventId, speakerId)
+      .run();
+
+    const html = await (await SELF.fetch(`${ORIGIN}/portal/${slug}/profile`, { headers: { cookie } })).text();
+    expect(html).toContain('The real, current profile bio.');
+  });
+
+  it('still warns when neither store has a bio', async () => {
+    await seedSubmission();
+    const html = await (await SELF.fetch(`${ORIGIN}/portal/${slug}`, { headers: { cookie } })).text();
+    expect(html).toContain('bio or headshot is missing');
   });
 });

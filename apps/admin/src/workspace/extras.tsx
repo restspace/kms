@@ -1377,6 +1377,16 @@ export function SubmissionEditForm({ initialValues, onSubmit, onCancel, onDelete
   const [detail, setDetail] = useState<SubmissionDetail | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [tracks, setTracks] = useState<TrackRow[]>([])
+  // #29 (eval defect): the Track select initially showed "— No track —" for a
+  // submission that plainly has a track (e.g. "Platform & Infra") — `fields.
+  // track_id` is seeded synchronously from `initialValues` (below), but
+  // `tracks` starts empty until `listTracks()` resolves, so the first paint
+  // has no <option> whose value matches the already-correct `track_id` and
+  // the browser falls back to the list's first option. `tracksLoaded` lets
+  // the select render a neutral "Loading…" placeholder for that one option
+  // instead of silently reading as "no track" — see the select's render
+  // below. The underlying state was never wrong; only the display was.
+  const [tracksLoaded, setTracksLoaded] = useState(false)
   const [rooms, setRooms] = useState<RoomRow[]>([])
   const [formatNames, setFormatNames] = useState<string[]>([])
   // The `track_id` the record actually holds, kept apart from the picker's
@@ -1417,6 +1427,7 @@ export function SubmissionEditForm({ initialValues, onSubmit, onCancel, onDelete
     listTracks()
       .then((t) => { if (!cancelled) setTracks(t.items) })
       .catch(() => {})
+      .finally(() => { if (!cancelled) setTracksLoaded(true) })
     listRooms()
       .then((r) => { if (!cancelled) setRooms(r.items) })
       .catch(() => {})
@@ -1597,6 +1608,15 @@ export function SubmissionEditForm({ initialValues, onSubmit, onCancel, onDelete
           <label htmlFor="sub-edit-track">Track</label>
           <select id="sub-edit-track" value={fields.track_id} disabled={isSubmitting} onChange={(e) => setField('track_id', e.target.value)}>
             <option value="">— No track —</option>
+            {/* #29: before `tracks` has loaded, a synthetic option keeps a
+                stored track_id from rendering as the misleading "No track"
+                fallback — see `tracksLoaded`'s doc comment above. Disappears
+                the moment the real list arrives and either matches by id
+                (the common case) or leaves the field genuinely unmatched
+                (unmatchedTrackAnswer's note below explains that case). */}
+            {!tracksLoaded && fields.track_id && (
+              <option value={fields.track_id}>Loading…</option>
+            )}
             {tracks.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
           </select>
           {unmatchedTrackAnswer && (

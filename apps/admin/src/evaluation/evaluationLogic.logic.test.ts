@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { buildAssignBody, buildScalePatch, parseCapInput } from './evaluationLogic'
+import { buildAssignBody, buildScalePatch, parseCapInput, resolveDateInputBlur } from './evaluationLogic'
 
 describe('buildScalePatch (ABS-01)', () => {
   it('returns the changed field as a patch', () => {
@@ -52,4 +52,32 @@ describe('parseCapInput (ABS-06)', () => {
     expect(parseCapInput('4', 4)).toBeUndefined()
     expect(parseCapInput('', null)).toBeUndefined()
   })
+})
+
+describe('resolveDateInputBlur (eval defect #24)', () => {
+  const parse = (v: string) => (v ? `${v}:00.000Z` : null)
+
+  it('never saves when badInput is set, regardless of the (always empty) value', () => {
+    expect(resolveDateInputBlur('', true, '2027-01-01T09:00:00.000Z', parse)).toEqual({ action: 'invalid' });
+  });
+
+  it('a genuinely empty value with no badInput is an intentional clear', () => {
+    expect(resolveDateInputBlur('', false, '2027-01-01T09:00:00.000Z', parse)).toEqual({
+      action: 'save',
+      next: null,
+    });
+  });
+
+  it('saves a complete, changed value', () => {
+    expect(resolveDateInputBlur('2027-02-01T10:00', false, null, parse)).toEqual({
+      action: 'save',
+      next: '2027-02-01T10:00:00.000Z',
+    });
+  });
+
+  it('is a no-op when the parsed value matches what is already stored', () => {
+    expect(resolveDateInputBlur('2027-02-01T10:00', false, '2027-02-01T10:00:00.000Z', parse)).toEqual({
+      action: 'noop',
+    });
+  });
 })

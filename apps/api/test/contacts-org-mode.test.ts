@@ -129,6 +129,32 @@ describe('POST /app/api/contacts/query — scope: org', () => {
     void eventB;
   });
 
+  // Eval defect #6b: event_count previously counted bare event_contacts rows
+  // while events_json required a live `events` row via an inner join. A
+  // membership left behind by a deleted event (orphaned event_contacts) then
+  // counted in event_count but not events_json, so the directory grid showed
+  // "N events" while the detail panel's "Events:" line, built from
+  // events_json, said "On no event yet" for the very same person. Both
+  // columns must now agree.
+  it('keeps event_count and events_json in agreement when a membership points at a deleted event', async () => {
+    const orgId = `org-${crypto.randomUUID()}`;
+    const home = await seedEvent({ org_id: orgId, name: 'Home Conf' });
+    const doomed = await seedEvent({ org_id: orgId, name: 'Doomed Conf' });
+    const admin = await seedStaff(home, 'admin');
+    const contactId = await seedContact(doomed, { email: 'orphan-membership@example.com' });
+
+    // Simulate a deleted event: the event_contacts row survives, the events
+    // row does not (the admin's own home event is untouched, so their
+    // session/org lookup stays valid).
+    await env.DB.prepare('DELETE FROM events WHERE id = ?').bind(doomed).run();
+
+    const { body } = await orgQuery(admin.cookie);
+    const found = row(body, contactId);
+    expect(found).toBeDefined();
+    expect(found!.event_count).toBe(0);
+    expect(JSON.parse(found!.events_json as string)).toEqual([]);
+  });
+
   it('never crosses the organisation boundary', async () => {
     const { admin } = await seedDirectory();
     const otherOrgEvent = await seedEvent();

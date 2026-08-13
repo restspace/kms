@@ -155,6 +155,7 @@ const ERROR_MESSAGES: Record<string, string> = {
   body_required: 'A note needs some text.',
   contact_required: 'Choose a contact to enroll.',
   event_required: 'Choose an event to add them to.',
+  no_seat_at_event: 'You do not have a seat on that event.',
 }
 
 function readableError(code: string): string {
@@ -1089,6 +1090,19 @@ export interface FileLibraryRow extends FileVersion {
   request_title: string | null
   submission_code: string | null
   submission_title: string | null
+  /**
+   * The session (submission) this upload belongs to (#9) — resolved
+   * server-side from `submission_id` when set, falling back to the
+   * submission of the task assignment the upload's chain came from when it
+   * isn't (a task assigned directly to a contact rather than a submission).
+   * `session_code`/`session_title` are the same value as
+   * `submission_code`/`submission_title` today; kept as a distinct field so
+   * the Files library's Session column has a name independent of the
+   * back-compat `submission_*` fields.
+   */
+  session_id: string | null
+  session_code: string | null
+  session_title: string | null
   version_count: number
   comment_count: number
   /**
@@ -1126,6 +1140,48 @@ export const addFileComment = (uploadId: string, body: string) =>
   request<{ ok: boolean; id: string; comments: FileComment[] }>(`/app/api/files/uploads/${uploadId}/comments`, {
     method: 'POST',
     body: JSON.stringify({ body }),
+  })
+
+/**
+ * #18 — event-level file-collection defaults: a toggle (pre-fill new tasks'
+ * Action type to File upload) plus a default allowed-types list (applied to
+ * a file_upload task's file request at creation, adminApi.ts's POST /tasks).
+ */
+export interface FileCollectionDefaults {
+  enabled: boolean
+  allowed_types: string[]
+}
+
+export const getFileCollectionDefaults = () => request<FileCollectionDefaults>('/app/api/files/settings')
+
+export const updateFileCollectionDefaults = (defaults: FileCollectionDefaults) =>
+  request<{ ok: boolean; enabled: boolean; allowed_types: string[] }>('/app/api/files/settings', {
+    method: 'PUT',
+    body: JSON.stringify(defaults),
+  })
+
+/**
+ * Airtable mirror settings (deployment-global singleton, routes/airtableAdmin.ts).
+ * The API key never round-trips: GET/PUT return only key_set + last 4 chars,
+ * and updateAirtableSettings omits api_key entirely to keep the stored one.
+ */
+export interface AirtableSettings {
+  enabled: boolean
+  base_id: string
+  key_set: boolean
+  key_last4: string | null
+}
+
+export const getAirtableSettings = () => request<AirtableSettings>('/app/api/airtable/settings')
+
+export const updateAirtableSettings = (body: { enabled: boolean; base_id: string; api_key?: string }) =>
+  request<AirtableSettings>('/app/api/airtable/settings', { method: 'PUT', body: JSON.stringify(body) })
+
+/** Probe with the typed-but-unsaved credentials when given, stored/env otherwise. */
+export const testAirtableConnection = (body: { api_key?: string; base_id?: string } = {}) =>
+  request<{ ok: boolean; error?: string }>('/app/api/airtable/settings/test', {
+    method: 'POST',
+    body: JSON.stringify(body),
   })
 
 /**
@@ -1675,6 +1731,20 @@ export interface ImportPlan {
    *  the per-row `message`/`errors` already on `ImportPlanRow`. Absent on a
    *  plan with nothing to flag. */
   warnings?: string[]
+  /** Eval defect #13, contacts only: same-name/different-email candidates
+   * among rows that would otherwise create a brand-new contact — advisory,
+   * never blocking. Absent when there are none. */
+  possibleDuplicates?: ImportPossibleDuplicate[]
+}
+
+export interface ImportPossibleDuplicate {
+  row: number
+  label: string
+  email: string
+  /** null when the match is another row in this same file, not an existing contact */
+  matchContactId: string | null
+  matchLabel: string
+  matchEmail: string
 }
 
 /** First pass: upload the file, auto-map its headers and dry-run the result. */
@@ -1817,7 +1887,13 @@ export const invitePortal = (contactId: string) =>
     { method: 'POST', body: JSON.stringify({ contact_id: contactId }) },
   )
 
-export type ComposeAudience = 'all_contacts' | 'roster' | 'speakers' | 'accepted_speakers' | 'selected'
+export type ComposeAudience =
+  | 'all_contacts'
+  | 'roster'
+  | 'speakers'
+  | 'accepted_speakers'
+  | 'declined_speakers'
+  | 'selected'
 
 export interface ComposeAudienceCount {
   audience: Exclude<ComposeAudience, 'selected'>

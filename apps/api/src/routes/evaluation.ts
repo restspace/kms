@@ -24,6 +24,7 @@ import {
   canReviewerSeeThread,
   loadAuthorName,
   loadThread,
+  loadThreadForPlan,
   pseudonymiseReviewerAuthors,
 } from '../submissionComments';
 
@@ -2284,7 +2285,10 @@ evaluationRoutes.get('/review/assignments/:id/comments', async (c) => {
   if (!(await canReviewerSeeThread(db, session.contactId, assignment.submission_id))) {
     return c.json({ error: 'review_not_submitted' }, 403);
   }
-  const thread = await loadThread(db, assignment.submission_id);
+  // #11: the reviewer's own scoring screen shows one round at a time — scope
+  // the thread to this assignment's round, not the whole submission (that
+  // pooled view is the organiser detail panel's job, via loadThread).
+  const thread = await loadThreadForPlan(db, assignment.submission_id, assignment.plan_id);
   return c.json({
     comments: assignment.anonymise_submitters === 1 ? pseudonymiseReviewerAuthors(thread) : thread,
   });
@@ -2315,7 +2319,7 @@ evaluationRoutes.post('/review/assignments/:id/comments', async (c) => {
   });
   if (!commentId) return c.json({ error: 'empty_body' }, 400);
   await bumpEventRevision(c.env, session.eventId);
-  const thread = await loadThread(db, assignment.submission_id);
+  const thread = await loadThreadForPlan(db, assignment.submission_id, assignment.plan_id);
   return c.json({
     ok: true,
     id: commentId,

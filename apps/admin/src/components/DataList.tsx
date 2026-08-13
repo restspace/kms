@@ -308,7 +308,10 @@ export interface DataListExportConfig {
 export interface DataListToolbarAction {
   /** Stable identity for the button's React key. */
   id: string;
-  label: string;
+  /** Static text, or a function of the live checked ids (e.g. "Message
+   * selected (3)") — recomputed on every render, so it always matches what
+   * `onClick`/`disabled` would see. */
+  label: string | ((ctx: { checkedIds: string[] }) => string);
   title?: string;
   /** Renders disabled with `title` explaining why (e.g. nothing selected). */
   disabled?: (ctx: { checkedIds: string[] }) => string | false;
@@ -2492,13 +2495,14 @@ export const DataList = <T extends Record<string, any>, TFilters extends Record<
                   {toolbarActions.map((action) => {
                     const checkedIds = Array.from(checkedItemIds);
                     const blocked = action.disabled?.({ checkedIds }) ?? false;
+                    const label = typeof action.label === 'function' ? action.label({ checkedIds }) : action.label;
                     return (
                       <button
                         key={action.id}
                         type="button"
                         className="data-list-export-button"
                         disabled={Boolean(blocked)}
-                        title={blocked || action.title || action.label}
+                        title={blocked || action.title || label}
                         onClick={() => {
                           const sort = sortState.field && sortState.direction
                             ? { field: sortState.field, direction: sortState.direction }
@@ -2511,7 +2515,7 @@ export const DataList = <T extends Record<string, any>, TFilters extends Record<
                           });
                         }}
                       >
-                        {action.label}
+                        {label}
                       </button>
                     );
                   })}

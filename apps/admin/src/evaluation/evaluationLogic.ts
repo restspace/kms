@@ -42,3 +42,34 @@ export function parseCapInput(rawValue: string, current: number | null): number 
   if (next === current) return undefined
   return next
 }
+
+/** What a round-timing `datetime-local` blur should do next (eval defect #24). */
+export type DateBlurOutcome =
+  | { action: 'save'; next: string | null }
+  | { action: 'invalid' }
+  | { action: 'noop' }
+
+/**
+ * The round card's "Reviews open"/"Reviews close" fields used to save on
+ * every blur regardless of whether the input actually held a complete date —
+ * `datetime-local` reports an empty `.value` both when the user genuinely
+ * cleared the field AND when they are mid-way through typing one (year typed,
+ * month not yet), so blurring mid-edit silently committed `null` and wiped
+ * the round's date. `badInput` (from the input's `ValidityState`) is what
+ * tells those two cases apart — true only for the partial-typing case — so
+ * callers pass it through instead of trusting `.value` alone.
+ *
+ * `parseValue` converts a datetime-local string to the ISO the API stores
+ * (or null for an intentional clear); it is injected so this stays a pure
+ * function testable without a real `<input>`.
+ */
+export function resolveDateInputBlur(
+  rawValue: string,
+  badInput: boolean,
+  current: string | null,
+  parseValue: (value: string) => string | null,
+): DateBlurOutcome {
+  if (badInput) return { action: 'invalid' }
+  const next = parseValue(rawValue)
+  return next === current ? { action: 'noop' } : { action: 'save', next }
+}

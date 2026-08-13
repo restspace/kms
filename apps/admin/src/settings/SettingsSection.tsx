@@ -15,6 +15,8 @@ import { ContactFieldsCard } from './ContactFieldsCard'
 import { SpeakerStatusesCard } from './SpeakerStatusesCard'
 import { EmailTemplatesCard } from './EmailTemplatesCard'
 import { ChaseSettingsCard } from './ChaseSettingsCard'
+import { FileCollectionDefaultsCard } from './FileCollectionDefaultsCard'
+import { AirtableSettingsCard } from './AirtableSettingsCard'
 import './settings.css'
 
 /**
@@ -223,6 +225,10 @@ export function SettingsSection({ me }: { me: Me }) {
       <EmailTemplatesCard />
 
       <ChaseSettingsCard />
+
+      <FileCollectionDefaultsCard />
+
+      <AirtableSettingsCard />
 
       {/*
         * Wave E (workplan 14, D8): pre-edit snapshots of the event's settings

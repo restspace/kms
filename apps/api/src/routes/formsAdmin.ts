@@ -21,6 +21,16 @@ export const formsAdminRoutes = new Hono<ApiEnv>();
 
 const nowIso = () => new Date().toISOString();
 
+/** A new form's fallback name/title when the caller supplies none — the
+ *  event's own name, so a freshly created form never shows the bare
+ *  "Untitled form" placeholder on the public page or the forms list
+ *  (defect #23). Falls back to that literal only if the event row is
+ *  somehow missing (should not happen behind the session guard). */
+async function defaultFormName(db: D1Database, eventId: string): Promise<string> {
+  const event = await db.prepare('SELECT name FROM events WHERE id = ?').bind(eventId).first<{ name: string | null }>();
+  return event?.name ? `${event.name} — Call for Speakers` : 'Untitled form';
+}
+
 /** Columns admins may write on submission_forms, with light coercion. */
 const FORM_FIELDS: Record<string, (v: unknown) => unknown | undefined> = {
   internal_name: (v) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, 255) : undefined),
@@ -425,7 +435,12 @@ formsAdminRoutes.post('/', async (c) => {
   const fields = pickFormFields(rawBody);
   const id = crypto.randomUUID();
   const ts = nowIso();
-  const name = (fields.internal_name as string) ?? 'Untitled form';
+  // Defect #23: an unnamed form used to default to the literal "Untitled
+  // form", which then flowed straight through to external_title (below) and
+  // rendered as the public page's H1 and the organiser's forms-list row.
+  // Falling back to the event's own name instead gives both surfaces a
+  // sensible title until the organiser renames it.
+  const name = (fields.internal_name as string) ?? (await defaultFormName(c.env.DB, session.eventId));
 
   await c.env.DB.prepare(
     `INSERT INTO submission_forms (id, event_id, internal_name, external_title, page_heading,

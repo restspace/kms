@@ -21,7 +21,7 @@ import {
   type PlanSubmissionsPayload,
 } from './evaluationApi'
 import { appConfirm } from '../components/dialogs'
-import { buildAssignBody, buildScalePatch, parseCapInput } from './evaluationLogic'
+import { buildAssignBody, buildScalePatch, parseCapInput, resolveDateInputBlur } from './evaluationLogic'
 import '../workspace/review.css'
 
 /**
@@ -453,9 +453,21 @@ function PlanCard({
             aria-label="Reviews open"
             defaultValue={toLocalInput(plan.opens_at)}
             onBlur={(e) => {
-              const next = fromLocalInput((e.target as HTMLInputElement).value)
-              if (next !== (plan.opens_at ?? null)) {
-                run(`${plan.name}: opening date saved`, () => updatePlan(plan.id, { opens_at: next }))
+              const input = e.target as HTMLInputElement
+              // #24: commit-on-blur, but validated — see resolveDateInputBlur.
+              const outcome = resolveDateInputBlur(
+                input.value,
+                input.validity.badInput,
+                plan.opens_at ?? null,
+                fromLocalInput,
+              )
+              if (outcome.action === 'invalid') {
+                input.value = toLocalInput(plan.opens_at)
+                onError('That opening date is incomplete — it was not saved.')
+                return
+              }
+              if (outcome.action === 'save') {
+                run(`${plan.name}: opening date saved`, () => updatePlan(plan.id, { opens_at: outcome.next }))
               }
             }}
           />
@@ -467,9 +479,20 @@ function PlanCard({
             aria-label="Reviews close"
             defaultValue={toLocalInput(plan.closes_at)}
             onBlur={(e) => {
-              const next = fromLocalInput((e.target as HTMLInputElement).value)
-              if (next !== (plan.closes_at ?? null)) {
-                run(`${plan.name}: closing date saved`, () => updatePlan(plan.id, { closes_at: next }))
+              const input = e.target as HTMLInputElement
+              const outcome = resolveDateInputBlur(
+                input.value,
+                input.validity.badInput,
+                plan.closes_at ?? null,
+                fromLocalInput,
+              )
+              if (outcome.action === 'invalid') {
+                input.value = toLocalInput(plan.closes_at)
+                onError('That closing date is incomplete — it was not saved.')
+                return
+              }
+              if (outcome.action === 'save') {
+                run(`${plan.name}: closing date saved`, () => updatePlan(plan.id, { closes_at: outcome.next }))
               }
             }}
           />

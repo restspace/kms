@@ -63,6 +63,14 @@ export function RoomsTracksCard() {
   const [savingRoom, setSavingRoom] = useState<string | null>(null)
   const [savingTrack, setSavingTrack] = useState<string | null>(null)
   const [savingFormat, setSavingFormat] = useState<string | null>(null)
+  // Eval #21: "+ Add room" used to call createRoom() on click, so a stray
+  // click left a live, schedulable "New room N" in the agenda's room list
+  // that had to be deleted through the confirm dialog. Name-first instead:
+  // the click only opens an inline input; nothing is created (no API call)
+  // until Enter commits a non-empty name. Escape/blur-empty cancels with no
+  // room ever having existed.
+  const [newRoomName, setNewRoomName] = useState<string | null>(null)
+  const [addingRoom, setAddingRoom] = useState(false)
 
   const loadRooms = useCallback(() => {
     setRoomsError(null)
@@ -91,13 +99,23 @@ export function RoomsTracksCard() {
     loadFormats()
   }, [loadRooms, loadTracks, loadFormats])
 
-  const handleAddRoom = async () => {
+  const handleCommitNewRoom = async () => {
+    if (addingRoom) return // disabling the input while in flight can itself trigger a blur; ignore the re-entrant call
+    const name = (newRoomName ?? '').trim()
+    if (!name) {
+      // Nothing was ever created — just close the input.
+      setNewRoomName(null)
+      return
+    }
+    setAddingRoom(true)
     try {
-      const n = (rooms?.length ?? 0) + 1
-      const created = await createRoom({ name: `New room ${n}` })
+      const created = await createRoom({ name })
       setRooms((cur) => [...(cur ?? []), asDraftRoom(created)])
+      setNewRoomName(null)
     } catch (e) {
       setRoomsError(e instanceof Error ? e.message : 'Failed to add the room.')
+    } finally {
+      setAddingRoom(false)
     }
   }
 
@@ -277,9 +295,37 @@ export function RoomsTracksCard() {
                   />
                 </div>
               ))}
-              <button type="button" className="rt-add" onClick={() => void handleAddRoom()}>
-                + Add room
-              </button>
+              {newRoomName !== null ? (
+                <input
+                  type="text"
+                  className="rt-row-name rt-new-row"
+                  placeholder="Room name"
+                  aria-label="New room name"
+                  autoFocus
+                  value={newRoomName}
+                  disabled={addingRoom}
+                  onChange={(e) => setNewRoomName((e.target as HTMLInputElement).value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault()
+                      void handleCommitNewRoom()
+                    } else if (e.key === 'Escape') {
+                      e.preventDefault()
+                      setNewRoomName(null)
+                    }
+                  }}
+                  onBlur={() => {
+                    // An empty name on blur just closes the input — no room
+                    // is created either way, so there is nothing to confirm.
+                    if (newRoomName.trim() === '') setNewRoomName(null)
+                    else void handleCommitNewRoom()
+                  }}
+                />
+              ) : (
+                <button type="button" className="rt-add" onClick={() => setNewRoomName('')}>
+                  + Add room
+                </button>
+              )}
             </div>
             </>
           )}

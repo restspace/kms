@@ -131,6 +131,32 @@ describe('POST /app/api/messaging/compose', () => {
     expect(params.contact_ids).toEqual([accepted]);
   });
 
+  // 2026-08-13 eval sweep, defect #14: there was no way to reach only
+  // rejected speakers without hand-picking recipients — this preset is
+  // symmetric with accepted_speakers above.
+  it('narrows "declined_speakers" to declined submissions', async () => {
+    const eventId = await createEvent();
+    const admin = await staffSession(eventId);
+    const declined = await createContact(eventId, { email: 'no-thanks@example.com' });
+    const accepted = await createContact(eventId, { email: 'yay@example.com' });
+    const pending = await createContact(eventId, { email: 'maybe@example.com' });
+    await seedSubmission(eventId, declined, 'declined');
+    await seedSubmission(eventId, accepted, 'accepted');
+    await seedSubmission(eventId, pending, 'pending');
+
+    const res = await SELF.fetch(
+      'https://example.com/app/api/messaging/compose',
+      post(admin.cookie, { subject: 'Hello', body: 'Body', audience: 'declined_speakers' }),
+    );
+    const body = (await res.json()) as { job_id: string; total: number };
+    expect(body.total).toBe(1);
+    const params = JSON.parse(
+      (await env.DB.prepare('SELECT params_json FROM bulk_jobs WHERE id = ?').bind(body.job_id).first<{ params_json: string }>())!
+        .params_json,
+    ) as { contact_ids: string[] };
+    expect(params.contact_ids).toEqual([declined]);
+  });
+
   it('drops contacts from another event out of an explicit selection', async () => {
     const eventId = await createEvent();
     const otherEvent = await createEvent({ slug: `other-${crypto.randomUUID().slice(0, 8)}` });
@@ -149,6 +175,61 @@ describe('POST /app/api/messaging/compose', () => {
         .params_json,
     ) as { contact_ids: string[] };
     expect(params.contact_ids).toEqual([mine]);
+  });
+
+  // Eval defect #10: composing from the org-wide "All events" directory offers
+  // recipients from every event the caller can access (the picker's contact
+  // list is unscoped by event), not just the session's own event. A
+  // `selected` audience can therefore span events within the SAME
+  // organisation — unlike the cross-org case above, these recipients must not
+  // be dropped, and their send must land against THEIR OWN event, not the
+  // session's home event ("the seeded default event" the eval report named).
+  it('resolves a same-org, other-event recipient and logs their send against their own event, not the session\'s', async () => {
+    await clearPendingJobs();
+    const orgId = `org-${crypto.randomUUID()}`;
+    const home = await createEvent({ org_id: orgId, name: 'Home Conf' });
+    const other = await createEvent({ org_id: orgId, name: 'Other Conf', slug: `other-conf-${crypto.randomUUID().slice(0, 8)}` });
+    const admin = await staffSession(home);
+    const homeContact = await createContact(home, { email: 'home-person@example.com', first_name: 'Homer' });
+    const otherContact = await createContact(other, { email: 'other-person@example.com', first_name: 'Ottoline' });
+
+    const res = await SELF.fetch(
+      'https://example.com/app/api/messaging/compose',
+      post(admin.cookie, {
+        subject: 'Hello {{first_name}}, welcome to {{event.name}}',
+        body: 'Hi {{first_name}}',
+        audience: 'selected',
+        contact_ids: [homeContact, otherContact],
+      }),
+    );
+    expect(res.status).toBe(202);
+    const body = (await res.json()) as { job_id: string; total: number };
+    // Both recipients resolve — same org, different events — where the old
+    // strict `ec.event_id = session.eventId` filter would have kept only the
+    // home-event contact.
+    expect(body.total).toBe(2);
+
+    await settleJob(body.job_id);
+
+    const { results: logs } = await env.DB.prepare(
+      `SELECT event_id, to_email, subject FROM message_log WHERE bulk_job_id = ? ORDER BY to_email`,
+    ).bind(body.job_id).all<{ event_id: string; to_email: string; subject: string }>();
+    expect(logs).toHaveLength(2);
+    const homeLog = logs.find((l) => l.to_email === 'home-person@example.com')!;
+    const otherLog = logs.find((l) => l.to_email === 'other-person@example.com')!;
+    // The bug: both used to be logged against `home` (the composing session's
+    // event) regardless of which event each recipient actually belonged to.
+    expect(homeLog.event_id).toBe(home);
+    expect(otherLog.event_id).toBe(other);
+    expect(homeLog.subject).toBe('Hello Homer, welcome to Home Conf');
+    expect(otherLog.subject).toBe('Hello Ottoline, welcome to Other Conf');
+
+    // The job row itself still carries the composing session's event — that
+    // column is what GET /bulk-jobs/:id's access check keys on — while the
+    // per-recipient message_log rows carry the truth.
+    const job = await env.DB.prepare('SELECT event_id FROM bulk_jobs WHERE id = ?')
+      .bind(body.job_id).first<{ event_id: string }>();
+    expect(job?.event_id).toBe(home);
   });
 
   it('rejects an empty subject, an empty body and an audience that resolves to nobody', async () => {
@@ -202,6 +283,25 @@ describe('POST /app/api/messaging/compose', () => {
       body: JSON.stringify({ subject: 'Hi', body: 'Body', audience: 'all_contacts' }),
     });
     expect(res.status).toBe(401);
+  });
+});
+
+describe('GET /app/api/messaging/compose/audiences', () => {
+  it('includes declined_speakers alongside accepted_speakers with honest counts', async () => {
+    const eventId = await createEvent();
+    const admin = await staffSession(eventId);
+    const declined = await createContact(eventId, { email: 'declined-count@example.com' });
+    await seedSubmission(eventId, declined, 'declined');
+
+    const res = await SELF.fetch('https://example.com/app/api/messaging/compose/audiences', {
+      headers: { cookie: admin.cookie },
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { items: Array<{ audience: string; count: number }> };
+    const declinedItem = body.items.find((i) => i.audience === 'declined_speakers');
+    expect(declinedItem).toBeDefined();
+    expect(declinedItem!.count).toBe(1);
+    expect(body.items.some((i) => i.audience === 'accepted_speakers')).toBe(true);
   });
 });
 

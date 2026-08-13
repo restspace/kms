@@ -39,6 +39,11 @@ interface PlanBody {
   newTracks: string[];
   newRooms: string[];
   event_id: string;
+  warnings?: string[];
+  possibleDuplicates?: Array<{
+    row: number; label: string; email: string;
+    matchContactId: string | null; matchLabel: string; matchEmail: string;
+  }>;
 }
 
 // ---------------------------------------------------------------------------
@@ -398,6 +403,72 @@ describe('speaker import', () => {
        WHERE ec.event_id = ? AND c.email = ?`,
     ).bind(eventA, 'ada@example.com').first<{ notes: string | null }>();
     expect(stillOnA?.notes).toBe("Event A's private note — must not travel.");
+  });
+
+  // Eval defect #13: dedupe is strictly by email, so re-importing the same
+  // person under a different address used to silently create a second
+  // contact with no signal at all. The import must still proceed (this is
+  // advisory, not a block — legitimate namesakes exist), but the plan now
+  // flags the same-name/different-email match so the organizer can review it
+  // in the existing Duplicates panel instead of finding out later.
+  it('flags a same-name/different-email match against an existing contact as a possible duplicate, but still creates it', async () => {
+    const eventId = await seedEvent();
+    const admin = await seedStaff(eventId, 'admin');
+    await seedContact(eventId, { email: 'ada.lovelace@work.example.com', first_name: 'Ada', last_name: 'Lovelace' });
+
+    const sheet = ['First Name,Last Name,Email', 'Ada,Lovelace,ada.l@personal.example.com'].join('\n');
+    const plan = (await (await upload(admin.cookie, 'contacts', eventId, 'x.csv', sheet)).json()) as PlanBody;
+    expect(plan.rows.map((r) => r.action)).toEqual(['create']);
+    expect(plan.warnings?.some((w) => w.includes('1 possible duplicate'))).toBe(true);
+    expect(plan.possibleDuplicates).toEqual([
+      {
+        row: 1,
+        label: 'Ada Lovelace',
+        email: 'ada.l@personal.example.com',
+        matchContactId: expect.any(String),
+        matchLabel: 'Ada Lovelace',
+        matchEmail: 'ada.lovelace@work.example.com',
+      },
+    ]);
+
+    const res = await post('/import/commit', admin.cookie, {
+      target: 'contacts', event_id: eventId, headers: plan.headers, rows: plan.rows_raw, mapping: plan.mapping,
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ ok: true, applied: { create: 1 } });
+    const count = await env.DB.prepare(
+      `SELECT COUNT(*) AS n FROM contacts
+       WHERE lower(first_name) = 'ada' AND lower(last_name) = 'lovelace'
+         AND email IN ('ada.lovelace@work.example.com', 'ada.l@personal.example.com')`,
+    ).first<{ n: number }>();
+    expect(count?.n).toBe(2); // proceeds and creates the second record — advisory, not a block
+  });
+
+  it('flags two brand-new rows in the same file sharing a name but different emails', async () => {
+    const eventId = await seedEvent();
+    const admin = await seedStaff(eventId, 'admin');
+    const sheet = [
+      'First Name,Last Name,Email',
+      'Sam,Rivera,sam.rivera.1@example.com',
+      'Sam,Rivera,sam.rivera.2@example.com',
+    ].join('\n');
+    const plan = (await (await upload(admin.cookie, 'contacts', eventId, 'x.csv', sheet)).json()) as PlanBody;
+    expect(plan.rows.map((r) => r.action)).toEqual(['create', 'create']);
+    expect(plan.possibleDuplicates).toEqual([
+      {
+        row: 2, label: 'Sam Rivera', email: 'sam.rivera.2@example.com',
+        matchContactId: null, matchLabel: 'Sam Rivera', matchEmail: 'sam.rivera.1@example.com',
+      },
+    ]);
+  });
+
+  it('does not flag a genuine merge/attach match (same name AND same email) as a possible duplicate', async () => {
+    const { eventId, admin } = await seedRoster();
+    const plan = (await (await upload(admin.cookie, 'contacts', eventId, 'speakers.csv', ROSTER)).json()) as PlanBody;
+    // Ada and Grace resolve by email to the existing contacts (merge/skip),
+    // only Dana is a `create` — and Dana has no name-only collision.
+    expect(plan.possibleDuplicates ?? []).toEqual([]);
+    expect(plan.warnings ?? []).toEqual([]);
   });
 });
 
