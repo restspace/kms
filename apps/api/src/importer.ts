@@ -237,6 +237,11 @@ export const CONTACT_IMPORT_FIELDS: ImportField[] = [
   { key: 'honorific', label: 'Honorific', aliases: ['suffix'] },
   { key: 'gender', label: 'Gender' },
   { key: 'notes', label: 'Internal notes', aliases: ['note', 'organiser notes'] },
+  // W7 (D11): last year's attendee rating, imported never collected — there is
+  // no capture UI, this pair of columns is the whole delivery mechanism for a
+  // Sched/Sessionboard feedback export.
+  { key: 'prior_rating', label: 'Prior rating', aliases: ['rating', 'attendee rating', 'feedback rating', 'session rating'], hint: 'This event’s attendee feedback score, e.g. from a Sched or Sessionboard export' },
+  { key: 'prior_rating_note', label: 'Prior rating note', aliases: ['rating note', 'feedback note'], hint: 'e.g. "bottom quartile, n=41"' },
 ];
 
 export const TARGET_FIELDS: Record<ImportTarget, ImportField[]> = {
@@ -799,10 +804,11 @@ export async function planSessions(
 const CONTACT_WRITABLE = [
   'first_name', 'last_name', 'company', 'job_title', 'mobile_phone',
   'biography', 'pronouns', 'salutation', 'honorific', 'gender', 'notes',
+  'prior_rating', 'prior_rating_note',
 ] as const;
 
 /** Per-event profile columns — written to `event_contacts`. */
-const CONTACT_PROFILE_WRITABLE: readonly string[] = ['company', 'job_title', 'biography', 'notes'];
+const CONTACT_PROFILE_WRITABLE: readonly string[] = ['company', 'job_title', 'biography', 'notes', 'prior_rating', 'prior_rating_note'];
 
 /** Org-level identity columns — written to `contacts`. */
 const CONTACT_IDENTITY_WRITABLE = CONTACT_WRITABLE.filter((c) => !CONTACT_PROFILE_WRITABLE.includes(c));
@@ -912,6 +918,9 @@ export async function planContacts(
     if (!email) errors.push('Email is required');
     else if (!EMAIL_RE.test(email)) errors.push(`"${values.email}" is not a valid email address`);
     if (email) values.email = email;
+    if (values.prior_rating && !Number.isFinite(Number(values.prior_rating))) {
+      errors.push(`Prior rating "${values.prior_rating}" is not a number`);
+    }
 
     const label = [values.first_name, values.last_name].filter(Boolean).join(' ') || values.email || '(no name)';
     let action: RowAction;
@@ -938,6 +947,9 @@ export async function planContacts(
         // the value to compare against is the seed rather than nothing.
         const current = (col: string): string | null => {
           const raw = !onEvent && CONTACT_SEEDED_PROFILE.includes(col) ? match[`seed_${col}`] : match[col];
+          // prior_rating (W7/D11) is the one writable column that comes back
+          // numeric rather than text — still "non-blank" for the fill check.
+          if (typeof raw === 'number') return String(raw);
           return typeof raw === 'string' ? raw : null;
         };
         const fills = CONTACT_WRITABLE.filter(
@@ -1142,6 +1154,14 @@ export function commitStatements(
       cols.filter((c) => !CONTACT_PROFILE_WRITABLE.includes(c));
     const profileOf = (cols: readonly string[]): string[] =>
       cols.filter((c) => CONTACT_PROFILE_WRITABLE.includes(c));
+    // Every profile column is plain text except prior_rating (REAL, W7/D11) —
+    // converted here rather than left to column-affinity coercion so a bind
+    // failure surfaces the same way the rest of the importer's numeric fields do.
+    const profileValue = (row: PlannedRow, col: string): string | number | null => {
+      const raw = row.values[col];
+      if (raw === undefined) return null;
+      return col === 'prior_rating' ? Number(raw) : raw;
+    };
 
     /**
      * Identity fills land on the org-level `contacts` row, which has no
@@ -1207,29 +1227,32 @@ export function commitStatements(
               `INSERT INTO event_contacts (event_id, contact_id, added_at, source${allCols.length ? ', ' + allCols.join(', ') : ''})
                VALUES (?, ?, ?, 'import'${', ?'.repeat(allCols.length)})`,
             )
-            .bind(eventId, contactId, now, ...profile.map((c) => row.values[c] ?? null), ...tail.binds),
+            .bind(eventId, contactId, now, ...profile.map((c) => profileValue(row, c)), ...tail.binds),
         );
       } else if (row.action === 'attach' && row.targetId) {
         const fills = row.mergeFields ?? [];
-        const fill = (c: string): string | null => (fills.includes(c) ? row.values[c] ?? null : null);
+        const fill = (c: string): string | number | null => (fills.includes(c) ? profileValue(row, c) : null);
         const tail = membershipTail(row);
         const tailColSql = tail.cols.length ? ', ' + tail.cols.join(', ') : '';
-        // Numbered placeholders continue after today's ?1..?7.
-        const tailExprSql = tail.cols.map((_c, i) => `, ?${8 + i}`).join('');
+        // Numbered placeholders continue after today's ?1..?9.
+        const tailExprSql = tail.cols.map((_c, i) => `, ?${10 + i}`).join('');
         // Mirrors db.contacts.attachToEvent — seed biography/company/job_title
         // from the contact's most recent event in the SAME org, never the
         // headshot (an event-scoped asset) and never notes (one team's private
         // remarks) — with the sheet's values overlaid where the seed is empty.
         // COALESCE keeps the fill-blanks promise even though the row being
-        // filled is created by this very statement.
+        // filled is created by this very statement. prior_rating/prior_rating_note
+        // (W7/D11) are never seeded across events — a rating is a fact about one
+        // event, not carried forward like a bio — so they pass straight from the
+        // sheet with no COALESCE.
         statements.push(
           db
             .prepare(
               `INSERT INTO event_contacts
                  (event_id, contact_id, biography, headshot_asset_id, company,
-                  job_title, notes, added_at, source${tailColSql})
+                  job_title, notes, prior_rating, prior_rating_note, added_at, source${tailColSql})
                SELECT ?1, ?2, COALESCE(prev.biography, ?4), NULL, COALESCE(prev.company, ?5),
-                      COALESCE(prev.job_title, ?6), ?7, ?3, 'import'${tailExprSql}
+                      COALESCE(prev.job_title, ?6), ?7, ?8, ?9, ?3, 'import'${tailExprSql}
                  FROM (SELECT ec.biography, ec.company, ec.job_title
                          FROM event_contacts ec
                          JOIN events e ON e.id = ec.event_id
@@ -1242,7 +1265,7 @@ export function commitStatements(
                WHERE true
                ON CONFLICT (event_id, contact_id) DO NOTHING`,
             )
-            .bind(eventId, row.targetId, now, fill('biography'), fill('company'), fill('job_title'), fill('notes'), ...tail.binds),
+            .bind(eventId, row.targetId, now, fill('biography'), fill('company'), fill('job_title'), fill('notes'), fill('prior_rating'), fill('prior_rating_note'), ...tail.binds),
         );
         // No prior event to seed from (or the person was attached between the
         // preview and now): the INSERT…SELECT above produced no row, so this
@@ -1252,17 +1275,17 @@ export function commitStatements(
           db
             .prepare(
               `INSERT INTO event_contacts
-                 (event_id, contact_id, biography, company, job_title, notes, added_at, source${tailColSql})
-               VALUES (?, ?, ?, ?, ?, ?, ?, 'import'${', ?'.repeat(tail.cols.length)})
+                 (event_id, contact_id, biography, company, job_title, notes, prior_rating, prior_rating_note, added_at, source${tailColSql})
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'import'${', ?'.repeat(tail.cols.length)})
                ON CONFLICT (event_id, contact_id) DO NOTHING`,
             )
-            .bind(eventId, row.targetId, fill('biography'), fill('company'), fill('job_title'), fill('notes'), now, ...tail.binds),
+            .bind(eventId, row.targetId, fill('biography'), fill('company'), fill('job_title'), fill('notes'), fill('prior_rating'), fill('prior_rating_note'), now, ...tail.binds),
         );
         pushIdentityFills(row, identityOf(fills));
       } else if (row.action === 'merge' && row.targetId && row.mergeFields?.length) {
         const profile = profileOf(row.mergeFields);
         const sets = profile.map((c) => `${c} = ?`);
-        const binds: unknown[] = profile.map((c) => row.values[c] ?? null);
+        const binds: unknown[] = profile.map((c) => profileValue(row, c));
         if (row.extra) {
           // Merge-over on update: new keys win, old keys survive (json_patch
           // is RFC-7396 — our values are always strings, never null).

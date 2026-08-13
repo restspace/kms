@@ -5,7 +5,9 @@ import { appConfirm } from '../components/dialogs'
 import {
   addSubmissionComment,
   addSubmissionParticipant,
+  getMaterialsOwners,
   getSubmissionDetail,
+  getSubmissionFileComments,
   getSubmissionRevisions,
   listFormats,
   listRooms,
@@ -16,6 +18,10 @@ import {
   setSubmissionParticipantConfirmed,
   updateSubmission,
   updateSubmissionApproval,
+  updateSubmissionCondition,
+  updateSubmissionDecision,
+  updateSubmissionIntroScript,
+  updateSubmissionMaterials,
   updateSubmissionNotes,
   updateSubmissionParticipantRole,
   updateSubmissionStatus,
@@ -23,8 +29,10 @@ import {
   type RoomRow,
   type SubmissionComment,
   type SubmissionDetail,
+  type SubmissionFileComment,
   type TrackRow,
 } from '../api'
+import { LobbyRail } from '../review/LobbyQueue'
 import { SubmissionFilesPanel } from './FilePanels'
 import './files.css'
 import './review.css'
@@ -72,10 +80,27 @@ const APPROVAL_CHIP: Record<string, { className: string; label: string }> = {
   refused: { className: 'status-declined', label: 'Approval refused' },
 }
 
+/** Workplan 15 W5a (D9) vocabulary — tracks routes/adminApi.ts's
+ *  MATERIALS_STATES, duplicated client-side like APPROVAL_STATES above.
+ *  'received' is listed because it must be *displayable*; it is set by an
+ *  upload, never by a person, so the editor below offers it read-only. */
+export const MATERIALS_STATES = ['received', 'reviewed', 'revision_requested', 'final'] as const
+
+const MATERIALS_CHIP: Record<string, { className: string; label: string }> = {
+  received: { className: 'status-pending', label: 'Deck received' },
+  reviewed: { className: 'status-pending', label: 'Deck reviewed' },
+  revision_requested: { className: 'status-declined', label: 'Revision requested' },
+  final: { className: 'status-accepted', label: 'Deck final' },
+}
+
 /** Single-select status chips; the tab count tracks the active chip. */
 export function StatusChipsFilter({ filters, setFilters }: DataListFilterProps<Record<string, string>>) {
   const active = filters.status ?? ''
   const choose = (value: string) => setFilters((prev) => ({ ...prev, status: value }))
+  const reviseOn = filters.decision_outcome === 'revise'
+  const conditionOn = filters.condition_outstanding === 'true'
+  const toggle = (key: string, value: string) =>
+    setFilters((prev) => ({ ...prev, [key]: prev[key] === value ? '' : value }))
   return (
     <div className="chip-filter" role="group" aria-label="Status filter">
       <button className={active === '' ? 'active' : ''} aria-pressed={active === ''} onClick={() => choose('')}>
@@ -86,6 +111,26 @@ export function StatusChipsFilter({ filters, setFilters }: DataListFilterProps<R
           {statusLabel(s)}
         </button>
       ))}
+      {/* Workplan 15 W2/W3: two flags that no status value can express (D4/D5)
+        * — a revise row reads 'Declined' in the status column, and a condition
+        * is orthogonal to the accept it hangs off. Independent toggles, so
+        * they compose with whichever status chip is active. */}
+      <button
+        className={reviseOn ? 'active' : ''}
+        aria-pressed={reviseOn}
+        title="Declines flagged revise-and-resubmit — the status column still reads Declined (D5)"
+        onClick={() => toggle('decision_outcome', 'revise')}
+      >
+        Revise &amp; resubmit
+      </button>
+      <button
+        className={conditionOn ? 'active' : ''}
+        aria-pressed={conditionOn}
+        title="Accepts carrying a condition nobody has marked met yet"
+        onClick={() => toggle('condition_outstanding', 'true')}
+      >
+        Condition outstanding
+      </button>
     </div>
   )
 }
@@ -156,6 +201,108 @@ function SubmissionCoverageBar({
 }
 
 /**
+ * Slot counter strip (workplan 15 W1a): one chip per track carrying a target
+ * — `Agents 12/15` — plus the total accepted on everything untracked.
+ *
+ * Counts are `status IN ('accepted','accept_queue')` (D2, the resource's
+ * `decision_accepted` filter): the strip exists to run *during* the decision
+ * meeting, where the last ten minutes of accepts are still queued and unsent,
+ * and counting only 'accepted' would make it read zero on the one screen it
+ * is for. Every count goes through the same query endpoint and the same
+ * filters as the grid, so the strip and the list cannot disagree — the rule
+ * the coverage bar above follows.
+ *
+ * D1: a target, never a cap. Over target renders in the error tone and blocks
+ * nothing — no modal, no refused save, anywhere.
+ */
+function SlotCounterStrip({
+  filters,
+  eventFilterId,
+}: {
+  filters: Record<string, unknown>
+  eventFilterId?: string | null
+}) {
+  const [tracks, setTracks] = useState<TrackRow[] | null>(null)
+  const [counts, setCounts] = useState<{ byTrack: Record<string, number>; total: number } | null>(null)
+
+  // The strip sets its own status and track scope; everything else the grid is
+  // filtered by (search text, tag, event) is carried through unchanged.
+  const base: Record<string, unknown> = { ...filters }
+  delete base.status
+  delete base.track_id
+  delete base.decision_accepted
+  if (eventFilterId) base.event_id = eventFilterId
+  const signature = JSON.stringify(base)
+
+  // Tracks belong to the session's event — the decision meeting is a
+  // one-event act, so this is deliberately not re-fetched per event filter.
+  useEffect(() => {
+    let cancelled = false
+    listTracks()
+      .then((r) => !cancelled && setTracks(r.items))
+      .catch(() => !cancelled && setTracks([]))
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  const targeted = (tracks ?? []).filter((t) => t.target_slots !== null)
+  const trackIds = targeted.map((t) => t.id).join(',')
+
+  useEffect(() => {
+    if (tracks === null) return
+    let cancelled = false
+    const parsed = JSON.parse(signature) as Record<string, unknown>
+    const query = queryResource<Record<string, unknown>>('submissions')
+    const ids = trackIds === '' ? [] : trackIds.split(',')
+    Promise.all([
+      query({ from: 0, size: 1, filters: { ...parsed, decision_accepted: true } }),
+      ...ids.map((id) => query({ from: 0, size: 1, filters: { ...parsed, decision_accepted: true, track_id: id } })),
+    ])
+      .then(([all, ...perTrack]) => {
+        if (cancelled) return
+        const byTrack: Record<string, number> = {}
+        ids.forEach((id, i) => {
+          byTrack[id] = perTrack[i]?.total ?? 0
+        })
+        setCounts({ byTrack, total: all.total })
+      })
+      .catch(() => {
+        if (!cancelled) setCounts(null)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [signature, trackIds, tracks])
+
+  if (targeted.length === 0 || !counts) return null
+  // Whatever the targeted tracks do not account for: no track at all, or a
+  // track nobody set a target on. Both are "not being counted down", which is
+  // the one number this strip owes the room beyond its chips.
+  const untracked = counts.total - targeted.reduce((sum, t) => sum + (counts.byTrack[t.id] ?? 0), 0)
+  return (
+    <div
+      className="slot-counter"
+      role="status"
+      aria-label="Accepted slots by track"
+      title="Accepted or queued, counted against each track's target — a target, not a cap"
+    >
+      {targeted.map((t) => {
+        const filled = counts.byTrack[t.id] ?? 0
+        const target = t.target_slots as number
+        const tone = filled > target ? 'status-declined' : filled === target ? 'status-accepted' : 'status-pending'
+        return (
+          <span key={t.id} className={`status-chip ${tone}`}>
+            {t.name} {filled}/{target}
+          </span>
+        )
+      })}
+      {untracked > 0 && <span className="status-chip status-draft">Untracked {untracked}</span>}
+    </div>
+  )
+}
+
+/**
  * The Submissions tab's filter row: the status chips plus the coverage
  * worklist chip ("everything with fewer than two reads" as a filter, not just
  * a sort — workplan 13 W2) and the coverage bar reading the same filters.
@@ -199,6 +346,8 @@ export function SubmissionsFilter({
         </button>
       </div>
       <SubmissionCoverageBar filters={filters} eventFilterId={eventFilterId} />
+      <SlotCounterStrip filters={filters} eventFilterId={eventFilterId} />
+      <LobbyRail />
     </div>
   )
 }
@@ -416,27 +565,98 @@ export function ContactsFilter({
 export interface BulkBarProps {
   count: number
   busy: boolean
-  onAction: (action: 'accept_queue' | 'decline_queue' | 'pending' | 'send_decisions') => void
+  onAction: (
+    action: 'accept_queue' | 'decline_queue' | 'pending' | 'send_decisions' | 'enroll_pipeline' | 'revise',
+  ) => void
   onClear: () => void
   note: string | null
   /** Workplan 13 W3: per-send opt-in — accept emails carry the employer-approval
    * ask and the covered submissions are flagged approval_state='pending'. */
   approvalAsk?: boolean
   onApprovalAskChange?: (next: boolean) => void
+  /** Workplan 15 W2: the meeting's proviso, typed in the accept action itself
+   * — the note is produced here and has nowhere else to land. */
+  acceptCondition?: string
+  onAcceptConditionChange?: (next: string) => void
+  /** W3: the speaker-facing "what to change", opened by "Ask to revise". */
+  reviseGuidance?: string
+  onReviseGuidanceChange?: (next: string) => void
 }
 
 /** Floating bar shown while submissions are checked (docs/06 §5). */
-export function BulkBar({ count, busy, onAction, onClear, note, approvalAsk, onApprovalAskChange }: BulkBarProps) {
+export function BulkBar({
+  count,
+  busy,
+  onAction,
+  onClear,
+  note,
+  approvalAsk,
+  onApprovalAskChange,
+  acceptCondition,
+  onAcceptConditionChange,
+  reviseGuidance,
+  onReviseGuidanceChange,
+}: BulkBarProps) {
   return (
     <div className="bulk-bar" role="toolbar" aria-label="Bulk actions">
       {count > 0 ? (
         <>
           <span className="bulk-count">{count} selected</span>
           <button disabled={busy} onClick={() => onAction('accept_queue')}>→ Accept Queue</button>
+          {/* W2: the condition rides the accept action rather than waiting for
+            * a later per-row edit — the document's whole complaint is that this
+            * note is the meeting's work product and lands nowhere. Blank means
+            * "no condition", never "clear the one that is there". */}
+          {onAcceptConditionChange && (
+            <input
+              type="text"
+              aria-label="Accept condition"
+              placeholder="Condition (e.g. needs a business co-presenter)"
+              value={acceptCondition ?? ''}
+              disabled={busy}
+              style={{ minWidth: 220, fontSize: 12 }}
+              title="Applied to the selected talks when you queue them as accepts; the speaker is told it in the acceptance letter"
+              onChange={(e) => onAcceptConditionChange((e.target as HTMLInputElement).value)}
+            />
+          )}
           <button disabled={busy} onClick={() => onAction('decline_queue')}>→ Decline Queue</button>
+          {/* W3: a flag, not a status (D5) — the rows stay in the decline queue
+            * and every downstream state machine is untouched; only the letter
+            * and the exported outcome differ. */}
+          {onReviseGuidanceChange && (
+            <>
+              <button
+                disabled={busy}
+                title="Flag the selected declines as revise-and-resubmit — they keep their decline status and get the revise letter instead"
+                onClick={() => onAction('revise')}
+              >
+                Ask to revise
+              </button>
+              <input
+                type="text"
+                aria-label="Revise guidance"
+                placeholder="What to change — sent to the speaker"
+                value={reviseGuidance ?? ''}
+                disabled={busy}
+                style={{ minWidth: 220, fontSize: 12 }}
+                onChange={(e) => onReviseGuidanceChange((e.target as HTMLInputElement).value)}
+              />
+            </>
+          )}
           <button disabled={busy} onClick={() => onAction('pending')}>→ Pending</button>
           <button className="primary" disabled={busy} onClick={() => onAction('send_decisions')}>
             Send decision emails
+          </button>
+          {/* Workplan 15 W4: the gesture is sort by rating, filter to declined,
+            * select the top of the tail, enrol — so it belongs on the same bar
+            * as the decision actions, not on a screen the organiser has to
+            * remember to visit later. */}
+          <button
+            disabled={busy}
+            title="Add each selected talk's speaker to the org-wide speaker pipeline at Identified"
+            onClick={() => onAction('enroll_pipeline')}
+          >
+            Add to speaker pipeline
           </button>
           {onApprovalAskChange && (
             <label
@@ -943,8 +1163,23 @@ export function SubmissionDetailPanel({ id, onEdit, onItemSaved }: {
   const [savedNotes, setSavedNotes] = useState('')
   const [notesSaving, setNotesSaving] = useState(false)
   const [notesError, setNotesError] = useState<string | null>(null)
+  /** W6/D10: the host's read-out line — also editable from the green room
+   * screen, which is where it usually gets filled in; this is the backstop. */
+  const [introScript, setIntroScript] = useState('')
+  const [savedIntroScript, setSavedIntroScript] = useState('')
+  const [introScriptSaving, setIntroScriptSaving] = useState(false)
+  const [introScriptError, setIntroScriptError] = useState<string | null>(null)
   /** Workplan 13 W3: the approval note draft (saved on blur/button). */
   const [approvalNote, setApprovalNote] = useState('')
+  /** Workplan 15 W2/W3: the condition and the revise guidance drafts, saved on
+   * blur like the approval note beside them. */
+  const [acceptCondition, setAcceptCondition] = useState('')
+  const [reviseGuidance, setReviseGuidance] = useState('')
+  /** W5a: seats a deck review can be handed to — fetched once per panel, and
+   * only used by the owner picker beside the materials state. */
+  const [owners, setOwners] = useState<Array<{ id: string; email: string; name: string | null }>>([])
+  /** W5d: the deck thread, rendered under the accept discussion as one history. */
+  const [fileComments, setFileComments] = useState<SubmissionFileComment[]>([])
   /** Inline save feedback for the status / visibility controls. */
   const [fieldSaving, setFieldSaving] = useState(false)
   const [fieldSaved, setFieldSaved] = useState(false)
@@ -968,8 +1203,20 @@ export function SubmissionDetailPanel({ id, onEdit, onItemSaved }: {
         setNotes(initialNotes)
         setSavedNotes(initialNotes)
         setApprovalNote(typeof d.submission.approval_note === 'string' ? d.submission.approval_note : '')
+        setAcceptCondition(typeof d.submission.accept_condition === 'string' ? d.submission.accept_condition : '')
+        setReviseGuidance(typeof d.submission.revise_guidance === 'string' ? d.submission.revise_guidance : '')
+        const initialIntroScript = typeof d.submission.intro_script === 'string' ? d.submission.intro_script : ''
+        setIntroScript(initialIntroScript)
+        setSavedIntroScript(initialIntroScript)
       })
       .catch((e: unknown) => setError(e instanceof Error ? e.message : 'Failed to load'))
+    // W5a/W5d: the deck-reviewer options and the deck thread. Neither is load
+    // bearing for the panel, so a failure leaves them empty rather than
+    // blanking a record an organiser opened to read.
+    setOwners([])
+    setFileComments([])
+    getMaterialsOwners().then((r) => setOwners(r.items)).catch(() => {})
+    getSubmissionFileComments(id).then((r) => setFileComments(r.items)).catch(() => {})
   }, [id])
 
   /**
@@ -1006,6 +1253,19 @@ export function SubmissionDetailPanel({ id, onEdit, onItemSaved }: {
     }
   }
 
+  const saveIntroScript = async () => {
+    setIntroScriptSaving(true)
+    setIntroScriptError(null)
+    try {
+      await updateSubmissionIntroScript(id, introScript.trim() || null)
+      setSavedIntroScript(introScript)
+    } catch (e) {
+      setIntroScriptError(e instanceof Error ? e.message : 'Failed to save the intro script')
+    } finally {
+      setIntroScriptSaving(false)
+    }
+  }
+
   if (error) return <div className="detail-panel"><p>{error}</p></div>
   if (!detail) return <div className="detail-panel"><p style={{ color: 'var(--text-muted)' }}>Loading…</p></div>
 
@@ -1027,6 +1287,26 @@ export function SubmissionDetailPanel({ id, onEdit, onItemSaved }: {
           <span className={`status-chip ${APPROVAL_CHIP[s.approval_state].className}`}>
             {APPROVAL_CHIP[s.approval_state].label}
           </span>
+        )}
+        {typeof s.materials_state === 'string' && MATERIALS_CHIP[s.materials_state] && (
+          <span className={`status-chip ${MATERIALS_CHIP[s.materials_state].className}`}>
+            {MATERIALS_CHIP[s.materials_state].label}
+          </span>
+        )}
+        {/* W2: an accepted talk that still owes something reads differently
+            from one that does not, so the chip sits with the other flags. */}
+        {typeof s.accept_condition === 'string' && s.accept_condition !== '' && (
+          <span
+            className={`status-chip ${s.condition_met_at ? 'status-accepted' : 'status-pending'}`}
+            title={s.accept_condition}
+          >
+            {s.condition_met_at ? 'Condition met' : 'Condition outstanding'}
+          </span>
+        )}
+        {/* W3: the flag is the only thing that says this is not a plain
+            decline — the status column cannot (D5). */}
+        {s.decision_outcome === 'revise' && (
+          <span className="status-chip status-pending">Revise &amp; resubmit</span>
         )}
         {mean !== null && <span className="rating-badge">★ {mean}</span>}
       </h2>
@@ -1053,13 +1333,81 @@ export function SubmissionDetailPanel({ id, onEdit, onItemSaved }: {
           disabled={fieldSaving}
           onChange={(e) => {
             const next = (e.target as HTMLSelectElement).value
-            void saveField(() => updateSubmissionStatus(id, next))
+            // W2: the condition rides the status write, so a proviso typed
+            // here lands with the accept that produced it rather than needing
+            // a second, separate save nobody makes. A blank field means "no
+            // condition", never "clear the one already there" — so the status
+            // call is left exactly as it was when there is nothing to add.
+            const condition = acceptCondition.trim()
+            void saveField(() =>
+              condition ? updateSubmissionStatus(id, next, condition) : updateSubmissionStatus(id, next),
+            )
           }}
         >
           {SUBMISSION_STATUSES.map((st) => (
             <option key={st} value={st}>{statusLabel(st)}</option>
           ))}
         </select>
+        {/* Workplan 15 W2 (D4): the accept's proviso, one line, beside the
+            status editor that produces it. Marking it met never changes
+            status — the two axes are independent. */}
+        <label htmlFor="sub-detail-condition">Condition</label>
+        <input
+          id="sub-detail-condition"
+          type="text"
+          placeholder="e.g. needs a business co-presenter — Ann to follow up"
+          value={acceptCondition}
+          disabled={fieldSaving}
+          style={{ minWidth: 240 }}
+          onChange={(e) => setAcceptCondition((e.target as HTMLInputElement).value)}
+          onBlur={() => {
+            const stored = typeof s.accept_condition === 'string' ? s.accept_condition : ''
+            if (acceptCondition.trim() === stored.trim()) return
+            void saveField(() => updateSubmissionCondition(id, { accept_condition: acceptCondition.trim() || null }))
+          }}
+        />
+        {typeof s.accept_condition === 'string' && s.accept_condition !== '' && (
+          <button
+            type="button"
+            disabled={fieldSaving}
+            title="Record that this condition has been met — the talk's status is untouched"
+            onClick={() => void saveField(() => updateSubmissionCondition(id, { condition_met: !s.condition_met_at }))}
+          >
+            {s.condition_met_at ? 'Reopen condition' : 'Mark condition met'}
+          </button>
+        )}
+        {/* Workplan 15 W3 (D5): the third outcome, as a flag. The row keeps
+            its decline status on purpose — only the letter and the exported
+            `outcome` column differ. */}
+        <label htmlFor="sub-detail-outcome">Outcome</label>
+        <select
+          id="sub-detail-outcome"
+          value={s.decision_outcome === 'revise' ? 'revise' : ''}
+          disabled={fieldSaving}
+          onChange={(e) => {
+            const next = (e.target as HTMLSelectElement).value
+            void saveField(() => updateSubmissionDecision(id, { decision_outcome: next || null }))
+          }}
+        >
+          <option value="">As decided</option>
+          <option value="revise">Revise &amp; resubmit</option>
+        </select>
+        {s.decision_outcome === 'revise' && (
+          <input
+            type="text"
+            aria-label="Revise guidance"
+            placeholder="What to change — the speaker reads this"
+            value={reviseGuidance}
+            disabled={fieldSaving}
+            style={{ minWidth: 240 }}
+            onChange={(e) => setReviseGuidance((e.target as HTMLInputElement).value)}
+            onBlur={() => {
+              const stored = typeof s.revise_guidance === 'string' ? s.revise_guidance : ''
+              if (reviseGuidance.trim() === stored.trim()) return
+              void saveField(() => updateSubmissionDecision(id, { revise_guidance: reviseGuidance.trim() || null }))
+            }}
+          />
+        )}
         {/* Workplan 13 W3: the employer-approval flag lives beside the status
             editor — accepted AND awaiting sign-off are independent axes (D4);
             picking Refused prompts a human, it never auto-withdraws (D7). */}
@@ -1094,6 +1442,43 @@ export function SubmissionDetailPanel({ id, onEdit, onItemSaved }: {
             }}
           />
         )}
+        {/* Workplan 15 W5a (D9): the post-accept editorial state, alongside
+            status for the same reason approval is — an accepted talk keeps
+            accumulating. 'Received' is offered only as the current value: it
+            is what an upload sets, and making a person confirm it would add a
+            click to every deck. */}
+        <label htmlFor="sub-detail-materials">Materials</label>
+        <select
+          id="sub-detail-materials"
+          value={typeof s.materials_state === 'string' ? s.materials_state : ''}
+          disabled={fieldSaving}
+          onChange={(e) => {
+            const next = (e.target as HTMLSelectElement).value
+            void saveField(() => updateSubmissionMaterials(id, { materials_state: next || null }))
+          }}
+        >
+          <option value="">Nothing on file</option>
+          {MATERIALS_STATES.filter((st) => st !== 'received' || s.materials_state === 'received').map((st) => (
+            <option key={st} value={st} disabled={st === 'received'}>{statusLabel(st)}</option>
+          ))}
+        </select>
+        {/* The 2016 retro action item was "share the load"; a reviewer per
+            deck is the smallest thing that makes that expressible. */}
+        <label htmlFor="sub-detail-materials-owner">Deck reviewer</label>
+        <select
+          id="sub-detail-materials-owner"
+          value={typeof s.materials_owner_id === 'string' ? s.materials_owner_id : ''}
+          disabled={fieldSaving}
+          onChange={(e) => {
+            const next = (e.target as HTMLSelectElement).value
+            void saveField(() => updateSubmissionMaterials(id, { materials_owner_id: next || null }))
+          }}
+        >
+          <option value="">Unassigned</option>
+          {owners.map((o) => (
+            <option key={o.id} value={o.id}>{o.name ?? o.email}</option>
+          ))}
+        </select>
         <label htmlFor="sub-detail-content-approved" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
           <input
             id="sub-detail-content-approved"
@@ -1161,6 +1546,28 @@ export function SubmissionDetailPanel({ id, onEdit, onItemSaved }: {
           </dl>
         </>
       )}
+
+      {/* W6/D10: same field the green room screen edits — generated show-flow
+          export reads it straight off the submission. */}
+      <h2 style={{ fontSize: 14 }}>Intro script</h2>
+      <textarea
+        className="internal-notes-field"
+        rows={3}
+        value={introScript}
+        onChange={(e) => setIntroScript((e.target as HTMLTextAreaElement).value)}
+        aria-label="Intro script"
+        placeholder="What the host reads out to introduce this session — usually filled in close to showtime, from the green room screen."
+      />
+      <div className="internal-notes-actions">
+        <button
+          type="button"
+          disabled={introScript === savedIntroScript || introScriptSaving}
+          onClick={() => void saveIntroScript()}
+        >
+          {introScriptSaving ? 'Saving…' : 'Save intro script'}
+        </button>
+        {introScriptError && <span className="internal-notes-error" role="alert">{introScriptError}</span>}
+      </div>
 
       <h2 style={{ fontSize: 14 }}>Internal notes</h2>
       <textarea
@@ -1251,6 +1658,33 @@ export function SubmissionDetailPanel({ id, onEdit, onItemSaved }: {
         comments={detail.comments}
         onComments={(next) => setDetail((d) => (d ? { ...d, comments: next } : d))}
       />
+
+      {/* Workplan 15 W5d: the deck feedback, inline directly beneath the
+          accept discussion so "the review comments sit next to the review
+          comments that got it accepted" — one history rather than two threads
+          on two surfaces. Version-anchored (0007), so a v1 note keeps pointing
+          at the deck it described after v2 lands; replying still happens in
+          the Files section above, against the version being replied to. */}
+      {fileComments.length > 0 && (
+        <>
+          <h2 style={{ fontSize: 14, marginTop: 16 }}>
+            Materials feedback <span style={{ color: 'var(--text-muted)', fontWeight: 400 }}>({fileComments.length})</span>
+          </h2>
+          <div className="file-thread">
+            {fileComments.map((m) => (
+              <div key={m.id} className={m.author_role === 'speaker' ? 'file-comment speaker' : 'file-comment'}>
+                <div className="fc-head">
+                  <strong>{m.author_name ?? 'Someone'}</strong>
+                  {m.author_role === 'speaker' ? ' · Speaker' : ' · Organiser'}
+                  {' · '}{m.filename} v{m.version}
+                  {' · '}{fmtDateTime(m.created_at)}
+                </div>
+                <div className="fc-body">{m.body}</div>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
     </div>
   )
 }

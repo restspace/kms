@@ -8,6 +8,9 @@ import {
   type ReviewQueue,
   type SubmissionComment,
 } from '../api'
+import { useEventScopeOptional } from '../eventScope'
+import { navigate } from '../router'
+import { LobbyPanel } from './LobbyQueue'
 import '../workspace/review.css'
 import '../workspace/files.css'
 
@@ -89,6 +92,10 @@ export function ReviewerWorkspace() {
             {isWindowClosed(a) && <span className="status-chip status-withdrawn">closed</span>}
           </button>
         ))}
+        {/* Workplan 15 W1b — the list this reviewer lobbies from on the call,
+            under the queue they scored it in. Absent until they have scored
+            something that is still undecided. */}
+        <LobbyPanel />
       </aside>
       <div className="review-pane">
         {active ? (
@@ -214,6 +221,7 @@ function ScoringForm({
           )
         )}
       </div>
+      <PriorRatingChip assignment={assignment} />
       {assignment.description ? (
         <div className="rp-desc">{String(assignment.description).replace(/<[^>]*>/g, '')}</div>
       ) : null}
@@ -323,6 +331,44 @@ function ScoringForm({
 
       <DiscussionPanel assignment={assignment} />
     </section>
+  )
+}
+
+/**
+ * W7 (D11): last year's attendee rating, shown as a fact for a human to weigh
+ * out loud — never a score, never folded into the criteria above. Absent
+ * whenever the queue found no earlier-event `event_contacts` row carrying
+ * `prior_rating` for this submission's speaker(s) (first-time speaker, or the
+ * plan anonymises submitters — the server withholds it the same way it
+ * withholds `participants`).
+ */
+function PriorRatingChip({ assignment }: { assignment: Assignment }) {
+  const scope = useEventScopeOptional()
+  const rating = assignment.prior_rating
+  if (rating === undefined || rating === null) return null
+  const eventName = String(assignment.prior_rating_event_name ?? 'a prior event')
+  const eventId = assignment.prior_rating_event_id ? String(assignment.prior_rating_event_id) : null
+  const contactId = assignment.prior_rating_contact_id ? String(assignment.prior_rating_contact_id) : null
+  const label = `Spoke at ${eventName} · ${Number(rating).toFixed(1)}`
+  const note = typeof assignment.prior_rating_note === 'string' ? assignment.prior_rating_note : null
+  const goToRecord = () => {
+    if (!eventId) return
+    // Per-event surfaces read from the session cookie, so jumping to another
+    // event's speaker record means rebinding it first (eventScope.tsx).
+    scope?.setFilter(eventId)
+    navigate({ v: 'workspace', ev: eventId, tab: 'speakers', rec: contactId ?? undefined })
+  }
+  return (
+    <button
+      type="button"
+      className="status-chip status-pending"
+      style={{ marginLeft: 8, cursor: eventId ? 'pointer' : 'default', border: 'none' }}
+      disabled={!eventId}
+      title={note ?? 'Imported from a prior event feedback export — a veto to weigh out loud, never auto-scored'}
+      onClick={goToRecord}
+    >
+      {label}
+    </button>
   )
 }
 

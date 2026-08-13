@@ -45,7 +45,12 @@ const asDraftRoom = (r: RoomRow): RoomDraftRow => ({
   name: r.name,
   capacity: r.capacity === null ? '' : String(r.capacity),
 })
-const asDraftTrack = (t: TrackRow): TrackDraftRow => ({ key: t.id, name: t.name, color: t.color ?? '' })
+const asDraftTrack = (t: TrackRow): TrackDraftRow => ({
+  key: t.id,
+  name: t.name,
+  color: t.color ?? '',
+  targetSlots: t.target_slots === null ? '' : String(t.target_slots),
+})
 const asDraftFormat = (f: FormatRow): FormatDraftRow => ({ key: f.id, name: f.name })
 
 export function RoomsTracksCard() {
@@ -260,6 +265,17 @@ export function RoomsTracksCard() {
     }
   }
 
+  const handleTrackTargetSlotsBlur = async (row: TrackDraftRow) => {
+    setSavingTrack(row.key)
+    try {
+      await updateTrack(row.key, { target_slots: row.targetSlots.trim() === '' ? null : Number(row.targetSlots) })
+    } catch (e) {
+      setTracksError(e instanceof Error ? e.message : 'Failed to update the track slot target.')
+    } finally {
+      setSavingTrack(null)
+    }
+  }
+
   const handleRemoveTrack = async (row: TrackDraftRow) => {
     const confirmed = await appConfirm(
       `Delete "${row.name || 'this track'}"? Any sessions on it keep their slot but lose the track.`,
@@ -321,7 +337,10 @@ export function RoomsTracksCard() {
       <p className="settings-hint">
         Changes here appear in the agenda builder&rsquo;s Add Session dialog immediately. Formats also
         drive the submission form&rsquo;s Format dropdown; put the default length in the name (e.g.
-        &ldquo;Talk (30 min)&rdquo;) and new sessions pick it up.
+        &ldquo;Talk (30 min)&rdquo;) and new sessions pick it up. A track&rsquo;s <em>Slots</em> number is
+        how many talks it expects to accept: the Submissions tab counts accepts against it live
+        during the decision meeting. It is a target, never a cap &mdash; going over it colours the
+        counter and blocks nothing.
       </p>
 
       {roomUndo && (
@@ -423,8 +442,12 @@ export function RoomsTracksCard() {
                     row={row}
                     onNameChange={(name) => setTracks((cur) => (cur ?? []).map((t) => (t.key === row.key ? { ...t, name } : t)))}
                     onColorChange={(color) => setTracks((cur) => (cur ?? []).map((t) => (t.key === row.key ? { ...t, color } : t)))}
+                    onTargetSlotsChange={(targetSlots) =>
+                      setTracks((cur) => (cur ?? []).map((t) => (t.key === row.key ? { ...t, targetSlots } : t)))
+                    }
                     onNameBlur={() => void handleTrackNameBlur(row)}
                     onColorBlur={() => void handleTrackColorBlur(row)}
+                    onTargetSlotsBlur={() => void handleTrackTargetSlotsBlur(row)}
                     onRemove={() => void handleRemoveTrack(row)}
                   />
                 </div>

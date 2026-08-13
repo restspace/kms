@@ -186,6 +186,9 @@ export interface RoomDraft {
 export interface TrackDraft {
   name: string
   color?: string | null
+  /** Workplan 15 W1a: the decision meeting's slot target. NULL = untracked,
+   * and it is a target rather than a cap (D1) — nothing refuses a save. */
+  target_slots?: number | null
 }
 
 export interface CreateEventInput {
@@ -251,6 +254,8 @@ export interface TrackRow {
   event_id: string
   name: string
   color: string | null
+  /** W1a slot target; null = untracked (no chip in the slot counter). */
+  target_slots: number | null
   position: number
 }
 
@@ -300,7 +305,7 @@ export const deleteFormat = (id: string) =>
 
 export const listTracks = () => request<{ items: TrackRow[] }>('/app/api/tracks')
 // Mutations via /app/api/agenda/tracks for the settings-history row, like rooms.
-export const createTrack = (data: { name: string; color?: string | null }) =>
+export const createTrack = (data: { name: string; color?: string | null; target_slots?: number | null }) =>
   request<TrackRow>('/app/api/agenda/tracks', { method: 'POST', body: JSON.stringify(data) })
 export const updateTrack = (id: string, data: Record<string, unknown>) =>
   request<TrackRow>(`/app/api/agenda/tracks/${id}`, { method: 'PUT', body: JSON.stringify(data) })
@@ -444,6 +449,14 @@ export const updateSubmissionNotes = (id: string, notes: string | null) =>
   request<{ ok: boolean }>(`/app/api/submissions/${id}/notes`, {
     method: 'PUT',
     body: JSON.stringify({ notes }),
+  })
+
+/** W6/D10: the intro script, editable from the detail panel as well as the
+ *  green room screen (greenroomIntroScript above). */
+export const updateSubmissionIntroScript = (id: string, introScript: string | null) =>
+  request<{ ok: boolean; intro_script: string | null }>(`/app/api/submissions/${id}/intro-script`, {
+    method: 'PUT',
+    body: JSON.stringify({ intro_script: introScript }),
   })
 
 // ---------------------------------------------------------------------------
@@ -658,6 +671,14 @@ export const enrollPipelineCard = (data: {
   score?: number | null
   rationale?: string | null
 }) => request<PipelineCard>('/app/api/crm/pipeline/cards', { method: 'POST', body: JSON.stringify(data) })
+
+/** Workplan 15 W4: route declined-but-highly-rated talks' speakers into the
+ * board — one card per person, so the counts split created vs already-there. */
+export const enrollSubmissionsInPipeline = (ids: string[]) =>
+  request<{ ok: boolean; enrolled: number; created: number; updated: number; skipped_no_speaker: number }>(
+    '/app/api/crm/pipeline/enroll-submissions',
+    { method: 'POST', body: JSON.stringify({ ids }) },
+  )
 
 export const fetchPipelineCard = (id: string) =>
   request<PipelineCard & { activity: PipelineActivityRow[] }>(`/app/api/crm/pipeline/cards/${id}`)
@@ -950,12 +971,17 @@ export interface ReviewQueue {
   participants: Record<string, Array<{ name: string | null; role: string }>>
 }
 
-export const updateSubmissionStatus = (id: string, status: string) =>
-  request<{ ok: boolean }>(`/app/api/submissions/${id}/status`, { method: 'PUT', body: JSON.stringify({ status }) })
-export const bulkStatus = (ids: string[], status: string) =>
+export const updateSubmissionStatus = (id: string, status: string, acceptCondition?: string | null) =>
+  request<{ ok: boolean }>(`/app/api/submissions/${id}/status`, {
+    method: 'PUT',
+    body: JSON.stringify({ status, ...(acceptCondition === undefined ? {} : { accept_condition: acceptCondition }) }),
+  })
+/** `acceptCondition` is workplan 15 W2's proviso, captured in the accept
+ *  action itself rather than in a later edit. */
+export const bulkStatus = (ids: string[], status: string, acceptCondition?: string | null) =>
   request<{ ok: boolean; changed: number }>('/app/api/submissions/bulk-status', {
     method: 'POST',
-    body: JSON.stringify({ ids, status }),
+    body: JSON.stringify({ ids, status, ...(acceptCondition ? { accept_condition: acceptCondition } : {}) }),
   })
 export const sendDecisions = (
   ids: string[],
@@ -998,6 +1024,8 @@ export const sendDecisions = (
     previews?: {
       accepted: { subject: string; body_html: string; body_text: string; sample_to: string } | null
       declined: { subject: string; body_html: string; body_text: string; sample_to: string } | null
+      /** W3: present only when the batch actually contains a revise row. */
+      revise?: { subject: string; body_html: string; body_text: string; sample_to: string } | null
       merged_speakers: number
     }
     /** CFP-14: null when nothing was in a decision queue; poll it for real sent/failed counts. */
@@ -1018,6 +1046,67 @@ export const updateSubmissionApproval = (
     `/app/api/submissions/${id}/approval`,
     { method: 'PUT', body: JSON.stringify(body) },
   )
+
+/** Workplan 15 W2 (D4): the accept's condition, and marking it met. Neither
+ * ever changes status — accepted and owing a co-presenter are independent. */
+export const updateSubmissionCondition = (
+  id: string,
+  body: { accept_condition?: string | null; condition_met?: boolean },
+) =>
+  request<{ ok: boolean; accept_condition: string | null; condition_met_at: string | null }>(
+    `/app/api/submissions/${id}/condition`,
+    { method: 'PUT', body: JSON.stringify(body) },
+  )
+
+/** Workplan 15 W3 (D5): "revise and resubmit" as a flag on a row that stays
+ * declined, so nothing downstream of the decline queue changes. */
+export const updateSubmissionDecision = (
+  id: string,
+  body: { decision_outcome?: string | null; revise_guidance?: string | null },
+) =>
+  request<{ ok: boolean; decision_outcome: string | null; revise_guidance: string | null }>(
+    `/app/api/submissions/${id}/decision`,
+    { method: 'PUT', body: JSON.stringify(body) },
+  )
+
+/** W3: "Ask to revise" over a selection from the decline queue. */
+export const bulkDecision = (ids: string[], reviseGuidance: string | null) =>
+  request<{ ok: boolean; changed: number }>('/app/api/submissions/bulk-decision', {
+    method: 'POST',
+    body: JSON.stringify({ ids, decision_outcome: 'revise', revise_guidance: reviseGuidance }),
+  })
+
+/** Workplan 15 W5a (D9): the post-accept materials flag and the deck's
+ * reviewer. 'received' is never sent from here — an upload sets it. */
+export const updateSubmissionMaterials = (
+  id: string,
+  body: { materials_state?: string | null; materials_owner_id?: string | null },
+) =>
+  request<{ ok: boolean; materials_state: string | null; materials_state_at: string | null; materials_owner_id: string | null }>(
+    `/app/api/submissions/${id}/materials`,
+    { method: 'PUT', body: JSON.stringify(body) },
+  )
+
+/** Seats a deck review can be handed to — "share the load" needs a list. */
+export const getMaterialsOwners = () =>
+  request<{ items: Array<{ id: string; email: string; name: string | null }> }>(
+    '/app/api/submissions/materials-owners',
+  )
+
+/** W5d: every deck comment on a submission, across chains and versions. */
+export const getSubmissionFileComments = (id: string) =>
+  request<{ items: SubmissionFileComment[] }>(`/app/api/files/submissions/${id}/comments`)
+
+export interface SubmissionFileComment {
+  id: string
+  author_role: string
+  author_name: string | null
+  body: string
+  created_at: string
+  /** Version ordinal of the upload the comment was left on (0007). */
+  version: number
+  filename: string
+}
 
 // ---------------------------------------------------------------------------
 // Submission edit + participants (F14/ABS-11): the fuller edit surface — the
@@ -1425,6 +1514,18 @@ export const removeSessionSpeaker = (sessionId: string, contactId: string) =>
 // Dashboards (docs/09, M5)
 // ---------------------------------------------------------------------------
 
+/** One accepted talk on the Materials panel (W5c). `days_since_request` is
+ *  only meaningful for the revision_requested bucket. */
+export interface MaterialsRow {
+  submission_id: string
+  code: string
+  title: string
+  contact_id: string | null
+  name: string
+  owner_name: string | null
+  days_since_request: number | null
+}
+
 export interface DashboardNudge {
   key: 'unscheduled' | 'pending' | 'staged' | 'assets' | 'outstanding' | 'overdue' | 'conflicts'
   count: number
@@ -1468,6 +1569,20 @@ export interface DashboardPayload {
     overdue: Array<{ assignment_id: string; contact_id: string; name: string; task_title: string; due_at: string; days_overdue: number }>
     /** Workplan 13 W3: accepted talks awaiting employer approval, sorted by days-until-event ascending. */
     approval_pending: Array<{ submission_id: string; code: string; title: string; approval_note: string | null; contact_id: string | null; name: string; days_until_event: number }>
+    /** Workplan 15 W2: accepts carrying a condition nobody has marked met,
+     * sorted by days-until-event ascending. A condition nobody chases is a
+     * decline discovered late. */
+    conditions_outstanding?: Array<{ submission_id: string; code: string; title: string; accept_condition: string; contact_id: string | null; name: string; days_until_event: number }>
+    /** Workplan 15 W5c: the two questions the doc asks about decks, plus the
+     * line in front of both. Every accepted talk is in exactly one bucket —
+     * `settled` is the reviewed/final remainder, counted but not listed. */
+    materials?: {
+      accepted_total: number
+      settled: number
+      awaiting_upload: MaterialsRow[]
+      not_seen: MaterialsRow[]
+      owes_v2: MaterialsRow[]
+    }
     assets: Array<{ contact_id: string; name: string; missing_bio: number; missing_headshot: number; missing_slides: number }>
   }
   pipeline: {
@@ -1582,6 +1697,8 @@ export interface GreenRoomSession {
   starts_at: string
   ends_at: string | null
   speaker_ids: string[]
+  /** W6/D10: the host's read-out line, editable here as well as the detail panel. */
+  intro_script: string | null
 }
 
 export interface GreenRoomPayload {
@@ -1620,6 +1737,18 @@ export const greenroomNudge = (contactId: string) =>
     method: 'POST',
     body: JSON.stringify({ contact_id: contactId }),
   })
+
+/** W6/D10: saves the intro script from the day-of screen; same whole-payload
+ *  response contract as checkin. */
+export const greenroomIntroScript = (submissionId: string, introScript: string | null) =>
+  request<GreenRoomPayload & { ok: boolean; etag: string }>('/app/api/greenroom/intro-script', {
+    method: 'POST',
+    body: JSON.stringify({ submission_id: submissionId, intro_script: introScript }),
+  })
+
+/** Show-flow handoff export (W6/D10): plain browser-navigated download, same
+ *  reasoning as importBatchReportUrl — the cookie carries the session. */
+export const showflowExportUrl = (format: 'csv' | 'xlsx') => `/app/api/greenroom/showflow.${format}`
 
 // ---------------------------------------------------------------------------
 // Settings: API tokens + demo reset (docs/10 §1, M6)
@@ -1690,6 +1819,25 @@ function exportParams(
 }
 
 export const getReviewQueue = () => request<ReviewQueue>('/app/api/review/queue')
+
+/** One row of the lobby queue (workplan 15 W1b): a submission this reviewer
+ * personally scored that is not yet accepted, with their own score beside the
+ * committee mean they are arguing against. */
+export interface LobbyRow {
+  id: string
+  code: string
+  title: string
+  status: string
+  my_score: number
+  submission_rating: number | null
+  track_name: string | null
+  review_count: number
+}
+
+/** "My top-ranked, not yet accepted", ordered by the caller's own score — a
+ * purpose-built endpoint because that ordering needs a bind the submissions
+ * resource's ORDER BY builder cannot carry (D3). */
+export const getReviewLobby = () => request<{ items: LobbyRow[] }>('/app/api/evaluation/lobby')
 export const saveReview = (assignmentId: string, body: Record<string, unknown>) =>
   request<{ ok: boolean; weighted_total: number | null; submission_rating: number | null }>(
     `/app/api/review/assignments/${assignmentId}`,

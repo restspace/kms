@@ -15,6 +15,7 @@ const session = (over: Partial<GreenRoomSession>): GreenRoomSession => ({
   room_id: 'room-a',
   starts_at: '2026-10-01T10:00:00Z',
   ends_at: '2026-10-01T11:00:00Z',
+  intro_script: null,
   speaker_ids: [],
   ...over,
 })

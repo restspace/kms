@@ -30,6 +30,7 @@ const api = vi.hoisted(() => {
   return {
     ApiError,
     getReviewQueue: vi.fn(),
+    getReviewLobby: vi.fn(),
     saveReview: vi.fn(),
     getAssignmentComments: vi.fn(),
     addAssignmentComment: vi.fn(),
@@ -39,6 +40,7 @@ const api = vi.hoisted(() => {
 vi.mock('../api', () => ({
   ApiError: api.ApiError,
   getReviewQueue: api.getReviewQueue,
+  getReviewLobby: api.getReviewLobby,
   saveReview: api.saveReview,
   getAssignmentComments: api.getAssignmentComments,
   addAssignmentComment: api.addAssignmentComment,
@@ -104,6 +106,9 @@ const COMMENTS = [
 
 beforeEach(() => {
   vi.clearAllMocks()
+  // The W1b lobby panel fetches on mount alongside the queue; these tests are
+  // about the discussion thread, so it stays empty and renders nothing.
+  api.getReviewLobby.mockResolvedValue({ items: [] })
 })
 
 describe('ReviewerWorkspace — discussion thread (workplan 7 §7)', () => {

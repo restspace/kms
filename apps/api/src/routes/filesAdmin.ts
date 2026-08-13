@@ -293,6 +293,33 @@ filesAdminRoutes.get('/task-assignments/:id', async (c) => {
   return c.json({ versions: [only], comments: [] });
 });
 
+/**
+ * GET /app/api/files/submissions/:submissionId/comments — every deck comment
+ * on this submission, across every chain and every version, oldest first.
+ *
+ * Workplan 15 W5d: the detail panel renders these directly beneath the
+ * submission_comments thread so "the review comments sit next to the review
+ * comments that got it accepted". No schema change was needed — file_comments
+ * already carries author, role and denormalised name, and is version-anchored
+ * (0007), which is why the version label stays correct after a v2 lands rather
+ * than re-pointing at the newest file.
+ */
+filesAdminRoutes.get('/submissions/:submissionId/comments', async (c) => {
+  const eventIds = await accessibleEventIds(c);
+  const { results } = await c.env.DB.prepare(
+    `SELECT fc.id, fc.file_request_upload_id, fc.author_role, fc.author_name, fc.body, fc.created_at,
+            u.version, fa.filename
+     FROM file_comments fc
+     JOIN file_request_uploads u ON u.id = fc.file_request_upload_id
+     JOIN file_assets fa ON fa.id = u.file_asset_id
+     WHERE u.submission_id = ? AND fa.event_id IN (${eventIds.map(() => '?').join(', ')})
+     ORDER BY fc.created_at, fc.id`,
+  )
+    .bind(c.req.param('submissionId'), ...eventIds)
+    .all();
+  return c.json({ items: results });
+});
+
 /** Portal-parity accepted types for organiser uploads: documents + images. */
 const ORGANISER_UPLOAD_TYPES = new Set<string>([...DOCUMENT_TYPES, ...IMAGE_TYPES]);
 

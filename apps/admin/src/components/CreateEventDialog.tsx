@@ -150,7 +150,11 @@ export function CreateEventDialog({ open, onClose, defaultTimezone, onCreated }:
         }));
       const trackDrafts: TrackDraft[] = tracks
         .filter((t) => t.name.trim())
-        .map((t) => ({ name: t.name.trim(), color: t.color.trim() || null }));
+        .map((t) => ({
+          name: t.name.trim(),
+          color: t.color.trim() || null,
+          target_slots: t.targetSlots.trim() === '' ? null : Number(t.targetSlots),
+        }));
       const payload: CreateEventInput = {
         name: name.trim(),
         slug: slug.trim(),

@@ -4,8 +4,10 @@ import {
   fetchOrgDashboard,
   getBulkJob,
   remindTasks,
+  updateSubmissionCondition,
   type DashboardNudge,
   type DashboardPayload,
+  type MaterialsRow,
   type OrgDashboardPayload,
 } from '../api'
 import { useEventScopeOptional, type EventFilter } from '../eventScope'
@@ -384,6 +386,22 @@ export function DashboardSection({ onNavigate }: { onNavigate: (target: AppNavTa
     }
   }, [load, pollRemindJob])
 
+  // W2: signing off a condition from the panel. Status is untouched — the
+  // talk was accepted either way; all that changes is whether anyone still
+  // has to chase it.
+  const markConditionMet = useCallback(async (submissionId: string) => {
+    setBusy(true)
+    try {
+      await updateSubmissionCondition(submissionId, { condition_met: true })
+      setNote('Condition marked met.')
+      await load(true)
+    } catch (err) {
+      setNote(err instanceof Error ? err.message : 'Could not mark the condition met')
+    } finally {
+      setBusy(false)
+    }
+  }, [load])
+
   const openNudge = useCallback((nudge: DashboardNudge) => {
     switch (nudge.key) {
       case 'unscheduled':
@@ -522,7 +540,14 @@ export function DashboardSection({ onNavigate }: { onNavigate: (target: AppNavTa
         />
       )}
       {board === 'tracking' && (
-        <TrackingBoard data={data} busy={busy} onRemind={remind} onSpeaker={openSpeaker} onNavigate={onNavigate} />
+        <TrackingBoard
+          data={data}
+          busy={busy}
+          onRemind={remind}
+          onConditionMet={markConditionMet}
+          onSpeaker={openSpeaker}
+          onNavigate={onNavigate}
+        />
       )}
       {board === 'pipeline' && <PipelineBoard data={data} onNavigate={onNavigate} />}
     </div>
@@ -751,10 +776,12 @@ function TodayBoard({ data, tab, onTab, onNudge, onNavigate }: {
 
 // --- Speaker Tracking (the required board, docs/09 §2) ----------------------
 
-function TrackingBoard({ data, busy, onRemind, onSpeaker, onNavigate }: {
+function TrackingBoard({ data, busy, onRemind, onConditionMet, onSpeaker, onNavigate }: {
   data: DashboardPayload
   busy: boolean
   onRemind: (ids?: string[]) => void
+  /** W2: one click, and it never changes the submission's status. */
+  onConditionMet: (submissionId: string) => void
   onSpeaker: (contactId: string, name: string, tab: 'speakers' | 'tasks') => void
   onNavigate: (t: AppNavTarget) => void
 }) {
@@ -878,6 +905,63 @@ function TrackingBoard({ data, busy, onRemind, onSpeaker, onNavigate }: {
             </table>
           )}
         </section>
+        {/* Workplan 15 W2: the decision meeting's provisos, still owed. Sits
+            beside Approval pending for the same reason it exists — a condition
+            nobody chases is a decline discovered late. Marking one met is one
+            click and never touches status (D4). Rows with condition_met_at set
+            are excluded server-side, so a marked row leaves the list. */}
+        <section className="db-card db-span3">
+          <h3>Conditions outstanding</h3>
+          {(t.conditions_outstanding ?? []).length === 0 && (
+            <div className="db-empty">No accepted talk is waiting on a condition.</div>
+          )}
+          {(t.conditions_outstanding ?? []).length > 0 && (
+            <table className="db-table">
+              <thead>
+                <tr><th>Talk</th><th>Speaker</th><th>Condition</th><th>Event in</th><th /></tr>
+              </thead>
+              <tbody>
+                {(t.conditions_outstanding ?? []).map((row) => (
+                  <tr key={row.submission_id}>
+                    <td className="db-td-title">{row.code} · {row.title}</td>
+                    <td>
+                      {row.contact_id ? (
+                        <button
+                          className="db-link"
+                          onClick={() => onSpeaker(row.contact_id!, row.name, 'speakers')}
+                          title="Open this speaker in the workspace"
+                        >
+                          {row.name}
+                        </button>
+                      ) : (
+                        row.name
+                      )}
+                    </td>
+                    <td>{row.accept_condition}</td>
+                    <td className="db-overdue">
+                      {row.days_until_event <= 0 ? 'now' : `${row.days_until_event} day${row.days_until_event === 1 ? '' : 's'}`}
+                    </td>
+                    <td>
+                      <button
+                        disabled={busy}
+                        title="Record that this condition has been met — the talk stays accepted either way"
+                        onClick={() => onConditionMet(row.submission_id)}
+                      >
+                        Mark met
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </section>
+        {/* Workplan 15 W5c: the document's own two questions about decks —
+            "whose deck have I not seen" and "who owes me a v2" — plus the line
+            in front of both, which the data always supported and nothing
+            surfaced. The four buckets partition the accepted set, so the panel
+            can be read as a whole rather than three unrelated counts. */}
+        <MaterialsPanel data={data} onNavigate={onNavigate} onSpeaker={onSpeaker} />
         <section className="db-card db-span3">
           <div className="db-card-head">
             <h3>Overdue tasks</h3>
@@ -915,6 +999,105 @@ function TrackingBoard({ data, busy, onRemind, onSpeaker, onNavigate }: {
           )}
         </section>
       </div>
+    </>
+  )
+}
+
+/**
+ * The Materials panel (workplan 15 W5c). Three cards, one per question, each
+ * headed by its count and deep-linking into the submissions grid on the
+ * matching `materials_state` filter — the same rule the coverage bar set:
+ * a panel and the list it points at must never disagree, so the click carries
+ * the panel's own filter rather than a hand-built approximation.
+ *
+ * `settled` (reviewed / final) is shown as a caption rather than a fourth
+ * card: it is the remainder that makes the arithmetic legible, not a worklist.
+ */
+export function MaterialsPanel({ data, onNavigate, onSpeaker }: {
+  data: DashboardPayload
+  onNavigate: (t: AppNavTarget) => void
+  onSpeaker: (contactId: string, name: string, tab: 'speakers' | 'tasks') => void
+}) {
+  // A payload from an older deploy has no `materials` block; render nothing
+  // rather than throwing on the poll (same defensive read as remindable_tasks).
+  const m = (data.tracking as Partial<DashboardPayload['tracking']>).materials
+  if (!m) return null
+
+  const open = (state: string, label: string) =>
+    onNavigate({
+      view: 'workspace',
+      tab: 'submissions',
+      seedFilters: { submissions: { status: 'accepted', materials_state: state } },
+      label,
+    })
+
+  const card = (
+    heading: string,
+    empty: string,
+    rows: MaterialsRow[],
+    filter: string,
+    waiting: boolean,
+  ) => (
+    <section className="db-card" key={filter}>
+      <div className="db-card-head">
+        <h3>{heading}</h3>
+        <button className="db-link" onClick={() => open(filter, heading)} title="Open these in the submissions grid">
+          {rows.length}
+        </button>
+      </div>
+      {rows.length === 0 && <div className="db-empty">{empty}</div>}
+      {rows.length > 0 && (
+        <table className="db-table">
+          <thead>
+            <tr><th>Talk</th><th>{waiting ? 'Waiting' : 'Reviewer'}</th></tr>
+          </thead>
+          <tbody>
+            {rows.map((row) => (
+              <tr key={row.submission_id}>
+                <td className="db-td-title">
+                  {row.code} · {row.title}
+                  <br />
+                  {row.contact_id ? (
+                    <button
+                      className="db-link"
+                      onClick={() => onSpeaker(row.contact_id!, row.name, 'speakers')}
+                      title="Open this speaker in the workspace"
+                    >
+                      {row.name}
+                    </button>
+                  ) : (
+                    row.name
+                  )}
+                </td>
+                {waiting ? (
+                  <td className="db-overdue">
+                    {row.days_since_request === null
+                      ? '—'
+                      : `${row.days_since_request} day${row.days_since_request === 1 ? '' : 's'}`}
+                  </td>
+                ) : (
+                  <td>{row.owner_name ?? 'Unassigned'}</td>
+                )}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </section>
+  )
+
+  return (
+    <>
+      {card('Deck not yet seen', 'Every deck on file has been looked at.', m.not_seen, 'received', false)}
+      {card('Owes a v2', 'Nobody owes a revision.', m.owes_v2, 'revision_requested', true)}
+      {card('No deck at all', 'Every accepted talk has materials on file.', m.awaiting_upload, 'none', false)}
+      <section className="db-card db-span3">
+        <div className="db-empty">
+          {m.accepted_total} accepted talk{m.accepted_total === 1 ? '' : 's'}: {m.awaiting_upload.length} with
+          nothing on file, {m.not_seen.length} awaiting a first read, {m.owes_v2.length} owing a revision,{' '}
+          {m.settled} reviewed or final.
+        </div>
+      </section>
     </>
   )
 }

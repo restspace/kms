@@ -140,6 +140,19 @@ interface OverdueRow {
   due_at: string;
 }
 
+interface MaterialsRow {
+  submission_id: string;
+  code: string;
+  title: string;
+  materials_state: string | null;
+  materials_state_at: string | null;
+  contact_id: string | null;
+  name: string | null;
+  email: string | null;
+  owner_name: string | null;
+  owner_email: string | null;
+}
+
 /** Calendar day of a UTC instant in the event's timezone (YYYY-MM-DD). */
 function dayInTz(iso: string, timezone: string): string {
   return new Intl.DateTimeFormat('en-CA', {
@@ -177,7 +190,9 @@ async function dashboardPayload(c: Context<ApiEnv>) {
     sessions,
     ignored,
     approvalRows,
+    conditionRows,
     remindableRow,
+    materialsRows,
   ] = await Promise.all([
     db.prepare('SELECT id, name, slug, timezone, starts_at, ends_at FROM events WHERE id = ?').bind(eventId).first<EventRow>(),
     db.prepare('SELECT status, COUNT(*) AS n FROM submissions WHERE event_id = ? GROUP BY status').bind(eventId).all<{ status: string; n: number }>(),
@@ -279,6 +294,24 @@ async function dashboardPayload(c: Context<ApiEnv>) {
       submission_id: string; code: string; title: string; approval_note: string | null;
       starts_at: string | null; contact_id: string | null; name: string | null; email: string | null;
     }>(),
+    // Workplan 15 W2: accepts carrying a condition nobody has signed off yet,
+    // for the tracking board's "Conditions outstanding" panel. Same reasoning
+    // as the approval list beside it — a condition nobody chases is a decline
+    // discovered late. Rows with condition_met_at set are gone from the panel
+    // the moment someone marks them, which is what makes it a worklist.
+    db.prepare(
+      `SELECT s.id AS submission_id, s.code, s.title, s.accept_condition, s.starts_at,
+              s.submitter_contact_id AS contact_id,
+              NULLIF(TRIM(COALESCE(c.first_name,'') || ' ' || COALESCE(c.last_name,'')), '') AS name,
+              c.email
+       FROM submissions s
+       LEFT JOIN contacts c ON c.id = s.submitter_contact_id
+       WHERE s.event_id = ? AND COALESCE(TRIM(s.accept_condition), '') != ''
+         AND s.condition_met_at IS NULL`,
+    ).bind(eventId).all<{
+      submission_id: string; code: string; title: string; accept_condition: string;
+      starts_at: string | null; contact_id: string | null; name: string | null; email: string | null;
+    }>(),
     // Matches POST /remind's target set exactly (status != 'complete',
     // due_at IS NOT NULL, no overdue-only cutoff) so the "Remind all" count
     // never drifts from what the endpoint will actually queue.
@@ -288,6 +321,22 @@ async function dashboardPayload(c: Context<ApiEnv>) {
        JOIN tasks t ON t.id = ta.task_id
        WHERE t.event_id = ? AND ta.status != 'complete' AND t.due_at IS NOT NULL`,
     ).bind(eventId).first<{ n: number }>(),
+    // Workplan 15 W5c: every accepted talk with its materials flag, bucketed
+    // below. One query rather than three counts so the buckets provably
+    // partition the accepted set — the panel's whole claim is that nothing
+    // falls between "not seen", "owes a v2" and "nothing at all".
+    db.prepare(
+      `SELECT s.id AS submission_id, s.code, s.title, s.materials_state, s.materials_state_at,
+              s.submitter_contact_id AS contact_id,
+              NULLIF(TRIM(COALESCE(c.first_name,'') || ' ' || COALESCE(c.last_name,'')), '') AS name,
+              c.email,
+              NULLIF(TRIM(COALESCE(o.first_name,'') || ' ' || COALESCE(o.last_name,'')), '') AS owner_name,
+              o.email AS owner_email
+       FROM submissions s
+       LEFT JOIN contacts c ON c.id = s.submitter_contact_id
+       LEFT JOIN contacts o ON o.id = s.materials_owner_id
+       WHERE s.event_id = ? AND s.status = 'accepted'`,
+    ).bind(eventId).all<MaterialsRow>(),
   ]);
 
   if (!event) return null;
@@ -383,6 +432,29 @@ async function dashboardPayload(c: Context<ApiEnv>) {
     });
   }
 
+  // W5c: the doc's two questions, plus the line in front of both of them.
+  // Every accepted talk lands in exactly one bucket — 'reviewed' and 'final'
+  // are the settled remainder, counted but not listed, so the three questions
+  // add up to something a reader can check against the accepted total.
+  const materialsRow = (row: MaterialsRow) => ({
+    submission_id: row.submission_id,
+    code: row.code,
+    title: row.title,
+    contact_id: row.contact_id,
+    name: row.name ?? row.email ?? 'No submitter',
+    owner_name: row.owner_name ?? row.owner_email,
+    days_since_request: row.materials_state_at
+      ? Math.max(0, Math.floor((Date.parse(now) - Date.parse(row.materials_state_at)) / 86_400_000))
+      : null,
+  });
+  const materialsIn = (state: string | null) =>
+    materialsRows.results.filter((r) => (r.materials_state ?? null) === state);
+  const owesV2 = materialsIn('revision_requested')
+    .map(materialsRow)
+    .sort((a, b) => (b.days_since_request ?? 0) - (a.days_since_request ?? 0));
+  const notSeen = materialsIn('received').map(materialsRow);
+  const awaitingUpload = materialsIn(null).map(materialsRow);
+
   let cumulative = 0;
   const pacing = pacingRows.results.map((row) => {
     cumulative += row.n;
@@ -462,6 +534,28 @@ async function dashboardPayload(c: Context<ApiEnv>) {
           ),
         }))
         .sort((a, b) => a.days_until_event - b.days_until_event),
+      // W2: same days-until-event ordering as the approval list it sits
+      // beside — the condition with the least runway left leads.
+      conditions_outstanding: conditionRows.results
+        .map((row) => ({
+          submission_id: row.submission_id,
+          code: row.code,
+          title: row.title,
+          accept_condition: row.accept_condition,
+          contact_id: row.contact_id,
+          name: row.name ?? row.email ?? 'No submitter',
+          days_until_event: Math.ceil(
+            (Date.parse(row.starts_at ?? event.starts_at) - Date.parse(now)) / 86_400_000,
+          ),
+        }))
+        .sort((a, b) => a.days_until_event - b.days_until_event),
+      materials: {
+        accepted_total: materialsRows.results.length,
+        awaiting_upload: awaitingUpload,
+        not_seen: notSeen,
+        owes_v2: owesV2,
+        settled: materialsRows.results.length - awaitingUpload.length - notSeen.length - owesV2.length,
+      },
       assets: missingAny.map((s) => ({
         contact_id: s.contact_id,
         name: fullName(s.name, s.email),

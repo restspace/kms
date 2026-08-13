@@ -167,10 +167,24 @@ export const APPROVAL_ASK_HTML =
   'it&rsquo;s granted — pending approvals are the most common reason accepted talks ' +
   'are withdrawn late.</p>';
 
+/** The {{{accept_condition}}} block (workplan 15 W2): the proviso the decision
+ * meeting attached to the accept, told to the speaker in the letter that tells
+ * them they are in. Rendered only for rows that carry one — same raw-slot
+ * family as APPROVAL_ASK_HTML above, so the free text is escaped here. */
+export const acceptConditionHtml = (condition: string): string =>
+  `<p><strong>One condition:</strong> ${escapeHtml(condition)}</p>`;
+
 interface DecisionRow {
   id: string; code: string; title: string; status: string;
   submitter_contact_id: string | null; submitter_email: string | null; submitter_first_name: string | null;
+  /** W2/W3 flags alongside the status (D4/D5), never status values themselves. */
+  accept_condition: string | null; decision_outcome: string | null; revise_guidance: string | null;
 }
+
+/** W3/D5: a decline-side row flagged 'revise' gets its own letter. Everything
+ * else about it — status, queue counts, scheduling, notified_at — is a
+ * decline, deliberately. */
+const isRevise = (s: DecisionRow) => s.decision_outcome === 'revise';
 
 /**
  * Workplan 10: the decision flush is speaker-shaped. One email per speaker
@@ -206,6 +220,7 @@ async function expandSendDecisions(env: Env, job: BulkJobRow, limit: number): Pr
   // COALESCE only reaches for it when the submitter's own address is missing
   // or blank, so a real submitter email is never overridden.
   const selectSql = `SELECT s.id, s.code, s.title, s.status, s.submitter_contact_id,
+              s.accept_condition, s.decision_outcome, s.revise_guidance,
               COALESCE(NULLIF(c.email, ''), fb.email) AS submitter_email,
               COALESCE(c.first_name, fb.first_name) AS submitter_first_name
        FROM submissions s
@@ -367,8 +382,16 @@ async function expandSendDecisions(env: Env, job: BulkJobRow, limit: number): Pr
         // decided row riding this batch (CFP-14), same side as accept_queue.
         const isAccept = s.status === 'accept_queue' || s.status === 'accepted';
         const reviewerFeedback = feedbackFor.get(s.id) ?? '';
+        // W3: the third letter. A revise row is on the decline side of every
+        // other question this expander asks, so only the template key and the
+        // guidance slot differ from the decline it would otherwise have sent.
+        const templateKey = isAccept
+          ? 'decision_accepted'
+          : isRevise(s)
+            ? 'decision_revise'
+            : 'decision_declined';
         ({ outcome, payload } = await queueTemplated(db, {
-          templateKey: isAccept ? 'decision_accepted' : 'decision_declined',
+          templateKey,
           eventId: job.event_id,
           contactId: s.submitter_contact_id,
           toEmail: s.submitter_email!,
@@ -381,25 +404,39 @@ async function expandSendDecisions(env: Env, job: BulkJobRow, limit: number): Pr
             portal_url: `${env.APP_URL}/portal/${event.slug}`,
             ...(reviewerFeedback ? { reviewer_feedback: reviewerFeedback } : {}),
             ...(isAccept && params.approval_ask ? { approval_ask: APPROVAL_ASK_HTML } : {}),
+            // W2: rendered only for a row that actually carries a condition,
+            // so an unconditional accept letter is unchanged.
+            ...(isAccept && s.accept_condition ? { accept_condition: acceptConditionHtml(s.accept_condition) } : {}),
+            ...(templateKey === 'decision_revise' ? { revise_guidance: s.revise_guidance ?? '' } : {}),
           },
         }));
       } else {
-        // ≥2 decisions: one merged decision_summary email. Accepts first.
+        // ≥2 decisions: one merged decision_summary email. Accepts first,
+        // then plain declines, then W3's revise block — a "please resubmit"
+        // reads as an invitation, so it belongs after the news it softens
+        // rather than mixed into the rejections it is not one of.
         const accepts = flipped.filter((s) => s.status === 'accept_queue' || s.status === 'accepted');
-        const declines = flipped.filter((s) => s.status !== 'accept_queue' && s.status !== 'accepted');
+        const declineSide = flipped.filter((s) => s.status !== 'accept_queue' && s.status !== 'accepted');
+        const declines = declineSide.filter((s) => !isRevise(s));
+        const revises = declineSide.filter(isRevise);
+        const nested = (text: string) =>
+          `<p style="white-space:pre-line;margin:0 0 12px 16px;color:#57534e;">${escapeHtml(text)}</p>`;
         const line = (s: DecisionRow, verdict: string) => {
           const feedback = feedbackFor.get(s.id) ?? '';
           return (
             `<p style="margin:0 0 6px 0;"><strong>${escapeHtml(s.title)}</strong> (${escapeHtml(s.code)}) — <strong>${verdict}</strong></p>` +
-            (feedback
-              ? `<p style="white-space:pre-line;margin:0 0 12px 16px;color:#57534e;">${escapeHtml(feedback)}</p>`
-              : '')
+            // The guidance is the whole point of a revise line; it rides in
+            // the same nested slot the reviewer feedback uses.
+            (isRevise(s) && s.revise_guidance ? nested(s.revise_guidance) : '') +
+            (feedback ? nested(feedback) : '')
           );
         };
-        const decisionsBlock =
-          accepts.map((s) => line(s, 'Accepted')).join('\n') +
-          (accepts.length && declines.length ? '\n' : '') +
-          declines.map((s) => line(s, 'Not accepted')).join('\n');
+        const blocks = [
+          accepts.map((s) => line(s, 'Accepted')).join('\n'),
+          declines.map((s) => line(s, 'Not accepted')).join('\n'),
+          revises.map((s) => line(s, 'Revise and resubmit')).join('\n'),
+        ].filter((block) => block !== '');
+        const decisionsBlock = blocks.join('\n');
 
         // Pending titles are queried at send time, not pre-flight time — they
         // may have changed between the organiser's click and this tick.

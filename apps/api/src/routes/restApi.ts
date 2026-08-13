@@ -10,7 +10,7 @@ import { cors } from 'hono/cors';
 import type { Context } from 'hono';
 import type { Env } from '../env';
 import { getRevalidatedPrivilegedSession } from '../session';
-import { RESOURCES, queryResource, type ResourceDef } from './adminApi';
+import { RESOURCES, queryResource, shapeExportRows, type ResourceDef } from './adminApi';
 import { toCsv, toXlsx } from '../export';
 import { sha256Hex } from '../hashing';
 import { decodeCursor, encodeCursor, keysetWhere, type CursorPayload } from '../cursor';
@@ -264,7 +264,13 @@ async function handleExport(c: Context<RestEnv>, resource: string) {
   const parsed = queryFromParams(c, resource, { maxSize: EXPORT_MAX_ROWS, defaultSize: EXPORT_MAX_ROWS });
   if (!parsed) return apiError(c, 404, 'unknown_resource', `No resource named "${resource}".`);
   const format = c.req.query('format') === 'xlsx' ? 'xlsx' : 'csv';
-  const { items } = await queryResource(c.env.DB, parsed.def, c.get('event').id, parsed.body);
+  const { items: rows } = await queryResource(c.env.DB, parsed.def, c.get('event').id, parsed.body);
+  // docs/10 §"same CSV/XLSX export as the admin workspace's own query tool" is
+  // a promise about the file, not just the query, so both paths shape their
+  // rows identically: submissions carry the derived `outcome` (workplan 15 D6,
+  // so a reader never has to know status and decision_outcome are two columns)
+  // and reviews get readable criterion names and the rationale fallback.
+  const items = await shapeExportRows(c.env.DB, resource, rows);
 
   const stamp = new Date().toISOString().slice(0, 10);
   const filename = `${c.get('event').slug}-${resource}-${stamp}.${format}`;

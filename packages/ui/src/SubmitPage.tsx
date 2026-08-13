@@ -33,6 +33,11 @@ export interface SubmitViewer {
    * (ABS defect: silently resuming used to overwrite an unrelated draft
    * under the same code with no warning). */
   draft: { id: string; title: string; answers: Answers } | null
+  /** Workplan 15 W3 (D7): guidance this person was given on an earlier
+   * proposal anywhere in the organisation, looked up at render time — never
+   * copied between events, because a copy forks the moment someone edits it.
+   * Absent on a bootstrap from an older deploy. */
+  revise_invites?: Array<{ submission_id: string; title: string; guidance: string; event_name: string }>
 }
 
 export interface SubmitFormInfo {
@@ -172,6 +177,12 @@ export function SubmitPage({ data }: { data: SubmitBootstrap }) {
   const [draftChoice, setDraftChoice] = useState<'resume' | 'new' | null>(null)
   const [draftChoiceError, setDraftChoiceError] = useState<string | null>(null)
   const [startingNew, setStartingNew] = useState(false)
+  // W3/D7: the "you were asked to revise this" panel is dismissible — it is a
+  // reminder, not a gate, and a submitter who is here about something else
+  // should be able to get it out of the way.
+  const [invitesDismissed, setInvitesDismissed] = useState(false)
+  /** Which prior submission this one answers, once the submitter says so. */
+  const [resubmissionOf, setResubmissionOf] = useState<string | null>(null)
   const participantQuestions = useMemo(() => {
     const configured = data.questions
       .filter((q) => q.section === 'participant')
@@ -256,6 +267,8 @@ export function SubmitPage({ data }: { data: SubmitBootstrap }) {
   answersRef.current = answers
   const submissionIdRef = useRef(submissionId)
   submissionIdRef.current = submissionId
+  const resubmissionOfRef = useRef<string | null>(null)
+  resubmissionOfRef.current = resubmissionOf
 
   const setAnswer = useCallback((qid: string, value: AnswerValue) => {
     dirtyRef.current = true
@@ -278,14 +291,22 @@ export function SubmitPage({ data }: { data: SubmitBootstrap }) {
     setDraftChoice('resume')
   }, [viewer])
 
-  const startNewDraft = useCallback(async () => {
+  // `priorId` (W3/D7) is set when the submitter starts from the revise panel:
+  // the new draft records what it answers, so "did they act on the guidance?"
+  // is answerable later. The guidance itself is never copied onto the new row.
+  const startNewDraft = useCallback(async (priorId?: string) => {
     setDraftChoiceError(null)
     setStartingNew(true)
     try {
       const res = await fetch(`${data.base_path}/draft`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ submission_id: null, answers: {}, force_new: true }),
+        body: JSON.stringify({
+          submission_id: null,
+          answers: {},
+          force_new: true,
+          ...(priorId ? { resubmission_of: priorId } : {}),
+        }),
       })
       const body = (await res.json().catch(() => ({}))) as { submission_id?: string; error?: string }
       if (!res.ok) {
@@ -300,6 +321,7 @@ export function SubmitPage({ data }: { data: SubmitBootstrap }) {
       setAnswers({})
       setParticipants([{ role: 'speaker', is_primary_contact: true, answers: primaryParticipantAnswers }])
       setDraftChoice('new')
+      if (priorId) setResubmissionOf(priorId)
     } catch {
       setDraftChoiceError('Could not start a new submission — please check your connection and try again.')
     } finally {
@@ -507,6 +529,10 @@ export function SubmitPage({ data }: { data: SubmitBootstrap }) {
           submission_id: submissionIdRef.current,
           answers: answersRef.current,
           participants: outgoingParticipants,
+          // W3/D7: carried here too, for the submitter who never triggered an
+          // autosave — the draft path stamps it on create, this covers the
+          // straight-through case.
+          ...(resubmissionOfRef.current ? { resubmission_of: resubmissionOfRef.current } : {}),
         }),
       })
       const body = (await res.json().catch(() => ({}))) as Record<string, unknown>
@@ -621,6 +647,42 @@ export function SubmitPage({ data }: { data: SubmitBootstrap }) {
               <p>
                 Signed in as <strong>{viewer.email}</strong>.
               </p>
+              {/* Workplan 15 W3 (D7): the guidance this person was given last
+                  time, shown back inside this year's form. Looked up at render
+                  time on the org-scoped contact — never copied forward, so
+                  editing it in the workspace changes what is shown here. */}
+              {!invitesDismissed &&
+                (viewer.revise_invites ?? []).length > 0 &&
+                !resubmissionOf && (
+                  <div className="sb-card sb-revise-invite">
+                    <p>
+                      <strong>You were asked to revise and resubmit.</strong>
+                    </p>
+                    {viewer.revise_invites!.map((invite) => (
+                      <div key={invite.submission_id} className="sb-revise-item">
+                        <p className="sb-muted">
+                          {invite.event_name} — “{invite.title}”
+                        </p>
+                        <p style={{ whiteSpace: 'pre-line' }}>{invite.guidance}</p>
+                        <button
+                          type="button"
+                          className="sb-button sb-primary"
+                          disabled={startingNew || overLimit}
+                          onClick={() => void startNewDraft(invite.submission_id)}
+                        >
+                          {startingNew ? 'Starting…' : 'Start a revised submission'}
+                        </button>
+                      </div>
+                    ))}
+                    {draftChoiceError && <div className="sb-error" role="alert">{draftChoiceError}</div>}
+                    <button type="button" className="sb-link" onClick={() => setInvitesDismissed(true)}>
+                      Dismiss
+                    </button>
+                  </div>
+                )}
+              {resubmissionOf && (
+                <p className="sb-muted">Starting a revised submission — we will link it to your earlier proposal.</p>
+              )}
               {overLimit ? (
                 <div className="sb-error">
                   You have reached the limit of {limit} submissions for this form. Manage your
@@ -1193,6 +1255,10 @@ const wizardCss = `
 .sb-muted { color: var(--text-muted); }
 .sb-saved { font-size: .8rem; }
 .sb-card { border: 1px solid var(--border); border-radius: var(--radius); padding: 1rem 1.1rem; margin: 0 0 1rem; }
+/* W3/D7: the revise-and-resubmit panel — an invitation, so it reads as an
+   accent card rather than a warning. */
+.sb-revise-invite { border-color: var(--accent); }
+.sb-revise-item + .sb-revise-item { border-top: 1px solid var(--border); padding-top: .75rem; margin-top: .75rem; }
 .sb-card-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: .75rem; }
 .sb-card-tools { display: flex; gap: .75rem; align-items: center; }
 .sb-card-tools select { font: inherit; font-size: .85rem; padding: .25rem .4rem; border-radius: var(--radius);

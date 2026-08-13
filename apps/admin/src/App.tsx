@@ -12,12 +12,14 @@ import type {
 } from './components/DataList'
 import {
   ApiError,
+  bulkDecision,
   bulkStatus,
   createContact,
   createSubmission,
   createTask,
   updateTask,
   deleteContact,
+  enrollSubmissionsInPipeline,
   getMe,
   getSubmissionDetail,
   listContactFields,
@@ -192,7 +194,12 @@ export function pollDecisionJob(
  * ModalDialog with a custom footer instead of the two-button appConfirm,
  * since this needs three actions.
  */
-type DecisionPreflight = Awaited<ReturnType<typeof sendDecisions>>
+type DecisionPreflight = Awaited<ReturnType<typeof sendDecisions>> & {
+  /** Workplan 15 W4: declined rows in this batch rated at or above the mean of
+   * what the event accepted. Absent when the batch has none — the pipeline
+   * offer below is only ever shown for a batch that actually loses a cohort. */
+  near_miss?: { count: number; ids: string[]; threshold: number }
+}
 
 /** One rendered decision email inside the review dialog — subject, sample
  * recipient, and the real body HTML (produced server-side by the same
@@ -242,12 +249,18 @@ export function DecisionReviewDialog({
   pre,
   onSend,
   onCancel,
+  onEnrollNearMiss,
 }: {
   pre: DecisionPreflight
   onSend: (holdContactIds: string[] | null) => void
   onCancel: () => void
+  /** Workplan 15 W4: enrol the near-miss cohort's speakers in the pipeline.
+   * Optional — a caller with no pipeline seat simply never offers it. */
+  onEnrollNearMiss?: (ids: string[]) => void
 }) {
   const [hold, setHold] = useState(false)
+  const [enrolled, setEnrolled] = useState(false)
+  const nearMiss = pre.near_miss
   const speakers = pre.speakers_with_pending ?? []
   const total = pre.accepted + pre.declined
   const notes: string[] = []
@@ -285,9 +298,39 @@ export function DecisionReviewDialog({
       )}
       <DecisionEmailPreview label="Accepted" count={pre.accepted} preview={pre.previews?.accepted ?? null} />
       <DecisionEmailPreview label="Declined" count={pre.declined} preview={pre.previews?.declined ?? null} />
+      {/* W3: only rendered when the batch actually holds a revise row — the
+        * server omits the key otherwise, so an ordinary batch is unchanged. */}
+      {pre.previews?.revise && (
+        <DecisionEmailPreview label="Revise & resubmit" count={1} preview={pre.previews.revise} />
+      )}
       <p className="decision-preview-meta">
         To change the wording, edit the templates in Settings → Email templates, then reopen this dialog.
       </p>
+      {/* Workplan 15 W4: this send is the moment the near-miss cohort is lost,
+        * so the offer to keep it is made here rather than left to somebody
+        * remembering the grid a season later. Enrolling never touches the
+        * decision — it is a second, independent click. */}
+      {nearMiss && nearMiss.count > 0 && onEnrollNearMiss && (
+        <p>
+          <strong>
+            {nearMiss.count} declined {nearMiss.count === 1 ? 'talk' : 'talks'} rated{' '}
+            {nearMiss.threshold.toFixed(1)}+
+          </strong>{' '}
+          — add their speakers to the pipeline?{' '}
+          {enrolled ? (
+            <em>Added to the speaker pipeline.</em>
+          ) : (
+            <button
+              onClick={() => {
+                setEnrolled(true)
+                onEnrollNearMiss(nearMiss.ids)
+              }}
+            >
+              Add to speaker pipeline
+            </button>
+          )}
+        </p>
+      )}
       {speakers.length > 0 && (
         <>
           <p>
@@ -2698,6 +2741,15 @@ export default function App() {
   const [approvalAsk, setApprovalAsk] = useState(false)
   const approvalAskRef = useRef(false)
   approvalAskRef.current = approvalAsk
+  // Workplan 15 W2/W3: the accept's condition and the revise guidance, typed
+  // in the bulk bar so they ride the action that produces them. Refs for the
+  // same reason approvalAsk has one — runBulk is memoised on the selection.
+  const [acceptCondition, setAcceptCondition] = useState('')
+  const acceptConditionRef = useRef('')
+  acceptConditionRef.current = acceptCondition
+  const [reviseGuidance, setReviseGuidance] = useState('')
+  const reviseGuidanceRef = useRef('')
+  reviseGuidanceRef.current = reviseGuidance
 
   // SPK-15: the Speakers tab's custom-field definitions, scoped to the
   // current session event (new/edited contacts always write there — same
@@ -3217,8 +3269,31 @@ export default function App() {
     [],
   )
 
+  /**
+   * Workplan 15 W4: enrol a set of submissions' speakers in the org-wide
+   * pipeline. Shared by the bulk bar and the decision dialog's near-miss
+   * offer, so both report the same counts — created vs already-on-the-board
+   * (whose rationale gained a line), plus talks with nobody attached.
+   */
+  const enrollInPipeline = useCallback(async (ids: string[]) => {
+    try {
+      const r = await enrollSubmissionsInPipeline(ids)
+      setBulkNote(
+        `${r.created} added to the speaker pipeline` +
+          (r.updated > 0 ? `; ${r.updated} already on the board — rationale appended` : '') +
+          (r.skipped_no_speaker > 0
+            ? `; ${r.skipped_no_speaker} skipped (no speaker on the submission)`
+            : ''),
+      )
+    } catch (e) {
+      setBulkNote(e instanceof Error ? e.message : 'Action failed')
+    } finally {
+      setBulkBusy(false)
+    }
+  }, [])
+
   const runBulk = useCallback(
-    async (action: 'accept_queue' | 'decline_queue' | 'pending' | 'send_decisions') => {
+    async (action: 'accept_queue' | 'decline_queue' | 'pending' | 'send_decisions' | 'enroll_pipeline' | 'revise') => {
       if (checkedIds.length === 0) return
       decisionPollRef.current?.cancel()
       setBulkBusy(true)
@@ -3250,8 +3325,33 @@ export default function App() {
         }
         return
       }
+      if (action === 'enroll_pipeline') {
+        // The selection stays checked: enrolling is not a decision, and the
+        // organiser usually goes straight back to acting on the same rows.
+        await enrollInPipeline(checkedIds)
+        return
+      }
+      if (action === 'revise') {
+        // W3/D5: a flag, never a status move — the rows stay exactly where the
+        // decline queue put them, so scheduling, notification and the queue
+        // counts all carry on working unchanged.
+        try {
+          const r = await bulkDecision(checkedIds, reviseGuidanceRef.current.trim() || null)
+          setBulkNote(`${r.changed} flagged Revise & resubmit — they keep their decline status`)
+        } catch (e) {
+          setBulkNote(e instanceof Error ? e.message : 'Action failed')
+        } finally {
+          setBulkBusy(false)
+        }
+        return
+      }
       try {
-        const r = await bulkStatus(checkedIds, action)
+        // W2: whatever is in the bar's condition field rides the accept.
+        const r = await bulkStatus(
+          checkedIds,
+          action,
+          action === 'accept_queue' ? acceptConditionRef.current.trim() || null : null,
+        )
         setBulkNote(`${r.changed} moved to ${statusLabel(action)}`)
         setCheckedIds([])
         setChecklistResetKey((k) => k + 1)
@@ -3261,7 +3361,7 @@ export default function App() {
         setBulkBusy(false)
       }
     },
-    [checkedIds, sendDecisionsForReal],
+    [checkedIds, sendDecisionsForReal, enrollInPipeline],
   )
 
   if (loadError) {
@@ -3453,6 +3553,10 @@ export default function App() {
                 note={bulkNote}
                 approvalAsk={approvalAsk}
                 onApprovalAskChange={setApprovalAsk}
+                acceptCondition={acceptCondition}
+                onAcceptConditionChange={setAcceptCondition}
+                reviseGuidance={reviseGuidance}
+                onReviseGuidanceChange={setReviseGuidance}
                 onAction={(a) => void runBulk(a)}
                 onClear={() => {
                   setCheckedIds([])
@@ -3473,6 +3577,7 @@ export default function App() {
                   setDecisionReview(null)
                   setBulkBusy(false)
                 }}
+                onEnrollNearMiss={(ids) => void enrollInPipeline(ids)}
               />
             )}
           </>

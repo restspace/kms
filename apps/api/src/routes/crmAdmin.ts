@@ -191,6 +191,126 @@ crmRoutes.post('/pipeline/cards', async (c) => {
   return c.json(await loadCard(c.env.DB, org, id), 201);
 });
 
+// POST /crm/pipeline/enroll-submissions { ids } — workplan 15 W4: the road
+// into the board for the near-miss cohort. Scoped to the session's event like
+// every other bulk action over submission ids (bulk-status, send-decisions).
+//
+// One card per person, not per talk (D8): the board is a people board, so a
+// speaker who near-missed in two seasons is one card whose rationale reads as
+// two lines — which is the true signal, a stronger lead. Enrolment therefore
+// never moves a card that has already progressed past `identified`, and never
+// lowers a score somebody already earned here.
+crmRoutes.post('/pipeline/enroll-submissions', async (c) => {
+  const org = await orgId(c);
+  if (!org) return c.json({ error: 'not_found' }, 404);
+  const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+  const ids = Array.isArray(body.ids)
+    ? body.ids.filter((v): v is string => typeof v === 'string').slice(0, 200)
+    : [];
+  if (ids.length === 0) return c.json({ error: 'ids_required' }, 400);
+
+  const placeholders = ids.map(() => '?').join(', ');
+  // `rating` is the submissions grid's normalised 1-5 expression verbatim
+  // (adminApi.ts): the number the organiser was looking at when they picked
+  // these rows has to be the number that rides onto the card. The speaker is
+  // the primary contact, else the first listed participant — the same
+  // "primary, falling back" rule the on-accept task owner uses. Season comes
+  // off the event, not the clock: a batch decided in January belongs to the
+  // event it declined for.
+  const { results } = await c.env.DB.prepare(
+    `SELECT s.id, s.code, s.title, s.status,
+            (SELECT ROUND(AVG(plan_avg), 2) FROM (
+               SELECT 1 + (AVG(r.weighted_total) - p.scoring_scale_min) * 4.0
+                        / (p.scoring_scale_max - p.scoring_scale_min) AS plan_avg
+               FROM reviews r JOIN evaluation_plans p ON p.id = r.plan_id
+               WHERE r.submission_id = s.id AND r.weighted_total IS NOT NULL
+               GROUP BY r.plan_id)) AS rating,
+            (SELECT sp.contact_id FROM submission_participants sp
+              WHERE sp.submission_id = s.id
+              ORDER BY sp.is_primary_contact DESC, sp.position LIMIT 1) AS speaker_id,
+            strftime('%Y', COALESCE(ev.starts_at, s.created_at)) AS season
+       FROM submissions s
+       JOIN events ev ON ev.id = s.event_id
+      WHERE s.event_id = ? AND s.id IN (${placeholders})`,
+  )
+    .bind(c.get('session').eventId, ...ids)
+    .all<{
+      id: string; code: string; title: string; status: string;
+      rating: number | null; speaker_id: string | null; season: string | null;
+    }>();
+
+  let created = 0;
+  let updated = 0;
+  let skippedNoSpeaker = 0;
+  const now = new Date().toISOString();
+  for (const row of results) {
+    if (!row.speaker_id) {
+      // A submission nobody is attached to has no person to enroll — the
+      // caller is told rather than left to wonder why the count is short.
+      skippedNoSpeaker += 1;
+      continue;
+    }
+    // "SESS-104 — Evals in anger (rated 4.6, declined 2026)": code and title
+    // so the card reads as a talk somebody remembers, rating and season so a
+    // reader a year later knows how close it came.
+    const outcome = row.status === 'decline_queue' ? 'declined' : row.status;
+    const facts = [
+      ...(row.rating === null ? [] : [`rated ${row.rating.toFixed(1)}`]),
+      [outcome, row.season].filter(Boolean).join(' '),
+    ].join(', ');
+    const line = `${row.code} — ${row.title} (${facts})`;
+    // 1-5 display scale onto the card's 0-100 prospect score: the floor of the
+    // scale is the floor of the score, so a 1.0 reads as 0 rather than 20.
+    const score = row.rating === null ? null : Math.max(0, Math.min(100, Math.round(((row.rating - 1) / 4) * 100)));
+
+    const existing = await c.env.DB.prepare(
+      'SELECT id, stage, score, rationale FROM pipeline_cards WHERE org_id = ? AND contact_id = ?',
+    )
+      .bind(org, row.speaker_id)
+      .first<{ id: string; stage: PipelineStage; score: number | null; rationale: string | null }>();
+
+    if (existing) {
+      const rationale = (existing.rationale ? `${existing.rationale}\n${line}` : line).slice(
+        0,
+        MAX_RATIONALE_CHARS,
+      );
+      await c.env.DB.prepare(
+        'UPDATE pipeline_cards SET score = ?, rationale = ?, updated_at = ? WHERE id = ?',
+      )
+        .bind(score === null ? existing.score : Math.max(score, existing.score ?? 0), rationale, now, existing.id)
+        .run();
+      await logActivity(c, existing.id, { kind: 'enrolled', to_stage: existing.stage });
+      updated += 1;
+      continue;
+    }
+
+    const tail = await c.env.DB.prepare(
+      'SELECT COALESCE(MAX(position), 0) + 1 AS next FROM pipeline_cards WHERE org_id = ? AND stage = ?',
+    )
+      .bind(org, PIPELINE_STAGES[0])
+      .first<{ next: number }>();
+    const id = crypto.randomUUID();
+    await c.env.DB.prepare(
+      `INSERT INTO pipeline_cards (id, org_id, contact_id, stage, score, rationale, position, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+      .bind(id, org, row.speaker_id, PIPELINE_STAGES[0], score, line.slice(0, MAX_RATIONALE_CHARS), tail?.next ?? 1, now, now)
+      .run();
+    // Same call the hand-enrolment path makes, so the timeline cannot tell a
+    // routed card from one somebody typed in.
+    await logActivity(c, id, { kind: 'enrolled', to_stage: PIPELINE_STAGES[0] });
+    created += 1;
+  }
+
+  return c.json({
+    ok: true,
+    enrolled: created + updated,
+    created,
+    updated,
+    skipped_no_speaker: skippedNoSpeaker,
+  });
+});
+
 // GET /crm/pipeline/cards/:id — card detail: contact summary plus the full
 // activity feed, newest first (CRM-08's notes + stage history in one list).
 crmRoutes.get('/pipeline/cards/:id', async (c) => {

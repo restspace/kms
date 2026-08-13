@@ -141,10 +141,15 @@ export const DEFAULT_TEMPLATES: Record<string, DefaultTemplate> = {
   // {{{approval_ask}}} is the optional employer-approval ask (workplan 13 W3):
   // prerendered system HTML supplied by the bulk-jobs expander when the
   // organiser enables it for a batch, '' otherwise.
+  // {{{accept_condition}}} is workplan 15 W2's conditional accept — the
+  // proviso the decision meeting attached ("accepted if you bring a business
+  // co-presenter"), supplied only for rows that carry one, so the speaker is
+  // told the condition in the letter that tells them they are in.
   decision_accepted: {
     subject: 'Congratulations — {{submission.title}} was accepted for {{event.name}}',
     body: `<p>Great news, {{speaker.first_name}}!</p>
 <p><strong>{{submission.title}}</strong> ({{submission.code}}) has been <strong>accepted</strong> for {{event.name}}.</p>
+{{{accept_condition}}}
 <p style="white-space:pre-line;">{{reviewer_feedback}}</p>
 {{{approval_ask}}}
 <p>Your speaker portal lists everything we need from you next — including any onboarding tasks.</p>
@@ -157,10 +162,23 @@ export const DEFAULT_TEMPLATES: Record<string, DefaultTemplate> = {
 <p style="white-space:pre-line;">{{reviewer_feedback}}</p>
 <p>We would love to see you submit again next time.</p>`,
   },
+  // Workplan 15 W3: the third decision outcome. Stored as a flag on a row
+  // that stays declined (D5), but it is a genuinely different letter — the
+  // archive's most valuable rejection is the one that asks for a resubmission,
+  // and the guidance is what makes it one.
+  decision_revise: {
+    subject: 'Your {{event.name}} submission: {{submission.title}} — we would like to see a revision',
+    body: `<p>Hi {{speaker.first_name}},</p>
+<p>Thank you for submitting <strong>{{submission.title}}</strong> ({{submission.code}}) to {{event.name}}. We are not able to take it as it stands — but we would like to see it again with some changes.</p>
+<p style="white-space:pre-line;">{{revise_guidance}}</p>
+<p style="white-space:pre-line;">{{reviewer_feedback}}</p>
+<p>Please do resubmit — we will see this guidance alongside your next proposal.</p>`,
+  },
   // Workplan 10: one email per speaker per decision batch when they have ≥2
   // decisions queued (single-decision speakers keep the two templates above —
   // D6). The {{{…}}} blocks are prerendered by the bulk-jobs expander:
-  // decisions_block (accepts first, feedback nested), pending_note (other
+  // decisions_block (accepts, then declines, then W3's revise block, feedback
+  // and guidance nested under their line), pending_note (other
   // submissions still under review, when enabled), followup_note (earlier
   // batches already notified), closing_block (portal button + onboarding line
   // when any accept, softer sign-off when declines-only).
@@ -191,6 +209,15 @@ export const DEFAULT_TEMPLATES: Record<string, DefaultTemplate> = {
     body: `<p>Hi {{speaker.first_name}},</p>
 <p>You have an unsubmitted draft for <strong>{{form.name}}</strong>. Submissions close <strong>{{form.close_at}}</strong> — after that the form locks.</p>
 <p><a href="{{submission_url}}" class="btn">Finish your submission</a></p>`,
+  },
+  // Workplan 15 W5b: the second chase — the deck came in, was reviewed, and a
+  // revision was asked for. Staged and sent by the same sweep/inbox as every
+  // other reminder (D9), so it needs nothing here but its own copy.
+  materials_revision: {
+    subject: 'Your slides for {{event.name}} — we asked for one more pass',
+    body: `<p>Hi {{speaker.first_name}},</p>
+<p>We reviewed the materials for <strong>{{submission.title}}</strong> ({{submission.code}}) and left notes asking for a revised version. We do not have it yet.</p>
+<p><a href="{{portal_url}}" class="btn">Upload the new version</a></p>`,
   },
   schedule_confirmed: {
     subject: 'You are scheduled: {{submission.title}} — {{event.name}}',

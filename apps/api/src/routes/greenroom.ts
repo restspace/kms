@@ -14,6 +14,7 @@ import { Hono } from 'hono';
 import type { Context } from 'hono';
 import { eventLocalDay } from '@kms/core';
 import type { AccessEnv } from '../access';
+import { toCsv, toXlsx } from '../export';
 import { sendTemplated } from '../mailer';
 import { bumpEventRevision, getEventRevision } from '../revision';
 import { speakerTracking, type SpeakerAggRow } from './dashboard';
@@ -44,6 +45,10 @@ interface GreenRoomSessionRow {
   room_id: string;
   starts_at: string;
   ends_at: string | null;
+  /** W6: what the host reads out, editable here as well as the detail panel
+   * (D10) — it lands late and from whoever is nearest, so the day-of screen
+   * is the point, not the detail panel. */
+  intro_script: string | null;
 }
 
 interface SessionSpeakerRow {
@@ -73,7 +78,7 @@ async function greenroomPayload(c: Context<ApiEnv>) {
     db
       .prepare(
         `SELECT s.id, s.code, s.title, s.format, t.name AS track_name,
-                s.room_id, s.starts_at, s.ends_at
+                s.room_id, s.starts_at, s.ends_at, s.intro_script
          FROM submissions s
          LEFT JOIN tracks t ON t.id = s.track_id
          WHERE s.event_id = ? AND s.status = 'accepted'
@@ -237,6 +242,37 @@ greenroomRoutes.post('/checkin', async (c) => {
   return c.json({ ok: true, etag: `"r${revision}"`, ...payload });
 });
 
+// POST /app/api/greenroom/intro-script { submission_id, intro_script } — the
+// host's read-out line for a session (W6/D10). The doc's median edit lands at
+// T-20 with a 10th percentile of T-2, so this is deliberately reachable from
+// the day-of screen and not only the detail panel: whoever is standing
+// nearest when it finally gets written down should be able to save it here.
+greenroomRoutes.post('/intro-script', async (c) => {
+  const session = c.get('session');
+  const db = c.env.DB;
+  const body = (await c.req.json().catch(() => ({}))) as { submission_id?: unknown; intro_script?: unknown };
+  const submissionId = typeof body.submission_id === 'string' ? body.submission_id : '';
+  if (submissionId === '') return c.json({ error: 'submission_id_required' }, 400);
+  const raw = body.intro_script;
+  if (raw !== null && typeof raw !== 'string') return c.json({ error: 'invalid_intro_script' }, 400);
+  const introScript = raw === null || raw === undefined ? null : (raw.trim() === '' ? null : raw);
+
+  const result = await db
+    .prepare('UPDATE submissions SET intro_script = ?, updated_at = ? WHERE id = ? AND event_id = ?')
+    .bind(introScript, new Date().toISOString(), submissionId, session.eventId)
+    .run();
+  if ((result.meta.changes ?? 0) === 0) return c.json({ error: 'not_found' }, 404);
+
+  await bumpEventRevision(c.env, session.eventId);
+  const revision = await getEventRevision(c.env, session.eventId);
+  const payload = await greenroomPayload(c);
+  if (!payload) return c.json({ error: 'not_found' }, 404);
+  await c.env.KV.put(cacheKeyFor(session.eventId, revision), JSON.stringify(payload), {
+    expirationTtl: GREENROOM_CACHE_TTL_SECONDS,
+  }).catch(() => {});
+  return c.json({ ok: true, etag: `"r${revision}"`, ...payload });
+});
+
 // POST /app/api/greenroom/nudge { contact_id } — one-tap reminder to a single
 // speaker about their incomplete tasks. Inline send (one recipient — no bulk
 // job), through the same task_reminder template and day-keyed idempotency as
@@ -316,3 +352,174 @@ greenroomRoutes.post('/nudge', async (c) => {
   // No revision bump: sending mail changes no green-room data.
   return c.json({ ok: true, sent, duplicates });
 });
+
+// ---------------------------------------------------------------------------
+// GET /app/api/greenroom/showflow.csv | .xlsx (W6/D10) — one generated
+// artifact, not a run-of-show editor: every fact the show-flow doc needs,
+// pulled into one row per scheduled session, so it stops being re-typed by
+// hand into a doc that lives outside this tool.
+// ---------------------------------------------------------------------------
+
+interface ShowflowSessionRow {
+  id: string;
+  code: string;
+  title: string;
+  format: string | null;
+  track_name: string | null;
+  starts_at: string;
+  ends_at: string | null;
+  pencilled_at: string | null;
+  intro_script: string | null;
+  materials_state: string | null;
+  room_name: string | null;
+  room_notes: string | null;
+}
+
+interface ShowflowParticipantRow {
+  submission_id: string;
+  role: string;
+  title_at_time: string | null;
+  is_primary_contact: number;
+  name: string | null;
+  email: string;
+  mobile_phone: string | null;
+  arrived_at: string | null;
+}
+
+interface ShowflowDeckRow {
+  submission_id: string;
+  filename: string;
+  uploaded_at: string;
+}
+
+/** Assembled once and shared by both formats — the export is the same rows,
+ * just two writers (docs/10 §2). */
+async function showflowRows(c: Context<ApiEnv>): Promise<{ slug: string; rows: Record<string, unknown>[] } | null> {
+  const db = c.env.DB;
+  const eventId = c.get('session').eventId;
+  const event = await db
+    .prepare('SELECT slug, timezone FROM events WHERE id = ?')
+    .bind(eventId)
+    .first<{ slug: string; timezone: string }>();
+  if (!event) return null;
+
+  const [{ results: sessions }, { results: participants }, { results: decks }] = await Promise.all([
+    // Running order: day, then start, then room — the same ordering the
+    // exported columns lead with. Pencilled sessions (0035) are included and
+    // marked, never dropped: a doc built three days out has half-placed
+    // sessions in it, and dropping them reproduces exactly the failure
+    // workplan 13 W5 fixed on the agenda.
+    db
+      .prepare(
+        `SELECT s.id, s.code, s.title, s.format, t.name AS track_name,
+                s.starts_at, s.ends_at, s.pencilled_at, s.intro_script, s.materials_state,
+                r.name AS room_name, r.notes AS room_notes
+         FROM submissions s
+         LEFT JOIN tracks t ON t.id = s.track_id
+         LEFT JOIN rooms r ON r.id = s.room_id
+         WHERE s.event_id = ? AND s.status = 'accepted'
+           AND s.starts_at IS NOT NULL AND s.room_id IS NOT NULL
+         ORDER BY s.starts_at, r.position, s.code`,
+      )
+      .bind(eventId)
+      .all<ShowflowSessionRow>(),
+    db
+      .prepare(
+        `SELECT sp.submission_id, sp.role, sp.title_at_time, sp.is_primary_contact,
+                TRIM(COALESCE(c.first_name, '') || ' ' || COALESCE(c.last_name, '')) AS name,
+                c.email, c.mobile_phone, ec.arrived_at
+         FROM submission_participants sp
+         JOIN submissions s ON s.id = sp.submission_id
+         JOIN contacts c ON c.id = sp.contact_id
+         LEFT JOIN event_contacts ec ON ec.event_id = s.event_id AND ec.contact_id = c.id
+         WHERE s.event_id = ? AND s.status = 'accepted'
+           AND s.starts_at IS NOT NULL AND s.room_id IS NOT NULL
+         ORDER BY sp.submission_id, sp.position`,
+      )
+      .bind(eventId)
+      .all<ShowflowParticipantRow>(),
+    // The current deck: file_request_uploads carries submission_id directly
+    // (unlike the dashboard's per-contact readiness check), so this reads the
+    // same "is_current" version chain the Files tab shows.
+    db
+      .prepare(
+        `SELECT u.submission_id, fa.filename, u.uploaded_at
+         FROM file_request_uploads u
+         JOIN file_assets fa ON fa.id = u.file_asset_id
+         JOIN submissions s ON s.id = u.submission_id
+         WHERE s.event_id = ? AND u.is_current = 1 AND u.submission_id IS NOT NULL`,
+      )
+      .bind(eventId)
+      .all<ShowflowDeckRow>(),
+  ]);
+
+  const bySubmission = new Map<string, ShowflowParticipantRow[]>();
+  for (const p of participants) {
+    const list = bySubmission.get(p.submission_id);
+    if (list) list.push(p);
+    else bySubmission.set(p.submission_id, [p]);
+  }
+  // A submission can carry more than one current upload (e.g. slides plus a
+  // separate handout request) — the latest by upload time is "the deck".
+  const deckFilename = new Map<string, string>();
+  const deckUploadedAt = new Map<string, string>();
+  for (const d of decks) {
+    const prior = deckUploadedAt.get(d.submission_id);
+    if (!prior || d.uploaded_at > prior) {
+      deckFilename.set(d.submission_id, d.filename);
+      deckUploadedAt.set(d.submission_id, d.uploaded_at);
+    }
+  }
+
+  const rows = sessions.map((s) => {
+    const people = bySubmission.get(s.id) ?? [];
+    const primary = people.find((p) => p.is_primary_contact === 1) ?? null;
+    const speakers = people
+      .map((p) => {
+        const who = fullName(p.name, p.email);
+        const titled = p.title_at_time ? `${who}, ${p.title_at_time}` : who;
+        return `${titled} (${p.role}${p.arrived_at ? ', arrived' : ''})`;
+      })
+      .join('; ');
+    return {
+      day: eventLocalDay(s.starts_at, event.timezone),
+      start: s.starts_at,
+      end: s.ends_at,
+      room: s.room_name,
+      track: s.track_name,
+      code: s.code,
+      title: s.title,
+      format: s.format,
+      pencilled: s.pencilled_at ? 'PENCILLED' : '',
+      speakers,
+      primary_contact: primary ? fullName(primary.name, primary.email) : '',
+      primary_contact_mobile: primary?.mobile_phone ?? '',
+      intro_script: s.intro_script ?? '',
+      materials_state: s.materials_state ?? '',
+      deck_filename: deckFilename.get(s.id) ?? '',
+      av_notes: s.room_notes ?? '',
+    };
+  });
+
+  return { slug: event.slug, rows };
+}
+
+async function handleShowflowExport(c: Context<ApiEnv>, format: 'csv' | 'xlsx') {
+  const built = await showflowRows(c);
+  if (!built) return c.json({ error: 'not_found' }, 404);
+  const stamp = new Date().toISOString().slice(0, 10);
+  const filename = `${built.slug}-showflow-${stamp}.${format}`;
+  if (format === 'xlsx') {
+    return c.body(toXlsx(built.rows, 'Show flow') as unknown as ArrayBuffer, 200, {
+      'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'Content-Disposition': `attachment; filename="${filename}"`,
+    });
+  }
+  return c.body(toCsv(built.rows), 200, {
+    'Content-Type': 'text/csv; charset=utf-8',
+    'Content-Disposition': `attachment; filename="${filename}"`,
+  });
+}
+
+greenroomRoutes.get('/showflow.csv', (c) => handleShowflowExport(c, 'csv'));
+greenroomRoutes.get('/showflow.xlsx', (c) => handleShowflowExport(c, 'xlsx'));
