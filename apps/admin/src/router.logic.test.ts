@@ -136,7 +136,9 @@ describe('parse/serialise round-trips', () => {
       day: '2026-05-12',
       form: 'frm_1',
       fstep: 'settings',
+      page: 'workspace-submissions',
     },
+    { ...DEFAULT_ROUTE, v: 'help', page: 'agenda' },
   ]
 
   it('survives state → search → state for every parameter', () => {
@@ -189,6 +191,8 @@ describe('shouldPush decision table', () => {
   })
 
   it('lists exactly the navigation parameters', () => {
-    expect([...PUSH_KEYS]).toEqual(['v', 'tab', 'rec', 'form'])
+    // `page` is here because moving between manual pages is a navigation the
+    // reader expects Back to undo, exactly like changing tab or record.
+    expect([...PUSH_KEYS]).toEqual(['v', 'tab', 'rec', 'form', 'page'])
   })
 })

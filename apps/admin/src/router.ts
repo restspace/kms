@@ -30,6 +30,7 @@ export const VIEW_KEYS = [
   'pipeline',
   'embeds',
   'settings',
+  'help',
 ] as const
 
 export type ViewKey = (typeof VIEW_KEYS)[number]
@@ -58,6 +59,8 @@ export interface RouteState {
   form: string | null
   /** Form-builder step key. */
   fstep: string | null
+  /** Manual page slug shown by the Help section (defaults to its index). */
+  page: string | null
 }
 
 export type RoutePatch = Partial<RouteState>
@@ -73,13 +76,14 @@ export const DEFAULT_ROUTE: RouteState = {
   day: null,
   form: null,
   fstep: null,
+  page: null,
 }
 
 /**
  * Parameters whose change is a *navigation*: the user expects Back to undo it.
  * Everything else refines the current screen and replaces the entry.
  */
-export const PUSH_KEYS: ReadonlyArray<keyof RouteState> = ['v', 'tab', 'rec', 'form']
+export const PUSH_KEYS: ReadonlyArray<keyof RouteState> = ['v', 'tab', 'rec', 'form', 'page']
 
 /** Custom event name fired after a programmatic navigation. */
 const ROUTE_EVENT = 'kms:routechange'
@@ -151,6 +155,7 @@ export function parseRoute(search: string | null | undefined): RouteState {
     day: text(params, 'day'),
     form: text(params, 'form'),
     fstep: text(params, 'fstep'),
+    page: text(params, 'page'),
   }
 }
 
@@ -171,6 +176,7 @@ export function routeToSearch(state: RouteState): string {
     ['day', state.day],
     ['form', state.form],
     ['fstep', state.fstep],
+    ['page', state.page],
   ]
   for (const [key, value] of optional) {
     if (value !== null && value !== undefined && String(value).trim().length > 0) {

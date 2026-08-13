@@ -32,8 +32,17 @@ interface TokenSnapshot {
   revoked_at: string | null;
 }
 
-/** Replay the seed. Chunked batches keep order; the seed's own leading DELETEs make it idempotent. */
-export async function resetDemoData(db: D1Database): Promise<number> {
+/**
+ * Replay the seed. Chunked batches keep order; the seed's own leading DELETEs
+ * make it idempotent.
+ *
+ * `redirectEmail` overrides the stored tester mailbox for this reset only —
+ * used by the Settings screen, which saves the setting and resets in one
+ * action and so already holds the new value. Omitted (the landing page button
+ * and the nightly cron), the stored setting applies, so a demo configured to
+ * deliver to a tester's inbox stays that way across the 09:00 UTC replay.
+ */
+export async function resetDemoData(db: D1Database, redirectEmail?: string | null): Promise<number> {
   // API tokens hang off the organisation, so the seed's DELETE would cascade
   // them away — and a judge's token would die at the nightly reset. Snapshot
   // and restore them (created_by is dropped: that contact may not re-exist).
@@ -62,5 +71,17 @@ export async function resetDemoData(db: D1Database): Promise<number> {
       ),
     );
   }
+
+  // Last, so it runs over the freshly seeded rows rather than being undone by
+  // them. A failure here must not present the whole reset as failed — the seed
+  // is already in place — so it is reported, not thrown.
+  const { applyEmailRedirect, readRedirectEmail } = await import('./demoEmails');
+  const redirect = redirectEmail !== undefined ? redirectEmail : await readRedirectEmail(db);
+  try {
+    await applyEmailRedirect(db, redirect);
+  } catch (error) {
+    console.error('demo reset: email redirect failed', error);
+  }
+
   return statements.length;
 }

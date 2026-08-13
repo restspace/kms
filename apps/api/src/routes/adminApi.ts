@@ -5163,13 +5163,54 @@ adminApiRoutes.delete('/tokens/:id', async (c) => {
   return c.json({ ok: true });
 });
 
+// Demo-data endpoints. All gated on DEMO_RESET so a real installation can
+// neither be wiped from the UI nor have its contact addresses rewritten.
+//
+// GET/PUT /demo/settings carry the tester mailbox every seeded contact is
+// redirected to on reset (apps/api/src/demoEmails.ts). It is stored rather
+// than passed per-reset so the nightly 09:00 UTC replay keeps it.
+adminApiRoutes.get('/demo/settings', async (c) => {
+  if (c.env.DEMO_RESET !== 'on') return c.json({ error: 'demo_reset_disabled' }, 403);
+  const { readRedirectEmail } = await import('../demoEmails');
+  return c.json({ redirect_email: await readRedirectEmail(c.env.DB) });
+});
+
+adminApiRoutes.put('/demo/settings', async (c) => {
+  if (c.env.DEMO_RESET !== 'on') return c.json({ error: 'demo_reset_disabled' }, 403);
+  const { parseRedirectBase, writeRedirectEmail } = await import('../demoEmails');
+  const body = await c.req.json<{ redirect_email?: string | null }>().catch(() => ({}) as { redirect_email?: string | null });
+  const raw = typeof body.redirect_email === 'string' ? body.redirect_email.trim() : '';
+  // Empty clears the setting and puts the demo back on seeded addresses.
+  if (raw.length === 0) {
+    await writeRedirectEmail(c.env.DB, null, new Date().toISOString());
+    return c.json({ redirect_email: null });
+  }
+  if (!parseRedirectBase(raw)) return c.json({ error: 'invalid_email' }, 400);
+  await writeRedirectEmail(c.env.DB, raw, new Date().toISOString());
+  return c.json({ redirect_email: raw });
+});
+
 // POST /demo/reset — replay the seed (docs/12 §2's "reset demo data" button).
-// Gated on DEMO_RESET so a real deployment can never be wiped from the UI.
+// An explicit redirect_email saves the setting first, so the Settings
+// screen can change the tester mailbox and reset in a single action.
 adminApiRoutes.post('/demo/reset', async (c) => {
   if (c.env.DEMO_RESET !== 'on') return c.json({ error: 'demo_reset_disabled' }, 403);
+  const body = await c.req.json<{ redirect_email?: string | null }>().catch(() => ({}) as { redirect_email?: string | null });
+  const { parseRedirectBase, readRedirectEmail, writeRedirectEmail } = await import('../demoEmails');
+  let redirect: string | null | undefined;
+  if (typeof body.redirect_email === 'string') {
+    const raw = body.redirect_email.trim();
+    if (raw.length > 0 && !parseRedirectBase(raw)) return c.json({ error: 'invalid_email' }, 400);
+    redirect = raw.length > 0 ? raw : null;
+    await writeRedirectEmail(c.env.DB, redirect, new Date().toISOString());
+  }
   const { resetDemoData } = await import('../demo');
-  const statements = await resetDemoData(c.env.DB);
-  return c.json({ ok: true, statements });
+  const statements = await resetDemoData(c.env.DB, redirect);
+  // Report the redirect that was actually applied, not just an override that
+  // was passed: with no override the stored setting still rewrote the seed, and
+  // saying "null" there reads as "your addresses are back to @example.com".
+  const applied = redirect !== undefined ? redirect : await readRedirectEmail(c.env.DB);
+  return c.json({ ok: true, statements, redirect_email: applied });
 });
 
 // ---------------------------------------------------------------------------

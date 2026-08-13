@@ -104,6 +104,9 @@ import {
   type EventScopeValue,
 } from './eventScope'
 import { currentRoute, navigate, stableStringify, useRoute, type ViewKey } from './router'
+import { HelpSection } from './help/HelpSection'
+import { helpSlugFor } from './help/helpTopics'
+import { MANUAL_PAGE_META } from './help/manualNav.generated'
 import { AdminErrorBoundary } from './components/AdminErrorBoundary'
 import { eventDays, formatEventDateRange } from './agenda/timeUtils'
 import './shell.css'
@@ -376,7 +379,34 @@ const NAV_ITEMS: ReadonlyArray<{ key: ViewKey; label: string; soon: string | nul
   { key: 'pipeline', label: 'Pipeline', soon: null },
   { key: 'embeds', label: 'Embeds', soon: null },
   { key: 'settings', label: 'Settings', soon: null },
+  { key: 'help', label: 'Help', soon: null },
 ]
+
+/**
+ * The '?' in the corner of every screen: opens the manual at the page for the
+ * screen you are on (see help/helpTopics.ts). A real anchor, so it can be
+ * middle-clicked into a second tab and read alongside the screen it explains;
+ * plain clicks stay in the SPA.
+ */
+function HelpButton({ view, tab }: { view: ViewKey; tab: string | null }) {
+  const slug = helpSlugFor(view, tab)
+  const title = MANUAL_PAGE_META.find((p) => p.slug === slug)?.title ?? 'the manual'
+  return (
+    <a
+      className="shell-help-button"
+      href={`/app?v=help&page=${slug}`}
+      title={`Help: ${title}`}
+      aria-label={`Help: ${title}`}
+      onClick={(e) => {
+        if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return
+        e.preventDefault()
+        navigate({ v: 'help', page: slug })
+      }}
+    >
+      ?
+    </a>
+  )
+}
 
 const fmtDate = (iso: string | null | undefined): string => {
   if (!iso) return ''
@@ -2818,7 +2848,9 @@ export default function App() {
       .then((m) => {
         setMe(m)
         if (m.role === 'reviewer') {
-          navigate({ v: 'review' }, { replace: true })
+          // Help is the one other section a reviewer may open, so a `?v=help`
+          // deep link (or the '?' button on the Review screen) survives here.
+          if (currentRoute().v !== 'help') navigate({ v: 'review' }, { replace: true })
           return
         }
         if (bootstrapped.current) return
@@ -3371,7 +3403,8 @@ export default function App() {
     return <div className="shell"><div className="shell-loading">Loading…</div></div>
   }
 
-  const navItems = isReviewer ? NAV_ITEMS.filter((i) => i.key === 'review') : NAV_ITEMS
+  // Reviewers see only their own workspace — plus Help, which documents it.
+  const navItems = isReviewer ? NAV_ITEMS.filter((i) => i.key === 'review' || i.key === 'help') : NAV_ITEMS
   const scope: EventScopeValue = {
     me,
     filter,
@@ -3500,8 +3533,16 @@ export default function App() {
         </div>
       </aside>
       <main className="shell-main" style={{ position: 'relative' }}>
+        {/* Every screen carries its own '?' — except Help itself, which is
+            already the manual and has its own contents rail. */}
+        {view !== 'help' && <HelpButton view={view} tab={route.tab} />}
         <AdminErrorBoundary section={NAV_ITEMS.find((i) => i.key === view)?.label ?? view} resetKey={`${view}:${me.event.id}`}>
-        {view === 'workspace' && !isReviewer ? (
+        {view === 'help' ? (
+          // Available to reviewers as well as organisers, and event-independent:
+          // no EventScopeNote, and no `key` that would reset the reader on an
+          // event switch.
+          <HelpSection slug={route.page} />
+        ) : view === 'workspace' && !isReviewer ? (
           <>
             <div className="ws-scope-title" role="status" title={wsScopeTitle}>
               {wsScopeTitle}

@@ -1,0 +1,203 @@
+/* The in-app user manual (Help section) — a contents rail plus a reading
+   column. Prose measure is capped at ~72ch and set in the display serif, so
+   the manual reads like a document rather than like another dense admin grid. */
+
+.manual {
+  display: grid;
+  grid-template-columns: 240px minmax(0, 1fr);
+  /* A flex child of .shell-main (column): grow into it, and allow the two
+     scroll panes below to shrink rather than pushing the shell taller. */
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.manual-nav {
+  border-right: 1px solid var(--border);
+  background: var(--chrome);
+  overflow-y: auto;
+  padding: var(--space-4) 0 var(--space-5);
+  box-sizing: border-box;
+}
+
+.manual-nav-section {
+  margin-top: var(--space-4);
+}
+
+.manual-nav-section h2 {
+  margin: 0 0 var(--space-1);
+  padding: 0 var(--space-4);
+  font-family: var(--font-ui);
+  font-size: var(--text-caption);
+  font-weight: 600;
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.manual-nav-link {
+  display: block;
+  width: 100%;
+  border: 0;
+  background: none;
+  text-align: left;
+  padding: 5px var(--space-4);
+  font: inherit;
+  font-size: var(--text-grid);
+  color: var(--text-secondary);
+  cursor: pointer;
+  border-left: 2px solid transparent;
+}
+
+.manual-nav-link:hover { background: var(--surface-hover); }
+.manual-nav-link.child { padding-left: var(--space-5); color: var(--text-muted); }
+
+.manual-nav-link.active {
+  background: var(--accent-soft);
+  border-left-color: var(--accent);
+  color: var(--accent-strong);
+  font-weight: 600;
+}
+
+.manual-page {
+  overflow-y: auto;
+  padding: var(--space-5);
+  box-sizing: border-box;
+}
+
+.manual-status { color: var(--text-muted); }
+
+.manual-page h1 {
+  font-family: var(--font-display);
+  font-size: var(--text-display);
+  line-height: 1.2;
+  margin: 0 0 var(--space-4);
+  max-width: 72ch;
+}
+
+.manual-body {
+  max-width: 72ch;
+  color: var(--text);
+  line-height: 1.6;
+}
+
+.manual-body h2,
+.manual-body h3,
+.manual-body h4 {
+  font-family: var(--font-display);
+  line-height: 1.3;
+  /* Generous space above, tight below: a heading belongs to what follows it. */
+  margin: var(--space-5) 0 var(--space-2);
+  /* Deep-linked headings must clear the top of the scroll container. */
+  scroll-margin-top: var(--space-4);
+}
+
+.manual-body h2 { font-size: 1.3rem; }
+.manual-body h3 { font-size: 1.05rem; }
+.manual-body h4 { font-size: 0.95rem; }
+
+.manual-body p { margin: 0 0 var(--space-3); }
+.manual-body ul,
+.manual-body ol { margin: 0 0 var(--space-3); padding-left: var(--space-5); }
+.manual-body li { margin-bottom: var(--space-2); }
+.manual-body li > ul,
+.manual-body li > ol { margin: var(--space-2) 0 0; }
+
+.manual-body a { color: var(--accent); }
+.manual-body a:hover { color: var(--accent-strong); }
+
+.manual-body code {
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+  background: var(--surface-hover);
+  border-radius: var(--radius-sm);
+  padding: 1px 4px;
+}
+
+.manual-body pre {
+  background: var(--surface-hover);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--space-3);
+  overflow-x: auto;
+  margin: 0 0 var(--space-3);
+}
+
+.manual-body pre code { background: none; padding: 0; font-size: var(--text-label); }
+
+.manual-body blockquote {
+  margin: 0 0 var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  background: var(--notice-soft);
+  border-left: 3px solid var(--notice-border);
+  color: var(--notice-text);
+}
+
+.manual-body blockquote p:last-child { margin-bottom: 0; }
+
+/* Wide tables scroll inside the reading column instead of stretching it. */
+.manual-table-wrap {
+  overflow-x: auto;
+  margin: 0 0 var(--space-4);
+}
+
+.manual-body table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: var(--text-grid);
+}
+
+.manual-body th,
+.manual-body td {
+  border: 1px solid var(--border);
+  padding: var(--space-2) var(--space-3);
+  text-align: left;
+  vertical-align: top;
+}
+
+.manual-body th {
+  background: var(--chrome);
+  font-weight: 600;
+}
+
+/* The '?' that opens this section, pinned to the top-right of every screen. */
+.shell-help-button {
+  position: absolute;
+  top: var(--space-2);
+  right: var(--space-3);
+  z-index: 5;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  background: var(--surface-raised);
+  color: var(--text-muted);
+  font: inherit;
+  font-size: var(--text-label);
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.shell-help-button:hover {
+  background: var(--accent-soft);
+  border-color: var(--accent-border);
+  color: var(--accent-strong);
+}
+
+@media (max-width: 900px) {
+  .manual {
+    grid-template-columns: minmax(0, 1fr);
+    overflow-y: auto;
+  }
+
+  /* The rail becomes a contents block above the page rather than disappearing:
+     on a phone the manual is the one screen you arrive at without context. */
+  .manual-nav {
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+    overflow: visible;
+  }
+
+  .manual-page { overflow: visible; }
+}

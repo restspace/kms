@@ -764,3 +764,107 @@ INSERT INTO pipeline_activity (id, card_id, kind, from_stage, to_stage, body, au
   ('pla00000-0000-4000-8000-000000000004', 'plc00000-0000-4000-8000-000000000002', 'enrolled',     NULL,          'researching', NULL, 'James Ellis-Jones', '2026-08-10T14:00:00Z'),
   ('pla00000-0000-4000-8000-000000000005', 'plc00000-0000-4000-8000-000000000003', 'enrolled',     NULL,          'interested', NULL, 'James Ellis-Jones', '2026-08-08T13:00:00Z'),
   ('pla00000-0000-4000-8000-000000000006', 'plc00000-0000-4000-8000-000000000003', 'stage_change', 'interested',  'confirmed',  NULL, 'James Ellis-Jones', '2026-08-11T16:00:00Z');
+
+-- ---------------------------------------------------------------------------
+-- Submission comment threads (0018).
+--
+-- Two things live in this table: kind='rationale' rows (a reviewer's written
+-- justification, folded into the thread at score-save time) and kind='discussion'
+-- rows (the organiser/reviewer conversation about a proposal).
+--
+-- Both were previously absent from the seed. 0018's backfill created rationale
+-- rows once, at migration time, from reviews.comment — but this seed's leading
+-- DELETE cascades every submission_comments row away, so a demo reset left the
+-- Comments tab and the reviewer scoring screen's thread completely empty.
+--
+-- The rationale half is derived from `reviews` by the same INSERT ... SELECT
+-- 0018 uses (same deterministic 'sc-' || review id, same OR IGNORE), so score
+-- and rationale cannot drift apart as the seeded reviews change.
+-- ---------------------------------------------------------------------------
+
+INSERT OR IGNORE INTO submission_comments
+  (id, event_id, submission_id, plan_id, assignment_id, author_contact_id,
+   author_role, author_name, kind, body, created_at)
+SELECT
+  'sc-' || r.id, p.event_id, r.submission_id, r.plan_id, r.assignment_id,
+  r.reviewer_contact_id, 'reviewer',
+  NULLIF(TRIM(COALESCE(c.first_name,'') || ' ' || COALESCE(c.last_name,'')), ''),
+  'rationale', r.comment, r.created_at
+FROM reviews r
+JOIN evaluation_plans p ON p.id = r.plan_id
+LEFT JOIN contacts c ON c.id = r.reviewer_contact_id
+WHERE r.comment IS NOT NULL AND TRIM(r.comment) != '';
+
+-- Discussion threads. Five submissions carry a real back-and-forth so the
+-- Comments tab, the Detail tab's thread and the reviewer scoring screen all
+-- open with something to read: a scoring disagreement that resolves (SESS-4),
+-- an overlap argument that turns into revise-and-resubmit guidance (SESS-5), a
+-- panel sent back for stronger names (SESS-7), a workshop held on logistics
+-- (SESS-3) and a short scheduling exchange on an accepted talk (SESS-1).
+--
+-- Reviewer posts carry plan_id (which round they are speaking in) but no
+-- assignment_id: a discussion post is not tied to one scoring assignment, which
+-- is what distinguishes it from the rationale rows above. Organiser posts carry
+-- neither — an organiser belongs to no round.
+INSERT INTO submission_comments
+  (id, event_id, submission_id, plan_id, assignment_id, author_contact_id,
+   author_role, author_name, kind, body, created_at) VALUES
+
+  ('sdc00000-0000-4000-8000-000000000001', 'evt00000-0000-4000-8000-000000000001', 'sub00000-0000-4000-8000-000000000004',
+   'plan0000-0000-4000-8000-000000000001', NULL, 'con00000-0000-4000-8000-000000000009', 'reviewer', 'Rosalind Franklin',
+   'discussion', 'Flagging that Vint and I are a full point apart on this one. My read is that the scale numbers are real and the audience will forgive a loose ending.', '2026-08-07T15:20:00Z'),
+  ('sdc00000-0000-4000-8000-000000000002', 'evt00000-0000-4000-8000-000000000001', 'sub00000-0000-4000-8000-000000000004',
+   'plan0000-0000-4000-8000-000000000001', NULL, 'con00000-0000-4000-8000-000000000010', 'reviewer', 'Vint Cerf',
+   'discussion', 'Agreed the numbers are real. My concern is that 40M documents is an infrastructure story and we already have two of those in the Infra track. This is a relevance score, not a quality one.', '2026-08-07T16:05:00Z'),
+  ('sdc00000-0000-4000-8000-000000000003', 'evt00000-0000-4000-8000-000000000001', 'sub00000-0000-4000-8000-000000000004',
+   NULL, NULL, 'con00000-0000-4000-8000-000000000001', 'owner', 'James Ellis-Jones',
+   'discussion', 'Useful disagreement. Ada is already speaking on SESS-1, so accepting both would give her two slots — worth weighing before we decide either way.', '2026-08-08T09:10:00Z'),
+  ('sdc00000-0000-4000-8000-000000000004', 'evt00000-0000-4000-8000-000000000001', 'sub00000-0000-4000-8000-000000000004',
+   'plan0000-0000-4000-8000-000000000001', NULL, 'con00000-0000-4000-8000-000000000009', 'reviewer', 'Rosalind Franklin',
+   'discussion', 'Did not spot the double booking. If it is one or the other, SESS-1 is the stronger talk and I would hold this one for the waitlist.', '2026-08-08T09:41:00Z'),
+  ('sdc00000-0000-4000-8000-000000000005', 'evt00000-0000-4000-8000-000000000001', 'sub00000-0000-4000-8000-000000000004',
+   NULL, NULL, 'con00000-0000-4000-8000-000000000001', 'owner', 'James Ellis-Jones',
+   'discussion', 'Waitlist it is — leaving this pending until the accepted set is locked, then I will write to Ada either way so she is not left guessing.', '2026-08-08T09:55:00Z'),
+
+  ('sdc00000-0000-4000-8000-000000000006', 'evt00000-0000-4000-8000-000000000001', 'sub00000-0000-4000-8000-000000000005',
+   'plan0000-0000-4000-8000-000000000001', NULL, 'con00000-0000-4000-8000-000000000009', 'reviewer', 'Rosalind Franklin',
+   'discussion', 'To be fair to Margaret, the overlap I mentioned in my score is with last year, not with anything in this year lineup. Someone who was not there will find this new.', '2026-08-07T16:30:00Z'),
+  ('sdc00000-0000-4000-8000-000000000007', 'evt00000-0000-4000-8000-000000000001', 'sub00000-0000-4000-8000-000000000005',
+   NULL, NULL, 'con00000-0000-4000-8000-000000000001', 'owner', 'James Ellis-Jones',
+   'discussion', 'About 40% of last year attendees come back, so a repeat is a real cost for them. Is there an angle that would not have fitted in the talk she gave last year?', '2026-08-08T10:02:00Z'),
+  ('sdc00000-0000-4000-8000-000000000008', 'evt00000-0000-4000-8000-000000000001', 'sub00000-0000-4000-8000-000000000005',
+   'plan0000-0000-4000-8000-000000000001', NULL, 'con00000-0000-4000-8000-000000000009', 'reviewer', 'Rosalind Franklin',
+   'discussion', 'Speculative decoding is genuinely new since last year and it is the half of the abstract with actual numbers behind it. A revise-and-resubmit narrowed to that would be a strong talk.', '2026-08-08T10:20:00Z'),
+  ('sdc00000-0000-4000-8000-000000000009', 'evt00000-0000-4000-8000-000000000001', 'sub00000-0000-4000-8000-000000000005',
+   NULL, NULL, 'con00000-0000-4000-8000-000000000001', 'owner', 'James Ellis-Jones',
+   'discussion', 'Good — that is the guidance to send rather than a flat decline. Noting it here so whoever writes the decision email has the wording.', '2026-08-08T10:26:00Z'),
+
+  ('sdc00000-0000-4000-8000-000000000010', 'evt00000-0000-4000-8000-000000000001', 'sub00000-0000-4000-8000-000000000007',
+   'plan0000-0000-4000-8000-000000000001', NULL, 'con00000-0000-4000-8000-000000000010', 'reviewer', 'Vint Cerf',
+   'discussion', 'The 62% to 94% number is the most concrete claim in the whole batch. My low score is entirely about the panel format — the same content as a talk would score well above 4.', '2026-08-07T17:15:00Z'),
+  ('sdc00000-0000-4000-8000-000000000011', 'evt00000-0000-4000-8000-000000000001', 'sub00000-0000-4000-8000-000000000007',
+   'plan0000-0000-4000-8000-000000000001', NULL, 'con00000-0000-4000-8000-000000000011', 'reviewer', 'Frances Allen',
+   'discussion', 'Same reading. Two of the four named panellists are from the same company, which is how panels turn into a product pitch.', '2026-08-07T18:20:00Z'),
+  ('sdc00000-0000-4000-8000-000000000012', 'evt00000-0000-4000-8000-000000000001', 'sub00000-0000-4000-8000-000000000007',
+   NULL, NULL, 'con00000-0000-4000-8000-000000000001', 'owner', 'James Ellis-Jones',
+   'discussion', 'Asking Claude whether he would rather give this as a solo talk. If yes it comes back as a new submission and skips the panel problem entirely.', '2026-08-08T11:15:00Z'),
+
+  ('sdc00000-0000-4000-8000-000000000013', 'evt00000-0000-4000-8000-000000000001', 'sub00000-0000-4000-8000-000000000003',
+   'plan0000-0000-4000-8000-000000000002', NULL, 'con00000-0000-4000-8000-000000000009', 'reviewer', 'Rosalind Franklin',
+   'discussion', 'Content is the strongest in the workshop round. The only open question is whether we can actually run it — the abstract assumes every attendee has a GPU-backed notebook.', '2026-08-07T14:10:00Z'),
+  ('sdc00000-0000-4000-8000-000000000014', 'evt00000-0000-4000-8000-000000000001', 'sub00000-0000-4000-8000-000000000003',
+   NULL, NULL, 'con00000-0000-4000-8000-000000000001', 'owner', 'James Ellis-Jones',
+   'discussion', 'Workshop B holds 40 and the venue wifi will not carry 40 people pulling model weights. Either we pre-provision hosted notebooks or we cap the room.', '2026-08-08T12:40:00Z'),
+  ('sdc00000-0000-4000-8000-000000000015', 'evt00000-0000-4000-8000-000000000001', 'sub00000-0000-4000-8000-000000000003',
+   'plan0000-0000-4000-8000-000000000002', NULL, 'con00000-0000-4000-8000-000000000010', 'reviewer', 'Vint Cerf',
+   'discussion', 'Alan ran this at a meetup on hosted notebooks with a pre-baked index, so the prerequisite is softer than the abstract makes it sound. Worth confirming with him before we accept.', '2026-08-08T13:05:00Z'),
+  ('sdc00000-0000-4000-8000-000000000016', 'evt00000-0000-4000-8000-000000000001', 'sub00000-0000-4000-8000-000000000003',
+   NULL, NULL, 'con00000-0000-4000-8000-000000000001', 'owner', 'James Ellis-Jones',
+   'discussion', 'Confirmed with Alan — hosted notebooks, no local GPU needed. Moving to the accept queue and capping the room at 40.', '2026-08-08T15:30:00Z'),
+
+  ('sdc00000-0000-4000-8000-000000000017', 'evt00000-0000-4000-8000-000000000001', 'sub00000-0000-4000-8000-000000000001',
+   'plan0000-0000-4000-8000-000000000001', NULL, 'con00000-0000-4000-8000-000000000011', 'reviewer', 'Frances Allen',
+   'discussion', 'Did not get to score this before the round closed, but for the record I would have put it top of the batch too.', '2026-08-07T19:00:00Z'),
+  ('sdc00000-0000-4000-8000-000000000018', 'evt00000-0000-4000-8000-000000000001', 'sub00000-0000-4000-8000-000000000001',
+   NULL, NULL, 'con00000-0000-4000-8000-000000000001', 'owner', 'James Ellis-Jones',
+   'discussion', 'Noted. Ada has asked for a morning slot because of a flight — putting that here so it is not lost in email when the agenda gets built.', '2026-08-09T08:15:00Z');

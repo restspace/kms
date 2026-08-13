@@ -93,3 +93,16 @@ example `curl` command using your token, for anyone integrating externally.
 **Reset demo data** wipes every record for the demo event and replays the seed data from scratch.
 This only exists to keep the public demo environment fresh — it's not something you'd normally
 click on a real event, and it asks for confirmation because it cannot be undone.
+
+**Send all contact email to** is an optional address for anyone testing the demo. Fill it in and
+every seeded contact is rewritten to a distinct variant of it when you reset: Ada Lovelace becomes
+`you+ada@…`, Grace Hopper `you+grace@…`, and so on. Mail providers deliver all of those to the
+plain address, so every decision email, reminder and portal invite the demo sends lands in one
+mailbox you can actually open — while the **To:** line still tells you which speaker each message
+was meant for.
+
+- Organiser accounts (owners and admins) keep their real address, so you don't lock yourself out
+  of the demo you're testing.
+- The address is saved when you reset, and reapplied by the nightly reset — you don't have to
+  retype it every day.
+- Clear the field and reset to put the seeded `@example.com` addresses back.

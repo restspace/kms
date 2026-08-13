@@ -1771,8 +1771,18 @@ export const createToken = (name: string) =>
   })
 export const revokeToken = (id: string) =>
   request<{ ok: boolean }>(`/app/api/tokens/${id}`, { method: 'DELETE' })
-export const resetDemoData = () =>
-  request<{ ok: boolean; statements: number }>('/app/api/demo/reset', { method: 'POST', body: JSON.stringify({}) })
+/**
+ * Demo-data reset. `redirect_email` (a tester mailbox, or '' to clear) is
+ * saved before the seed replays, so every seeded contact comes back as a
+ * plus-addressed variant of it — omit the field to keep whatever is stored.
+ */
+export const resetDemoData = (redirectEmail?: string) =>
+  request<{ ok: boolean; statements: number; redirect_email: string | null }>('/app/api/demo/reset', {
+    method: 'POST',
+    body: JSON.stringify(redirectEmail === undefined ? {} : { redirect_email: redirectEmail }),
+  })
+
+export const getDemoSettings = () => request<{ redirect_email: string | null }>('/app/api/demo/settings')
 
 /**
  * Export URL against the public REST API (session cookie authorises the

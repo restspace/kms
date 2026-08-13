@@ -29,6 +29,7 @@ The left-hand sidebar is your main map:
 | **Evaluation** | Setting up review rounds and scoring |
 | **Agenda** | The drag-and-drop schedule builder |
 | **Settings** | Event details, email templates and branding, your team, and library items (tags, tracks, rooms) |
+| **Help** | This manual, readable inside the app |
 
 ### The workspace and tabs
 
@@ -45,6 +46,16 @@ selecting a speaker filters the Submissions and Tasks tabs down to just theirs.
 
 Every list tab in the Workspace has its own search box that filters that tab's records — see
 [Workspace](workspace.md) for how it combines with each tab's filters.
+
+### Getting help on the screen you're on
+
+Every screen has a small **?** button in its top-right corner. It opens this manual at the page
+describing that exact screen — the **?** on the Agenda opens [Agenda](agenda.md), the **?** on the
+Workspace's Reviews tab opens [Reviews](workspace-reviews.md), and so on. **Help** in the sidebar
+opens the same manual at its contents page, and reviewers get both as well.
+
+> **Note:** the **?** is an ordinary link, so middle-clicking it (or ⌘/Ctrl-clicking) opens the
+> manual page in a second browser tab, to read alongside the screen it explains.
 
 ## Roles
 

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import {
   createToken,
+  getDemoSettings,
   listTokens,
   resetDemoData,
   revokeToken,
@@ -33,6 +34,17 @@ const fmtWhen = (iso: string | null): string => {
     : d.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })
 }
 
+/**
+ * What the redirect does to one address, shown so the tester can see the shape
+ * before committing to a reset. Mirrors apps/api/src/demoEmails.ts, which owns
+ * the real derivation — this only ever illustrates the first seeded speaker.
+ */
+const plusExample = (email: string): string => {
+  const at = email.lastIndexOf('@')
+  if (at <= 0) return email
+  return `${email.slice(0, at).split('+')[0]}+ada@${email.slice(at + 1)}`
+}
+
 export function SettingsSection({ me }: { me: Me }) {
   const [tokens, setTokens] = useState<ApiTokenRow[] | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
@@ -42,6 +54,10 @@ export function SettingsSection({ me }: { me: Me }) {
   const [copied, setCopied] = useState(false)
   const [resetBusy, setResetBusy] = useState(false)
   const [resetNote, setResetNote] = useState<string | null>(null)
+  // The tester mailbox seeded contacts are redirected to. `null` while the
+  // setting is still loading, so the field does not flash empty over a stored
+  // value and then save that emptiness on the next reset.
+  const [redirectEmail, setRedirectEmail] = useState<string | null>(null)
 
   const reload = useCallback(() => {
     setLoadError(null)
@@ -53,6 +69,15 @@ export function SettingsSection({ me }: { me: Me }) {
   useEffect(() => {
     reload()
   }, [reload])
+
+  useEffect(() => {
+    // 403 means DEMO_RESET is off on this deployment — the card below is
+    // harmless there (the button already reports the refusal), so the field
+    // just stays empty rather than surfacing an error nobody can act on.
+    getDemoSettings()
+      .then((r) => setRedirectEmail(r.redirect_email ?? ''))
+      .catch(() => setRedirectEmail(''))
+  }, [])
 
   const handleCreate = async () => {
     setCreating(true)
@@ -80,16 +105,25 @@ export function SettingsSection({ me }: { me: Me }) {
   }
 
   const handleReset = async () => {
+    const target = (redirectEmail ?? '').trim()
     const confirmed = await appConfirm(
-      'Reset the demo data? All records for the demo event are deleted and the seed is replayed. This cannot be undone.',
+      `Reset the demo data? All records for the demo event are deleted and the seed is replayed. This cannot be undone.${
+        target ? `\n\nEvery seeded contact will be given a ${target} address (${plusExample(target)}).` : ''
+      }`,
       { title: 'Reset demo data', confirmLabel: 'Reset', danger: true },
     )
     if (!confirmed) return
     setResetBusy(true)
     setResetNote(null)
     try {
-      await resetDemoData()
-      setResetNote('Demo data restored to the seeded state.')
+      // Passing the field value saves it as well as applying it, so a typed
+      // address survives the nightly reset without a separate Save button.
+      const result = await resetDemoData(target)
+      setResetNote(
+        result.redirect_email
+          ? `Demo data restored, with contact emails redirected to ${result.redirect_email}.`
+          : 'Demo data restored to the seeded state.',
+      )
     } catch (err) {
       setResetNote(err instanceof Error ? err.message : 'Reset failed.')
     } finally {
@@ -262,6 +296,33 @@ export function SettingsSection({ me }: { me: Me }) {
         <h2>Demo data</h2>
         <p className="settings-hint">
           Restore the demo event to its seeded state (also runs automatically every night on the public demo).
+        </p>
+        <label className="settings-field">
+          <span>Send all contact email to</span>
+          <input
+            type="email"
+            placeholder="you@example.com (optional)"
+            value={redirectEmail ?? ''}
+            disabled={redirectEmail === null || resetBusy}
+            onChange={(e) => setRedirectEmail((e.target as HTMLInputElement).value)}
+          />
+        </label>
+        <p className="settings-hint">
+          {(redirectEmail ?? '').trim() ? (
+            <>
+              Every seeded contact is given a distinct variant of this address — Ada Lovelace becomes{' '}
+              <code>{plusExample((redirectEmail ?? '').trim())}</code> — so all demo mail lands in one mailbox and you
+              can still tell who each message was for. Organiser accounts keep their real address so you can still sign
+              in. Saved with the reset, and reapplied by the nightly reset; clear the field to go back to the seeded{' '}
+              <code>@example.com</code> addresses.
+            </>
+          ) : (
+            <>
+              Optional. Give a mailbox you can open and every seeded contact is rewritten to a{' '}
+              <code>you+name@…</code> variant of it, so demo mail is deliverable but still distinguishable. Left empty,
+              contacts keep their seeded <code>@example.com</code> addresses.
+            </>
+          )}
         </p>
         <div className="settings-reset-row">
           <button className="settings-danger" disabled={resetBusy} onClick={() => void handleReset()}>

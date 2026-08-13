@@ -262,6 +262,37 @@
   color: var(--text-muted);
 }
 
+/* Stacked label + control, used by the demo card's redirect address. */
+.settings-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 12px 0 6px;
+  max-width: 360px;
+}
+
+.settings-field > span {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-faint);
+}
+
+.settings-field input {
+  height: var(--control-height);
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-raised);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+}
+
+.settings-field input:disabled {
+  background: var(--surface-hover);
+  color: var(--text-muted);
+}
+
 /* Email templates (SPK-14): the expanded per-template editor row. */
 .settings-template-editor {
   display: flex;

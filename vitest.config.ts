@@ -19,6 +19,9 @@ export default defineConfig({
           include: [
             'packages/*/src/**/*.test.ts',
             'apps/admin/src/**/*.logic.test.ts',
+            // The manual→HTML converter behind the Help section (build-time,
+            // so it has no package to live in).
+            'scripts/**/*.test.mjs',
           ],
         },
       },
