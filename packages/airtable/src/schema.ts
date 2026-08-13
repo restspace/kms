@@ -11,7 +11,7 @@
 // cannot do, and reports that as a scope error the UI can explain.
 
 /** Field types we create. `text` is also the fallback for anything typecast handles. */
-type FieldType = 'singleLineText' | 'multilineText' | 'number' | 'checkbox';
+type FieldType = 'singleLineText' | 'multilineText' | 'number' | 'checkbox' | 'multipleRecordLinks';
 
 export interface FieldSpec {
   name: string;
@@ -19,10 +19,35 @@ export interface FieldSpec {
   options?: Record<string, unknown>;
 }
 
+/**
+ * A `multipleRecordLinks` column — Airtable's cross-table navigation, and what
+ * lookups, rollups and "expand record" all ride on. Kept separate from `fields`
+ * because it cannot be created in the same call as the table: the target table
+ * must already exist, so ensureBaseSchema creates every table first and comes
+ * back for the links (see there).
+ */
+export interface LinkSpec {
+  name: string;
+  /** Name of the BASE_SCHEMA table this points at. */
+  table: string;
+}
+
 export interface TableSpec {
   name: string;
   fields: FieldSpec[];
+  links?: LinkSpec[];
 }
+
+/**
+ * Which links exist at all is decided in mapping.ts, not here: `typecast`
+ * resolves a link by the target's *primary field* and invents a record when
+ * nothing matches, so a target is only safe if its primary field is unique
+ * base-wide. That is true of `Events`.Name and `Contacts`.Email and of nothing
+ * else in the base — submission codes and track/room/tag names all repeat
+ * across events. Those relationships stay plain text.
+ */
+const linkToEvent: LinkSpec = { name: 'Event Link', table: 'Events' };
+const linkToContact = (name: string): LinkSpec => ({ name, table: 'Contacts' });
 
 const text = (name: string): FieldSpec => ({ name, type: 'singleLineText' });
 const long = (name: string): FieldSpec => ({ name, type: 'multilineText' });
@@ -67,6 +92,7 @@ export const BASE_SCHEMA: TableSpec[] = [
       text('Starts At'), text('Ends At'), num('Capacity'), text('Speaker'), text('Speaker Email'),
       num('Rating', 2), long('Notes'), text('Event'),
     ],
+    links: [linkToEvent, linkToContact('Speaker Link')],
   },
   {
     name: 'Tasks',
@@ -74,6 +100,7 @@ export const BASE_SCHEMA: TableSpec[] = [
       text('Title'), long('Description'), text('Target'), text('Action'), text('Due At'),
       check('Required'), text('Event'),
     ],
+    links: [linkToEvent],
   },
   {
     name: 'Reviews',
@@ -81,10 +108,11 @@ export const BASE_SCHEMA: TableSpec[] = [
       text('Submission'), text('Submission Title'), text('Reviewer'), text('Reviewer Email'),
       num('Total', 2), long('Comment'), check('Conflict Of Interest'), text('Event'),
     ],
+    links: [linkToEvent, linkToContact('Reviewer Link')],
   },
-  { name: 'Tracks', fields: [text('Name'), text('Color'), text('Event')] },
-  { name: 'Rooms', fields: [text('Name'), num('Capacity'), long('Notes'), text('Event')] },
-  { name: 'Tags', fields: [text('Name'), text('Color'), text('Event')] },
+  { name: 'Tracks', fields: [text('Name'), text('Color'), text('Event')], links: [linkToEvent] },
+  { name: 'Rooms', fields: [text('Name'), num('Capacity'), long('Notes'), text('Event')], links: [linkToEvent] },
+  { name: 'Tags', fields: [text('Name'), text('Color'), text('Event')], links: [linkToEvent] },
   // Second wave (migration 0045). An existing base gains these by pressing
   // "Create the tables in Airtable" again — ensureBaseSchema is additive, so a
   // base built before this release keeps its data and grows the new tables.
@@ -95,6 +123,7 @@ export const BASE_SCHEMA: TableSpec[] = [
       long('Biography'), long('Notes'), text('Speaker Status'), text('Arrived At'), text('Source'),
       text('Added At'), num('Prior Rating', 2), text('Prior Rating Note'),
     ],
+    links: [linkToEvent, linkToContact('Contact Link')],
   },
   {
     name: 'Messages',
@@ -102,6 +131,7 @@ export const BASE_SCHEMA: TableSpec[] = [
       text('To'), text('Subject'), text('Template'), text('Status'), long('Error'),
       text('Contact'), text('Event'), text('Created At'), text('Sent At'),
     ],
+    links: [linkToEvent, linkToContact('Contact Link')],
   },
   {
     name: 'Comments',
@@ -109,6 +139,7 @@ export const BASE_SCHEMA: TableSpec[] = [
       text('Submission'), text('Submission Title'), text('Author'), text('Role'), text('Kind'),
       long('Body'), text('Event'), text('Created At'),
     ],
+    links: [linkToEvent, linkToContact('Author Link')],
   },
   {
     name: 'Pipeline',
@@ -116,6 +147,7 @@ export const BASE_SCHEMA: TableSpec[] = [
       text('Contact'), text('Email'), text('Stage'), num('Score'), long('Rationale'),
       text('Created At'), text('Updated At'),
     ],
+    links: [linkToContact('Contact Link')],
   },
   {
     name: 'Pipeline Activity',
@@ -123,6 +155,7 @@ export const BASE_SCHEMA: TableSpec[] = [
       text('Contact'), text('Email'), text('Kind'), text('From Stage'), text('To Stage'),
       long('Body'), text('Author'), text('Created At'),
     ],
+    links: [linkToContact('Contact Link')],
   },
   {
     name: 'Files',
@@ -130,6 +163,7 @@ export const BASE_SCHEMA: TableSpec[] = [
       text('Filename'), text('Content Type'), num('Size KB', 1), text('Uploaded By'), text('Request'),
       text('Event'), text('Created At'),
     ],
+    links: [linkToEvent, linkToContact('Uploader Link')],
   },
   {
     name: 'File Requests',
@@ -137,6 +171,7 @@ export const BASE_SCHEMA: TableSpec[] = [
       text('Title'), text('Type'), long('Instructions'), text('Due At'), num('Max Size MB'),
       text('Event'),
     ],
+    links: [linkToEvent],
   },
   {
     name: 'Portal Responses',
@@ -144,6 +179,7 @@ export const BASE_SCHEMA: TableSpec[] = [
       text('Form'), text('Contact'), text('Email'), text('Submission'), long('Answers'),
       text('Submitted At'), text('Event'),
     ],
+    links: [linkToEvent, linkToContact('Contact Link')],
   },
 ];
 
@@ -167,6 +203,44 @@ interface LiveTable {
   id: string;
   name: string;
   fields: Array<{ id: string; name: string; type: string }>;
+}
+
+/** Every column setup creates for a table: its scalar fields, then its links. */
+export const expectedColumns = (spec: TableSpec): string[] => [
+  ...spec.fields.map((f) => f.name),
+  ...(spec.links ?? []).map((l) => l.name),
+];
+
+/**
+ * What a base is still missing, changing nothing — the read-only half of
+ * ensureBaseSchema, for the Settings page's "Test connection".
+ *
+ * Columns matter as much as tables here: the sweep sends every mapped field on
+ * every write and Airtable 422s the whole request over a single unknown field
+ * name, so a base holding all sixteen tables but lagging one column mirrors
+ * nothing at all. That is exactly the state an existing base is in after an
+ * upgrade adds fields, until someone presses "Create the tables" again.
+ */
+export function missingFromBase(live: Array<{ name: string; fields: Array<{ name: string }> }>): {
+  tables: string[];
+  fields: string[];
+} {
+  const byName = new Map(live.map((t) => [t.name, new Set(t.fields.map((f) => f.name))]));
+  const tables: string[] = [];
+  const fields: string[] = [];
+
+  for (const spec of BASE_SCHEMA) {
+    const columns = byName.get(spec.name);
+    if (!columns) {
+      tables.push(spec.name);
+      continue;
+    }
+    for (const column of expectedColumns(spec)) {
+      if (!columns.has(column)) fields.push(`${spec.name}.${column}`);
+    }
+  }
+
+  return { tables, fields };
 }
 
 export interface AirtableMetaClientOptions {
@@ -261,26 +335,29 @@ export interface SetupReport {
  */
 export async function ensureBaseSchema(meta: AirtableMetaClient, baseId: string): Promise<SetupReport> {
   const report: SetupReport = { createdTables: [], addedFields: [], mismatched: [], unchanged: [] };
+  const touched = new Set<string>();
   const live = new Map((await meta.listTables(baseId)).map((t) => [t.name, t]));
 
+  // Pass 1 — tables and their scalar columns. `links` is stripped from the
+  // create payload: a link field needs its target's table id, which does not
+  // exist yet for a table later in the list.
   for (const spec of BASE_SCHEMA) {
     const found = live.get(spec.name);
 
     if (!found) {
-      await meta.createTable(baseId, spec);
+      await meta.createTable(baseId, { name: spec.name, fields: spec.fields });
       report.createdTables.push(spec.name);
       continue;
     }
 
     const columns = new Map(found.fields.map((f) => [f.name, f]));
-    let added = 0;
 
     for (const field of spec.fields) {
       const column = columns.get(field.name);
       if (!column) {
         await meta.createField(baseId, found.id, field);
         report.addedFields.push(`${spec.name}.${field.name}`);
-        added += 1;
+        touched.add(spec.name);
         continue;
       }
       // Text columns swallow anything typecast produces, so only the numeric and
@@ -289,9 +366,48 @@ export async function ensureBaseSchema(meta: AirtableMetaClient, baseId: string)
         report.mismatched.push(`${spec.name}.${field.name} is ${column.type}, expected ${field.type}`);
       }
     }
-
-    if (added === 0) report.unchanged.push(spec.name);
   }
 
+  // Pass 2 — the link columns, now that every table exists and has an id.
+  // Re-listing is what makes that true for the tables pass 1 just created.
+  if (BASE_SCHEMA.some((s) => s.links?.length)) {
+    const withIds = new Map((await meta.listTables(baseId)).map((t) => [t.name, t]));
+
+    for (const spec of BASE_SCHEMA) {
+      const found = withIds.get(spec.name);
+      if (!spec.links || !found) continue;
+      const columns = new Map(found.fields.map((f) => [f.name, f]));
+
+      for (const spot of spec.links) {
+        const target = withIds.get(spot.table);
+        if (!target) continue; // its table failed in pass 1; that error already surfaced
+        const column = columns.get(spot.name);
+        if (!column) {
+          await meta.createField(baseId, found.id, {
+            name: spot.name,
+            type: 'multipleRecordLinks',
+            // Every one of these is many-to-one (a submission has one event), so
+            // Airtable should show a single chip and stop at one record.
+            options: { linkedTableId: target.id, prefersSingleRecordLink: true },
+          });
+          report.addedFields.push(`${spec.name}.${spot.name}`);
+          touched.add(spec.name);
+          continue;
+        }
+        // A link column that is text takes the write (typecast stringifies the
+        // array) but navigates nowhere — worth saying so, unlike a text/text
+        // difference.
+        if (column.type !== 'multipleRecordLinks') {
+          report.mismatched.push(
+            `${spec.name}.${spot.name} is ${column.type}, expected a link to ${spot.table}`,
+          );
+        }
+      }
+    }
+  }
+
+  report.unchanged = BASE_SCHEMA.filter((s) => !report.createdTables.includes(s.name) && !touched.has(s.name)).map(
+    (s) => s.name,
+  );
   return report;
 }

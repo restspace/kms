@@ -35,7 +35,12 @@ import {
 } from './mapping';
 import { SYNC_TABLES } from './sync';
 
-const columns = (table: string) => BASE_SCHEMA.find((t) => t.name === table)!.fields.map((f) => f.name);
+const spec = (table: string) => BASE_SCHEMA.find((t) => t.name === table)!;
+/** Every column setup creates for a table — scalar fields plus its link fields. */
+const columns = (table: string) => [
+  ...spec(table).fields.map((f) => f.name),
+  ...(spec(table).links ?? []).map((l) => l.name),
+];
 
 describe('BASE_SCHEMA matches the mappers', () => {
   const cases: Array<[string, Record<string, unknown>]> = [
@@ -73,13 +78,52 @@ describe('BASE_SCHEMA matches the mappers', () => {
   it('starts every table with a text column (Airtable primary fields cannot be number/checkbox)', () => {
     for (const table of BASE_SCHEMA) expect(table.fields[0]!.type).toBe('singleLineText');
   });
+
+  // The one invariant that keeps typecast from manufacturing junk records: a
+  // link resolves against the target's primary field, so only a table whose
+  // primary field is unique base-wide may be linked to. That is Events (Name)
+  // and Contacts (Email) — submission codes and track/room/tag names all repeat
+  // across events, and linking on those would merge unrelated rows.
+  it('only links to Events and Contacts', () => {
+    const targets = new Set(BASE_SCHEMA.flatMap((t) => (t.links ?? []).map((l) => l.table)));
+    expect([...targets].sort()).toEqual(['Contacts', 'Events']);
+  });
+
+  it('points every link at a table that exists, under a name no scalar column uses', () => {
+    const names = new Set(BASE_SCHEMA.map((t) => t.name));
+    for (const table of BASE_SCHEMA) {
+      const scalars = new Set(table.fields.map((f) => f.name));
+      for (const spot of table.links ?? []) {
+        expect(names.has(spot.table)).toBe(true);
+        expect(scalars.has(spot.name)).toBe(false);
+      }
+    }
+  });
+
+  // Airtable creates the reciprocal field on the target automatically and names
+  // it after the source table, so two links from one table into the same target
+  // would collide there.
+  it('never links one table into the same target twice', () => {
+    for (const table of BASE_SCHEMA) {
+      const targets = (table.links ?? []).map((l) => l.table);
+      expect(new Set(targets).size).toBe(targets.length);
+    }
+  });
+
+  // Both link targets are swept before anything that points at them; otherwise
+  // typecast invents a placeholder record and the real sweep duplicates it.
+  it('sweeps the link targets first', () => {
+    expect(SYNC_TABLES.slice(0, 2).map((t) => t.airtableTable)).toEqual(['Events', 'Contacts']);
+  });
 });
 
 /**
  * A fake metadata API: `tables` is the live base, mutated by create calls the
  * same way Airtable would, so idempotency is testable by running twice.
  */
-function fakeMeta(tables: Array<{ id: string; name: string; fields: Array<{ name: string; type: string }> }> = []) {
+type FakeField = { name: string; type: string; options?: Record<string, unknown> };
+
+function fakeMeta(tables: Array<{ id: string; name: string; fields: FakeField[] }> = []) {
   const calls: string[] = [];
   const meta = {
     async listTables() {
@@ -89,9 +133,9 @@ function fakeMeta(tables: Array<{ id: string; name: string; fields: Array<{ name
       calls.push(`table:${table.name}`);
       tables.push({ id: `tbl${tables.length}`, name: table.name, fields: table.fields.map((f) => ({ ...f })) });
     },
-    async createField(_baseId: string, tableId: string, field: { name: string; type: string }) {
+    async createField(_baseId: string, tableId: string, field: FakeField) {
       calls.push(`field:${tableId}:${field.name}`);
-      tables.find((t) => t.id === tableId)!.fields.push({ name: field.name, type: field.type });
+      tables.find((t) => t.id === tableId)!.fields.push({ ...field });
     },
   } as unknown as AirtableMetaClient;
   return { meta, calls, tables };
@@ -120,20 +164,46 @@ describe('parseBaseId', () => {
   });
 });
 
+/** How a finished base looks: link columns already the right type. */
+const builtColumns = (table: string, scalarType = 'singleLineText') =>
+  columns(table).map((name) => ({
+    name,
+    type: (spec(table).links ?? []).some((l) => l.name === name) ? 'multipleRecordLinks' : scalarType,
+  }));
+
+const LINK_COUNT = BASE_SCHEMA.reduce((n, t) => n + (t.links?.length ?? 0), 0);
+
 describe('ensureBaseSchema', () => {
   it('creates every table in an empty base, then no-ops on a second run', async () => {
     const { meta, calls } = fakeMeta();
 
     const first = await ensureBaseSchema(meta, 'appX');
     expect(first.createdTables).toEqual(BASE_SCHEMA.map((t) => t.name));
-    expect(first.addedFields).toEqual([]);
-    expect(calls).toHaveLength(BASE_SCHEMA.length);
+    // Links can only be added once their targets exist, so they arrive as a
+    // second pass of field creates rather than with the tables.
+    expect(first.addedFields).toEqual(
+      BASE_SCHEMA.flatMap((t) => (t.links ?? []).map((l) => `${t.name}.${l.name}`)),
+    );
+    expect(calls).toHaveLength(BASE_SCHEMA.length + LINK_COUNT);
 
     const second = await ensureBaseSchema(meta, 'appX');
     expect(second.createdTables).toEqual([]);
     expect(second.addedFields).toEqual([]);
     expect(second.unchanged).toEqual(BASE_SCHEMA.map((t) => t.name));
-    expect(calls).toHaveLength(BASE_SCHEMA.length); // no further writes
+    expect(calls).toHaveLength(BASE_SCHEMA.length + LINK_COUNT); // no further writes
+  });
+
+  it('creates a link field pointing at the target table it just created', async () => {
+    const { meta, tables } = fakeMeta();
+
+    await ensureBaseSchema(meta, 'appX');
+
+    const events = tables.find((t) => t.name === 'Events')!;
+    const field = tables.find((t) => t.name === 'Tasks')!.fields.find((f) => f.name === 'Event Link');
+    expect(field).toMatchObject({
+      type: 'multipleRecordLinks',
+      options: { linkedTableId: events.id, prefersSingleRecordLink: true },
+    });
   });
 
   it('appends missing columns to an existing table without touching its data', async () => {
@@ -143,18 +213,17 @@ describe('ensureBaseSchema', () => {
 
     const report = await ensureBaseSchema(meta, 'appX');
 
-    expect(report.addedFields).toEqual(['Tags.Color', 'Tags.Event']);
+    expect(report.addedFields).toContain('Tags.Color');
+    expect(report.addedFields).toContain('Tags.Event');
+    // The upgrade path for a base built before links existed: it gains them.
+    expect(report.addedFields).toContain('Tags.Event Link');
     expect(report.createdTables).not.toContain('Tags');
     expect(calls).toContain('field:tblTags:Color');
   });
 
   it('reports an incompatible column type instead of changing it', async () => {
-    const roomColumns = columns('Rooms').map((name) => ({
-      name,
-      // Capacity is a number in BASE_SCHEMA; someone made it text by hand.
-      type: 'singleLineText',
-    }));
-    const { meta, calls } = fakeMeta([{ id: 'tblRooms', name: 'Rooms', fields: roomColumns }]);
+    // Capacity is a number in BASE_SCHEMA; someone made it text by hand.
+    const { meta, calls } = fakeMeta([{ id: 'tblRooms', name: 'Rooms', fields: builtColumns('Rooms') }]);
 
     const report = await ensureBaseSchema(meta, 'appX');
 
@@ -163,9 +232,17 @@ describe('ensureBaseSchema', () => {
     expect(calls.some((c) => c.startsWith('field:tblRooms'))).toBe(false);
   });
 
-  it('ignores a harmless type difference on a text column', async () => {
-    const tagColumns = columns('Tags').map((name) => ({ name, type: 'multilineText' }));
+  it('reports a link column someone left as plain text', async () => {
+    const tagColumns = columns('Tags').map((name) => ({ name, type: 'singleLineText' }));
     const { meta } = fakeMeta([{ id: 'tblTags', name: 'Tags', fields: tagColumns }]);
+
+    expect((await ensureBaseSchema(meta, 'appX')).mismatched).toEqual([
+      'Tags.Event Link is singleLineText, expected a link to Events',
+    ]);
+  });
+
+  it('ignores a harmless type difference on a text column', async () => {
+    const { meta } = fakeMeta([{ id: 'tblTags', name: 'Tags', fields: builtColumns('Tags', 'multilineText') }]);
 
     expect((await ensureBaseSchema(meta, 'appX')).mismatched).toEqual([]);
   });

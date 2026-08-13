@@ -340,6 +340,55 @@ describe('airtable mirror: the sweep against the real schema', () => {
     expect(mineUpdated[0].fields['Job Title']).toBe('Principal');
   });
 
+  // Link columns (schema.ts's LinkSpec) are resolved by Airtable against the
+  // target's primary field, so what the sweep sends has to be exactly the value
+  // the Events/Contacts sweep writes as that primary — an event's Name and a
+  // contact's Email — and nothing at all when there is no such record.
+  it('sends link values the Events/Contacts sweeps also write as primary fields', async () => {
+    const eventName = `Linked Event ${crypto.randomUUID()}`;
+    const eventId = await createEvent({ name: eventName });
+    const contactId = `con-${crypto.randomUUID()}`;
+    const email = `${contactId}@example.com`;
+    await env.DB.prepare(
+      `INSERT INTO contacts (id, org_id, email, first_name, last_name, created_at, updated_at)
+       SELECT ?, org_id, ?, 'Ada', 'Lovelace', ?, ? FROM events WHERE id = ?`,
+    ).bind(contactId, email, EPOCH, EPOCH, eventId).run();
+    const company = `Linked ${crypto.randomUUID()}`;
+    await env.DB.prepare(
+      `INSERT INTO event_contacts (event_id, contact_id, company, added_at, source)
+       VALUES (?, ?, ?, '2026-08-01T00:00:00.000Z', 'admin')`,
+    ).bind(eventId, contactId, company).run();
+
+    // Two messages: one to the contact, one to an address nobody holds. The
+    // second is the dangerous case — typecast would mint a Contacts record from
+    // a stray address, so the sweep must send null rather than to_email.
+    const stranger = `msg-${crypto.randomUUID()}`;
+    await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO message_log (id, event_id, contact_id, to_email, subject, status, idempotency_key, created_at)
+         VALUES (?, ?, ?, ?, ?, 'sent', ?, ?)`,
+      ).bind(`msg-${crypto.randomUUID()}`, eventId, contactId, email, company, company, EPOCH),
+      env.DB.prepare(
+        `INSERT INTO message_log (id, event_id, contact_id, to_email, subject, status, idempotency_key, created_at)
+         VALUES (?, ?, NULL, 'nobody@example.com', ?, 'sent', ?, ?)`,
+      ).bind(stranger, eventId, stranger, stranger, EPOCH),
+    ]);
+
+    const { client, creates } = makeFakeClient('LNK');
+    await runAirtableSync(env.DB, client, { tables: tablesFor('event_contacts', 'message_log') });
+
+    const roster = createdRecords(creates, 'Event Contacts').filter((r) => r.fields.Company === company);
+    expect(roster).toHaveLength(1);
+    expect(roster[0].fields['Event Link']).toEqual([eventName]);
+    expect(roster[0].fields['Contact Link']).toEqual([email]);
+    // The link value must be the same string the Events sweep puts in Name.
+    expect(roster[0].fields.Event).toBe(eventName);
+
+    const messages = createdRecords(creates, 'Messages');
+    expect(messages.find((m) => m.fields.Subject === company)?.fields['Contact Link']).toEqual([email]);
+    expect(messages.find((m) => m.fields.Subject === stranger)?.fields['Contact Link']).toBeNull();
+  });
+
   it('updated_at is trigger-maintained: content edits dirty a row, record-id write-backs do not', async () => {
     const eventId = await createEvent();
     const contactId = `con-${crypto.randomUUID()}`;

@@ -17,6 +17,9 @@ renames, retypes or deletes anything. Pressing the button again after a failure,
 upgrade adds columns, is the intended recovery path. A column that already exists with an
 incompatible type is reported for a human to fix, not altered.
 
+It runs in two passes: every table first, then the linked-record columns (§1.1), which cannot
+be created until the table they point at exists.
+
 The token needs **four** scopes, not two: `data.records:read`, `data.records:write` (the
 mirror) plus `schema.bases:read`, `schema.bases:write` (base listing and table creation). A
 token with only the data scopes still mirrors — it just cannot run setup, and the page says so
@@ -59,6 +62,52 @@ prefer those; plain text also works.
 The last eight arrived after the first release (migration 0045). **An existing base gains them
 by pressing "Create the tables in Airtable" again** — setup is additive, so the eight original
 tables keep their data untouched. Until you do, Test connection reports them as missing.
+
+## 1.1 Linked records
+
+Alongside those text columns, setup creates **linked-record** columns — Airtable's cross-table
+navigation, and what "expand record", lookups and rollups all ride on. They are named with a
+`… Link` suffix so they sit next to the text column they mirror rather than replacing it: the
+text stays filterable and groupable, and a base built before this release keeps working after
+the columns are added.
+
+| Table | Link columns |
+| --- | --- |
+| `Submissions` | Event Link, Speaker Link |
+| `Tasks`, `Tracks`, `Rooms`, `Tags`, `File Requests` | Event Link |
+| `Reviews` | Event Link, Reviewer Link |
+| `Event Contacts`, `Messages`, `Portal Responses` | Event Link, Contact Link |
+| `Comments` | Event Link, Author Link |
+| `Files` | Event Link, Uploader Link |
+| `Pipeline`, `Pipeline Activity` | Contact Link |
+
+Airtable adds the reciprocal column on the other side by itself, so `Events` ends up with a
+`Submissions` column listing that event's talks, `Contacts` with the messages sent to each
+person, and so on. Nothing creates those — they appear as a side effect of the links above.
+
+**Only `Events` and `Contacts` are linked to, and that is a constraint, not a preference.**
+The mirror sends `typecast: true`, and Airtable resolves a link by matching the string against
+the target table's **primary field** — *creating a record there if nothing matches*. So a link
+is only safe when that primary value is unique across the whole base:
+
+- `Events`.Name — one record per event.
+- `Contacts`.Email — `UNIQUE (org_id, lower(email))`.
+
+Everything else in the base repeats. Submission codes are `UNIQUE (event_id, code)` and are
+generated `SESS-1`, `SESS-2` per event, so `SESS-1` exists in *every* event; track, room and
+tag names repeat the same way ("Main Hall" in each). Linking on those would silently point
+half the base's reviews and comments at another event's talk, so `Submission`, `Track`, `Room`
+and the tag columns stay plain text.
+
+The same rule decides *which rows* get a link. A message to an address that belongs to no
+contact, a comment written by an organiser, an upload with no uploader on record — all send
+an empty link rather than the address or name, because a near-miss would manufacture a junk
+Contacts row rather than fail.
+
+One consequence for the sweep: `Events` and `Contacts` are swept **first** (`SYNC_TABLES`
+order in `sync.ts`), so their records exist before anything points at them. Out of order,
+typecast would create a placeholder and the real sweep would then add a second — a duplicate
+rather than an overwrite. A test pins that ordering.
 
 There is deliberately **no `Forms` table** (form and question config is meaningless in a
 spreadsheet — `File Requests` is mirrored because chasing one is real work, unlike editing a
@@ -152,6 +201,11 @@ same base as production — every environment that can see the base will happily
   (typically because it isn't in the base yet, the normal state between an upgrade and the
   next press of "Create the tables"), it is logged, its watermark stays put so its rows retry,
   and the remaining tables sync as usual.
+- **A missing *column* is as fatal as a missing table, per table.** Every write carries every
+  mapped field and Airtable rejects the whole request over one unknown field name, so a base
+  that has all sixteen tables but lags a column mirrors nothing from that table. Test
+  connection checks columns as well as tables and names what is missing; the fix is always the
+  same press of "Create the tables in Airtable".
 - **updated_at maintenance differs by table.** The eight original tables rely on their routes
   keeping `updated_at` current; the eight added in 0045 have SQL triggers that do it for them,
   so a route that has never heard of the mirror still feeds it. The triggers deliberately skip

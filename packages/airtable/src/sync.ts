@@ -60,6 +60,12 @@ const contactName = (a: string) => `TRIM(COALESCE(${a}.first_name, '') || ' ' ||
 // COALESCE(updated_at, created_at) on tasks/reviews guards rows written by any
 // straggler INSERT that misses the new column; tracks/rooms/tags have no
 // created_at so their inserts must set updated_at (backfilled by 0017).
+//
+// Order matters now that the base has link columns: `events` and `contacts` are
+// the two link targets (mapping.ts's link()), and they sweep first so their
+// records exist before anything points at them. Out of order, typecast would
+// invent a placeholder record in the target table and the real sweep would then
+// add a second — a duplicate, not an overwrite. Keep them at the top.
 export const SYNC_TABLES: SyncTableConfig[] = [
   {
     d1Table: 'events',
@@ -163,7 +169,8 @@ export const SYNC_TABLES: SyncTableConfig[] = [
     airtableTable: 'Messages',
     // LEFT JOIN on both: message_log.event_id is nullable (org-level mail) and
     // contact_id is SET NULL on contact delete, but the delivery record stays.
-    selectSql: `SELECT m.*, e.name AS event_name, ${contactName('c')} AS contact_name
+    selectSql: `SELECT m.*, e.name AS event_name, ${contactName('c')} AS contact_name,
+                       c.email AS contact_email
                 FROM message_log m
                 LEFT JOIN events e ON e.id = m.event_id
                 LEFT JOIN contacts c ON c.id = m.contact_id
@@ -174,7 +181,7 @@ export const SYNC_TABLES: SyncTableConfig[] = [
     d1Table: 'submission_comments',
     airtableTable: 'Comments',
     selectSql: `SELECT sc.*, s.code AS submission_code, s.title AS submission_title, e.name AS event_name,
-                       ${contactName('c')} AS author_fallback_name
+                       ${contactName('c')} AS author_fallback_name, c.email AS author_email
                 FROM submission_comments sc
                 JOIN submissions s ON s.id = sc.submission_id
                 JOIN events e ON e.id = sc.event_id
@@ -207,6 +214,7 @@ export const SYNC_TABLES: SyncTableConfig[] = [
     // Which request an upload answered lives on file_request_uploads; resolving
     // it here to the request's title keeps that join table out of the base.
     selectSql: `SELECT f.*, e.name AS event_name, ${contactName('c')} AS uploader_name,
+                       c.email AS uploader_email,
                        (SELECT r.title FROM file_request_uploads u
                          JOIN file_requests r ON r.id = u.file_request_id
                         WHERE u.file_asset_id = f.id LIMIT 1) AS request_title

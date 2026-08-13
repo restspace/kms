@@ -48,7 +48,8 @@ plain-language user manual — also served in-app under **Help** — is in [docs
   **Settings → Airtable mirror**: paste a token, pick the base, and the app creates the tables it
   needs. Sixteen tables: events, contacts and their per-event speaker profiles, submissions,
   reviews and comments, tasks, tracks/rooms/tags, the sourcing pipeline, files and file
-  requests, portal responses, and the outbound message log. See
+  requests, portal responses, and the outbound message log — linked to each other, so an event
+  record lists its talks and a person record everything they touched. See
   [tests/airtable-mirror-setup.md](tests/airtable-mirror-setup.md).
 - **Operations** — outbox-based email delivery with retries, reminder and bulk-job sweeps, a
   nightly demo-data reset, and a one-click reset button.

@@ -14,6 +14,7 @@ import { env, SELF } from 'cloudflare:test';
 import {
   AirtableScopeError,
   BASE_SCHEMA,
+  expectedColumns,
   SYNC_TABLES,
   type AirtableClient,
   type AirtableMetaClient,
@@ -171,9 +172,17 @@ function makeFakeMeta(over: Partial<Record<string, unknown>> = {}) {
   return { factory, keys };
 }
 
-/** A base whose schema is already complete, as the metadata API would report it. */
+/**
+ * A base whose schema is already complete, as the metadata API would report it.
+ * expectedColumns rather than t.fields: link columns count too, and a base
+ * missing one mirrors nothing (every write carries every field).
+ */
 const fullyBuiltBase = () =>
-  BASE_SCHEMA.map((t, i) => ({ id: `tbl${i}`, name: t.name, fields: t.fields.map((f) => ({ id: f.name, ...f })) }));
+  BASE_SCHEMA.map((t, i) => ({
+    id: `tbl${i}`,
+    name: t.name,
+    fields: expectedColumns(t).map((name) => ({ id: name, name, type: 'singleLineText' })),
+  }));
 
 describe('POST /app/api/airtable/settings/test', () => {
   // The probe would dial api.airtable.com, so these tests build the router
@@ -274,6 +283,29 @@ describe('POST /app/api/airtable/settings/test', () => {
     const parsed = (await res.json()) as { ok: boolean; error: string };
     expect(parsed.ok).toBe(false);
     expect(parsed.error).toContain('Reviews, Tags');
+  });
+
+  // The state every existing base lands in when a release adds columns: all
+  // sixteen tables present, so the old table-only check called it healthy —
+  // while Airtable 422s every write over the unknown field name.
+  it('fails a base that has every table but is short a column', async () => {
+    const { factory } = makeFakeMeta({
+      async listTables() {
+        return fullyBuiltBase().map((t) =>
+          t.name === 'Tasks' ? { ...t, fields: t.fields.filter((f) => f.name !== 'Event Link') } : t,
+        );
+      },
+    });
+    const routes = createAirtableAdminRoutes(makeFakeFactory().factory, factory);
+    const res = await routes.request(
+      '/settings/test',
+      jsonReq(admin.cookie, { api_key: KEY, base_id: 'appOLD' }),
+      testEnv(),
+    );
+    const parsed = (await res.json()) as { ok: boolean; error: string };
+    expect(parsed.ok).toBe(false);
+    expect(parsed.error).toContain('Tasks.Event Link');
+    expect(parsed.error).toContain('Create the tables in Airtable');
   });
 
   it('reports failure detail without echoing the key', async () => {

@@ -245,6 +245,8 @@ export function AirtableSettingsCard() {
             The mirror writes into its own set of tables with specific columns, and does not create them
             itself. This adds anything missing and never changes or deletes what is already there, so it is
             safe to run again — after a failure, or when an update adds new tables and columns to mirror.
+            It also links the tables together, so you can click through from an event to its talks, or from
+            a person to everything they touched.
           </p>
 
           <div className="settings-reset-row">

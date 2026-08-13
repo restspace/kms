@@ -11,10 +11,13 @@ export {
   AirtableScopeError,
   BASE_SCHEMA,
   ensureBaseSchema,
+  expectedColumns,
+  missingFromBase,
   parseBaseId,
   type AirtableBaseSummary,
   type AirtableMetaClientOptions,
   type FieldSpec,
+  type LinkSpec,
   type SetupReport,
   type TableSpec,
 } from './schema';

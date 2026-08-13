@@ -60,6 +60,10 @@ describe('mapSubmission', () => {
       Rating: 4.5,
       Notes: 'internal note',
       Event: 'DevConf',
+      // Alongside the text columns, not instead of them: the link navigates,
+      // the text stays filterable and survives on a base built before links.
+      'Event Link': ['DevConf'],
+      'Speaker Link': ['ada@example.com'],
     });
   });
 
@@ -169,18 +173,58 @@ describe('remaining mappers', () => {
       Name: 'AI',
       Color: '#f00',
       Event: 'DevConf',
+      'Event Link': ['DevConf'],
     });
     expect(mapRoom({ name: 'Main', capacity: 300, notes: null, event_name: 'DevConf' })).toEqual({
       Name: 'Main',
       Capacity: 300,
       Notes: null,
       Event: 'DevConf',
+      'Event Link': ['DevConf'],
     });
     expect(mapTag({ name: 'keynote', color: null, event_name: 'DevConf' })).toEqual({
       Name: 'keynote',
       Color: null,
       Event: 'DevConf',
+      'Event Link': ['DevConf'],
     });
+  });
+});
+
+describe('link fields', () => {
+  // The failure mode this guards: typecast resolves a link against the target's
+  // primary field and CREATES a record when nothing matches. A row with no
+  // contact must send null, not a name or an address that is not in Contacts.
+  it('sends null rather than a value that would invent a record in the target', () => {
+    // A message to someone who is not a contact: to_email is set, the joined
+    // contact is not.
+    expect(mapMessage({ to_email: 'stranger@example.com', event_name: 'DevConf' })['Contact Link']).toBeNull();
+    // An organiser-authored comment — no author_contact_id.
+    expect(mapComment({ author_name: 'Grace', event_name: 'DevConf' })['Author Link']).toBeNull();
+    // An upload with no uploader on record.
+    expect(mapFile({ filename: 'x.pdf', event_name: 'DevConf' })['Uploader Link']).toBeNull();
+    // Org-level mail has no event at all.
+    expect(mapMessage({ to_email: 'a@example.com' })['Event Link']).toBeNull();
+  });
+
+  it('links a contact by email, which is what Contacts uses as its primary field', () => {
+    expect(mapMessage({ contact_email: 'ada@example.com' })['Contact Link']).toEqual(['ada@example.com']);
+    expect(mapComment({ author_email: 'ada@example.com' })['Author Link']).toEqual(['ada@example.com']);
+    expect(mapPipelineCard({ contact_email: 'ada@example.com' })['Contact Link']).toEqual(['ada@example.com']);
+  });
+
+  // Submission codes are UNIQUE (event_id, code) and generated as SESS-1,
+  // SESS-2 per event, so SESS-1 exists in every event — linking on one would
+  // point half the base's reviews and comments at the wrong talk.
+  it('never links to a submission', () => {
+    const rows = [
+      mapReview({ submission_code: 'SESS-1' }),
+      mapComment({ submission_code: 'SESS-1' }),
+      mapPortalResponse({ submission_title: 'Talk' }),
+    ];
+    for (const fields of rows) {
+      expect(Object.keys(fields).filter((k) => k.startsWith('Submission') && k.endsWith('Link'))).toEqual([]);
+    }
   });
 });
 
@@ -222,6 +266,7 @@ describe('mapMessage', () => {
       template_key: 'decision_accept',
       status: 'sent',
       contact_name: 'Ada Lovelace',
+      contact_email: 'ada@example.com',
       event_name: 'DevConf',
       created_at: '2026-08-01T10:00:00Z',
       sent_at: '2026-08-01T10:00:03Z',
@@ -237,6 +282,8 @@ describe('mapMessage', () => {
       Event: 'DevConf',
       'Created At': '2026-08-01T10:00:00Z',
       'Sent At': '2026-08-01T10:00:03Z',
+      'Event Link': ['DevConf'],
+      'Contact Link': ['ada@example.com'],
     });
   });
 });
@@ -269,6 +316,7 @@ describe('mapFile', () => {
         content_type: 'application/pdf',
         size_bytes: 2_411_724,
         uploader_name: 'Ada Lovelace',
+        uploader_email: 'ada@example.com',
         request_title: 'Final slides',
         event_name: 'DevConf',
         created_at: '2026-10-01T09:00:00Z',
@@ -281,6 +329,8 @@ describe('mapFile', () => {
       Request: 'Final slides',
       Event: 'DevConf',
       'Created At': '2026-10-01T09:00:00Z',
+      'Event Link': ['DevConf'],
+      'Uploader Link': ['ada@example.com'],
     });
     expect(mapFile({ filename: 'x.pdf' })['Size KB']).toBeNull();
   });

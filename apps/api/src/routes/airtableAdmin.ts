@@ -23,6 +23,7 @@ import {
   AirtableScopeError,
   BASE_SCHEMA,
   ensureBaseSchema,
+  missingFromBase,
   parseBaseId,
   SYNC_TABLES,
 } from '@kms/airtable';
@@ -139,21 +140,32 @@ export function createAirtableAdminRoutes(
     if (!apiKey || !baseId) return c.json({ ok: false, error: MISSING_BOTH });
 
     try {
-      const live = new Set((await makeMetaClient({ apiKey }).listTables(baseId)).map((t) => t.name));
-      const missing = BASE_SCHEMA.filter((t) => !live.has(t.name)).map((t) => t.name);
-      if (missing.length === BASE_SCHEMA.length) {
+      const missing = missingFromBase(await makeMetaClient({ apiKey }).listTables(baseId));
+      if (missing.tables.length === BASE_SCHEMA.length) {
         return c.json({
           ok: false,
           error: 'Connected to the base, but none of the mirror\'s tables exist yet — use "Create the tables in Airtable" below.',
         });
       }
-      if (missing.length > 0) {
+      if (missing.tables.length > 0) {
         return c.json({
           ok: false,
-          error: `Connected to the base, but these tables are missing: ${missing.join(', ')}. Use "Create the tables in Airtable" below.`,
+          error: `Connected to the base, but these tables are missing: ${missing.tables.join(', ')}. Use "Create the tables in Airtable" below.`,
         });
       }
-      return c.json({ ok: true, message: 'Connected — the base has every table the mirror needs.' });
+      // Every table present but a column short is the more confusing state, and
+      // it mirrors exactly nothing: Airtable rejects a whole write over one
+      // unknown field name, so say so rather than reporting a healthy base.
+      if (missing.fields.length > 0) {
+        return c.json({
+          ok: false,
+          error:
+            `Connected to the base, and all ${BASE_SCHEMA.length} tables are there, but ${missing.fields.length} ` +
+            `column(s) are missing: ${summarise(missing.fields)}. Nothing will mirror until they exist — ` +
+            'use "Create the tables in Airtable" below.',
+        });
+      }
+      return c.json({ ok: true, message: 'Connected — the base has every table and column the mirror needs.' });
     } catch (err) {
       if (!(err instanceof AirtableScopeError)) {
         return c.json({ ok: false, error: scrub(err instanceof Error ? err.message : String(err), apiKey) });
@@ -239,6 +251,10 @@ async function credentials(env: Env, body: Record<string, unknown>) {
     unparseableBaseId: raw !== '' && parseBaseId(raw) === null ? raw.slice(0, 60) : null,
   };
 }
+
+/** A whole release's worth of new columns is a wall of text; name a few. */
+const summarise = (names: string[], keep = 6) =>
+  names.length <= keep ? names.join(', ') : `${names.slice(0, keep).join(', ')} and ${names.length - keep} more`;
 
 const badBaseId = (raw: string) =>
   `"${raw}" doesn't contain an Airtable base ID. Paste the base's web address, or the app… part of it — you can also press "Find my bases" above.`;

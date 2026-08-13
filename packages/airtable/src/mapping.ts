@@ -16,6 +16,25 @@ const s = (v: unknown): string | null => (typeof v === 'string' && v !== '' ? v 
 const n = (v: unknown): number | null => (typeof v === 'number' ? v : null);
 const b = (v: unknown): boolean => v === 1 || v === true;
 
+/**
+ * Value for a `multipleRecordLinks` column (the `… Link` fields, schema.ts).
+ *
+ * With `typecast: true` Airtable resolves the string against the *primary
+ * field* of the linked table — and **creates a record there when nothing
+ * matches**. So only ever pass a value the mirror itself writes as that table's
+ * primary field, and only where that value is unique across the whole base:
+ * an event's Name, or a contact's Email. A near-miss doesn't fail, it silently
+ * manufactures a junk row.
+ *
+ * That rules out linking on a submission code (`SESS-1` exists once per event —
+ * `UNIQUE (event_id, code)`), or on a track/room/tag name, which repeat across
+ * events the same way. Those stay plain text.
+ *
+ * null clears the cell, matching s()/n() — a row whose contact is gone loses
+ * its link on the next sweep rather than keeping a stale one.
+ */
+const link = (v: unknown): string[] | null => (typeof v === 'string' && v !== '' ? [v] : null);
+
 type Row = Record<string, unknown>;
 export type Fields = Record<string, unknown>;
 
@@ -57,6 +76,8 @@ export function mapSubmission(row: Row): Fields {
     Rating: roundRating(n(row.rating_normalized)) ?? averageRating(row.rating_cache),
     Notes: s(row.notes),
     Event: s(row.event_name),
+    'Event Link': link(row.event_name),
+    'Speaker Link': link(row.speaker_email),
   };
 }
 
@@ -113,6 +134,7 @@ export function mapTask(row: Row): Fields {
     'Due At': s(row.due_at),
     Required: b(row.required),
     Event: s(row.event_name),
+    'Event Link': link(row.event_name),
   };
 }
 
@@ -127,22 +149,32 @@ export function mapReview(row: Row): Fields {
     Comment: s(row.comment),
     'Conflict Of Interest': b(row.conflict_of_interest),
     Event: s(row.event_name),
+    'Event Link': link(row.event_name),
+    // Reviewers are contacts (reviews.reviewer_contact_id), so this resolves to
+    // an existing Contacts record rather than inventing one.
+    'Reviewer Link': link(row.reviewer_email),
   };
 }
 
 /** Expects joined column: event_name. */
 export function mapTrack(row: Row): Fields {
-  return { Name: s(row.name), Color: s(row.color), Event: s(row.event_name) };
+  return { Name: s(row.name), Color: s(row.color), Event: s(row.event_name), 'Event Link': link(row.event_name) };
 }
 
 /** Expects joined column: event_name. */
 export function mapRoom(row: Row): Fields {
-  return { Name: s(row.name), Capacity: n(row.capacity), Notes: s(row.notes), Event: s(row.event_name) };
+  return {
+    Name: s(row.name),
+    Capacity: n(row.capacity),
+    Notes: s(row.notes),
+    Event: s(row.event_name),
+    'Event Link': link(row.event_name),
+  };
 }
 
 /** Expects joined column: event_name. */
 export function mapTag(row: Row): Fields {
-  return { Name: s(row.name), Color: s(row.color), Event: s(row.event_name) };
+  return { Name: s(row.name), Color: s(row.color), Event: s(row.event_name), 'Event Link': link(row.event_name) };
 }
 
 // ---------------------------------------------------------------------------
@@ -168,11 +200,13 @@ export function mapEventContact(row: Row): Fields {
     'Added At': s(row.added_at),
     'Prior Rating': n(row.prior_rating),
     'Prior Rating Note': s(row.prior_rating_note),
+    'Event Link': link(row.event_name),
+    'Contact Link': link(row.contact_email),
   };
 }
 
 /**
- * Expects joined columns: event_name, contact_name.
+ * Expects joined columns: event_name, contact_name, contact_email.
  *
  * body_html/body_text are deliberately not mirrored: the rendered message is
  * large, repeated per recipient, and it is the delivery record an organiser
@@ -189,10 +223,14 @@ export function mapMessage(row: Row): Fields {
     Event: s(row.event_name),
     'Created At': s(row.created_at),
     'Sent At': s(row.sent_at),
+    'Event Link': link(row.event_name),
+    // The joined contact's address, not to_email: a message sent to someone who
+    // is not (or is no longer) a contact must not conjure one into Contacts.
+    'Contact Link': link(row.contact_email),
   };
 }
 
-/** Expects joined columns: submission_code, submission_title, event_name, author_fallback_name. */
+/** Expects joined columns: submission_code, submission_title, event_name, author_fallback_name, author_email. */
 export function mapComment(row: Row): Fields {
   return {
     Submission: s(row.submission_code) ?? s(row.submission_title),
@@ -205,6 +243,10 @@ export function mapComment(row: Row): Fields {
     Body: s(row.body),
     Event: s(row.event_name),
     'Created At': s(row.created_at),
+    'Event Link': link(row.event_name),
+    // Only when the author is a contact — an organiser-authored comment has no
+    // author_contact_id, and Author (text) carries the name in that case.
+    'Author Link': link(row.author_email),
   };
 }
 
@@ -223,6 +265,7 @@ export function mapPipelineCard(row: Row): Fields {
     Rationale: s(row.rationale),
     'Created At': s(row.created_at),
     'Updated At': s(row.updated_at),
+    'Contact Link': link(row.contact_email),
   };
 }
 
@@ -237,10 +280,12 @@ export function mapPipelineActivity(row: Row): Fields {
     Body: s(row.body),
     Author: s(row.author_name),
     'Created At': s(row.created_at),
+    // The card's contact. author_name is an organiser, who is not a contact.
+    'Contact Link': link(row.contact_email),
   };
 }
 
-/** Expects joined columns: event_name, uploader_name, request_title. */
+/** Expects joined columns: event_name, uploader_name, uploader_email, request_title. */
 export function mapFile(row: Row): Fields {
   return {
     Filename: s(row.filename),
@@ -250,6 +295,8 @@ export function mapFile(row: Row): Fields {
     Request: s(row.request_title),
     Event: s(row.event_name),
     'Created At': s(row.created_at),
+    'Event Link': link(row.event_name),
+    'Uploader Link': link(row.uploader_email),
   };
 }
 
@@ -266,6 +313,7 @@ export function mapFileRequest(row: Row): Fields {
     'Due At': s(row.due_at),
     'Max Size MB': n(row.max_size_mb),
     Event: s(row.event_name),
+    'Event Link': link(row.event_name),
   };
 }
 
@@ -279,6 +327,8 @@ export function mapPortalResponse(row: Row): Fields {
     Answers: renderAnswers(row.answers, row.form_questions),
     'Submitted At': s(row.submitted_at),
     Event: s(row.event_name),
+    'Event Link': link(row.event_name),
+    'Contact Link': link(row.contact_email),
   };
 }
 
