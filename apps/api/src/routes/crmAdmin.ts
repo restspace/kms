@@ -15,6 +15,7 @@ import type { AccessEnv } from '../access';
 import { isWriter, requireEventAccess } from '../access';
 import { bumpEventRevision } from '../revision';
 import { loadAuthorName } from '../submissionComments';
+import { stageAirtableDeletes } from '../airtableStage';
 
 type ApiEnv = AccessEnv;
 
@@ -405,10 +406,13 @@ crmRoutes.post('/pipeline/cards/:id/notes', async (c) => {
 crmRoutes.delete('/pipeline/cards/:id', async (c) => {
   const org = await orgId(c);
   if (!org) return c.json({ error: 'not_found' }, 404);
-  const res = await c.env.DB.prepare('DELETE FROM pipeline_cards WHERE org_id = ? AND id = ?')
-    .bind(org, c.req.param('id'))
-    .run();
-  if (!res.meta.changes) return c.json({ error: 'not_found' }, 404);
+  const cardId = c.req.param('id');
+  const results = await c.env.DB.batch([
+    stageAirtableDeletes(c.env.DB, 'pipeline_activity', 'card_id = ?', cardId),
+    stageAirtableDeletes(c.env.DB, 'pipeline_cards', 'id = ? AND org_id = ?', cardId, org),
+    c.env.DB.prepare('DELETE FROM pipeline_cards WHERE org_id = ? AND id = ?').bind(org, cardId),
+  ]);
+  if (!(results.at(-1)?.meta.changes ?? 0)) return c.json({ error: 'not_found' }, 404);
   return c.json({ ok: true });
 });
 

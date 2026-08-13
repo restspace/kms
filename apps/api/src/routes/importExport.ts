@@ -34,6 +34,7 @@ import {
   type ImportTarget,
 } from '../importer';
 import { isImportSource, type ImportSource } from '../sourceProfiles';
+import { stageAirtableDeletes } from '../airtableStage';
 import { toCsv } from '../export';
 
 export const importRoutes = new Hono<AccessEnv>();
@@ -393,15 +394,37 @@ importRoutes.post('/batches/:id/undo', async (c) => {
   if (summary.undone_at) return c.json({ error: 'already_undone' }, 409);
 
   const db = c.env.DB;
+  // Held by reference, not by index: the response reports each one's row count
+  // and the staging statements interleaved below would shift a fixed position.
+  const deleteParticipants = db
+    .prepare('DELETE FROM submission_participants WHERE import_batch_id = ?')
+    .bind(id);
+  const deleteSubmissions = db
+    .prepare('DELETE FROM submissions WHERE import_batch_id = ? AND event_id = ?')
+    .bind(id, scope.eventId);
+  const deleteRoster = db
+    .prepare('DELETE FROM event_contacts WHERE import_batch_id = ? AND event_id = ?')
+    .bind(id, scope.eventId);
+
   const statements = [
-    db.prepare('DELETE FROM submission_participants WHERE import_batch_id = ?').bind(id),
-    db.prepare('DELETE FROM submissions WHERE import_batch_id = ? AND event_id = ?').bind(id, scope.eventId),
-    db.prepare('DELETE FROM event_contacts WHERE import_batch_id = ? AND event_id = ?').bind(id, scope.eventId),
+    deleteParticipants,
+    // Undoing an import removes mirrored rows, so it stages Airtable deletes
+    // for them exactly as the per-row delete routes do; with the mirror off
+    // these match nothing (every airtable_record_id is NULL).
+    stageAirtableDeletes(db, 'submissions', 'import_batch_id = ? AND event_id = ?', id, scope.eventId),
+    deleteSubmissions,
+    stageAirtableDeletes(db, 'event_contacts', 'import_batch_id = ? AND event_id = ?', id, scope.eventId),
+    deleteRoster,
   ];
   const createdContactIds = (summary.createdContactIds ?? []).filter(
     (v): v is string => typeof v === 'string' && v !== '',
   );
   for (const group of chunk(createdContactIds, 80)) {
+    const orphaned = `id IN (${group.map(() => '?').join(', ')})
+              AND org_id = (SELECT org_id FROM events WHERE id = ?)
+              AND NOT EXISTS (SELECT 1 FROM event_contacts ec WHERE ec.contact_id = contacts.id)
+              AND NOT EXISTS (SELECT 1 FROM submission_participants sp WHERE sp.contact_id = contacts.id)`;
+    statements.push(stageAirtableDeletes(db, 'contacts', orphaned, ...group, scope.eventId));
     statements.push(
       db
         .prepare(
@@ -431,9 +454,9 @@ importRoutes.post('/batches/:id/undo', async (c) => {
   await bumpEventRevision(c.env, scope.eventId);
   return c.json({
     undone: {
-      submission_participants: results[0]?.meta.changes ?? 0,
-      submissions: results[1]?.meta.changes ?? 0,
-      event_contacts: results[2]?.meta.changes ?? 0,
+      submission_participants: results[statements.indexOf(deleteParticipants)]?.meta.changes ?? 0,
+      submissions: results[statements.indexOf(deleteSubmissions)]?.meta.changes ?? 0,
+      event_contacts: results[statements.indexOf(deleteRoster)]?.meta.changes ?? 0,
     },
   });
 });

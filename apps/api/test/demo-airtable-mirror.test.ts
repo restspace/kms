@@ -14,7 +14,8 @@
 
 import { env } from 'cloudflare:test';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { resetDemoData } from '../src/demo';
+import { SYNC_TABLES } from '@kms/airtable';
+import { MIRRORED_TABLES, resetDemoData } from '../src/demo';
 
 /** A seeded event and contact — deterministic ids, so they survive the replay. */
 const SEEDED_EVENT = 'evt00000-0000-4000-8000-000000000001';
@@ -39,13 +40,24 @@ beforeEach(async () => {
   await env.DB.prepare('DELETE FROM airtable_sync_state').run();
   await resetDemoData(env.DB); // start from a known, freshly seeded demo org
   await env.DB.batch(
-    ['events', 'contacts', 'submissions', 'tasks', 'reviews', 'tracks', 'rooms', 'tags'].map((t) =>
-      env.DB.prepare(`UPDATE ${t} SET airtable_record_id = NULL`),
-    ),
+    [
+      'events', 'contacts', 'submissions', 'tasks', 'reviews', 'tracks', 'rooms', 'tags',
+      'event_contacts', 'message_log', 'submission_comments', 'pipeline_cards', 'pipeline_activity',
+      'file_assets', 'file_requests', 'portal_form_responses',
+    ].map((t) => env.DB.prepare(`UPDATE ${t} SET airtable_record_id = NULL`)),
   );
 });
 
 describe('demo reset with the Airtable mirror in use', () => {
+  // A table added to the sweep but not here would have its record ids wiped by
+  // every nightly reset, and the next sweep would duplicate the whole table.
+  it('covers every table the sweep mirrors, keyed the same way', () => {
+    expect(Object.keys(MIRRORED_TABLES).sort()).toEqual(SYNC_TABLES.map((t) => t.d1Table).sort());
+    for (const table of SYNC_TABLES) {
+      expect(MIRRORED_TABLES[table.d1Table]).toBe(table.idColumn ?? 'id');
+    }
+  });
+
   /** Stand in for a sweep having run: give seeded rows Airtable record ids. */
   async function mirrorHasRun() {
     await env.DB.batch([
@@ -53,6 +65,12 @@ describe('demo reset with the Airtable mirror in use', () => {
       env.DB.prepare('UPDATE contacts SET airtable_record_id = ? WHERE id = ?').bind(
         'recCONTACT1',
         SEEDED_CONTACT,
+      ),
+      // Keyed by the generated mirror_id, the one mirrored table without an id
+      // column (migration 0045) — so the restore's key handling is exercised.
+      env.DB.prepare('UPDATE event_contacts SET airtable_record_id = ? WHERE mirror_id = ?').bind(
+        'recROSTER1',
+        `${SEEDED_EVENT}:${SEEDED_CONTACT}`,
       ),
       env.DB.prepare(
         `INSERT INTO airtable_sync_state (table_name, last_synced_at) VALUES ('events', '2026-08-13T00:00:00Z')`,
@@ -67,6 +85,10 @@ describe('demo reset with the Airtable mirror in use', () => {
 
     expect((await recordIdOf('events', SEEDED_EVENT))?.airtable_record_id).toBe('recEVENT1');
     expect((await recordIdOf('contacts', SEEDED_CONTACT))?.airtable_record_id).toBe('recCONTACT1');
+    const roster = await env.DB.prepare('SELECT airtable_record_id FROM event_contacts WHERE mirror_id = ?')
+      .bind(`${SEEDED_EVENT}:${SEEDED_CONTACT}`)
+      .first<{ airtable_record_id: string | null }>();
+    expect(roster?.airtable_record_id).toBe('recROSTER1');
     expect((await pendingDeletes()).results).toEqual([]);
   });
 

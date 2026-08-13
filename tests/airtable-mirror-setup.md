@@ -47,14 +47,33 @@ prefer those; plain text also works.
 | `Tracks` | Name, Color, Event |
 | `Rooms` | Name, Capacity (number), Notes ¶, Event |
 | `Tags` | Name, Color, Event |
+| `Event Contacts` | Name, Email, Event, Company, Job Title, Biography ¶, Notes ¶, Speaker Status, Arrived At, Source, Added At, Prior Rating (number, 2 dp), Prior Rating Note |
+| `Messages` | To, Subject, Template, Status, Error ¶, Contact, Event, Created At, Sent At |
+| `Comments` | Submission, Submission Title, Author, Role, Kind, Body ¶, Event, Created At |
+| `Pipeline` | Contact, Email, Stage, Score (number), Rationale ¶, Created At, Updated At |
+| `Pipeline Activity` | Contact, Email, Kind, From Stage, To Stage, Body ¶, Author, Created At |
+| `Files` | Filename, Content Type, Size KB (number, 1 dp), Uploaded By, Request, Event, Created At |
+| `File Requests` | Title, Type, Instructions ¶, Due At, Max Size MB (number), Event |
+| `Portal Responses` | Form, Contact, Email, Submission, Answers ¶, Submitted At, Event |
 
-There is deliberately **no `Forms` table** (form config is meaningless in a spreadsheet) and
-**no `Sessions` table** — a session is a scheduled submission (workplan-9 §3). To get the
-"Sessions" view the domain model describes, create a filtered view on `Submissions` once, in
-the base UI: *Starts At is not empty*.
+The last eight arrived after the first release (migration 0045). **An existing base gains them
+by pressing "Create the tables in Airtable" again** — setup is additive, so the eight original
+tables keep their data untouched. Until you do, Test connection reports them as missing.
+
+There is deliberately **no `Forms` table** (form and question config is meaningless in a
+spreadsheet — `File Requests` is mirrored because chasing one is real work, unlike editing a
+form definition) and **no `Sessions` table** — a session is a scheduled submission
+(workplan-9 §3). To get the "Sessions" view the domain model describes, create a filtered view
+on `Submissions` once, in the base UI: *Starts At is not empty*.
 
 Every row carries an `Event` field (the event's name), since all events on the deployment
-mirror into this one base — filter or group by it as needed.
+mirror into this one base — filter or group by it as needed. The one exception is `Pipeline` /
+`Pipeline Activity`: speaker sourcing is org-wide, and a prospect is enrolled long before
+anyone knows which event they will speak at.
+
+`Messages` is the one table that can get large — one row per email ever sent, growing without
+bound, where every other table is bounded by the size of the conference. Watch the base's
+record count if you run high-volume campaigns; Airtable's per-base record cap applies.
 
 ## 2. Personal access token
 
@@ -124,8 +143,19 @@ same base as production — every environment that can see the base will happily
 - **Airtable edits don't survive.** The mirror is one-way overwrite: any cell edited in
   Airtable reverts the next time that row changes in D1. Treat the base as read-only.
 - **Deletes propagate.** Hard-deleting a submission/contact/task/track/room in the app stages
-  its Airtable record (and cascaded reviews) for deletion; the next sweep removes it. Rows
-  deleted directly in Airtable just get re-created on that row's next D1 edit.
+  its Airtable record for deletion, along with the rows that cascade with it (a submission
+  takes its reviews, comments and portal responses; a contact takes their roster rows,
+  pipeline card and its activity); the next sweep removes them. Undoing an import stages the
+  rows it created. Rows deleted directly in Airtable just get re-created on that row's next
+  D1 edit.
+- **A failing table doesn't stop the sweep.** Each table's pass is isolated: if one 422s
+  (typically because it isn't in the base yet, the normal state between an upgrade and the
+  next press of "Create the tables"), it is logged, its watermark stays put so its rows retry,
+  and the remaining tables sync as usual.
+- **updated_at maintenance differs by table.** The eight original tables rely on their routes
+  keeping `updated_at` current; the eight added in 0045 have SQL triggers that do it for them,
+  so a route that has never heard of the mirror still feeds it. The triggers deliberately skip
+  writes that only set `airtable_record_id`, which is the sweep's own write-back.
 - **Force a full re-push** (e.g. after wiping the base): `DELETE FROM airtable_sync_state;`
   re-runs the epoch backfill. If the base was wiped, also
   `UPDATE <table> SET airtable_record_id = NULL` for each mirrored table first — otherwise the

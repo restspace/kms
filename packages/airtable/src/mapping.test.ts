@@ -1,14 +1,21 @@
 import { describe, expect, it } from 'vitest';
 import {
   averageRating,
+  mapComment,
   mapContact,
   mapEvent,
+  mapEventContact,
+  mapFile,
+  mapMessage,
+  mapPipelineCard,
+  mapPortalResponse,
   mapReview,
   mapRoom,
   mapSubmission,
   mapTag,
   mapTask,
   mapTrack,
+  renderAnswers,
 } from './mapping';
 
 describe('mapSubmission', () => {
@@ -173,6 +180,156 @@ describe('remaining mappers', () => {
       Name: 'keynote',
       Color: null,
       Event: 'DevConf',
+    });
+  });
+});
+
+// Second wave (migration 0045).
+describe('mapEventContact', () => {
+  it('carries the per-event speaker profile, with the contact resolved to a name', () => {
+    expect(
+      mapEventContact({
+        contact_name: 'Ada Lovelace',
+        contact_email: 'ada@example.com',
+        event_name: 'DevConf',
+        company: 'Analytical Engines',
+        job_title: 'Principal',
+        biography: 'Bio',
+        speaker_status: 'confirmed',
+        arrived_at: '2026-10-12T08:40:00Z',
+        source: 'cfp',
+        added_at: '2026-06-01T00:00:00Z',
+        prior_rating: 4.4,
+      }),
+    ).toMatchObject({
+      Name: 'Ada Lovelace',
+      Email: 'ada@example.com',
+      Event: 'DevConf',
+      Company: 'Analytical Engines',
+      'Speaker Status': 'confirmed',
+      'Arrived At': '2026-10-12T08:40:00Z',
+      'Prior Rating': 4.4,
+      'Prior Rating Note': null,
+    });
+  });
+});
+
+describe('mapMessage', () => {
+  it('maps the delivery record and leaves the rendered body out of it', () => {
+    const fields = mapMessage({
+      to_email: 'ada@example.com',
+      subject: 'You are accepted',
+      template_key: 'decision_accept',
+      status: 'sent',
+      contact_name: 'Ada Lovelace',
+      event_name: 'DevConf',
+      created_at: '2026-08-01T10:00:00Z',
+      sent_at: '2026-08-01T10:00:03Z',
+      body_html: '<p>huge</p>',
+    });
+    expect(fields).toEqual({
+      To: 'ada@example.com',
+      Subject: 'You are accepted',
+      Template: 'decision_accept',
+      Status: 'sent',
+      Error: null,
+      Contact: 'Ada Lovelace',
+      Event: 'DevConf',
+      'Created At': '2026-08-01T10:00:00Z',
+      'Sent At': '2026-08-01T10:00:03Z',
+    });
+  });
+});
+
+describe('mapComment', () => {
+  it('prefers the denormalised author name and falls back to the joined contact', () => {
+    expect(mapComment({ author_name: 'Ada', author_fallback_name: 'Someone Else' }).Author).toBe('Ada');
+    expect(mapComment({ author_name: null, author_fallback_name: 'Grace Hopper' }).Author).toBe('Grace Hopper');
+  });
+
+  it('labels the row by submission code, falling back to the title', () => {
+    expect(mapComment({ submission_code: 'S-042', submission_title: 'Talk' }).Submission).toBe('S-042');
+    expect(mapComment({ submission_code: null, submission_title: 'Talk' }).Submission).toBe('Talk');
+  });
+});
+
+describe('mapPipelineCard', () => {
+  it('has no Event column — the pipeline is org-wide', () => {
+    const fields = mapPipelineCard({ contact_name: 'Ada', contact_email: 'ada@example.com', stage: 'interested' });
+    expect(Object.keys(fields)).not.toContain('Event');
+    expect(fields).toMatchObject({ Contact: 'Ada', Stage: 'interested', Score: null });
+  });
+});
+
+describe('mapFile', () => {
+  it('reports size in KB rather than bytes, and names the request it answered', () => {
+    expect(
+      mapFile({
+        filename: 'slides.pdf',
+        content_type: 'application/pdf',
+        size_bytes: 2_411_724,
+        uploader_name: 'Ada Lovelace',
+        request_title: 'Final slides',
+        event_name: 'DevConf',
+        created_at: '2026-10-01T09:00:00Z',
+      }),
+    ).toEqual({
+      Filename: 'slides.pdf',
+      'Content Type': 'application/pdf',
+      'Size KB': 2355.2,
+      'Uploaded By': 'Ada Lovelace',
+      Request: 'Final slides',
+      Event: 'DevConf',
+      'Created At': '2026-10-01T09:00:00Z',
+    });
+    expect(mapFile({ filename: 'x.pdf' })['Size KB']).toBeNull();
+  });
+});
+
+describe('mapPortalResponse / renderAnswers', () => {
+  const questions = JSON.stringify([
+    { id: 'q-diet', label: 'Dietary requirements' },
+    { id: 'q-shirt', label: 'T-shirt size' },
+  ]);
+
+  it('renders answers as labelled lines in the form’s question order', () => {
+    expect(renderAnswers(JSON.stringify({ 'q-shirt': 'L', 'q-diet': 'None' }), questions)).toBe(
+      'Dietary requirements: None\nT-shirt size: L',
+    );
+  });
+
+  it('falls back to the bare question id for an answer whose question is gone', () => {
+    expect(renderAnswers(JSON.stringify({ 'q-removed': 'yes' }), questions)).toBe('q-removed: yes');
+  });
+
+  it('returns null for empty, absent and malformed answers', () => {
+    expect(renderAnswers(null, questions)).toBeNull();
+    expect(renderAnswers('', questions)).toBeNull();
+    expect(renderAnswers('{oops', questions)).toBeNull();
+    expect(renderAnswers('{}', questions)).toBeNull();
+  });
+
+  it('still renders when the form questions are unreadable', () => {
+    expect(renderAnswers(JSON.stringify({ 'q-diet': 'None' }), '{oops')).toBe('q-diet: None');
+  });
+
+  it('maps the response with its form, contact and submission resolved', () => {
+    expect(
+      mapPortalResponse({
+        form_name: 'Speaker details',
+        form_questions: questions,
+        contact_name: 'Ada Lovelace',
+        contact_email: 'ada@example.com',
+        submission_title: 'Talk',
+        answers: JSON.stringify({ 'q-diet': 'None' }),
+        submitted_at: '2026-08-01T10:00:00Z',
+        event_name: 'DevConf',
+      }),
+    ).toMatchObject({
+      Form: 'Speaker details',
+      Contact: 'Ada Lovelace',
+      Submission: 'Talk',
+      Answers: 'Dietary requirements: None',
     });
   });
 });

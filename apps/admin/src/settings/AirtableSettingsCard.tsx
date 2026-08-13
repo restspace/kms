@@ -242,9 +242,9 @@ export function AirtableSettingsCard() {
 
           <h3>3. Create the tables</h3>
           <p className="settings-hint">
-            The mirror writes into eight tables with specific columns and does not create them itself. This
-            adds anything missing and never changes or deletes what is already there, so it is safe to run
-            again — after a failure, or when an update adds new columns.
+            The mirror writes into its own set of tables with specific columns, and does not create them
+            itself. This adds anything missing and never changes or deletes what is already there, so it is
+            safe to run again — after a failure, or when an update adds new tables and columns to mirror.
           </p>
 
           <div className="settings-reset-row">

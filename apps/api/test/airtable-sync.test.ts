@@ -235,3 +235,143 @@ describe('airtable mirror sweep', () => {
     expect(remaining?.n).toBe(0);
   });
 });
+
+// Second wave (migration 0045). Every mapper is unit-tested against a fake row
+// in packages/airtable; what needs a real database is the other half — that
+// each selectSql parses and joins against the live schema, that it exposes the
+// column the record-id write-back matches on, and that the trigger-maintained
+// updated_at makes a row dirty when it should and not when it shouldn't.
+describe('airtable mirror: the sweep against the real schema', () => {
+  const EPOCH = '1970-01-01T00:00:00.000Z';
+
+  for (const table of SYNC_TABLES) {
+    it(`${table.d1Table}: the sweep query runs and selects its key column`, async () => {
+      const key = table.idColumn ?? 'id';
+      const { results } = await env.DB.prepare(table.selectSql).bind(EPOCH).all<Record<string, unknown>>();
+      // The seed populates most of these; an empty table still proves the SQL
+      // parses and binds, which is the failure this catches.
+      for (const row of results.slice(0, 1)) {
+        expect(Object.keys(row)).toContain(key);
+        expect(Object.keys(row)).toContain('airtable_record_id');
+        expect(row[key]).toBeTruthy();
+      }
+    });
+  }
+
+  it('one table failing (missing from the base) does not strand the others', async () => {
+    const title = `Isolation Talk ${crypto.randomUUID()}`;
+    const eventId = await createEvent();
+    // Dated past any watermark the tests above left behind, so both tables
+    // certainly have a row to create in this sweep.
+    const future = '2999-01-01T00:00:00.000Z';
+    await insertSubmission({ id: `sub-${crypto.randomUUID()}`, eventId, title, updatedAt: future });
+    await env.DB.prepare(
+      `INSERT INTO tasks (id, event_id, title, created_at, updated_at) VALUES (?, ?, ?, ?, ?)`,
+    ).bind(`task-${crypto.randomUUID()}`, eventId, `Isolation task ${title}`, future, future).run();
+
+    const before = await env.DB.prepare(
+      `SELECT last_synced_at FROM airtable_sync_state WHERE table_name = 'tasks'`,
+    ).first<{ last_synced_at: string }>();
+
+    // What Airtable returns for a table the base doesn't have yet — the state
+    // of every existing base between an upgrade and pressing "Create the
+    // tables". Tasks come before submissions in SYNC_TABLES order.
+    const { client, creates } = makeFakeClient('ISO');
+    const failing = {
+      ...client,
+      async createRecords(table: string, fieldsList: Fields[]) {
+        if (table === 'Tasks') throw new Error('airtable POST Tasks: 422 TABLE_NOT_FOUND');
+        return client.createRecords(table, fieldsList);
+      },
+    } as unknown as AirtableClient;
+
+    const reports = await runAirtableSync(env.DB, failing, { tables: tablesFor('tasks', 'submissions') });
+
+    expect(reports.find((r) => r.table === 'tasks')?.error).toContain('TABLE_NOT_FOUND');
+    expect(createdRecords(creates, 'Submissions').filter((r) => r.fields.Title === title)).toHaveLength(1);
+
+    // The failed table keeps its old watermark, so its rows retry next tick
+    // instead of being silently skipped.
+    const after = await env.DB.prepare(
+      `SELECT last_synced_at FROM airtable_sync_state WHERE table_name = 'tasks'`,
+    ).first<{ last_synced_at: string }>();
+    expect(after?.last_synced_at).toBe(before?.last_synced_at);
+  });
+
+  it('event_contacts round-trips on its generated mirror_id, not an id column', async () => {
+    const eventId = await createEvent({ name: `Roster Event ${crypto.randomUUID()}` });
+    const contactId = `con-${crypto.randomUUID()}`;
+    const company = `Acme ${crypto.randomUUID()}`;
+    await env.DB.prepare(
+      `INSERT INTO contacts (id, org_id, email, first_name, last_name, created_at, updated_at)
+       SELECT ?, org_id, ?, 'Ada', 'Lovelace', ?, ? FROM events WHERE id = ?`,
+    ).bind(contactId, `${contactId}@example.com`, EPOCH, EPOCH, eventId).run();
+    await env.DB.prepare(
+      `INSERT INTO event_contacts (event_id, contact_id, company, added_at, source)
+       VALUES (?, ?, ?, '2026-08-01T00:00:00.000Z', 'admin')`,
+    ).bind(eventId, contactId, company).run();
+
+    const { client, creates, updates } = makeFakeClient('EC');
+    const tables = tablesFor('event_contacts');
+    // Real timestamps, not the injected ones the tests above use: updated_at
+    // here comes from the SQL trigger, which reads the actual clock.
+    await runAirtableSync(env.DB, client, { tables });
+
+    const mine = createdRecords(creates, 'Event Contacts').filter((r) => r.fields.Company === company);
+    expect(mine).toHaveLength(1);
+    expect(mine[0].fields.Name).toBe('Ada Lovelace');
+
+    // The write-back has to land on this roster row specifically — the whole
+    // point of mirror_id, since (event_id, contact_id) is the real key.
+    const stored = await env.DB.prepare(
+      `SELECT airtable_record_id FROM event_contacts WHERE event_id = ? AND contact_id = ?`,
+    ).bind(eventId, contactId).first<{ airtable_record_id: string | null }>();
+    expect(stored?.airtable_record_id).toBe(mine[0].id);
+
+    // An edit after the watermark arrives as an update, never a second create.
+    await env.DB.prepare(`UPDATE event_contacts SET job_title = 'Principal' WHERE event_id = ? AND contact_id = ?`)
+      .bind(eventId, contactId)
+      .run();
+    await runAirtableSync(env.DB, client, { tables });
+
+    expect(createdRecords(creates, 'Event Contacts').filter((r) => r.fields.Company === company)).toHaveLength(1);
+    const mineUpdated = updates.flatMap((u) => u.records).filter((r) => r.id === mine[0].id);
+    expect(mineUpdated).toHaveLength(1);
+    expect(mineUpdated[0].fields['Job Title']).toBe('Principal');
+  });
+
+  it('updated_at is trigger-maintained: content edits dirty a row, record-id write-backs do not', async () => {
+    const eventId = await createEvent();
+    const contactId = `con-${crypto.randomUUID()}`;
+    await env.DB.prepare(
+      `INSERT INTO contacts (id, org_id, email, created_at, updated_at)
+       SELECT ?, org_id, ?, ?, ? FROM events WHERE id = ?`,
+    ).bind(contactId, `${contactId}@example.com`, EPOCH, EPOCH, eventId).run();
+    // No updated_at in the INSERT — the trigger supplies it, which is what lets
+    // ~20 unmodified write sites feed the mirror.
+    await env.DB.prepare(
+      `INSERT INTO event_contacts (event_id, contact_id, added_at, source) VALUES (?, ?, ?, 'admin')`,
+    ).bind(eventId, contactId, '2026-08-01T00:00:00.000Z').run();
+
+    const read = async () =>
+      (await env.DB.prepare(`SELECT updated_at FROM event_contacts WHERE event_id = ? AND contact_id = ?`)
+        .bind(eventId, contactId)
+        .first<{ updated_at: string | null }>())!.updated_at;
+
+    const onInsert = await read();
+    expect(onInsert).toBeTruthy();
+
+    await env.DB.prepare(`UPDATE event_contacts SET company = 'Acme' WHERE event_id = ? AND contact_id = ?`)
+      .bind(eventId, contactId)
+      .run();
+    const afterEdit = await read();
+    expect(afterEdit! > onInsert!).toBe(true);
+
+    // The sweep's own write-back must not make the row dirty again, or every
+    // created row would cost one redundant update on the next sweep.
+    await env.DB.prepare(
+      `UPDATE event_contacts SET airtable_record_id = 'recX' WHERE event_id = ? AND contact_id = ?`,
+    ).bind(eventId, contactId).run();
+    expect(await read()).toBe(afterEdit);
+  });
+});

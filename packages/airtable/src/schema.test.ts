@@ -15,7 +15,25 @@ import {
   parseBaseId,
   type TableSpec,
 } from './schema';
-import { mapContact, mapEvent, mapReview, mapRoom, mapSubmission, mapTag, mapTask, mapTrack } from './mapping';
+import {
+  mapComment,
+  mapContact,
+  mapEvent,
+  mapEventContact,
+  mapFile,
+  mapFileRequest,
+  mapMessage,
+  mapPipelineActivity,
+  mapPipelineCard,
+  mapPortalResponse,
+  mapReview,
+  mapRoom,
+  mapSubmission,
+  mapTag,
+  mapTask,
+  mapTrack,
+} from './mapping';
+import { SYNC_TABLES } from './sync';
 
 const columns = (table: string) => BASE_SCHEMA.find((t) => t.name === table)!.fields.map((f) => f.name);
 
@@ -29,6 +47,14 @@ describe('BASE_SCHEMA matches the mappers', () => {
     ['Tracks', mapTrack({})],
     ['Rooms', mapRoom({})],
     ['Tags', mapTag({})],
+    ['Event Contacts', mapEventContact({})],
+    ['Messages', mapMessage({})],
+    ['Comments', mapComment({})],
+    ['Pipeline', mapPipelineCard({})],
+    ['Pipeline Activity', mapPipelineActivity({})],
+    ['Files', mapFile({})],
+    ['File Requests', mapFileRequest({})],
+    ['Portal Responses', mapPortalResponse({})],
   ];
 
   for (const [table, fields] of cases) {
@@ -36,6 +62,13 @@ describe('BASE_SCHEMA matches the mappers', () => {
       expect(columns(table).sort()).toEqual(Object.keys(fields).sort());
     });
   }
+
+  // The list above is hand-written; this catches a table added to the sweep
+  // whose mapper nobody thought to check here.
+  it('covers every table the sweep writes to, and nothing else', () => {
+    expect(cases.map(([table]) => table).sort()).toEqual(SYNC_TABLES.map((t) => t.airtableTable).sort());
+    expect(BASE_SCHEMA.map((t) => t.name).sort()).toEqual(SYNC_TABLES.map((t) => t.airtableTable).sort());
+  });
 
   it('starts every table with a text column (Airtable primary fields cannot be number/checkbox)', () => {
     for (const table of BASE_SCHEMA) expect(table.fields[0]!.type).toBe('singleLineText');

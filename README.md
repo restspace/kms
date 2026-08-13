@@ -46,7 +46,10 @@ plain-language user manual — also served in-app under **Help** — is in [docs
   everything unmapped preserved on the record.
 - **Airtable mirror** — optional one-way D1 → Airtable copy, off by default, set up entirely from
   **Settings → Airtable mirror**: paste a token, pick the base, and the app creates the tables it
-  needs. See [tests/airtable-mirror-setup.md](tests/airtable-mirror-setup.md).
+  needs. Sixteen tables: events, contacts and their per-event speaker profiles, submissions,
+  reviews and comments, tasks, tracks/rooms/tags, the sourcing pipeline, files and file
+  requests, portal responses, and the outbound message log. See
+  [tests/airtable-mirror-setup.md](tests/airtable-mirror-setup.md).
 - **Operations** — outbox-based email delivery with retries, reminder and bulk-job sweeps, a
   nightly demo-data reset, and a one-click reset button.
 

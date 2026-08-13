@@ -85,6 +85,66 @@ export const BASE_SCHEMA: TableSpec[] = [
   { name: 'Tracks', fields: [text('Name'), text('Color'), text('Event')] },
   { name: 'Rooms', fields: [text('Name'), num('Capacity'), long('Notes'), text('Event')] },
   { name: 'Tags', fields: [text('Name'), text('Color'), text('Event')] },
+  // Second wave (migration 0045). An existing base gains these by pressing
+  // "Create the tables in Airtable" again — ensureBaseSchema is additive, so a
+  // base built before this release keeps its data and grows the new tables.
+  {
+    name: 'Event Contacts',
+    fields: [
+      text('Name'), text('Email'), text('Event'), text('Company'), text('Job Title'),
+      long('Biography'), long('Notes'), text('Speaker Status'), text('Arrived At'), text('Source'),
+      text('Added At'), num('Prior Rating', 2), text('Prior Rating Note'),
+    ],
+  },
+  {
+    name: 'Messages',
+    fields: [
+      text('To'), text('Subject'), text('Template'), text('Status'), long('Error'),
+      text('Contact'), text('Event'), text('Created At'), text('Sent At'),
+    ],
+  },
+  {
+    name: 'Comments',
+    fields: [
+      text('Submission'), text('Submission Title'), text('Author'), text('Role'), text('Kind'),
+      long('Body'), text('Event'), text('Created At'),
+    ],
+  },
+  {
+    name: 'Pipeline',
+    fields: [
+      text('Contact'), text('Email'), text('Stage'), num('Score'), long('Rationale'),
+      text('Created At'), text('Updated At'),
+    ],
+  },
+  {
+    name: 'Pipeline Activity',
+    fields: [
+      text('Contact'), text('Email'), text('Kind'), text('From Stage'), text('To Stage'),
+      long('Body'), text('Author'), text('Created At'),
+    ],
+  },
+  {
+    name: 'Files',
+    fields: [
+      text('Filename'), text('Content Type'), num('Size KB', 1), text('Uploaded By'), text('Request'),
+      text('Event'), text('Created At'),
+    ],
+  },
+  {
+    name: 'File Requests',
+    fields: [
+      text('Title'), text('Type'), long('Instructions'), text('Due At'), num('Max Size MB'),
+      text('Event'),
+    ],
+  },
+  {
+    name: 'Portal Responses',
+    fields: [
+      text('Form'), text('Contact'), text('Email'), text('Submission'), long('Answers'),
+      text('Submitted At'), text('Event'),
+    ],
+  },
 ];
 
 export interface AirtableBaseSummary {

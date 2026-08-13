@@ -15,7 +15,7 @@ import { toCsv, toXlsx } from '../export';
 import { sha256Hex } from '../hashing';
 import { decodeCursor, encodeCursor, keysetWhere, type CursorPayload } from '../cursor';
 import { bumpEventRevision } from '../revision';
-import { stageAirtableDeletes } from '../airtableStage';
+import { stageAirtableDeletes, stageContactCascades } from '../airtableStage';
 import { isValidEmailShape } from '@kms/core';
 import { createDb } from '@kms/db';
 
@@ -578,6 +578,10 @@ restApiRoutes.delete('/events/:event_id/contacts/:cid', async (c) => {
   try {
     await c.env.DB.batch([
       c.env.DB.prepare('UPDATE event_contacts SET headshot_asset_id = NULL WHERE event_id = ? AND contact_id = ?').bind(eventId, id),
+      // The roster row itself is mirrored (Event Contacts), so stage it before
+      // the delete that removes it — unlike the NOT EXISTS staging below, which
+      // has to run after.
+      stageAirtableDeletes(c.env.DB, 'event_contacts', 'event_id = ? AND contact_id = ?', eventId, id),
       c.env.DB.prepare('DELETE FROM event_contacts WHERE event_id = ? AND contact_id = ?').bind(eventId, id),
       stageAirtableDeletes(
         c.env.DB,
@@ -593,6 +597,8 @@ restApiRoutes.delete('/events/:event_id/contacts/:cid', async (c) => {
         id,
         id,
       ),
+      // Cascades of that same last-membership contact delete.
+      ...stageContactCascades(c.env.DB, id, { lastMembershipOnly: true }),
       c.env.DB.prepare(
         `DELETE FROM contacts WHERE id = ?1
            AND NOT EXISTS (SELECT 1 FROM event_contacts ec WHERE ec.contact_id = ?1)`,
@@ -741,10 +747,12 @@ restApiRoutes.delete('/events/:event_id/submissions/:sid', async (c) => {
   const sid = c.req.param('sid');
   const results = await c.env.DB.batch([
     stageAirtableDeletes(c.env.DB, 'reviews', 'submission_id = ?', sid),
+    stageAirtableDeletes(c.env.DB, 'submission_comments', 'submission_id = ?', sid),
+    stageAirtableDeletes(c.env.DB, 'portal_form_responses', 'submission_id = ?', sid),
     stageAirtableDeletes(c.env.DB, 'submissions', 'id = ? AND event_id = ?', sid, eventId),
     c.env.DB.prepare('DELETE FROM submissions WHERE id = ? AND event_id = ?').bind(sid, eventId),
   ]);
-  if ((results[2]?.meta.changes ?? 0) === 0) return apiError(c, 404, 'not_found', 'No submission with this id in this event.');
+  if ((results.at(-1)?.meta.changes ?? 0) === 0) return apiError(c, 404, 'not_found', 'No submission with this id in this event.');
   await bumpEventRevision(c.env, eventId);
   return c.json({ ok: true });
 });

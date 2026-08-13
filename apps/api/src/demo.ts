@@ -22,7 +22,7 @@ export function seedStatements(): string[] {
 }
 
 interface MirrorRow {
-  id: string;
+  key: string;
   airtable_record_id: string;
 }
 
@@ -42,9 +42,9 @@ interface MirrorRow {
  */
 async function snapshotMirrorIds(db: D1Database): Promise<Map<string, MirrorRow[]>> {
   const snapshot = new Map<string, MirrorRow[]>();
-  for (const table of MIRRORED_TABLES) {
+  for (const [table, keyColumn] of Object.entries(MIRRORED_TABLES)) {
     const rows = await db
-      .prepare(`SELECT id, airtable_record_id FROM ${table} WHERE airtable_record_id IS NOT NULL`)
+      .prepare(`SELECT ${keyColumn} AS key, airtable_record_id FROM ${table} WHERE airtable_record_id IS NOT NULL`)
       .all<MirrorRow>();
     if (rows.results.length > 0) snapshot.set(table, rows.results);
   }
@@ -73,8 +73,8 @@ async function restoreMirrorIds(db: D1Database, snapshot: Map<string, MirrorRow[
       const results = await db.batch(
         chunk.map((row) =>
           db
-            .prepare(`UPDATE ${table} SET airtable_record_id = ? WHERE id = ?`)
-            .bind(row.airtable_record_id, row.id),
+            .prepare(`UPDATE ${table} SET airtable_record_id = ? WHERE ${MIRRORED_TABLES[table]} = ?`)
+            .bind(row.airtable_record_id, row.key),
         ),
       );
       results.forEach((result, j) => {
@@ -101,8 +101,30 @@ async function restoreMirrorIds(db: D1Database, snapshot: Map<string, MirrorRow[
   await db.prepare('DELETE FROM airtable_sync_state').run();
 }
 
-/** Mirrored tables, in SYNC_TABLES order — interpolated into SQL, so a closed list. */
-const MIRRORED_TABLES = ['events', 'contacts', 'submissions', 'tasks', 'reviews', 'tracks', 'rooms', 'tags'];
+/**
+ * Mirrored table → the column its Airtable record id is keyed by, in
+ * SYNC_TABLES order. Both halves are interpolated into SQL, so this is a
+ * closed list; it must stay in step with SYNC_TABLES (packages/airtable),
+ * which demo-airtable-mirror.test.ts asserts.
+ */
+export const MIRRORED_TABLES: Record<string, string> = {
+  events: 'id',
+  contacts: 'id',
+  submissions: 'id',
+  tasks: 'id',
+  reviews: 'id',
+  tracks: 'id',
+  rooms: 'id',
+  tags: 'id',
+  event_contacts: 'mirror_id',
+  message_log: 'id',
+  submission_comments: 'id',
+  pipeline_cards: 'id',
+  pipeline_activity: 'id',
+  file_assets: 'id',
+  file_requests: 'id',
+  portal_form_responses: 'id',
+};
 const MIRROR_CHUNK = 50;
 
 interface TokenSnapshot {

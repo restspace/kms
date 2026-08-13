@@ -29,7 +29,7 @@ import { appendUploadVersion } from '../fileVersions';
 import { formsAdminRoutes } from './formsAdmin';
 import { APPROVAL_STATES, DECISION_OUTCOMES, evaluationRoutes } from './evaluation';
 import { agendaRoutes } from './agenda';
-import { stageAirtableDeletes } from '../airtableStage';
+import { stageAirtableDeletes, stageContactCascades } from '../airtableStage';
 import { resolveAudience, type ComposeAudience } from './messagingAdmin';
 import { sendTaskReminderNow } from '../jobs/reminders';
 import { dashboardRoutes } from './dashboard';
@@ -1875,9 +1875,16 @@ adminApiRoutes.delete('/contacts/:id', async (c) => {
   const id = c.req.param('id');
   const db = c.env.DB;
 
+  // Held by reference rather than by index: whether the detach changed a row is
+  // what decides 404, and staging statements get inserted around it over time.
+  const detach = db
+    .prepare('DELETE FROM event_contacts WHERE event_id = ? AND contact_id = ?')
+    .bind(session.eventId, id);
+
   let results;
+  let statements: D1PreparedStatement[];
   try {
-    results = await db.batch([
+    statements = [
       db.prepare(
         `UPDATE events SET logo_asset_id = NULL
           WHERE id = ?1
@@ -1892,8 +1899,10 @@ adminApiRoutes.delete('/contacts/:id', async (c) => {
             AND NOT EXISTS (SELECT 1 FROM event_contacts
                              WHERE contact_id = ?2 AND event_id <> ?1)`,
       ).bind(session.eventId, id),
-      db.prepare('DELETE FROM event_contacts WHERE event_id = ? AND contact_id = ?')
-        .bind(session.eventId, id),
+      // Mirrored in its own right (Event Contacts), so staged before the delete
+      // rather than after it like the NOT EXISTS staging below.
+      stageAirtableDeletes(db, 'event_contacts', 'event_id = ? AND contact_id = ?', session.eventId, id),
+      detach,
       // Runs after the detach above (batch statements are sequential and share
       // one transaction), so the NOT EXISTS is what makes this a no-op for a
       // contact who still belongs to another event in the org.
@@ -1911,11 +1920,13 @@ adminApiRoutes.delete('/contacts/:id', async (c) => {
         id,
         id,
       ),
+      ...stageContactCascades(db, id, { lastMembershipOnly: true }),
       db.prepare(
         `DELETE FROM contacts
           WHERE id = ?1 AND NOT EXISTS (SELECT 1 FROM event_contacts WHERE contact_id = ?1)`,
       ).bind(id),
-    ]);
+    ];
+    results = await db.batch(statements);
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     return c.json({ error: 'delete_conflict', detail }, 409);
@@ -1923,7 +1934,9 @@ adminApiRoutes.delete('/contacts/:id', async (c) => {
 
   // The detach, not the identity delete, is what "found" means: a contact in
   // another event of the org is not on this roster and reads as absent.
-  if ((results[2]?.meta.changes ?? 0) === 0) return c.json({ error: 'not_found' }, 404);
+  if ((results[statements.indexOf(detach)]?.meta.changes ?? 0) === 0) {
+    return c.json({ error: 'not_found' }, 404);
+  }
   await bumpEventRevision(c.env, session.eventId);
   return c.json({ ok: true });
 });
@@ -2350,6 +2363,8 @@ adminApiRoutes.delete('/contacts/:id/org', async (c) => {
       // last-membership path.
       stageAirtableDeletes(db, 'reviews', 'reviewer_contact_id = ?', id),
       stageAirtableDeletes(db, 'contacts', 'id = ? AND org_id = ?', id, orgId),
+      // Org-wide delete, so every roster row goes too — no last-membership guard.
+      ...stageContactCascades(db, id, { includeRoster: true }),
       db.prepare('DELETE FROM contacts WHERE id = ? AND org_id = ?').bind(id, orgId),
     ]);
   } catch (err) {
