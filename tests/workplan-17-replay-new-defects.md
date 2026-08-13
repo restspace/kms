@@ -33,3 +33,21 @@ happen inline at the end. Deploy remains blocked on 0040/0041 remote migrations.
 1. Full monorepo typecheck + test suite; fix fallout.
 2. Single commit (no deploy — deploy still waits on 0040/0041 `migrate:remote`).
 3. Update memory + this file with outcomes.
+
+## Outcome (2026-08-13)
+
+All 14 items fixed and committed as `0718ec5` (50 files, +3323/−168). Typecheck clean;
+full suite 1505 tests — 2 load-induced timeout flakes (formats-crud,
+submission-limit-per-form) passed clean on isolated re-run. Notable findings vs plan:
+
+- Criteria bleed was client-side UX: round creation left the OLD round's criteria editor
+  as the only open input. API was always correct.
+- Kanban scrolling already worked; Windows 11 overlay scrollbars were invisible —
+  affordance-only CSS fix.
+- Bulk-send server aggregate already existed (`GET /app/api/bulk-jobs/:id`); only the
+  poll-past-done gap in messaging.tsx needed fixing.
+- File detail tab bug was URL-navigation stranding, fixed via `?rec=` restore for files.
+- NEW MIGRATION `0042_field_audience.sql` (field_definitions.audience) — now pending on
+  remote D1 along with 0040/0041. Deploy needs all three.
+- Extra hardening beyond plan: legacy adminApi rooms/tracks routes history-hooked;
+  workspace Events tab got the same timezone date fix as the dashboard.
