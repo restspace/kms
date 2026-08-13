@@ -1294,12 +1294,38 @@ export const getAirtableSettings = () => request<AirtableSettings>('/app/api/air
 export const updateAirtableSettings = (body: { enabled: boolean; base_id: string; api_key?: string }) =>
   request<AirtableSettings>('/app/api/airtable/settings', { method: 'PUT', body: JSON.stringify(body) })
 
-/** Probe with the typed-but-unsaved credentials when given, stored/env otherwise. */
+/**
+ * Probe with the typed-but-unsaved credentials when given, stored/env otherwise.
+ * Checks the base's schema where the token allows it, so "tables not created
+ * yet" reads differently from "wrong base ID" — both are a bare 404 otherwise.
+ */
 export const testAirtableConnection = (body: { api_key?: string; base_id?: string } = {}) =>
-  request<{ ok: boolean; error?: string }>('/app/api/airtable/settings/test', {
+  request<{ ok: boolean; message?: string; error?: string }>('/app/api/airtable/settings/test', {
     method: 'POST',
     body: JSON.stringify(body),
   })
+
+/** Bases the token can see, for the base picker. Needs schema.bases:read on the PAT. */
+export const listAirtableBases = (body: { api_key?: string } = {}) =>
+  request<{ ok: boolean; bases: Array<{ id: string; name: string }>; error?: string }>(
+    '/app/api/airtable/settings/bases',
+    { method: 'POST', body: JSON.stringify(body) },
+  )
+
+/** What one setup run changed — additive only, so re-running is always safe. */
+export interface AirtableSetupReport {
+  createdTables: string[]
+  addedFields: string[]
+  mismatched: string[]
+  unchanged: string[]
+}
+
+/** Create the mirror's tables/columns in the selected base. Needs schema.bases:write. */
+export const setUpAirtableBase = (body: { api_key?: string; base_id?: string } = {}) =>
+  request<{ ok: boolean; report?: AirtableSetupReport; error?: string }>(
+    '/app/api/airtable/settings/setup',
+    { method: 'POST', body: JSON.stringify(body) },
+  )
 
 /**
  * Organiser-side upload (reuses the portal's storage machinery server-side).

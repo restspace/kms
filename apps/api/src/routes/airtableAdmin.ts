@@ -17,7 +17,15 @@
 import { Hono } from 'hono';
 import { can } from '@kms/core';
 import type { Actor } from '@kms/core';
-import { AirtableClient, SYNC_TABLES } from '@kms/airtable';
+import {
+  AirtableClient,
+  AirtableMetaClient,
+  AirtableScopeError,
+  BASE_SCHEMA,
+  ensureBaseSchema,
+  parseBaseId,
+  SYNC_TABLES,
+} from '@kms/airtable';
 import type { AccessEnv } from '../access';
 import type { Env } from '../env';
 import { resolveAirtableConfig } from '../jobs/airtableSync';
@@ -41,17 +49,19 @@ const maskedJson = (row: SettingsRow | null) => ({
 });
 
 export type MakeClient = (opts: { apiKey: string; baseId: string }) => AirtableClient;
+export type MakeMetaClient = (opts: { apiKey: string }) => AirtableMetaClient;
 
 /**
- * Factory so tests can swap the Airtable client the test-connection probe
- * builds (workers tests must not dial api.airtable.com). Production uses the
- * `airtableAdminRoutes` instance below with the real client.
+ * Factories so tests can swap the Airtable clients these routes build (workers
+ * tests must not dial api.airtable.com). Production uses the
+ * `airtableAdminRoutes` instance below with the real clients.
  */
 export function createAirtableAdminRoutes(
   makeClient: MakeClient = (opts) =>
     // Probe client: fail fast instead of sleeping through Airtable's 30s 429
     // penalty window — a rate-limited probe should say so, not hang the tab.
     new AirtableClient({ ...opts, minIntervalMs: 0, maxRetries: 0 }),
+  makeMetaClient: MakeMetaClient = (opts) => new AirtableMetaClient(opts),
 ) {
   const routes = new Hono<AccessEnv>();
 
@@ -83,8 +93,16 @@ export function createAirtableAdminRoutes(
     const existing = await loadRow(c.env.DB);
 
     const enabled = typeof body.enabled === 'boolean' ? body.enabled : existing?.enabled === 1;
+    // Store the id, not the address bar: parseBaseId strips the table/view ids
+    // that come with a copied base URL. An unrecognisable value is kept as
+    // typed so the user can see and correct it — the probes reject it by name.
+    const submittedBase = typeof body.base_id === 'string' ? body.base_id.trim() : null;
     const baseId =
-      typeof body.base_id === 'string' ? body.base_id.trim() || null : (existing?.base_id ?? null);
+      submittedBase === null
+        ? (existing?.base_id ?? null)
+        : submittedBase === ''
+          ? null
+          : (parseBaseId(submittedBase) ?? submittedBase);
     const apiKey =
       typeof body.api_key === 'string' && body.api_key.trim() !== ''
         ? body.api_key.trim()
@@ -104,33 +122,144 @@ export function createAirtableAdminRoutes(
   /**
    * POST /app/api/airtable/settings/test { api_key?, base_id? } — probe the
    * base with the just-typed credentials when given, the stored/env ones
-   * otherwise, via one cheap read (maxRecords=1 off the first mirrored
-   * table). Always 200 with { ok, error? }; the error text never contains
-   * the key.
+   * otherwise. Always 200 with { ok, message?, error? }; neither text ever
+   * contains the key.
+   *
+   * Prefers the metadata API, because the data API cannot tell "wrong base id"
+   * from "right base, tables not created yet" — both are a bare 404 NOT_FOUND,
+   * and the second is the normal state of a base at step 2. Reading the schema
+   * separates them and names the missing tables. With a token that lacks the
+   * schema scopes there is no schema to read, so it falls back to the record
+   * probe and spells out what a 404 could mean.
    */
   routes.post('/settings/test', async (c) => {
     const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
-    const stored = await resolveAirtableConfig(c.env as Env);
-    const apiKey =
-      (typeof body.api_key === 'string' && body.api_key.trim()) || stored.apiKey;
-    const baseId =
-      (typeof body.base_id === 'string' && body.base_id.trim()) || stored.baseId;
-    if (!apiKey || !baseId) {
-      return c.json({ ok: false, error: 'API key and base ID are required — enter or save them first.' });
-    }
+    const { apiKey, baseId, unparseableBaseId } = await credentials(c.env as Env, body);
+    if (unparseableBaseId) return c.json({ ok: false, error: badBaseId(unparseableBaseId) });
+    if (!apiKey || !baseId) return c.json({ ok: false, error: MISSING_BOTH });
+
     try {
-      await makeClient({ apiKey, baseId }).listRecords(SYNC_TABLES[0]!.airtableTable, 1);
-      return c.json({ ok: true });
+      const live = new Set((await makeMetaClient({ apiKey }).listTables(baseId)).map((t) => t.name));
+      const missing = BASE_SCHEMA.filter((t) => !live.has(t.name)).map((t) => t.name);
+      if (missing.length === BASE_SCHEMA.length) {
+        return c.json({
+          ok: false,
+          error: 'Connected to the base, but none of the mirror\'s tables exist yet — use "Create the tables in Airtable" below.',
+        });
+      }
+      if (missing.length > 0) {
+        return c.json({
+          ok: false,
+          error: `Connected to the base, but these tables are missing: ${missing.join(', ')}. Use "Create the tables in Airtable" below.`,
+        });
+      }
+      return c.json({ ok: true, message: 'Connected — the base has every table the mirror needs.' });
     } catch (err) {
-      const raw = err instanceof Error ? err.message : String(err);
-      // Belt and braces: the client's errors carry status + body, never the
-      // Authorization header, but scrub the key anyway before echoing.
-      const error = raw.split(apiKey).join('[redacted]').slice(0, 300);
-      return c.json({ ok: false, error });
+      if (!(err instanceof AirtableScopeError)) {
+        return c.json({ ok: false, error: scrub(err instanceof Error ? err.message : String(err), apiKey) });
+      }
+      // No schema scopes: fall back to reading one record from the first
+      // mirrored table, which only needs data.records:read.
+      try {
+        await makeClient({ apiKey, baseId }).listRecords(SYNC_TABLES[0]!.airtableTable, 1);
+        return c.json({ ok: true, message: 'Connected — the base answered.' });
+      } catch (probeErr) {
+        // Belt and braces: the client's errors carry status + body, never the
+        // Authorization header, but scrub the key anyway before echoing.
+        const raw = scrub(probeErr instanceof Error ? probeErr.message : String(probeErr), apiKey);
+        return c.json({
+          ok: false,
+          error: /: 404\b/.test(raw)
+            ? `${raw} — that means either the base ID is wrong, or the base has no "${SYNC_TABLES[0]!.airtableTable}" table yet. This token cannot read the base structure, so add the scopes schema.bases:read and schema.bases:write to tell those apart and to create the tables from here.`
+            : raw,
+        });
+      }
+    }
+  });
+
+  /**
+   * POST /app/api/airtable/settings/bases { api_key? } — bases the token can
+   * reach, so the Settings page can offer a picker instead of asking an
+   * organiser to dig an `app…` id out of a URL. Always 200 with
+   * { ok, bases[], error? }; needs schema.bases:read on the PAT.
+   */
+  routes.post('/settings/bases', async (c) => {
+    const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+    const { apiKey } = await credentials(c.env as Env, body);
+    if (!apiKey) return c.json({ ok: false, bases: [], error: MISSING_KEY });
+    try {
+      return c.json({ ok: true, bases: await makeMetaClient({ apiKey }).listBases() });
+    } catch (err) {
+      return c.json({ ok: false, bases: [], error: setupError(err, apiKey) });
+    }
+  });
+
+  /**
+   * POST /app/api/airtable/settings/setup { api_key?, base_id? } — create the
+   * tables and columns the sweep writes into, in the selected base. Idempotent
+   * and additive (see ensureBaseSchema), so re-running after a partial failure
+   * or a schema addition is safe and is the documented recovery path.
+   *
+   * Always 200 with { ok, report?, error? }: a scope/permission problem is an
+   * expected outcome an organiser has to act on, not a 500.
+   */
+  routes.post('/settings/setup', async (c) => {
+    const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+    const { apiKey, baseId, unparseableBaseId } = await credentials(c.env as Env, body);
+    if (unparseableBaseId) return c.json({ ok: false, error: badBaseId(unparseableBaseId) });
+    if (!apiKey || !baseId) return c.json({ ok: false, error: MISSING_BOTH });
+    try {
+      return c.json({ ok: true, report: await ensureBaseSchema(makeMetaClient({ apiKey }), baseId) });
+    } catch (err) {
+      // Partial progress is kept, not rolled back — the tables already created
+      // are correct, and re-running finishes the rest.
+      return c.json({ ok: false, error: setupError(err, apiKey) });
     }
   });
 
   return routes;
+}
+
+const MISSING_KEY = 'API key is required — enter or save it first.';
+const MISSING_BOTH = 'API key and base ID are required — enter or save them first.';
+
+/**
+ * Just-typed credentials win over stored/env ones, so the UI can verify before
+ * saving. The base id is normalised on the way through: a value pasted from the
+ * browser's address bar carries the table and view ids too, and those would be
+ * concatenated into every Airtable request path.
+ */
+async function credentials(env: Env, body: Record<string, unknown>) {
+  const stored = await resolveAirtableConfig(env);
+  const raw = (typeof body.base_id === 'string' && body.base_id.trim()) || stored.baseId || '';
+  return {
+    apiKey: (typeof body.api_key === 'string' && body.api_key.trim()) || stored.apiKey,
+    baseId: raw === '' ? '' : (parseBaseId(raw) ?? ''),
+    /** Set when something was supplied but held no `app…` id — a typo, not a blank. */
+    unparseableBaseId: raw !== '' && parseBaseId(raw) === null ? raw.slice(0, 60) : null,
+  };
+}
+
+const badBaseId = (raw: string) =>
+  `"${raw}" doesn't contain an Airtable base ID. Paste the base's web address, or the app… part of it — you can also press "Find my bases" above.`;
+
+/** Belt and braces: upstream errors carry status + body, never the key — scrub anyway. */
+const scrub = (raw: string, apiKey: string) => raw.split(apiKey).join('[redacted]').slice(0, 300);
+
+/**
+ * Setup fails most often because the PAT carries only the two data.records
+ * scopes the mirror needs — say that in the terms of the Airtable UI the
+ * organiser has to go back to, rather than echoing a raw 403 body.
+ */
+function setupError(err: unknown, apiKey: string): string {
+  if (err instanceof AirtableScopeError) {
+    return (
+      'Airtable refused: this token cannot read or change the base structure. ' +
+      'Edit it at airtable.com/create/tokens, add the scopes schema.bases:read and ' +
+      'schema.bases:write, and make sure the base (or its workspace) is in its access list.'
+    );
+  }
+  return scrub(err instanceof Error ? err.message : String(err), apiKey);
 }
 
 export const airtableAdminRoutes = createAirtableAdminRoutes();

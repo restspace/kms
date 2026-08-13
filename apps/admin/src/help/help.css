@@ -159,32 +159,6 @@
   font-weight: 600;
 }
 
-/* The '?' that opens this section, pinned to the top-right of every screen. */
-.shell-help-button {
-  position: absolute;
-  top: var(--space-2);
-  right: var(--space-3);
-  z-index: 5;
-  width: 22px;
-  height: 22px;
-  padding: 0;
-  border: 1px solid var(--border);
-  border-radius: 50%;
-  background: var(--surface-raised);
-  color: var(--text-muted);
-  font: inherit;
-  font-size: var(--text-label);
-  font-weight: 700;
-  line-height: 1;
-  cursor: pointer;
-}
-
-.shell-help-button:hover {
-  background: var(--accent-soft);
-  border-color: var(--accent-border);
-  color: var(--accent-strong);
-}
-
 @media (max-width: 900px) {
   .manual {
     grid-template-columns: minmax(0, 1fr);

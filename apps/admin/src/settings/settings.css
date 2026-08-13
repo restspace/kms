@@ -14,7 +14,10 @@
 }
 
 .settings-card {
-  background: var(--surface);
+  /* --surface is deliberately identical to --bg in this theme, which left each
+     card's extent resting on its 1px border alone. --surface-raised lifts the
+     card off the page in both schemes (lighter in light, lighter in dark). */
+  background: var(--surface-raised);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 16px 18px;
@@ -282,7 +285,8 @@
   padding: 0 8px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  background: var(--surface-raised);
+  /* Was --surface-raised, which the card now uses — inputs sit inset against it. */
+  background: var(--surface);
   color: var(--text);
   font: inherit;
   font-size: 13px;

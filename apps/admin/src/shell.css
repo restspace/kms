@@ -207,6 +207,38 @@
   min-height: 0;
 }
 
+/* The '?' link that opens the manual (help/HelpSection.tsx), pinned to the
+   top-right of every screen. It lives here rather than in help.css because the
+   help section is lazy-loaded: its stylesheet would not arrive until the user
+   had already visited the manual, leaving the button unstyled until then. */
+.shell-help-button {
+  position: absolute;
+  top: var(--space-2);
+  right: var(--space-3);
+  z-index: 5;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  background: var(--surface-raised);
+  color: var(--text-muted);
+  font: inherit;
+  font-size: var(--text-label);
+  font-weight: 700;
+  line-height: 1;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.shell-help-button:hover {
+  background: var(--accent-soft);
+  border-color: var(--accent-border);
+  color: var(--accent-strong);
+}
+
 .shell-placeholder {
   margin: auto;
   text-align: center;

@@ -40,7 +40,11 @@ export class AirtableClient {
   constructor(opts: AirtableClientOptions) {
     this.apiKey = opts.apiKey;
     this.baseId = opts.baseId;
-    this.fetchImpl = opts.fetchImpl ?? fetch;
+    // Bind: workers' fetch throws "Illegal invocation" if it is called as a
+    // method of anything other than globalThis, which `this.fetchImpl(...)`
+    // otherwise does. Injected test doubles are plain functions — binding them
+    // is harmless.
+    this.fetchImpl = (opts.fetchImpl ?? fetch).bind(globalThis);
     this.sleep = opts.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
     this.minIntervalMs = opts.minIntervalMs ?? 250;
     this.backoffMs = opts.backoffMs ?? 30_000;

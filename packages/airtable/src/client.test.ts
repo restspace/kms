@@ -36,7 +36,28 @@ function client(f: typeof fetch, slept: number[], extra = {}) {
   });
 }
 
+/**
+ * Regression guard for an "Illegal invocation" in production: workers' global
+ * fetch must be called with globalThis as its receiver, and `this.fetchImpl(…)`
+ * supplies the client instead unless the constructor binds it. A plain
+ * (non-arrow) double records the receiver it was actually called with.
+ */
+function receiverRecordingFetch() {
+  const seen: unknown[] = [];
+  const impl = function (this: unknown) {
+    seen.push(this);
+    return Promise.resolve(new Response('{"records":[]}', { status: 200 }));
+  } as unknown as typeof fetch;
+  return { impl, seen };
+}
+
 describe('AirtableClient', () => {
+  it('calls fetch bound to globalThis', async () => {
+    const { impl, seen } = receiverRecordingFetch();
+    await client(impl, []).listRecords('Events');
+    expect(seen).toEqual([globalThis]);
+  });
+
   it('batches creates at 10 records per request and returns rec ids in input order', async () => {
     const { impl, calls } = fakeFetch();
     const slept: number[] = [];

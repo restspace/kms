@@ -11,7 +11,13 @@
 //     but unconfigured stays a warn + no-op.
 
 import { env, SELF } from 'cloudflare:test';
-import type { AirtableClient } from '@kms/airtable';
+import {
+  AirtableScopeError,
+  BASE_SCHEMA,
+  SYNC_TABLES,
+  type AirtableClient,
+  type AirtableMetaClient,
+} from '@kms/airtable';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { createAirtableAdminRoutes } from '../src/routes/airtableAdmin';
 import { resolveAirtableConfig, sweepAirtableSync } from '../src/jobs/airtableSync';
@@ -127,29 +133,66 @@ describe('GET/PUT /app/api/airtable/settings', () => {
     expect(ownerGet.status).toBe(200);
   });
 
+  it('stores the base id from a pasted base URL, not the whole path', async () => {
+    const res = await SELF.fetch(
+      `${ORIGIN}/app/api/airtable/settings`,
+      jsonReq(
+        admin.cookie,
+        { enabled: false, base_id: 'https://airtable.com/appbrUQ7n7P0zFSL6/tblEn0t0UeFGHnLrl/viwYhZ' },
+        'PUT',
+      ),
+    );
+    expect((await res.json()) as { base_id: string }).toMatchObject({ base_id: 'appbrUQ7n7P0zFSL6' });
+  });
+
   it('unauthenticated requests get 401', async () => {
     const res = await SELF.fetch(`${ORIGIN}/app/api/airtable/settings`);
     expect(res.status).toBe(401);
   });
 });
 
+/** Fake metadata client — records the key it was built with, never dials out. */
+function makeFakeMeta(over: Partial<Record<string, unknown>> = {}) {
+  const keys: string[] = [];
+  const factory = (opts: { apiKey: string }) => {
+    keys.push(opts.apiKey);
+    return {
+      async listBases() {
+        return [{ id: 'appA', name: 'Conference' }];
+      },
+      async listTables() {
+        return [];
+      },
+      async createTable() {},
+      async createField() {},
+      ...over,
+    } as unknown as AirtableMetaClient;
+  };
+  return { factory, keys };
+}
+
+/** A base whose schema is already complete, as the metadata API would report it. */
+const fullyBuiltBase = () =>
+  BASE_SCHEMA.map((t, i) => ({ id: `tbl${i}`, name: t.name, fields: t.fields.map((f) => ({ id: f.name, ...f })) }));
+
 describe('POST /app/api/airtable/settings/test', () => {
   // The probe would dial api.airtable.com, so these tests build the router
   // via its factory with a fake client and call it directly (same guard path:
   // the defensive middleware re-resolves the session from the cookie).
   const testEnv = () => ({ ...env, AIRTABLE_SYNC: 'off' }) as unknown as Env;
+  const builtMeta = () => makeFakeMeta({ async listTables() { return fullyBuiltBase(); } });
 
   it('uses stored credentials when none are submitted', async () => {
     await SELF.fetch(
       `${ORIGIN}/app/api/airtable/settings`,
       jsonReq(admin.cookie, { enabled: true, base_id: 'appSTORED', api_key: KEY }, 'PUT'),
     );
-    const { factory, calls } = makeFakeFactory();
-    const routes = createAirtableAdminRoutes(factory);
+    const { factory, keys } = builtMeta();
+    const routes = createAirtableAdminRoutes(makeFakeFactory().factory, factory);
     const res = await routes.request('/settings/test', jsonReq(admin.cookie, {}), testEnv());
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ ok: true });
-    expect(calls).toEqual([{ apiKey: KEY, baseId: 'appSTORED' }]);
+    expect((await res.json()) as { ok: boolean }).toMatchObject({ ok: true });
+    expect(keys).toEqual([KEY]);
   });
 
   it('just-submitted credentials win over stored ones', async () => {
@@ -157,20 +200,89 @@ describe('POST /app/api/airtable/settings/test', () => {
       `${ORIGIN}/app/api/airtable/settings`,
       jsonReq(admin.cookie, { enabled: true, base_id: 'appSTORED', api_key: KEY }, 'PUT'),
     );
-    const { factory, calls } = makeFakeFactory();
-    const routes = createAirtableAdminRoutes(factory);
+    const { factory, keys } = builtMeta();
+    const routes = createAirtableAdminRoutes(makeFakeFactory().factory, factory);
     const res = await routes.request(
       '/settings/test',
       jsonReq(admin.cookie, { api_key: 'patTYPED9999', base_id: 'appTYPED' }),
       testEnv(),
     );
-    expect(await res.json()).toEqual({ ok: true });
-    expect(calls).toEqual([{ apiKey: 'patTYPED9999', baseId: 'appTYPED' }]);
+    expect((await res.json()) as { ok: boolean }).toMatchObject({ ok: true });
+    expect(keys).toEqual(['patTYPED9999']);
+  });
+
+  it('tells an unbuilt base apart from a wrong base id, instead of a bare 404', async () => {
+    const routes = createAirtableAdminRoutes(makeFakeFactory().factory, makeFakeMeta().factory);
+    const res = await routes.request(
+      '/settings/test',
+      jsonReq(admin.cookie, { api_key: KEY, base_id: 'appEMPTY' }),
+      testEnv(),
+    );
+    const parsed = (await res.json()) as { ok: boolean; error: string };
+    expect(parsed.ok).toBe(false);
+    expect(parsed.error).toContain('Create the tables in Airtable');
+    expect(parsed.error).not.toContain('404');
+  });
+
+  it('accepts a base URL pasted from the browser, stripping the table and view ids', async () => {
+    const bases: string[] = [];
+    const { factory } = makeFakeMeta({
+      async listTables(baseId: string) {
+        bases.push(baseId);
+        return fullyBuiltBase();
+      },
+    });
+    const routes = createAirtableAdminRoutes(makeFakeFactory().factory, factory);
+    const res = await routes.request(
+      '/settings/test',
+      jsonReq(admin.cookie, {
+        api_key: KEY,
+        base_id: 'https://airtable.com/appbrUQ7n7P0zFSL6/tblEn0t0UeFGHnLrl/viwYhZb2WIzFFKCj2',
+      }),
+      testEnv(),
+    );
+    expect((await res.json()) as { ok: boolean }).toMatchObject({ ok: true });
+    expect(bases).toEqual(['appbrUQ7n7P0zFSL6']);
+  });
+
+  it('rejects a base id with no app… in it by name, without calling Airtable', async () => {
+    const { factory, keys } = makeFakeMeta();
+    const routes = createAirtableAdminRoutes(makeFakeFactory().factory, factory);
+    const res = await routes.request(
+      '/settings/test',
+      jsonReq(admin.cookie, { api_key: KEY, base_id: 'my conference base' }),
+      testEnv(),
+    );
+    const parsed = (await res.json()) as { ok: boolean; error: string };
+    expect(parsed.ok).toBe(false);
+    expect(parsed.error).toContain('my conference base');
+    expect(keys).toHaveLength(0);
+  });
+
+  it('names the tables a half-built base is missing', async () => {
+    const { factory } = makeFakeMeta({
+      async listTables() {
+        return fullyBuiltBase().filter((t) => t.name !== 'Reviews' && t.name !== 'Tags');
+      },
+    });
+    const routes = createAirtableAdminRoutes(makeFakeFactory().factory, factory);
+    const res = await routes.request(
+      '/settings/test',
+      jsonReq(admin.cookie, { api_key: KEY, base_id: 'appHALF' }),
+      testEnv(),
+    );
+    const parsed = (await res.json()) as { ok: boolean; error: string };
+    expect(parsed.ok).toBe(false);
+    expect(parsed.error).toContain('Reviews, Tags');
   });
 
   it('reports failure detail without echoing the key', async () => {
-    const { factory } = makeFakeFactory(`airtable GET Events: 401 {"error":"AUTHENTICATION_REQUIRED"} key=${KEY}`);
-    const routes = createAirtableAdminRoutes(factory);
+    const { factory } = makeFakeMeta({
+      async listTables() {
+        throw new Error(`airtable meta GET: 401 {"error":"AUTHENTICATION_REQUIRED"} key=${KEY}`);
+      },
+    });
+    const routes = createAirtableAdminRoutes(makeFakeFactory().factory, factory);
     const res = await routes.request(
       '/settings/test',
       jsonReq(admin.cookie, { api_key: KEY, base_id: 'appBAD' }),
@@ -184,13 +296,134 @@ describe('POST /app/api/airtable/settings/test', () => {
     expect(parsed.error).toContain('[redacted]');
   });
 
+  describe('token without the schema scopes', () => {
+    const scopeless = () =>
+      makeFakeMeta({
+        async listTables() {
+          throw new AirtableScopeError('403 INVALID_PERMISSIONS');
+        },
+      }).factory;
+
+    it('falls back to the record probe and passes when it answers', async () => {
+      const { factory, calls } = makeFakeFactory();
+      const routes = createAirtableAdminRoutes(factory, scopeless());
+      const res = await routes.request(
+        '/settings/test',
+        jsonReq(admin.cookie, { api_key: KEY, base_id: 'appOK' }),
+        testEnv(),
+      );
+      expect((await res.json()) as { ok: boolean }).toMatchObject({ ok: true });
+      expect(calls).toEqual([{ apiKey: KEY, baseId: 'appOK' }]);
+    });
+
+    it('explains what a 404 from the record probe could mean', async () => {
+      const { factory } = makeFakeFactory('airtable GET Events: 404 {"error":"NOT_FOUND"}');
+      const routes = createAirtableAdminRoutes(factory, scopeless());
+      const res = await routes.request(
+        '/settings/test',
+        jsonReq(admin.cookie, { api_key: KEY, base_id: 'appOK' }),
+        testEnv(),
+      );
+      const parsed = (await res.json()) as { ok: boolean; error: string };
+      expect(parsed.ok).toBe(false);
+      expect(parsed.error).toContain('base ID is wrong');
+      expect(parsed.error).toContain('schema.bases:write');
+    });
+  });
+
   it('says so when nothing is configured anywhere', async () => {
     const { factory, calls } = makeFakeFactory();
-    const routes = createAirtableAdminRoutes(factory);
+    const { factory: meta, keys } = makeFakeMeta();
+    const routes = createAirtableAdminRoutes(factory, meta);
     const res = await routes.request('/settings/test', jsonReq(admin.cookie, {}), testEnv());
     const parsed = (await res.json()) as { ok: boolean };
     expect(parsed.ok).toBe(false);
     expect(calls).toHaveLength(0);
+    expect(keys).toHaveLength(0);
+  });
+});
+
+describe('POST /app/api/airtable/settings/bases and /setup', () => {
+  const testEnv = () => ({ ...env, AIRTABLE_SYNC: 'off' }) as unknown as Env;
+
+  it('lists bases with the typed key before anything is saved', async () => {
+    const { factory, keys } = makeFakeMeta();
+    const routes = createAirtableAdminRoutes(makeFakeFactory().factory, factory);
+    const res = await routes.request('/settings/bases', jsonReq(admin.cookie, { api_key: KEY }), testEnv());
+    expect(await res.json()).toEqual({ ok: true, bases: [{ id: 'appA', name: 'Conference' }] });
+    expect(keys).toEqual([KEY]);
+  });
+
+  it('creates every mirrored table in an empty base and reports it', async () => {
+    const created: string[] = [];
+    const { factory } = makeFakeMeta({
+      async createTable(_baseId: string, table: { name: string }) {
+        created.push(table.name);
+      },
+    });
+    const routes = createAirtableAdminRoutes(makeFakeFactory().factory, factory);
+    const res = await routes.request(
+      '/settings/setup',
+      jsonReq(admin.cookie, { api_key: KEY, base_id: 'appNEW' }),
+      testEnv(),
+    );
+    const body = (await res.json()) as { ok: boolean; report: { createdTables: string[] } };
+    expect(body.ok).toBe(true);
+    expect(body.report.createdTables).toEqual(SYNC_TABLES.map((t) => t.airtableTable));
+    expect(created).toEqual(SYNC_TABLES.map((t) => t.airtableTable));
+  });
+
+  it('explains the missing token scopes rather than echoing a raw 403', async () => {
+    const { factory } = makeFakeMeta({
+      async listTables() {
+        throw new AirtableScopeError(`403 INVALID_PERMISSIONS key=${KEY}`);
+      },
+    });
+    const routes = createAirtableAdminRoutes(makeFakeFactory().factory, factory);
+    const res = await routes.request(
+      '/settings/setup',
+      jsonReq(admin.cookie, { api_key: KEY, base_id: 'appNEW' }),
+      testEnv(),
+    );
+    const text = await res.text();
+    expect(text).not.toContain(KEY);
+    const body = JSON.parse(text) as { ok: boolean; error: string };
+    expect(body.ok).toBe(false);
+    expect(body.error).toContain('schema.bases:write');
+  });
+
+  it('scrubs the key out of any other setup failure', async () => {
+    const { factory } = makeFakeMeta({
+      async listTables() {
+        throw new Error(`airtable meta GET: 500 boom key=${KEY}`);
+      },
+    });
+    const routes = createAirtableAdminRoutes(makeFakeFactory().factory, factory);
+    const res = await routes.request(
+      '/settings/setup',
+      jsonReq(admin.cookie, { api_key: KEY, base_id: 'appNEW' }),
+      testEnv(),
+    );
+    const text = await res.text();
+    expect(text).not.toContain(KEY);
+    expect(text).toContain('[redacted]');
+  });
+
+  it('refuses setup with no base selected', async () => {
+    const { factory, keys } = makeFakeMeta();
+    const routes = createAirtableAdminRoutes(makeFakeFactory().factory, factory);
+    const res = await routes.request('/settings/setup', jsonReq(admin.cookie, { api_key: KEY }), testEnv());
+    expect((await res.json()) as { ok: boolean }).toMatchObject({ ok: false });
+    expect(keys).toHaveLength(0);
+  });
+
+  it('refuses both routes to reviewers', async () => {
+    const reviewer = await seedStaff(eventId, 'reviewer');
+    const routes = createAirtableAdminRoutes(makeFakeFactory().factory, makeFakeMeta().factory);
+    for (const path of ['/settings/bases', '/settings/setup']) {
+      const res = await routes.request(path, jsonReq(reviewer.cookie, { api_key: KEY }), testEnv());
+      expect(res.status).toBe(403);
+    }
   });
 });
 

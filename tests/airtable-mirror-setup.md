@@ -4,13 +4,34 @@ Companion to [workplan-9-airtable-mirror.md](workplan-9-airtable-mirror.md), whi
 built. The mirror is one-way (D1 → Airtable), off by default, and mirrors into **one global
 base** — a single-tenant-deployment feature (workplan-9 §5 option (b)).
 
-## 1. Create the Airtable base
+## 0. The short version — Settings page
 
-The sync does not create tables or columns — they must exist before the first sweep, with
-these exact names (they are the keys in `packages/airtable/src/mapping.ts`; renaming one there
-means renaming the Airtable column too). `typecast: true` is sent on every write, so
-single-select options (Status, Kind, …) are created automatically as values arrive — but
-tables and fields are not.
+An organiser sets this up themselves, in **Settings → Airtable mirror**, in four numbered
+steps: paste a personal access token, pick the base (**Find my bases**), press **Create the
+tables in Airtable**, tick **Mirror to Airtable** and Save. Nothing below is needed unless
+something goes wrong or you are configuring a deployment from the command line.
+
+Setup runs `ensureBaseSchema` (`packages/airtable/src/schema.ts`) against the metadata API:
+additive and idempotent — it creates missing tables, appends missing columns, and never
+renames, retypes or deletes anything. Pressing the button again after a failure, or after an
+upgrade adds columns, is the intended recovery path. A column that already exists with an
+incompatible type is reported for a human to fix, not altered.
+
+The token needs **four** scopes, not two: `data.records:read`, `data.records:write` (the
+mirror) plus `schema.bases:read`, `schema.bases:write` (base listing and table creation). A
+token with only the data scopes still mirrors — it just cannot run setup, and the page says so
+in those terms.
+
+## 1. The base schema
+
+The sync itself does not create tables or columns — they must exist before the first sweep,
+with these exact names (they are the keys in `packages/airtable/src/mapping.ts`, mirrored in
+`BASE_SCHEMA` in `schema.ts`; `schema.test.ts` fails if the two drift). `typecast: true` is
+sent on every write, so single-select options (Status, Kind, …) are created automatically as
+values arrive — but tables and fields are not.
+
+Step 3 on the Settings page builds all of this for you; the table below is the reference for
+checking or hand-building a base.
 
 Field types: single line text unless noted. Long text where marked ¶. ISO-8601 timestamp
 strings are sent as strings — Airtable's typecast will coerce them into Date fields if you
@@ -39,10 +60,12 @@ mirror into this one base — filter or group by it as needed.
 
 Create a PAT at <https://airtable.com/create/tokens> with:
 
-- scopes: `data.records:read`, `data.records:write`
-- access: just the base you created
+- scopes: `data.records:read`, `data.records:write` — and `schema.bases:read`,
+  `schema.bases:write` if you want the Settings page to list bases and build the tables
+- access: just the base you created (or its workspace, if the base doesn't exist yet)
 
-The base id is the `appXXXXXXXXXXXXXX` segment of the base's URL.
+The base id is the `appXXXXXXXXXXXXXX` segment of the base's URL — or let **Find my bases** on
+the Settings page fill it in.
 
 ## 3. Configure the deployment
 
