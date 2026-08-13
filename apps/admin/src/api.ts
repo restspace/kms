@@ -156,6 +156,7 @@ const ERROR_MESSAGES: Record<string, string> = {
   contact_required: 'Choose a contact to enroll.',
   event_required: 'Choose an event to add them to.',
   no_seat_at_event: 'You do not have a seat on that event.',
+  duplicate_criterion_name: 'A criterion with that name already exists on this round — names must be unique within a scorecard.',
 }
 
 function readableError(code: string): string {
@@ -211,6 +212,9 @@ export interface EventListRow {
   slug: string
   starts_at: string
   ends_at: string
+  /** IANA event timezone — the Events tab derives its inclusive local-day
+   * range from this (via eventDays) instead of reading the UTC instants. */
+  timezone: string
   agenda_published: boolean
   role: string
   speaker_count: number
@@ -251,12 +255,33 @@ export interface TrackRow {
 }
 
 export const listRooms = () => request<{ items: RoomRow[] }>('/app/api/rooms')
+// Mutations go through /app/api/agenda/rooms — the same CRUD as the legacy
+// /app/api/rooms routes, plus a settings-history row per change (eval defect:
+// room/track edits never appeared in the Settings history panel).
 export const createRoom = (data: { name: string; capacity?: number | null; notes?: string | null }) =>
-  request<RoomRow>('/app/api/rooms', { method: 'POST', body: JSON.stringify(data) })
+  request<RoomRow>('/app/api/agenda/rooms', { method: 'POST', body: JSON.stringify(data) })
 export const updateRoom = (id: string, data: Record<string, unknown>) =>
-  request<RoomRow>(`/app/api/rooms/${id}`, { method: 'PUT', body: JSON.stringify(data) })
+  request<RoomRow>(`/app/api/agenda/rooms/${id}`, { method: 'PUT', body: JSON.stringify(data) })
+/** What deleting this room would touch — feeds the confirm dialog. */
+export const getRoomUsage = (id: string) =>
+  request<{ session_count: number; scheduled_count: number }>(`/app/api/agenda/rooms/${id}/usage`)
 export const deleteRoom = (id: string) =>
-  request<{ ok: boolean }>(`/app/api/rooms/${id}`, { method: 'DELETE' })
+  request<{ ok: boolean; room: RoomRow; detached_session_ids: string[] }>(`/app/api/agenda/rooms/${id}`, {
+    method: 'DELETE',
+  })
+/** Undo of deleteRoom: reinstates the room under its original id and re-points
+ * the sessions that lost it (sessions re-homed meanwhile are left alone). */
+export const restoreRoom = (room: RoomRow, sessionIds: string[]) =>
+  request<{ ok: boolean; room: RoomRow; restored_sessions: number }>(`/app/api/agenda/rooms/${room.id}/restore`, {
+    method: 'POST',
+    body: JSON.stringify({
+      name: room.name,
+      capacity: room.capacity,
+      notes: room.notes,
+      position: room.position,
+      session_ids: sessionIds,
+    }),
+  })
 
 export interface FormatRow {
   id: string
@@ -274,12 +299,13 @@ export const deleteFormat = (id: string) =>
   request<{ ok: boolean }>(`/app/api/formats/${id}`, { method: 'DELETE' })
 
 export const listTracks = () => request<{ items: TrackRow[] }>('/app/api/tracks')
+// Mutations via /app/api/agenda/tracks for the settings-history row, like rooms.
 export const createTrack = (data: { name: string; color?: string | null }) =>
-  request<TrackRow>('/app/api/tracks', { method: 'POST', body: JSON.stringify(data) })
+  request<TrackRow>('/app/api/agenda/tracks', { method: 'POST', body: JSON.stringify(data) })
 export const updateTrack = (id: string, data: Record<string, unknown>) =>
-  request<TrackRow>(`/app/api/tracks/${id}`, { method: 'PUT', body: JSON.stringify(data) })
+  request<TrackRow>(`/app/api/agenda/tracks/${id}`, { method: 'PUT', body: JSON.stringify(data) })
 export const deleteTrack = (id: string) =>
-  request<{ ok: boolean }>(`/app/api/tracks/${id}`, { method: 'DELETE' })
+  request<{ ok: boolean }>(`/app/api/agenda/tracks/${id}`, { method: 'DELETE' })
 
 // ---------------------------------------------------------------------------
 // Saved embeds (EMB-15): named embed configurations. `options` is the
@@ -1123,6 +1149,8 @@ const fileQuery = (params: Record<string, string | number | undefined>): string 
 }
 
 export const getFileLibrary = (params: {
+  /** A single chain by its current upload row's id — `?rec=` deep-link restore. */
+  upload_id?: string
   submission_id?: string
   contact_id?: string
   event_id?: string
@@ -1475,6 +1503,8 @@ export interface OrgDashboardEventRow {
   id: string
   name: string
   slug: string
+  /** Event timezone; the date range renders as local days, not UTC dates. */
+  timezone: string
   starts_at: string
   ends_at: string
   agenda_published: number

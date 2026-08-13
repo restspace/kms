@@ -139,27 +139,38 @@ export function EvaluationSection() {
   const [note, setNote] = useState<string | null>(null)
   const [newPlan, setNewPlan] = useState('')
   const [creating, setCreating] = useState(false)
+  // Replay defect #1: the round the organiser just created, so its card can
+  // open with the criteria editor active (see PlanCard's autoEditCriteria).
+  const [freshPlanId, setFreshPlanId] = useState<string | null>(null)
   const alive = useRef(true)
   useEffect(() => {
     alive.current = true
     return () => { alive.current = false }
   }, [])
 
+  // Replay defect #1 (supporting fix): every mutation triggers a reload, so
+  // two quick edits put two overview fetches in flight — and if the older
+  // response resolved last it silently reinstated a stale overview (criteria
+  // lists missing their newest rows, which reads as "mangled"). Only the
+  // newest request may write state.
+  const loadSeq = useRef(0)
+
   const reload = useCallback(() => {
+    const seq = ++loadSeq.current
     setLoading(true)
     setError(null)
     withTimeout(getEvaluationOverview(), LOAD_TIMEOUT_MS)
       .then((raw) => {
-        if (!alive.current) return
+        if (!alive.current || seq !== loadSeq.current) return
         setOverview(normaliseOverview(raw))
       })
       .catch((e: unknown) => {
-        if (!alive.current) return
+        if (!alive.current || seq !== loadSeq.current) return
         setError(message(e))
       })
       .finally(() => {
         // The one guarantee that matters: "Loading…" always ends.
-        if (alive.current) setLoading(false)
+        if (alive.current && seq === loadSeq.current) setLoading(false)
       })
   }, [])
   useEffect(() => { reload() }, [reload])
@@ -189,10 +200,18 @@ export function EvaluationSection() {
     setCreating(true)
     setError(null)
     createPlan(name)
-      .then(() => {
+      .then((res) => {
         if (!alive.current) return
         setNewPlan('')
         setNote(`Created “${name}”`)
+        // Replay defect #1 (cross-round criteria bleed): after Create, the new
+        // round's card used to appear last, closed, while any previously
+        // opened criteria editor — belonging to the *old* round — stayed open
+        // and kept accepting input. Criteria typed "for the new round" were
+        // POSTed with the old round's plan id. Remember the new id so its
+        // card mounts with the criteria editor open and focused: the active
+        // criteria target is now the round the organiser just created.
+        setFreshPlanId(typeof res?.id === 'string' ? res.id : null)
         reload()
       })
       .catch((e: unknown) => { if (alive.current) setError(message(e)) })
@@ -247,6 +266,7 @@ export function EvaluationSection() {
                 run={run}
                 onNote={setNote}
                 onError={setError}
+                autoEditCriteria={plan.id === freshPlanId}
               />
             ))}
           </div>
@@ -262,12 +282,18 @@ function PlanCard({
   run,
   onNote,
   onError,
+  autoEditCriteria = false,
 }: {
   plan: Plan
   overview: Overview
   run: (label: Label, action: () => Promise<unknown>) => void
   onNote: (note: string) => void
   onError: (error: string) => void
+  /** Replay defect #1: true for a just-created round — its card mounts with
+   *  the criteria editor open and the name input focused, so criteria typed
+   *  right after Create land on this round, not on whichever older round's
+   *  editor happened to be open. */
+  autoEditCriteria?: boolean
 }) {
   const criteria = overview.criteria.filter((c) => c.plan_id === plan.id)
   const stats = overview.stats.find((s) => s.plan_id === plan.id)
@@ -313,8 +339,16 @@ function PlanCard({
   // Each section reads as a one-line summary until its ✎ opens the editor.
   const [editTiming, setEditTiming] = useState(false)
   const [editScale, setEditScale] = useState(false)
-  const [editCriteria, setEditCriteria] = useState(false)
+  const [editCriteria, setEditCriteria] = useState(autoEditCriteria)
   const [editReviewers, setEditReviewers] = useState(false)
+  // Focus the new round's criterion-name input once its editor is on screen.
+  const critNameRef = useRef<HTMLInputElement | null>(null)
+  useEffect(() => {
+    if (autoEditCriteria) critNameRef.current?.focus()
+    // Mount-time only: the card is keyed by plan.id, so a fresh round is a
+    // fresh mount.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   // ABS-05: submissions ticked for a scoped Assign (server already accepts
   // submission_ids — this was the missing UI half).
@@ -343,6 +377,14 @@ function PlanCard({
   const addCrit = () => {
     const name = critName.trim()
     if (!name || addingRef.current) return
+    // Replay defect #2: a second criterion with the same name makes the
+    // reviewer scorecard ambiguous. Same case-insensitive trim compare the
+    // server now enforces (409 duplicate_criterion_name) — checked here too
+    // so the organiser gets told before the field is cleared.
+    if (criteria.some((c) => c.name.trim().toLowerCase() === name.toLowerCase())) {
+      onError(`“${name}” is already a criterion on ${plan.name} — names must be unique within a round.`)
+      return
+    }
     // A dropdown needs at least two options before it means anything.
     const options = critOptions.split(',').map((o) => o.trim()).filter(Boolean)
     if (critKind === 'choice' && options.length < 2) return
@@ -613,6 +655,7 @@ function PlanCard({
       ))}
       <div className="crit-add">
         <input
+          ref={critNameRef}
           aria-label="New criterion name"
           placeholder="Add a criterion…"
           value={critName}

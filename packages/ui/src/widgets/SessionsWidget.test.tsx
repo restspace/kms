@@ -151,4 +151,42 @@ describe('SessionsWidget', () => {
     // The sibling card with a real description is unaffected.
     expect(screen.getByRole('button', { name: 'Show more' })).toBeTruthy();
   });
+
+  // Eval defect: an embed with ?track= applied said "No sessions are
+  // scheduled yet." when the agenda was full and the FILTER simply matched
+  // nothing — reading exactly like an empty agenda to a visitor.
+  it('says the filter matched nothing (naming the track) instead of claiming the agenda is empty', async () => {
+    render(<SessionsWidget eventSlug="devflow" filter={{ track: 'no-such-track' }} />);
+    await waitFor(() =>
+      expect(screen.getByText('No sessions match the selected filter (the "no-such-track" track).')).toBeTruthy(),
+    );
+    expect(screen.queryByText('No sessions are scheduled yet.')).toBeNull();
+  });
+
+  it('resolves a matching track filter with no sessions on it to the track display name', async () => {
+    const emptyTrackFeed: AgendaFeed = {
+      ...feed,
+      tracks: [...feed.tracks, { id: 't2', name: 'Platform Engineering', color: null }],
+    };
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({ ok: true, json: async () => emptyTrackFeed }) as Response),
+    );
+    render(<SessionsWidget eventSlug="devflow" filter={{ track: 'platform-engineering' }} />);
+    await waitFor(() =>
+      expect(
+        screen.getByText('No sessions match the selected filter (the "Platform Engineering" track).'),
+      ).toBeTruthy(),
+    );
+  });
+
+  it('still reports a genuinely empty agenda as such, filter or not', async () => {
+    const emptyFeed: AgendaFeed = { ...feed, days: [], sessions: [] };
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({ ok: true, json: async () => emptyFeed }) as Response),
+    );
+    render(<SessionsWidget eventSlug="devflow" filter={{ track: 'Agents' }} />);
+    await waitFor(() => expect(screen.getByText('No sessions are scheduled yet.')).toBeTruthy());
+  });
 });

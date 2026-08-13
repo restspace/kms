@@ -103,7 +103,7 @@ import {
 } from './eventScope'
 import { currentRoute, navigate, stableStringify, useRoute, type ViewKey } from './router'
 import { AdminErrorBoundary } from './components/AdminErrorBoundary'
-import { formatEventDateRange } from './agenda/timeUtils'
+import { eventDays, formatEventDateRange } from './agenda/timeUtils'
 import './shell.css'
 
 /**
@@ -340,6 +340,38 @@ const fmtDate = (iso: string | null | undefined): string => {
   const d = new Date(iso)
   if (Number.isNaN(d.getTime())) return iso
   return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+}
+
+/** A `YYYY-MM-DD` event-local day, formatted with year — midday UTC keeps the
+ * calendar day stable either side of the date line (same trick as the
+ * dashboard's fmtEventDay). */
+const fmtLocalDay = (day: string): string => {
+  const d = new Date(`${day.slice(0, 10)}T12:00:00Z`)
+  if (Number.isNaN(d.getTime())) return day
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' })
+}
+
+/**
+ * Events tab dates (replay defect #6's workspace sibling): the same
+ * event-local, inclusive day span the dashboard's `fmtEventRange` and the
+ * sidebar derive via `eventDays`. Rendering `fmtDate(starts_at/ends_at)` read
+ * the UTC instants in the VIEWER's timezone with no event timezone at all, so
+ * an event ending late on its final local day displayed as ending a day later
+ * for any viewer/timezone pairing that pushes the instant past midnight.
+ * Unparseable input or a bad timezone id falls back to the literal instants.
+ */
+export const fmtEventListRange = (item: { starts_at: string; ends_at: string; timezone?: string | null }): string => {
+  try {
+    const days = eventDays(item.starts_at, item.ends_at, item.timezone || 'UTC')
+    if (days.length > 0) {
+      const from = fmtLocalDay(days[0])
+      const to = fmtLocalDay(days[days.length - 1])
+      return from === to ? from : `${from} – ${to}`
+    }
+  } catch {
+    // fall through to the literal instants
+  }
+  return `${fmtDate(item.starts_at)} – ${fmtDate(item.ends_at)}`
 }
 
 const contactName = (c: ContactRow): string =>
@@ -773,6 +805,52 @@ const orgContactSchema = {
       (speakerSchema.properties as Record<string, unknown>)[key],
     ]),
   ),
+}
+
+/**
+ * Replay defect #10: Company and Job title are directory columns (the org
+ * contacts query coalesces them from the person's most recent membership) but
+ * the org-mode EDIT form offered no control for either, so they could not be
+ * corrected from the very grid that displays them. They stay membership
+ * columns server-side, and org edits are gated to people on the sidebar's
+ * current event (see `getEditAccess`), so the PUT lands on a real
+ * event_contacts row. Edit-only: the event-less CREATE ("＋ NEW CONTACT")
+ * keeps the identity-only schema above — the server 400s profile fields with
+ * no membership to put them on (`event_required_for_profile`).
+ */
+export const orgContactEditSchema = {
+  ...orgContactSchema,
+  properties: {
+    ...orgContactSchema.properties,
+    company: (speakerSchema.properties as Record<string, unknown>).company,
+    job_title: (speakerSchema.properties as Record<string, unknown>).job_title,
+  },
+}
+
+/**
+ * The org-mode save payload: identity fields always (as before), plus
+ * company/job_title ONLY when the organiser actually changed them from the
+ * values the form was seeded with. The seed is the grid row's coalesced
+ * most-recent-membership answer while the PUT writes the sidebar event's
+ * membership row — sending them unconditionally would silently copy one
+ * event's profile onto another on every untouched save (the exact
+ * silent-edit-loss shape the contacts PUT guards against). A deliberate edit
+ * travels; clearing a field sends null; an untouched field is simply absent
+ * (the API treats absence as "unchanged").
+ */
+export const buildOrgContactSavePayload = (
+  data: Record<string, unknown>,
+  existing?: ContactRow,
+): Record<string, unknown> => {
+  const out = identityFieldsOnly(unflattenContactLinks(data))
+  if (!existing) return out
+  for (const key of ['company', 'job_title'] as const) {
+    if (!(key in data)) continue
+    const next = typeof data[key] === 'string' ? (data[key] as string).trim() : ''
+    const prev = typeof existing[key] === 'string' ? (existing[key] as string) : ''
+    if (next !== prev) out[key] = next === '' ? null : next
+  }
+  return out
 }
 
 /**
@@ -1239,8 +1317,16 @@ const isWorkspaceTabKey = (value: string | null): value is WorkspaceTabKey =>
  * Tabs whose selected record can be resolved back from an id alone, and so can
  * survive a reload as `?rec=`. Tasks and Messages have no by-id read on the
  * query endpoint yet (see the FE-2 notes) — their selection is not URL-backed.
+ *
+ * Files joined (replay defect #11): the "Detail: <filename>" tab lived only in
+ * DataTabManager's in-memory state, so any URL-driven navigation (browser
+ * Back, a replayed/deep link, a sidebar sub-tab click) steered the workspace
+ * to whatever list the URL named while the file detail silently lost its
+ * active slot — file details were not reliably reachable. With the row id in
+ * `?rec=`, the detail tab is re-opened from the URL like a speaker's or a
+ * submission's (resolved via GET /files/library?upload_id=…).
  */
-const REC_RESTORABLE: ReadonlyArray<WorkspaceTabKey> = ['speakers', 'submissions']
+export const REC_RESTORABLE: ReadonlyArray<WorkspaceTabKey> = ['speakers', 'submissions', 'files']
 
 type WorkspaceSeeds = Partial<Record<WorkspaceTabKey, Record<string, unknown>>>
 
@@ -1250,8 +1336,9 @@ const NullFilter = () => null
 /**
  * Resolve a workspace record from its id so a `?rec=` deep link can re-open the
  * detail tab. Returns null when the record is gone (the caller drops `rec`).
+ * Exported for App.filesOpenDetails.test.tsx.
  */
-async function loadWorkspaceRecord(
+export async function loadWorkspaceRecord(
   tab: WorkspaceTabKey,
   id: string,
   eventFilterId: string | null,
@@ -1275,6 +1362,13 @@ async function loadWorkspaceRecord(
   if (tab === 'submissions') {
     const detail = await getSubmissionDetail(id)
     return (detail.submission as unknown as SubmissionRow | undefined) ?? null
+  }
+  if (tab === 'files') {
+    // Same event scoping as the tab's own dataSource, so a rec that fell out
+    // of the current filter resolves to nothing and the deep link drops
+    // rather than opening an out-of-scope row.
+    const result = await getFileLibrary({ upload_id: id, size: 1, event_id: eventFilterId ?? undefined })
+    return result.items[0] ?? null
   }
   return null
 }
@@ -1742,11 +1836,13 @@ export function buildWorkspaceConfig(
     // Eval defects #5/#16: event-mode schema now carries `speaker_status` (a
     // proper field on both create and Edit) alongside the custom fields.
     schema: orgMode ? orgContactSchema : eventSpeakerSchema,
-    // Same identity-only shape on edit: the grid's company/job title/bio in org
-    // mode are the person's MOST RECENT membership's answer, and the contacts
-    // PUT writes profile columns to the event it is aimed at — rendering them
-    // here would invite copying one event's profile onto another.
-    editSchema: orgMode ? orgContactSchema : undefined,
+    // Org edit renders identity plus Company/Job title (replay defect #10 —
+    // both are directory columns, so they must be correctable here). The
+    // seeded values are the person's MOST RECENT membership's answer while
+    // the PUT writes the sidebar event's row, so `buildOrgContactSavePayload`
+    // only sends them when actually changed — an untouched save can neither
+    // clear them nor copy one event's profile onto another.
+    editSchema: orgMode ? orgContactEditSchema : undefined,
     /**
      * Org mode edit gate. PUT /contacts/:id joins event_contacts for the event
      * it writes (the session's, since a directory row carries no event_id), so
@@ -1777,15 +1873,16 @@ export function buildWorkspaceConfig(
     // to open (consistent with the importer's fill-blanks-only merge: never
     // clobber, always land the organiser on the real record instead).
     onUpsert: async (data, existing?: ContactRow) => {
-      // Org mode posts identity only, both ways: `no_event: true` on create is
-      // what tells the API to make the person without a membership (profile
-      // fields there are a 400), and `identityFieldsOnly` on update keeps
+      // Org mode: `no_event: true` on create is what tells the API to make
+      // the person without a membership (profile fields there are a 400);
+      // updates send identity plus only the company/job_title values the
+      // organiser actually changed (buildOrgContactSavePayload), keeping
       // RecordForm's whole-record submit from smuggling the coalesced profile
       // columns into whichever event the PUT lands on. Event mode narrows the
       // same way now (defect #2): only the fields the form actually rendered
       // travel — see buildSpeakerSavePayload's doc comment.
       const payload = orgMode
-        ? identityFieldsOnly(unflattenContactLinks(data))
+        ? buildOrgContactSavePayload(data, existing)
         : buildSpeakerSavePayload(data, eventSpeakerSchema, contactFields)
       // F7: an edit opened from another accessible event's row must write THAT
       // event's membership row. Previously the whole-record submit carried the
@@ -2492,7 +2589,7 @@ export function buildWorkspaceConfig(
         header: 'Dates',
         width: '1.4fr',
         sortable: true,
-        render: (_value: string, item) => `${fmtDate(item.starts_at)} – ${fmtDate(item.ends_at)}`,
+        render: (_value: string, item) => fmtEventListRange(item),
       },
       {
         field: 'agenda_published',
@@ -2511,7 +2608,7 @@ export function buildWorkspaceConfig(
     detailComponent: ({ item }) => (
       <div className="detail-panel">
         <h2>{item.name}</h2>
-        <div className="detail-sub">{fmtDate(item.starts_at)} – {fmtDate(item.ends_at)}</div>
+        <div className="detail-sub">{fmtEventListRange(item)}</div>
         <dl>
           <dt>Agenda</dt><dd>{item.agenda_published ? 'Published' : 'Draft'}</dd>
           <dt>Speakers</dt><dd>{item.speaker_count}</dd>

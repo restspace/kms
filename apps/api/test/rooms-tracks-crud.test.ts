@@ -187,3 +187,72 @@ describe('POST /app/api/events with rooms + tracks', () => {
     expect(body.rooms.map((r) => r.id)).toContain(roomId);
   });
 });
+
+// Replay defect #3's back door: the SPA's Settings card mutates through
+// /agenda/rooms|tracks (which record settings history), but these legacy
+// routes stayed mutation-capable with no history — an external/API caller
+// could change the lists without leaving a trail. They now batch the same
+// pre-edit 'settings' content_revisions snapshot as the agenda routes.
+describe('legacy rooms/tracks mutations record settings history', () => {
+  const settingsRevisions = async (eventId: string) => {
+    const { results } = await env.DB
+      .prepare(
+        `SELECT payload FROM content_revisions
+         WHERE event_id = ? AND entity_type = 'settings' AND entity_id = ?
+         ORDER BY edited_at, id`,
+      )
+      .bind(eventId, eventId)
+      .all<{ payload: string }>();
+    return results.map((r) => JSON.parse(r.payload) as Record<string, unknown>);
+  };
+
+  it('room add / rename / delete each snapshot the pre-edit lists', async () => {
+    const eventId = await seedEvent();
+    const admin = await seedStaff(eventId, 'admin');
+
+    const created = await api('/rooms', admin.cookie, { name: 'Main Hall', capacity: 120 });
+    expect(created.status).toBe(201);
+    const room = (await created.json()) as { id: string };
+    let revs = await settingsRevisions(eventId);
+    expect(revs.length).toBe(1);
+    expect(revs[0]).toEqual({ rooms: null, tracks: null });
+
+    const renamed = await api(`/rooms/${room.id}`, admin.cookie, { name: 'Great Hall' }, 'PUT');
+    expect(renamed.status).toBe(200);
+    revs = await settingsRevisions(eventId);
+    expect(revs.length).toBe(2);
+    expect(revs[1]?.rooms).toBe('Main Hall (capacity 120)');
+
+    // An unchanged write records nothing (same discipline as the agenda PUT).
+    const noop = await api(`/rooms/${room.id}`, admin.cookie, { name: 'Great Hall' }, 'PUT');
+    expect(noop.status).toBe(200);
+    expect((await settingsRevisions(eventId)).length).toBe(2);
+
+    const deleted = await api(`/rooms/${room.id}`, admin.cookie, undefined, 'DELETE');
+    expect(deleted.status).toBe(200);
+    revs = await settingsRevisions(eventId);
+    expect(revs.length).toBe(3);
+    expect(revs[2]?.rooms).toBe('Great Hall (capacity 120)');
+
+    // A 404 delete leaves no phantom history row.
+    expect((await api(`/rooms/${room.id}`, admin.cookie, undefined, 'DELETE')).status).toBe(404);
+    expect((await settingsRevisions(eventId)).length).toBe(3);
+  });
+
+  it('track add and delete record history too', async () => {
+    const eventId = await seedEvent();
+    const admin = await seedStaff(eventId, 'admin');
+
+    const created = await api('/tracks', admin.cookie, { name: 'AI', color: 'green' });
+    expect(created.status).toBe(201);
+    const track = (await created.json()) as { id: string };
+
+    const deleted = await api(`/tracks/${track.id}`, admin.cookie, undefined, 'DELETE');
+    expect(deleted.status).toBe(200);
+
+    const revs = await settingsRevisions(eventId);
+    expect(revs.length).toBe(2);
+    expect(revs[0]?.tracks).toBeNull();
+    expect(revs[1]?.tracks).toBe('AI (green)');
+  });
+});

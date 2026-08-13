@@ -191,6 +191,36 @@ export function isEmptyFilter(filter: PublicFeedFilter | null | undefined): bool
   return !filter || (!filter.track && !filter.day);
 }
 
+/**
+ * Empty-state copy for a widget whose embed filter matched nothing (eval
+ * defect: a sessions embed with `?track=` said "No sessions are scheduled
+ * yet." when the agenda was full and the FILTER simply matched no session —
+ * a visitor could conclude the agenda is empty). Names the active filter,
+ * resolving the track back to its display name against the UNFILTERED feed's
+ * track list (applyFeedFilter strips unmatched tracks from its output, so
+ * callers must pass the raw feed's tracks).
+ */
+export function filteredEmptyMessage(
+  tracks: PublicTrack[] | undefined,
+  filter: PublicFeedFilter | null | undefined,
+): string {
+  const parts: string[] = [];
+  const wanted = (filter?.track ?? '').trim();
+  if (wanted) {
+    const lower = wanted.toLowerCase();
+    const wantedSlug = trackSlug(wanted);
+    const match = (tracks ?? []).find(
+      (t) => t.id.toLowerCase() === lower || (wantedSlug !== '' && trackSlug(t.name ?? '') === wantedSlug),
+    );
+    parts.push(`the "${match?.name ?? wanted}" track`);
+  }
+  const day = (filter?.day ?? '').trim();
+  if (day) parts.push(day);
+  return parts.length > 0
+    ? `No sessions match the selected filter (${parts.join(', ')}).`
+    : 'No sessions match the selected filter.';
+}
+
 // ---------------------------------------------------------------------------
 // Field-visibility toggles (workplan 14, F3/D6): the SSR handler
 // (apps/api/src/routes/landing.tsx parsePageOptions) parses

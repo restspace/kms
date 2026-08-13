@@ -14,7 +14,24 @@
  * also opening the detail tab.
  */
 import { describe, expect, it, vi, beforeAll } from 'vitest';
-import { render, screen } from '@testing-library/preact';
+import { render, screen, waitFor } from '@testing-library/preact';
+
+vi.mock('@tanstack/react-query', () => ({
+  useQueries: () => [],
+  useQueryClient: () => ({ setQueryData: () => {}, invalidateQueries: () => {} }),
+}));
+
+const getFileLibrary = vi.fn();
+
+vi.mock('./api', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./api')>();
+  return {
+    ...actual,
+    getFileLibrary: (...args: unknown[]) => getFileLibrary(...args),
+    // FileLibraryDetail loads the chain on mount; keep it off the network.
+    getFileChain: async () => ({ versions: [], comments: [] }),
+  };
+});
 
 vi.mock('react-window', () => ({
   FixedSizeList: ({ itemCount, itemData, children: Row }: any) => (
@@ -30,9 +47,22 @@ vi.mock('react-window-infinite-loader', () => ({
 }));
 
 import { DataList } from './components/DataList';
-import { buildWorkspaceConfig } from './App';
+import { DataTabManager } from './components/DataTabManager';
+import { buildWorkspaceConfig, loadWorkspaceRecord, REC_RESTORABLE } from './App';
 
 beforeAll(() => {
+  if (!window.matchMedia) {
+    window.matchMedia = ((query: string) => ({
+      matches: false,
+      media: query,
+      onchange: null,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      addListener: () => {},
+      removeListener: () => {},
+      dispatchEvent: () => false,
+    })) as any;
+  }
   if (!('ResizeObserver' in globalThis)) {
     (globalThis as any).ResizeObserver = class {
       observe() {}
@@ -135,5 +165,92 @@ describe('Files tab "Open details" control', () => {
 
     fileLink.click();
     expect(onItemActivate).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * Replay defect #11 ("Detail: headshot.png tab but the main pane keeps
+ * rendering the Submissions list"). Two halves:
+ *
+ *  1. With the full workspace tab set mounted, activating a file row must
+ *     make the FILE detail pane the active panel — pinned against the real
+ *     buildWorkspaceConfig + DataTabManager pair.
+ *  2. The detail tab used to live only in DataTabManager's memory: any
+ *     URL-driven navigation (Back, a replayed deep link, a sidebar sub-tab
+ *     click) steered the workspace to whatever list the URL named and the
+ *     file detail lost its slot with no way back. Files are `?rec=`-backed
+ *     now — REC_RESTORABLE includes them and loadWorkspaceRecord resolves the
+ *     row via GET /files/library?upload_id=… so the shell can re-open the tab.
+ */
+describe('Files detail tab pane', () => {
+  const ALL_TABS = ['speakers', 'submissions', 'reviews', 'comments', 'tasks', 'messages', 'files', 'events'];
+
+  function fullConfig() {
+    const stubSource = async () => ({ items: [], total: 0 });
+    const filesSource = async () => ({ items: [{ ...FILE_ROW }], total: 1 });
+    return buildWorkspaceConfig(
+      () => {},
+      0,
+      {},
+      'ev-1',
+      'Demo event',
+      {
+        contacts: stubSource as any,
+        submissions: stubSource as any,
+        tasks: stubSource as any,
+        messages: stubSource as any,
+        files: filesSource as any,
+        reviews: stubSource as any,
+        comments: stubSource as any,
+      },
+      () => {},
+      () => {},
+      [],
+      null,
+    );
+  }
+
+  it('renders the file detail (not another tab\'s list) once its tab is active', async () => {
+    const { container } = render(
+      <DataTabManager
+        config={fullConfig() as any}
+        defaultTabs={ALL_TABS}
+        activeTabRequest={{ configKey: 'files', token: 1 }}
+      />,
+    );
+
+    const link = await waitFor(() => {
+      const el = container.querySelector('.data-tab-panel.files .data-list-cell-link') as HTMLElement | null;
+      expect(el).toBeTruthy();
+      return el as HTMLElement;
+    });
+    link.click();
+
+    await waitFor(() => {
+      expect(container.querySelector('.data-tab-label.active')?.textContent ?? '').toContain('Detail: slides.pdf');
+    });
+    const activePanel = container.querySelector('.data-tab-panel.active');
+    expect(activePanel?.className ?? '').toContain('files');
+    expect(activePanel?.textContent ?? '').toContain('Versions');
+    expect(activePanel?.textContent ?? '').not.toContain('SESS-18 '); // no submissions grid
+  });
+});
+
+describe('files ?rec= restore', () => {
+  it('is REC_RESTORABLE and resolves the row by upload_id through the library endpoint', async () => {
+    expect(REC_RESTORABLE).toContain('files');
+    getFileLibrary.mockResolvedValueOnce({ items: [{ ...FILE_ROW }], total: 1 });
+
+    const item = await loadWorkspaceRecord('files', 'up-1', 'ev-1');
+
+    expect(getFileLibrary).toHaveBeenCalledWith({ upload_id: 'up-1', size: 1, event_id: 'ev-1' });
+    expect((item as { upload_id: string }).upload_id).toBe('up-1');
+  });
+
+  it('resolves null (deep link drops) when the row is gone or out of scope', async () => {
+    getFileLibrary.mockResolvedValueOnce({ items: [], total: 0 });
+    expect(await loadWorkspaceRecord('files', 'up-gone', null)).toBeNull();
+    // Org scope sends no event_id at all rather than an empty string.
+    expect(getFileLibrary).toHaveBeenLastCalledWith({ upload_id: 'up-gone', size: 1, event_id: undefined });
   });
 });

@@ -11,7 +11,10 @@ import type { Context } from 'hono';
 import { autoSchedule, computeConflicts } from '@kms/core';
 import type { AgendaRoomInput, AgendaSessionInput, Conflict } from '@kms/core';
 import type { Env } from '../env';
-import { bumpEventRevision } from '../revision';
+import { isWriter } from '../access';
+import { stageAirtableDeletes } from '../airtableStage';
+import { bumpEventRevision, entityRevisionInsert, watchedFieldsChanged } from '../revision';
+import { loadAuthorName } from '../submissionComments';
 import { sendScheduleEmails, type ScheduleMailKind } from '../scheduleMail';
 import { nextSessionCodeSql } from '../sessionCode';
 import type { SessionPayload } from '../session';
@@ -585,6 +588,339 @@ agendaRoutes.post('/conflicts/ignore', async (c) => {
   await c.env.KV.put(ignoredKey(session.eventId), JSON.stringify(next));
   const payload = await agendaPayload(c);
   return c.json({ ok: true, ...payload });
+});
+
+// ---------------------------------------------------------------------------
+// Rooms & tracks — the Settings card's mutation surface, with settings history.
+//
+// Eval defect: adding/renaming/deleting a room or track never reached the
+// "Settings history" panel, which kept claiming "the event settings are as
+// first configured". History entries are content_revisions rows with
+// entity_type 'settings' + entity_id = the event (Wave E, workplan 14 D8),
+// which is exactly what GET /app/api/events/:id/revisions lists — so recording
+// a room/track change is one entityRevisionInsert batched with the mutation,
+// same discipline as the events PATCH. The snapshot is the PRE-edit rooms and
+// tracks lists as readable lines; there is no PATCH surface that could write a
+// room list back, so these rows are informational (the history panel offers
+// Restore only on rows that carry restorable event fields).
+//
+// The routes live here rather than next to the original rooms/tracks CRUD in
+// adminApi.ts so the history hook ships with the agenda/settings surface; the
+// admin SPA's Settings card now calls these. The legacy /app/api/rooms and
+// /app/api/tracks mutations remain for external callers and record the same
+// settings-history rows via their own mirror in adminApi.ts.
+// ---------------------------------------------------------------------------
+
+const ROOM_TRACK_NAME_MAX_CHARS = 200;
+
+interface NamedFields {
+  values: Record<string, string | number | null>;
+  error?: string;
+}
+
+/** Mirrors adminApi.ts pickRoomFields — name required on create only. */
+function pickRoomFields(raw: unknown, { requireName }: { requireName: boolean }): NamedFields {
+  const body = (raw ?? {}) as Record<string, unknown>;
+  const values: Record<string, string | number | null> = {};
+  const fail = (error: string): NamedFields => ({ values: {}, error });
+
+  if (requireName || 'name' in body) {
+    const name = typeof body.name === 'string' ? body.name.trim() : '';
+    if (!name) return fail('name_required');
+    values.name = name.slice(0, ROOM_TRACK_NAME_MAX_CHARS);
+  }
+  if ('capacity' in body) {
+    const capacity = parseCapacity(body.capacity);
+    if (capacity === undefined) return fail('invalid_capacity');
+    values.capacity = capacity;
+  }
+  if ('notes' in body) {
+    const v = body.notes;
+    if (v === null || v === '') values.notes = null;
+    else if (typeof v === 'string') values.notes = v.trim().slice(0, 2000);
+    else return fail('invalid_notes');
+  }
+  return { values };
+}
+
+/** Mirrors adminApi.ts pickTrackFields. */
+function pickTrackFields(raw: unknown, { requireName }: { requireName: boolean }): NamedFields {
+  const body = (raw ?? {}) as Record<string, unknown>;
+  const values: Record<string, string | number | null> = {};
+  const fail = (error: string): NamedFields => ({ values: {}, error });
+
+  if (requireName || 'name' in body) {
+    const name = typeof body.name === 'string' ? body.name.trim() : '';
+    if (!name) return fail('name_required');
+    values.name = name.slice(0, ROOM_TRACK_NAME_MAX_CHARS);
+  }
+  if ('color' in body) {
+    const v = body.color;
+    if (v === null || v === '') values.color = null;
+    else if (typeof v === 'string') values.color = v.trim().slice(0, 20);
+    else return fail('invalid_color');
+  }
+  return { values };
+}
+
+const roomRow = (db: D1Database, id: string, eventId: string) =>
+  db.prepare('SELECT id, event_id, name, capacity, position, notes FROM rooms WHERE id = ? AND event_id = ?')
+    .bind(id, eventId)
+    .first<{ id: string; event_id: string; name: string; capacity: number | null; position: number; notes: string | null }>();
+
+const trackRow = (db: D1Database, id: string, eventId: string) =>
+  db.prepare('SELECT id, event_id, name, color, position FROM tracks WHERE id = ? AND event_id = ?')
+    .bind(id, eventId)
+    .first<{ id: string; event_id: string; name: string; color: string | null; position: number }>();
+
+/**
+ * The PRE-edit rooms/tracks snapshot as one settings-history INSERT, ready to
+ * batch with the mutation it precedes. Lists render one item per line —
+ * "Main Hall (capacity 120)" / "AI (green)" — because the history panel shows
+ * snapshots as text, not structured rows; an empty list snapshots as null so
+ * it displays "(empty)" like any cleared field.
+ */
+async function roomsTracksRevision(c: Context<ApiEnv>, editedAt: string): Promise<D1PreparedStatement> {
+  const session = c.get('session');
+  const db = c.env.DB;
+  const [rooms, tracks, editedByName] = await Promise.all([
+    db.prepare('SELECT name, capacity FROM rooms WHERE event_id = ? ORDER BY position')
+      .bind(session.eventId)
+      .all<{ name: string; capacity: number | null }>()
+      .then((r) => r.results),
+    db.prepare('SELECT name, color FROM tracks WHERE event_id = ? ORDER BY position')
+      .bind(session.eventId)
+      .all<{ name: string; color: string | null }>()
+      .then((r) => r.results),
+    loadAuthorName(db, session.contactId),
+  ]);
+  const roomLines = rooms
+    .map((r) => (r.capacity !== null ? `${r.name} (capacity ${r.capacity})` : r.name))
+    .join('\n');
+  const trackLines = tracks.map((t) => (t.color ? `${t.name} (${t.color})` : t.name)).join('\n');
+  return entityRevisionInsert(db, {
+    eventId: session.eventId,
+    entityType: 'settings',
+    entityId: session.eventId,
+    payload: { rooms: roomLines || null, tracks: trackLines || null },
+    editedBy: session.contactId,
+    editedByName,
+    source: 'admin',
+    editedAt,
+  });
+}
+
+// POST /agenda/rooms — create, with the pre-add list snapshotted.
+agendaRoutes.post('/rooms', async (c) => {
+  const session = c.get('session');
+  if (!isWriter(session.role)) return c.json({ error: 'forbidden' }, 403);
+  const { values, error } = pickRoomFields(await c.req.json().catch(() => ({})), { requireName: true });
+  if (error) return c.json({ error }, 400);
+
+  const db = c.env.DB;
+  const id = crypto.randomUUID();
+  const ts = nowIso();
+  await db.batch([
+    await roomsTracksRevision(c, ts),
+    db.prepare(
+      `INSERT INTO rooms (id, event_id, name, capacity, notes, position, updated_at)
+       SELECT ?1, ?2, ?3, ?4, ?5, COALESCE((SELECT MAX(position) + 1 FROM rooms WHERE event_id = ?2), 0), ?6`,
+    ).bind(id, session.eventId, values.name, values.capacity ?? null, values.notes ?? null, ts),
+  ]);
+  await bumpEventRevision(c.env, session.eventId);
+  return c.json(await roomRow(db, id, session.eventId), 201);
+});
+
+// PUT /agenda/rooms/:id — rename / capacity / notes. The Settings card writes
+// on blur, so an unchanged write is a no-op: no UPDATE, no history row.
+agendaRoutes.put('/rooms/:id', async (c) => {
+  const session = c.get('session');
+  if (!isWriter(session.role)) return c.json({ error: 'forbidden' }, 403);
+  const id = c.req.param('id');
+  const { values, error } = pickRoomFields(await c.req.json().catch(() => ({})), { requireName: false });
+  if (error) return c.json({ error }, 400);
+
+  const db = c.env.DB;
+  const before = await roomRow(db, id, session.eventId);
+  if (!before) return c.json({ error: 'not_found' }, 404);
+
+  const cols = Object.keys(values);
+  if (cols.length === 0 || !watchedFieldsChanged(before, values, cols)) return c.json(before);
+
+  const ts = nowIso();
+  await db.batch([
+    await roomsTracksRevision(c, ts),
+    db.prepare(
+      `UPDATE rooms SET ${cols.map((k) => `${k} = ?`).join(', ')}, updated_at = ? WHERE id = ? AND event_id = ?`,
+    ).bind(...cols.map((k) => values[k]), ts, id, session.eventId),
+  ]);
+  await bumpEventRevision(c.env, session.eventId);
+  return c.json(await roomRow(db, id, session.eventId));
+});
+
+// GET /agenda/rooms/:id/usage — what a delete would touch, for the confirm
+// dialog: how many accepted sessions are scheduled in this room right now.
+agendaRoutes.get('/rooms/:id/usage', async (c) => {
+  const session = c.get('session');
+  const id = c.req.param('id');
+  const room = await roomRow(c.env.DB, id, session.eventId);
+  if (!room) return c.json({ error: 'not_found' }, 404);
+  const counts = await c.env.DB
+    .prepare(
+      `SELECT COUNT(*) AS session_count,
+              SUM(CASE WHEN starts_at IS NOT NULL AND status = 'accepted' THEN 1 ELSE 0 END) AS scheduled_count
+       FROM submissions WHERE room_id = ? AND event_id = ?`,
+    )
+    .bind(id, session.eventId)
+    .first<{ session_count: number; scheduled_count: number | null }>();
+  return c.json({
+    session_count: counts?.session_count ?? 0,
+    scheduled_count: counts?.scheduled_count ?? 0,
+  });
+});
+
+// DELETE /agenda/rooms/:id — same null-the-reference semantics as the legacy
+// route, plus history and an undo payload: the deleted row and every session
+// id that lost its room ride back so the client's Undo toast can restore both.
+agendaRoutes.delete('/rooms/:id', async (c) => {
+  const session = c.get('session');
+  if (!isWriter(session.role)) return c.json({ error: 'forbidden' }, 403);
+  const id = c.req.param('id');
+  const db = c.env.DB;
+  const room = await roomRow(db, id, session.eventId);
+  if (!room) return c.json({ error: 'not_found' }, 404);
+  const { results: detached } = await db
+    .prepare('SELECT id FROM submissions WHERE room_id = ? AND event_id = ?')
+    .bind(id, session.eventId)
+    .all<{ id: string }>();
+
+  const ts = nowIso();
+  await db.batch([
+    await roomsTracksRevision(c, ts),
+    db.prepare('UPDATE submissions SET room_id = NULL, updated_at = ? WHERE room_id = ? AND event_id = ?')
+      .bind(ts, id, session.eventId),
+    stageAirtableDeletes(db, 'rooms', 'id = ? AND event_id = ?', id, session.eventId),
+    db.prepare('DELETE FROM rooms WHERE id = ? AND event_id = ?').bind(id, session.eventId),
+  ]);
+  await bumpEventRevision(c.env, session.eventId);
+  return c.json({ ok: true, room, detached_session_ids: detached.map((r) => r.id) });
+});
+
+// POST /agenda/rooms/:id/restore — the Undo half of the delete above: put the
+// room back under its original id and re-point the sessions that lost it.
+// `room_id IS NULL` in the session UPDATE keeps a session an operator already
+// re-homed during the undo window where they put it.
+agendaRoutes.post('/rooms/:id/restore', async (c) => {
+  const session = c.get('session');
+  if (!isWriter(session.role)) return c.json({ error: 'forbidden' }, 403);
+  const id = c.req.param('id');
+  const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+  const { values, error } = pickRoomFields(body, { requireName: true });
+  if (error) return c.json({ error }, 400);
+  const position = Number.isInteger(body.position) && (body.position as number) >= 0 ? (body.position as number) : 0;
+  const sessionIds = Array.isArray(body.session_ids)
+    ? (body.session_ids as unknown[]).filter((v): v is string => typeof v === 'string').slice(0, 500)
+    : [];
+
+  const db = c.env.DB;
+  const ts = nowIso();
+  // INSERT OR IGNORE + read-back: a double-fired undo finds the room already
+  // restored; an id colliding with another event's room never re-points a
+  // session (the read-back is event-scoped and 409s instead).
+  await db.batch([
+    await roomsTracksRevision(c, ts),
+    db.prepare(
+      'INSERT OR IGNORE INTO rooms (id, event_id, name, capacity, notes, position, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    ).bind(id, session.eventId, values.name, values.capacity ?? null, values.notes ?? null, position, ts),
+  ]);
+  const room = await roomRow(db, id, session.eventId);
+  if (!room) return c.json({ error: 'conflict' }, 409);
+  let restoredSessions = 0;
+  if (sessionIds.length > 0) {
+    const result = await db
+      .prepare(
+        `UPDATE submissions SET room_id = ?, updated_at = ?
+         WHERE id IN (${sessionIds.map(() => '?').join(',')}) AND event_id = ? AND room_id IS NULL`,
+      )
+      .bind(id, ts, ...sessionIds, session.eventId)
+      .run();
+    restoredSessions = result.meta.changes ?? 0;
+  }
+  await bumpEventRevision(c.env, session.eventId);
+  return c.json({ ok: true, room, restored_sessions: restoredSessions });
+});
+
+// POST /agenda/tracks — create, with history.
+agendaRoutes.post('/tracks', async (c) => {
+  const session = c.get('session');
+  if (!isWriter(session.role)) return c.json({ error: 'forbidden' }, 403);
+  const { values, error } = pickTrackFields(await c.req.json().catch(() => ({})), { requireName: true });
+  if (error) return c.json({ error }, 400);
+
+  const db = c.env.DB;
+  const id = crypto.randomUUID();
+  const ts = nowIso();
+  await db.batch([
+    await roomsTracksRevision(c, ts),
+    db.prepare(
+      `INSERT INTO tracks (id, event_id, name, color, position, updated_at)
+       SELECT ?1, ?2, ?3, ?4, COALESCE((SELECT MAX(position) + 1 FROM tracks WHERE event_id = ?2), 0), ?5`,
+    ).bind(id, session.eventId, values.name, values.color ?? null, ts),
+  ]);
+  await bumpEventRevision(c.env, session.eventId);
+  return c.json(await trackRow(db, id, session.eventId), 201);
+});
+
+// PUT /agenda/tracks/:id — rename / recolor, no-op writes skipped like rooms.
+agendaRoutes.put('/tracks/:id', async (c) => {
+  const session = c.get('session');
+  if (!isWriter(session.role)) return c.json({ error: 'forbidden' }, 403);
+  const id = c.req.param('id');
+  const { values, error } = pickTrackFields(await c.req.json().catch(() => ({})), { requireName: false });
+  if (error) return c.json({ error }, 400);
+
+  const db = c.env.DB;
+  const before = await trackRow(db, id, session.eventId);
+  if (!before) return c.json({ error: 'not_found' }, 404);
+
+  const cols = Object.keys(values);
+  if (cols.length === 0 || !watchedFieldsChanged(before, values, cols)) return c.json(before);
+
+  const ts = nowIso();
+  await db.batch([
+    await roomsTracksRevision(c, ts),
+    db.prepare(
+      `UPDATE tracks SET ${cols.map((k) => `${k} = ?`).join(', ')}, updated_at = ? WHERE id = ? AND event_id = ?`,
+    ).bind(...cols.map((k) => values[k]), ts, id, session.eventId),
+  ]);
+  await bumpEventRevision(c.env, session.eventId);
+  return c.json(await trackRow(db, id, session.eventId));
+});
+
+// DELETE /agenda/tracks/:id — legacy semantics (null the reference, clean the
+// submission_tracks junction) plus the history row.
+agendaRoutes.delete('/tracks/:id', async (c) => {
+  const session = c.get('session');
+  if (!isWriter(session.role)) return c.json({ error: 'forbidden' }, 403);
+  const id = c.req.param('id');
+  const db = c.env.DB;
+  const track = await trackRow(db, id, session.eventId);
+  if (!track) return c.json({ error: 'not_found' }, 404);
+
+  const ts = nowIso();
+  await db.batch([
+    await roomsTracksRevision(c, ts),
+    db.prepare('UPDATE submissions SET track_id = NULL, updated_at = ? WHERE track_id = ? AND event_id = ?')
+      .bind(ts, id, session.eventId),
+    db.prepare(
+      `DELETE FROM submission_tracks WHERE track_id = ?
+       AND submission_id IN (SELECT id FROM submissions WHERE event_id = ?)`,
+    ).bind(id, session.eventId),
+    stageAirtableDeletes(db, 'tracks', 'id = ? AND event_id = ?', id, session.eventId),
+    db.prepare('DELETE FROM tracks WHERE id = ? AND event_id = ?').bind(id, session.eventId),
+  ]);
+  await bumpEventRevision(c.env, session.eventId);
+  return c.json({ ok: true });
 });
 
 // DELETE /agenda/sessions/:id/speakers/:contactId — the "Remove speaker"

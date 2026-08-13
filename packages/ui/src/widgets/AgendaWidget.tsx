@@ -4,6 +4,8 @@ import {
   applyFeedFilter,
   fetchAgenda,
   fieldVisible,
+  filteredEmptyMessage,
+  isEmptyFilter,
   type AgendaFeed,
   type FieldVisibility,
   type PublicFeedFilter,
@@ -191,21 +193,28 @@ export function AgendaWidget({ eventSlug, filter, show }: AgendaWidgetProps) {
   const showSpeakers = fieldVisible(show, 'speakers')
   const showRoom = fieldVisible(show, 'room')
   const showTrack = fieldVisible(show, 'track')
-  const [feed, setFeed] = useState<AgendaFeed | null | undefined>(undefined)
+  // Raw feed kept alongside the filtered view so the empty state can tell
+  // "nothing scheduled" apart from "the embed filter matched nothing".
+  const [rawFeed, setRawFeed] = useState<AgendaFeed | null | undefined>(undefined)
   const [day, setDay] = useState<string | null>(null)
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const panelRef = useRef<HTMLDivElement | null>(null)
 
   useEffect(() => {
     let cancelled = false
-    setFeed(undefined)
+    setRawFeed(undefined)
     fetchAgenda(eventSlug).then((data) => {
-      if (!cancelled) setFeed(applyFeedFilter(data, filter))
+      if (!cancelled) setRawFeed(data)
     })
     return () => {
       cancelled = true
     }
-  }, [eventSlug, filter?.track, filter?.day])
+  }, [eventSlug])
+
+  const feed = useMemo(
+    () => (rawFeed === undefined ? undefined : applyFeedFilter(rawFeed, filter)),
+    [rawFeed, filter?.track, filter?.day],
+  )
 
   // Days the tab strip offers (EMB-07): when the event has a start/end date
   // range, every event day gets a tab — including days with nothing
@@ -279,10 +288,17 @@ export function AgendaWidget({ eventSlug, filter, show }: AgendaWidgetProps) {
   const trackById = new Map(feed.tracks.map((t) => [t.id, t]))
 
   if (!layout || days.length === 0) {
+    // Same defect and fix as SessionsWidget: an embed filter that matched
+    // nothing must not read as an empty agenda.
+    const filteredOut = !isEmptyFilter(filter) && (rawFeed?.sessions.length ?? 0) > 0
     return (
       <>
         <style dangerouslySetInnerHTML={{ __html: agendaCss }} />
-        <p className="event-widget-empty">No sessions are on the schedule yet — check back soon.</p>
+        <p className="event-widget-empty">
+          {filteredOut
+            ? filteredEmptyMessage(rawFeed?.tracks, filter)
+            : 'No sessions are on the schedule yet — check back soon.'}
+        </p>
       </>
     )
   }

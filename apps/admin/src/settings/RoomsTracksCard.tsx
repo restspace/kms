@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   createFormat,
   createRoom,
@@ -6,9 +6,11 @@ import {
   deleteFormat,
   deleteRoom,
   deleteTrack,
+  getRoomUsage,
   listFormats,
   listRooms,
   listTracks,
+  restoreRoom,
   updateFormat,
   updateRoom,
   updateTrack,
@@ -71,6 +73,20 @@ export function RoomsTracksCard() {
   // room ever having existed.
   const [newRoomName, setNewRoomName] = useState<string | null>(null)
   const [addingRoom, setAddingRoom] = useState(false)
+  // Room-delete undo (eval defect: deletion was destructive with no way back).
+  // The DELETE response carries the doomed row and the ids of every session
+  // that lost its room, so Undo is one restore call — same toast-with-Undo
+  // affordance the agenda board uses for schedule changes.
+  const [roomUndo, setRoomUndo] = useState<{ room: RoomRow; sessionIds: string[]; note: string } | null>(null)
+  const [undoBusy, setUndoBusy] = useState(false)
+  const undoTimer = useRef<number | null>(null)
+
+  useEffect(
+    () => () => {
+      if (undoTimer.current !== null) window.clearTimeout(undoTimer.current)
+    },
+    [],
+  )
 
   const loadRooms = useCallback(() => {
     setRoomsError(null)
@@ -150,16 +166,59 @@ export function RoomsTracksCard() {
   }
 
   const handleRemoveRoom = async (row: RoomDraftRow) => {
-    const confirmed = await appConfirm(
-      `Delete "${row.name || 'this room'}"? Any scheduled sessions keep their slot but lose the room.`,
-      { title: 'Delete room', confirmLabel: 'Delete', danger: true },
-    )
+    // Name the blast radius before asking (eval defect: the old confirm said
+    // "any scheduled sessions" without knowing whether that meant 0 or 40).
+    let scheduled: number | null = null
+    try {
+      scheduled = (await getRoomUsage(row.key)).scheduled_count
+    } catch {
+      // The count is advisory; an unreachable usage endpoint must not make
+      // the room undeletable. The confirm falls back to the generic wording.
+    }
+    const impact =
+      scheduled === null
+        ? 'Any scheduled sessions in this room keep their slot but lose the room.'
+        : scheduled > 0
+          ? `${scheduled} scheduled session${scheduled === 1 ? ' is' : 's are'} in this room — ${scheduled === 1 ? 'it keeps' : 'they keep'} their slot but lose the room.`
+          : 'No scheduled sessions are in this room.'
+    const confirmed = await appConfirm(`Delete "${row.name || 'this room'}"? ${impact}`, {
+      title: 'Delete room',
+      confirmLabel: 'Delete',
+      danger: true,
+    })
     if (!confirmed) return
     try {
-      await deleteRoom(row.key)
+      const res = await deleteRoom(row.key)
       setRooms((cur) => (cur ?? []).filter((r) => r.key !== row.key))
+      setRoomUndo({
+        room: res.room,
+        sessionIds: res.detached_session_ids,
+        note:
+          res.detached_session_ids.length > 0
+            ? `Room "${res.room.name}" deleted — ${res.detached_session_ids.length} session${res.detached_session_ids.length === 1 ? '' : 's'} kept their slot without a room.`
+            : `Room "${res.room.name}" deleted.`,
+      })
+      if (undoTimer.current !== null) window.clearTimeout(undoTimer.current)
+      // Longer than the agenda's 6s toast on purpose: this one is the only
+      // way back from a destructive delete, not a courtesy confirmation.
+      undoTimer.current = window.setTimeout(() => setRoomUndo(null), 15000)
     } catch (e) {
       setRoomsError(e instanceof Error ? e.message : 'Failed to delete the room.')
+    }
+  }
+
+  const handleUndoRoomDelete = async () => {
+    if (!roomUndo || undoBusy) return
+    setUndoBusy(true)
+    try {
+      await restoreRoom(roomUndo.room, roomUndo.sessionIds)
+      if (undoTimer.current !== null) window.clearTimeout(undoTimer.current)
+      setRoomUndo(null)
+      loadRooms()
+    } catch (e) {
+      setRoomsError(e instanceof Error ? e.message : 'Failed to restore the room.')
+    } finally {
+      setUndoBusy(false)
     }
   }
 
@@ -264,6 +323,18 @@ export function RoomsTracksCard() {
         drive the submission form&rsquo;s Format dropdown; put the default length in the name (e.g.
         &ldquo;Talk (30 min)&rdquo;) and new sessions pick it up.
       </p>
+
+      {roomUndo && (
+        <div className="settings-undo-toast" role="status">
+          <span>{roomUndo.note}</span>
+          <button type="button" disabled={undoBusy} onClick={() => void handleUndoRoomDelete()}>
+            {undoBusy ? 'Restoring…' : 'Undo'}
+          </button>
+          <button type="button" className="settings-ghost" onClick={() => setRoomUndo(null)}>
+            Dismiss
+          </button>
+        </div>
+      )}
 
       <div className="settings-rt-columns">
         <div>

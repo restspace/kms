@@ -1255,6 +1255,18 @@ evaluationRoutes.post('/evaluation/plans/:id/criteria', async (c) => {
   const weight = Number(body.weight);
   const kindSpec = parseCriterionKind(body);
   if (!kindSpec) return c.json({ error: 'invalid_criterion_kind' }, 400);
+  // Replay defect #2: two criteria with the same name on one scorecard render
+  // as indistinguishable fields on the reviewer's card, and the saved scores
+  // keyed by criterion id become impossible to tell apart by eye. Refuse the
+  // duplicate here (case-insensitive, trimmed) — same 409 pattern as
+  // already_participant. Uniqueness is per plan: two rounds may both have a
+  // "Comments" criterion.
+  const dupe = await c.env.DB.prepare(
+    'SELECT 1 FROM scoring_criteria WHERE plan_id = ? AND lower(trim(name)) = lower(?) LIMIT 1',
+  )
+    .bind(planId, name)
+    .first();
+  if (dupe) return c.json({ error: 'duplicate_criterion_name' }, 409);
   const pos = await c.env.DB.prepare('SELECT COALESCE(MAX(position), 0) + 1 AS n FROM scoring_criteria WHERE plan_id = ?')
     .bind(planId)
     .first<{ n: number }>();
@@ -1273,7 +1285,23 @@ evaluationRoutes.put('/evaluation/criteria/:id', async (c) => {
   const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
   const sets: string[] = [];
   const params: unknown[] = [];
-  if (typeof body.name === 'string' && body.name.trim()) { sets.push('name = ?'); params.push(body.name.trim()); }
+  if (typeof body.name === 'string' && body.name.trim()) {
+    const name = body.name.trim();
+    // Replay defect #2, rename path: renaming must not create the duplicate
+    // the create route now refuses. `id != ?1` so renaming a criterion to its
+    // own name (a case tweak, say) still goes through.
+    const dupe = await c.env.DB.prepare(
+      `SELECT 1 FROM scoring_criteria
+       WHERE id != ?1 AND lower(trim(name)) = lower(?2)
+         AND plan_id = (SELECT plan_id FROM scoring_criteria WHERE id = ?1)
+       LIMIT 1`,
+    )
+      .bind(c.req.param('id'), name)
+      .first();
+    if (dupe) return c.json({ error: 'duplicate_criterion_name' }, 409);
+    sets.push('name = ?');
+    params.push(name);
+  }
   const weight = Number(body.weight);
   if (Number.isFinite(weight) && weight > 0) { sets.push('weight = ?'); params.push(weight); }
   if ('kind' in body || 'options' in body) {

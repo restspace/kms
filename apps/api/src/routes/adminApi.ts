@@ -3334,6 +3334,47 @@ function parseCapacityValue(value: unknown): number | null | undefined {
   return Number.isInteger(n) && n >= 0 ? n : undefined;
 }
 
+/**
+ * Replay defect #3's back door: the admin SPA's Settings card mutates rooms
+ * and tracks through /app/api/agenda/rooms|tracks (agenda.ts), which batch a
+ * settings-history row (content_revisions, entity_type 'settings') with every
+ * change — but these legacy routes remained mutation-capable with no history,
+ * so any external/API caller could still change the lists without leaving a
+ * trail. Mirror of agenda.ts's `roomsTracksRevision`: the PRE-edit rooms and
+ * tracks lists as readable lines, one INSERT ready to batch with the mutation
+ * it precedes. Kept as a local copy rather than an import so the two
+ * ownership lanes (this file vs agenda.ts) stay independent.
+ */
+async function legacyRoomsTracksRevision(c: Context<ApiEnv>, editedAt: string): Promise<D1PreparedStatement> {
+  const session = c.get('session');
+  const db = c.env.DB;
+  const [rooms, tracks, editedByName] = await Promise.all([
+    db.prepare('SELECT name, capacity FROM rooms WHERE event_id = ? ORDER BY position')
+      .bind(session.eventId)
+      .all<{ name: string; capacity: number | null }>()
+      .then((r) => r.results),
+    db.prepare('SELECT name, color FROM tracks WHERE event_id = ? ORDER BY position')
+      .bind(session.eventId)
+      .all<{ name: string; color: string | null }>()
+      .then((r) => r.results),
+    loadAuthorName(db, session.contactId),
+  ]);
+  const roomLines = rooms
+    .map((r) => (r.capacity !== null ? `${r.name} (capacity ${r.capacity})` : r.name))
+    .join('\n');
+  const trackLines = tracks.map((t) => (t.color ? `${t.name} (${t.color})` : t.name)).join('\n');
+  return entityRevisionInsert(db, {
+    eventId: session.eventId,
+    entityType: 'settings',
+    entityId: session.eventId,
+    payload: { rooms: roomLines || null, tracks: trackLines || null },
+    editedBy: session.contactId,
+    editedByName,
+    source: 'admin',
+    editedAt,
+  });
+}
+
 const roomRow = (db: D1Database, id: string, eventId: string) =>
   db.prepare('SELECT id, event_id, name, capacity, position, notes FROM rooms WHERE id = ? AND event_id = ?')
     .bind(id, eventId)
@@ -3357,12 +3398,14 @@ adminApiRoutes.post('/rooms', async (c) => {
   if (error) return c.json({ error }, 400);
 
   const id = crypto.randomUUID();
-  await c.env.DB.prepare(
-    `INSERT INTO rooms (id, event_id, name, capacity, notes, position, updated_at)
-     SELECT ?1, ?2, ?3, ?4, ?5, COALESCE((SELECT MAX(position) + 1 FROM rooms WHERE event_id = ?2), 0), ?6`,
-  )
-    .bind(id, session.eventId, values.name, values.capacity ?? null, values.notes ?? null, new Date().toISOString())
-    .run();
+  const ts = new Date().toISOString();
+  await c.env.DB.batch([
+    await legacyRoomsTracksRevision(c, ts),
+    c.env.DB.prepare(
+      `INSERT INTO rooms (id, event_id, name, capacity, notes, position, updated_at)
+       SELECT ?1, ?2, ?3, ?4, ?5, COALESCE((SELECT MAX(position) + 1 FROM rooms WHERE event_id = ?2), 0), ?6`,
+    ).bind(id, session.eventId, values.name, values.capacity ?? null, values.notes ?? null, ts),
+  ]);
   await bumpEventRevision(c.env, session.eventId);
   return c.json(await roomRow(c.env.DB, id, session.eventId), 201);
 });
@@ -3374,14 +3417,19 @@ adminApiRoutes.put('/rooms/:id', async (c) => {
   const { values, error } = pickRoomFields(await c.req.json().catch(() => ({})), { requireName: false });
   if (error) return c.json({ error }, 400);
 
+  // Same shape as the agenda PUT: resolve the row first so a missing id (or
+  // an unchanged write) never records a history row it shouldn't.
+  const before = await roomRow(c.env.DB, id, session.eventId);
+  if (!before) return c.json({ error: 'not_found' }, 404);
   const cols = Object.keys(values);
-  if (cols.length > 0) {
-    const result = await c.env.DB.prepare(
-      `UPDATE rooms SET ${cols.map((k) => `${k} = ?`).join(', ')}, updated_at = ? WHERE id = ? AND event_id = ?`,
-    )
-      .bind(...cols.map((k) => values[k]), new Date().toISOString(), id, session.eventId)
-      .run();
-    if (result.meta.changes === 0) return c.json({ error: 'not_found' }, 404);
+  if (cols.length > 0 && watchedFieldsChanged(before as Record<string, unknown>, values, cols)) {
+    const ts = new Date().toISOString();
+    await c.env.DB.batch([
+      await legacyRoomsTracksRevision(c, ts),
+      c.env.DB.prepare(
+        `UPDATE rooms SET ${cols.map((k) => `${k} = ?`).join(', ')}, updated_at = ? WHERE id = ? AND event_id = ?`,
+      ).bind(...cols.map((k) => values[k]), ts, id, session.eventId),
+    ]);
     await bumpEventRevision(c.env, session.eventId);
   }
   const row = await roomRow(c.env.DB, id, session.eventId);
@@ -3397,13 +3445,17 @@ adminApiRoutes.delete('/rooms/:id', async (c) => {
   if (!isWriter(session.role)) return c.json({ error: 'forbidden' }, 403);
   const id = c.req.param('id');
   const db = c.env.DB;
+  // Resolve first so a 404 never records a history row for a delete that
+  // touched nothing.
+  if (!(await roomRow(db, id, session.eventId))) return c.json({ error: 'not_found' }, 404);
   const results = await db.batch([
+    await legacyRoomsTracksRevision(c, new Date().toISOString()),
     db.prepare('UPDATE submissions SET room_id = NULL, updated_at = ? WHERE room_id = ? AND event_id = ?')
       .bind(new Date().toISOString(), id, session.eventId),
     stageAirtableDeletes(db, 'rooms', 'id = ? AND event_id = ?', id, session.eventId),
     db.prepare('DELETE FROM rooms WHERE id = ? AND event_id = ?').bind(id, session.eventId),
   ]);
-  if ((results[2]?.meta.changes ?? 0) === 0) return c.json({ error: 'not_found' }, 404);
+  if ((results[3]?.meta.changes ?? 0) === 0) return c.json({ error: 'not_found' }, 404);
   await bumpEventRevision(c.env, session.eventId);
   return c.json({ ok: true });
 });
@@ -3455,12 +3507,14 @@ adminApiRoutes.post('/tracks', async (c) => {
   if (error) return c.json({ error }, 400);
 
   const id = crypto.randomUUID();
-  await c.env.DB.prepare(
-    `INSERT INTO tracks (id, event_id, name, color, position, updated_at)
-     SELECT ?1, ?2, ?3, ?4, COALESCE((SELECT MAX(position) + 1 FROM tracks WHERE event_id = ?2), 0), ?5`,
-  )
-    .bind(id, session.eventId, values.name, values.color ?? null, new Date().toISOString())
-    .run();
+  const ts = new Date().toISOString();
+  await c.env.DB.batch([
+    await legacyRoomsTracksRevision(c, ts),
+    c.env.DB.prepare(
+      `INSERT INTO tracks (id, event_id, name, color, position, updated_at)
+       SELECT ?1, ?2, ?3, ?4, COALESCE((SELECT MAX(position) + 1 FROM tracks WHERE event_id = ?2), 0), ?5`,
+    ).bind(id, session.eventId, values.name, values.color ?? null, ts),
+  ]);
   await bumpEventRevision(c.env, session.eventId);
   return c.json(await trackRow(c.env.DB, id, session.eventId), 201);
 });
@@ -3472,14 +3526,19 @@ adminApiRoutes.put('/tracks/:id', async (c) => {
   const { values, error } = pickTrackFields(await c.req.json().catch(() => ({})), { requireName: false });
   if (error) return c.json({ error }, 400);
 
+  // Same shape as the agenda PUT: resolve the row first so a missing id (or
+  // an unchanged write) never records a history row it shouldn't.
+  const before = await trackRow(c.env.DB, id, session.eventId);
+  if (!before) return c.json({ error: 'not_found' }, 404);
   const cols = Object.keys(values);
-  if (cols.length > 0) {
-    const result = await c.env.DB.prepare(
-      `UPDATE tracks SET ${cols.map((k) => `${k} = ?`).join(', ')}, updated_at = ? WHERE id = ? AND event_id = ?`,
-    )
-      .bind(...cols.map((k) => values[k]), new Date().toISOString(), id, session.eventId)
-      .run();
-    if (result.meta.changes === 0) return c.json({ error: 'not_found' }, 404);
+  if (cols.length > 0 && watchedFieldsChanged(before as Record<string, unknown>, values, cols)) {
+    const ts = new Date().toISOString();
+    await c.env.DB.batch([
+      await legacyRoomsTracksRevision(c, ts),
+      c.env.DB.prepare(
+        `UPDATE tracks SET ${cols.map((k) => `${k} = ?`).join(', ')}, updated_at = ? WHERE id = ? AND event_id = ?`,
+      ).bind(...cols.map((k) => values[k]), ts, id, session.eventId),
+    ]);
     await bumpEventRevision(c.env, session.eventId);
   }
   const row = await trackRow(c.env.DB, id, session.eventId);
@@ -3495,7 +3554,11 @@ adminApiRoutes.delete('/tracks/:id', async (c) => {
   if (!isWriter(session.role)) return c.json({ error: 'forbidden' }, 403);
   const id = c.req.param('id');
   const db = c.env.DB;
+  // Resolve first so a 404 never records a history row for a delete that
+  // touched nothing.
+  if (!(await trackRow(db, id, session.eventId))) return c.json({ error: 'not_found' }, 404);
   const results = await db.batch([
+    await legacyRoomsTracksRevision(c, new Date().toISOString()),
     db.prepare('UPDATE submissions SET track_id = NULL, updated_at = ? WHERE track_id = ? AND event_id = ?')
       .bind(new Date().toISOString(), id, session.eventId),
     db.prepare(
@@ -3505,7 +3568,7 @@ adminApiRoutes.delete('/tracks/:id', async (c) => {
     stageAirtableDeletes(db, 'tracks', 'id = ? AND event_id = ?', id, session.eventId),
     db.prepare('DELETE FROM tracks WHERE id = ? AND event_id = ?').bind(id, session.eventId),
   ]);
-  if ((results[3]?.meta.changes ?? 0) === 0) return c.json({ error: 'not_found' }, 404);
+  if ((results[4]?.meta.changes ?? 0) === 0) return c.json({ error: 'not_found' }, 404);
   await bumpEventRevision(c.env, session.eventId);
   return c.json({ ok: true });
 });
@@ -4668,11 +4731,11 @@ adminApiRoutes.get('/events', async (c) => {
   const [eventsResult, contactCounts, submissionCounts] = await Promise.all([
     db
       .prepare(
-        `SELECT id, name, slug, starts_at, ends_at, agenda_published
+        `SELECT id, name, slug, starts_at, ends_at, timezone, agenda_published
          FROM events WHERE id IN (${placeholders}) ORDER BY starts_at DESC`,
       )
       .bind(...ids)
-      .all<{ id: string; name: string; slug: string; starts_at: string; ends_at: string; agenda_published: number }>(),
+      .all<{ id: string; name: string; slug: string; starts_at: string; ends_at: string; timezone: string; agenda_published: number }>(),
     // Roster size, so it counts event_contacts rows: `contacts` is org-level
     // since 0015 and one person can be counted by several events.
     db
@@ -4694,6 +4757,10 @@ adminApiRoutes.get('/events', async (c) => {
       slug: e.slug,
       starts_at: e.starts_at,
       ends_at: e.ends_at,
+      // The Events tab renders dates event-local via eventDays (the instants
+      // alone read a day long for any viewer west of the event — the same
+      // off-by-one the dashboard's fmtEventRange fixed).
+      timezone: e.timezone,
       agenda_published: e.agenda_published === 1,
       role: byId.get(e.id)?.role ?? 'reviewer',
       speaker_count: contactsById.get(e.id) ?? 0,

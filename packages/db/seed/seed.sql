@@ -73,39 +73,43 @@ INSERT INTO tags (id, event_id, name, color, updated_at) VALUES
 -- Field definitions — default abstract set (docs/04 §2.3) + participant set (§2.4)
 -- ---------------------------------------------------------------------------
 
-INSERT INTO field_definitions (id, event_id, key, label, type, scope, options, max_chars, system) VALUES
+-- `audience` (0042): 'internal' fields are organiser-only — never rendered on
+-- the public CFP wizard or the portal edit page. The three operational keys
+-- (capacity/ceu_credits/client_session_id) exist for the importer's column
+-- mapping, not as speaker-facing questions.
+INSERT INTO field_definitions (id, event_id, key, label, type, scope, options, max_chars, system, audience) VALUES
   -- abstract (submission scope)
-  ('fld00000-0000-4000-8000-000000000001', 'evt00000-0000-4000-8000-000000000001', 'title',             'Title',             'text',        'submission', NULL, 255, 1),
-  ('fld00000-0000-4000-8000-000000000002', 'evt00000-0000-4000-8000-000000000001', 'description',       'Description',       'wysiwyg',     'submission', NULL, 5000, 0),
+  ('fld00000-0000-4000-8000-000000000001', 'evt00000-0000-4000-8000-000000000001', 'title',             'Title',             'text',        'submission', NULL, 255, 1, 'public'),
+  ('fld00000-0000-4000-8000-000000000002', 'evt00000-0000-4000-8000-000000000001', 'description',       'Description',       'wysiwyg',     'submission', NULL, 5000, 0, 'public'),
   -- Like `track` below, the canonical `format` field carries no stored
   -- options: loadQuestions derives them from this event's `formats` rows
   -- (formsAdmin.ts FORMAT_FIELD_KEY, spec-gap CFP-S1).
-  ('fld00000-0000-4000-8000-000000000003', 'evt00000-0000-4000-8000-000000000001', 'format',            'Format',            'dropdown',    'submission', NULL, NULL, 0),
+  ('fld00000-0000-4000-8000-000000000003', 'evt00000-0000-4000-8000-000000000001', 'format',            'Format',            'dropdown',    'submission', NULL, NULL, 0, 'public'),
   ('fld00000-0000-4000-8000-000000000004', 'evt00000-0000-4000-8000-000000000001', 'tags',              'Tags',              'multiselect', 'submission',
-    '[{"value":"Open Source","label":"Open Source"},{"value":"Research","label":"Research"},{"value":"Production","label":"Production"},{"value":"Sponsor","label":"Sponsor"}]', NULL, 0),
+    '[{"value":"Open Source","label":"Open Source"},{"value":"Research","label":"Research"},{"value":"Production","label":"Production"},{"value":"Sponsor","label":"Sponsor"}]', NULL, 0, 'public'),
   -- The canonical `track` field carries no stored options: loadQuestions
   -- derives them from this event's `tracks` rows on every load, so renaming or
   -- deleting a track cannot leave a form offering a name that resolves to
   -- nothing. See formsAdmin.ts's TRACK_FIELD_KEY.
   ('fld00000-0000-4000-8000-000000000005', 'evt00000-0000-4000-8000-000000000001', 'track',             'Track',             'dropdown',    'submission',
-    NULL, NULL, 0),
+    NULL, NULL, 0, 'public'),
   ('fld00000-0000-4000-8000-000000000006', 'evt00000-0000-4000-8000-000000000001', 'level',             'Level',             'dropdown',    'submission',
-    '[{"value":"Beginner","label":"Beginner"},{"value":"Intermediate","label":"Intermediate"},{"value":"Advanced","label":"Advanced"}]', NULL, 0),
+    '[{"value":"Beginner","label":"Beginner"},{"value":"Intermediate","label":"Intermediate"},{"value":"Advanced","label":"Advanced"}]', NULL, 0, 'public'),
   ('fld00000-0000-4000-8000-000000000007', 'evt00000-0000-4000-8000-000000000001', 'language',          'Language',          'dropdown',    'submission',
-    '[{"value":"English","label":"English"},{"value":"Spanish","label":"Spanish"},{"value":"French","label":"French"}]', NULL, 0),
-  ('fld00000-0000-4000-8000-000000000008', 'evt00000-0000-4000-8000-000000000001', 'capacity',          'Capacity',          'number',      'submission', NULL, NULL, 0),
-  ('fld00000-0000-4000-8000-000000000009', 'evt00000-0000-4000-8000-000000000001', 'ceu_credits',       'CEU Credits',       'number',      'submission', NULL, NULL, 0),
-  ('fld00000-0000-4000-8000-000000000010', 'evt00000-0000-4000-8000-000000000001', 'client_session_id', 'Client Session ID', 'text',        'submission', NULL, 255, 0),
+    '[{"value":"English","label":"English"},{"value":"Spanish","label":"Spanish"},{"value":"French","label":"French"}]', NULL, 0, 'public'),
+  ('fld00000-0000-4000-8000-000000000008', 'evt00000-0000-4000-8000-000000000001', 'capacity',          'Capacity',          'number',      'submission', NULL, NULL, 0, 'internal'),
+  ('fld00000-0000-4000-8000-000000000009', 'evt00000-0000-4000-8000-000000000001', 'ceu_credits',       'CEU Credits',       'number',      'submission', NULL, NULL, 0, 'internal'),
+  ('fld00000-0000-4000-8000-000000000010', 'evt00000-0000-4000-8000-000000000001', 'client_session_id', 'Client Session ID', 'text',        'submission', NULL, 255, 0, 'internal'),
   -- participant (contact scope)
-  ('fld00000-0000-4000-8000-000000000011', 'evt00000-0000-4000-8000-000000000001', 'first_name',        'First Name',        'text',        'contact',    NULL, 255, 1),
-  ('fld00000-0000-4000-8000-000000000012', 'evt00000-0000-4000-8000-000000000001', 'last_name',         'Last Name',         'text',        'contact',    NULL, 255, 1),
-  ('fld00000-0000-4000-8000-000000000013', 'evt00000-0000-4000-8000-000000000001', 'email',             'Email',             'email',       'contact',    NULL, 255, 1),
-  ('fld00000-0000-4000-8000-000000000014', 'evt00000-0000-4000-8000-000000000001', 'mobile_phone',      'Mobile Phone',      'phone',       'contact',    NULL, NULL, 0),
-  ('fld00000-0000-4000-8000-000000000015', 'evt00000-0000-4000-8000-000000000001', 'biography',         'Biography',         'wysiwyg',     'contact',    NULL, 5000, 0),
-  ('fld00000-0000-4000-8000-000000000016', 'evt00000-0000-4000-8000-000000000001', 'headshot',          'Headshot',          'file',        'contact',    NULL, NULL, 0),
+  ('fld00000-0000-4000-8000-000000000011', 'evt00000-0000-4000-8000-000000000001', 'first_name',        'First Name',        'text',        'contact',    NULL, 255, 1, 'public'),
+  ('fld00000-0000-4000-8000-000000000012', 'evt00000-0000-4000-8000-000000000001', 'last_name',         'Last Name',         'text',        'contact',    NULL, 255, 1, 'public'),
+  ('fld00000-0000-4000-8000-000000000013', 'evt00000-0000-4000-8000-000000000001', 'email',             'Email',             'email',       'contact',    NULL, 255, 1, 'public'),
+  ('fld00000-0000-4000-8000-000000000014', 'evt00000-0000-4000-8000-000000000001', 'mobile_phone',      'Mobile Phone',      'phone',       'contact',    NULL, NULL, 0, 'public'),
+  ('fld00000-0000-4000-8000-000000000015', 'evt00000-0000-4000-8000-000000000001', 'biography',         'Biography',         'wysiwyg',     'contact',    NULL, 5000, 0, 'public'),
+  ('fld00000-0000-4000-8000-000000000016', 'evt00000-0000-4000-8000-000000000001', 'headshot',          'Headshot',          'file',        'contact',    NULL, NULL, 0, 'public'),
   -- workshop-only fields (docs/04 §3 worked example)
-  ('fld00000-0000-4000-8000-000000000017', 'evt00000-0000-4000-8000-000000000001', 'room_setup',        'Room Setup Requirements', 'textarea', 'submission', NULL, 1000, 0),
-  ('fld00000-0000-4000-8000-000000000018', 'evt00000-0000-4000-8000-000000000001', 'prerequisites',     'Prerequisites',           'textarea', 'submission', NULL, 1000, 0);
+  ('fld00000-0000-4000-8000-000000000017', 'evt00000-0000-4000-8000-000000000001', 'room_setup',        'Room Setup Requirements', 'textarea', 'submission', NULL, 1000, 0, 'public'),
+  ('fld00000-0000-4000-8000-000000000018', 'evt00000-0000-4000-8000-000000000001', 'prerequisites',     'Prerequisites',           'textarea', 'submission', NULL, 1000, 0, 'public');
 
 -- ---------------------------------------------------------------------------
 -- Submission form: Call for Speakers 2026 (the form judges use)

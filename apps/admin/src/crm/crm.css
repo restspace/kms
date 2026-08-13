@@ -50,6 +50,40 @@
   padding-bottom: var(--space-2);
 }
 
+/* Firefox (no ::-webkit-scrollbar): thin classic scrollbar in the same
+   colours. Guarded because in Chromium a non-auto scrollbar-width would
+   itself disable the ::-webkit-scrollbar styling below. */
+@supports not selector(::-webkit-scrollbar) {
+  .pl-board {
+    scrollbar-width: thin;
+    scrollbar-color: var(--border-strong) var(--chrome);
+  }
+}
+
+/* 2026-08-13 eval sweep: six 220px columns overflow any laptop viewport, and
+   Chromium's Windows-11 overlay scrollbars are invisible until a scroll is
+   already in progress — so the Confirmed/Declined columns just looked clipped,
+   with nothing signalling the board scrolls. Styling the scrollbar (the same
+   move .data-tab-labels makes in DataTabManager.css) opts back into a classic,
+   always-visible bar that also reserves its own gutter. */
+.pl-board::-webkit-scrollbar {
+  height: 8px;
+}
+
+.pl-board::-webkit-scrollbar-track {
+  background: var(--chrome);
+  border-radius: 4px;
+}
+
+.pl-board::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 4px;
+}
+
+.pl-board::-webkit-scrollbar-thumb:hover {
+  background: var(--text-faint);
+}
+
 .pl-column {
   flex: 0 0 220px;
   display: flex;

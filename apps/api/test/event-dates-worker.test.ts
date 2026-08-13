@@ -108,3 +108,38 @@ describe('PATCH /app/api/events/:id — bare date resolves against the stored ti
     expect(days[0]).toBe('2027-06-01');
   });
 });
+
+describe('GET /app/api/events — list rows carry the event timezone', () => {
+  // Replay defect #6's workspace sibling: the Events tab derives its inclusive
+  // local-day range via eventDays, which needs the event's own timezone in the
+  // list payload — without it the tab read the UTC instants in the viewer's
+  // clock and showed an event ending a day late.
+  it('returns timezone alongside the instants', async () => {
+    const seedEventId = await seedEvent();
+    const admin = await seedStaff(seedEventId, 'admin');
+    const slug = `list-tz-${crypto.randomUUID().slice(0, 8)}`;
+    const created = await api('/events', admin.cookie, {
+      name: 'List TZ Event',
+      slug,
+      timezone: 'America/Los_Angeles',
+      starts_at: '2027-05-12',
+      ends_at: '2027-05-14',
+    });
+    expect(created.status).toBe(201);
+
+    const list = await api('/events', admin.cookie, undefined, 'GET');
+    expect(list.status).toBe(200);
+    const { items } = (await list.json()) as {
+      items: Array<{ slug: string; starts_at: string; ends_at: string; timezone: string }>;
+    };
+    const row = items.find((e) => e.slug === slug);
+    expect(row).toBeTruthy();
+    expect(row!.timezone).toBe('America/Los_Angeles');
+    // The admin tab's own math over the payload lands on the configured days.
+    expect(eventDays(row!.starts_at, row!.ends_at, row!.timezone)).toEqual([
+      '2027-05-12',
+      '2027-05-13',
+      '2027-05-14',
+    ]);
+  });
+});

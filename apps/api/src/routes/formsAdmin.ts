@@ -237,7 +237,7 @@ const QUESTION_SELECT = `
          COALESCE(q.label, f.label) AS label, q.help_text,
          COALESCE(q.options, f.options) AS options,
          COALESCE(q.max_chars, f.max_chars) AS max_chars,
-         q.visibility, f.id AS field_id, f.key AS field_key, f.type
+         q.visibility, f.id AS field_id, f.key AS field_key, f.type, f.audience
   FROM form_questions q
   JOIN field_definitions f ON f.id = q.field_id`;
 
@@ -256,6 +256,7 @@ interface QuestionRow {
   field_id: string;
   field_key: string;
   type: string;
+  audience: 'public' | 'internal';
 }
 
 /** Parse the json-in-TEXT columns for the client. */
@@ -495,6 +496,32 @@ formsAdminRoutes.post('/', async (c) => {
   return c.json({ form: form ? shapeForm(form) : null, questions: await loadQuestions(c.env.DB, id, session.eventId) }, 201);
 });
 
+// PUT /fields/:fieldId — field-library edit; today just the audience flag
+// (0042). Two path segments, so it can never shadow the one-segment /:id
+// form routes. The public wizard and the portal edit page skip 'internal'
+// fields; this is how an organiser flips a field between the two without a
+// schema poke.
+formsAdminRoutes.put('/fields/:fieldId', async (c) => {
+  const session = c.get('session');
+  const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+  const audience = body.audience;
+  if (audience !== 'public' && audience !== 'internal') {
+    return c.json({ error: 'invalid_audience', detail: "audience must be 'public' or 'internal'" }, 400);
+  }
+  const result = await c.env.DB.prepare(
+    'UPDATE field_definitions SET audience = ? WHERE id = ? AND event_id = ?',
+  )
+    .bind(audience, c.req.param('fieldId'), session.eventId)
+    .run();
+  if (result.meta.changes === 0) return c.json({ error: 'not_found' }, 404);
+  const field = await c.env.DB.prepare(
+    'SELECT id, key, label, type, scope, options, max_chars, system, audience FROM field_definitions WHERE id = ?',
+  )
+    .bind(c.req.param('fieldId'))
+    .first();
+  return c.json({ field });
+});
+
 // GET /:id — full form + questions for the builder and the workspace.
 formsAdminRoutes.get('/:id', async (c) => {
   const session = c.get('session');
@@ -680,8 +707,8 @@ formsAdminRoutes.post('/:id/questions', async (c) => {
     fieldId = crypto.randomUUID();
     const key = `custom_${newField.label.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '').slice(0, 40)}_${fieldId.slice(0, 4)}`;
     await c.env.DB.prepare(
-      `INSERT INTO field_definitions (id, event_id, key, label, type, scope, options, max_chars, system)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)`,
+      `INSERT INTO field_definitions (id, event_id, key, label, type, scope, options, max_chars, system, audience)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`,
     )
       .bind(
         fieldId,
@@ -692,6 +719,9 @@ formsAdminRoutes.post('/:id/questions', async (c) => {
         section === 'participant' ? 'contact' : 'submission',
         jsonText(newField.options) ?? null,
         nullableInt(newField.max_chars) ?? null,
+        // Audience (0042): organiser-authored fields are public unless the
+        // builder explicitly marks them internal.
+        newField.audience === 'internal' ? 'internal' : 'public',
       )
       .run();
   }

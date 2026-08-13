@@ -39,11 +39,30 @@ export interface BulkJobPollHandle {
 }
 
 /**
+ * How many follow-up polls a job that settled 'done' with rows still queued
+ * gets before the loop gives up, and the backoff base between them. Queued
+ * rows drain via the sweep cron, so a couple of minutes covers the healthy
+ * case; on a dev/demo deployment where crons never fire, "queued" may
+ * legitimately never advance and the loop must stop rather than poll forever.
+ */
+const SETTLED_QUEUED_MAX_POLLS = 5
+
+/**
  * Poll a bulk job to a settled state, reporting progress as it goes. Factored
  * out of DashboardSection's `pollRemindJob` shape so every caller that fires a
  * 202-style bulk send (decisions, compose, …) reports the same way: real
  * sent/failed counts from message_log, never the planned counts the POST
  * echoed back.
+ *
+ * A job can flip to 'done' with messages still queued (the expander enqueued
+ * them; delivery drains via the sweep cron afterwards). Stopping at the first
+ * 'done' froze the banner on "K still queued" even though
+ * GET /app/api/bulk-jobs/:id keeps returning live counts as those rows send —
+ * so `onSettled` fires immediately on 'done' (the banner never waits), and
+ * while `queued > 0` the loop keeps polling a bounded number of times with
+ * backoff, re-invoking `onSettled` with the fresher counts each time.
+ * Callers must therefore treat `onSettled` as re-entrant (every current one
+ * just sets state), and "queued" stays a non-final, non-error state.
  *
  * Returns a handle whose `cancel()` stops the loop and suppresses both
  * callbacks — call it from an unmount effect.
@@ -59,6 +78,7 @@ export function pollBulkJob(
 ): BulkJobPollHandle {
   let cancelled = false
   let timer: number | null = null
+  let settledPolls = 0
 
   const tick = async () => {
     if (cancelled) return
@@ -67,12 +87,23 @@ export function pollBulkJob(
       if (cancelled) return
       if (job.status === 'done' || job.status === 'failed') {
         handlers.onSettled(job)
+        // 'failed' is terminal; 'done' with an empty outbox is too. Only
+        // "done but still draining" earns follow-ups, doubling the gap each
+        // time (6s, 12s, 24s, … for the default interval).
+        if (job.status === 'done' && (job.queued ?? 0) > 0 && settledPolls < SETTLED_QUEUED_MAX_POLLS) {
+          settledPolls += 1
+          timer = window.setTimeout(() => void tick(), intervalMs * 2 ** settledPolls)
+        }
         return
       }
       handlers.onProgress?.(job)
       timer = window.setTimeout(() => void tick(), intervalMs)
     } catch (err) {
       if (cancelled) return
+      // A failure on a follow-up poll must not replace an already-delivered
+      // settled banner with an error — the extra polls are a refresh, not a
+      // verdict. Stop quietly instead.
+      if (settledPolls > 0) return
       handlers.onError(err instanceof Error ? err.message : 'Could not check progress')
     }
   }

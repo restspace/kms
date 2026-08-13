@@ -9,6 +9,7 @@ import {
   type OrgDashboardPayload,
 } from '../api'
 import { useEventScopeOptional, type EventFilter } from '../eventScope'
+import { eventDays } from '../agenda/timeUtils'
 import { fmtDateInTz } from '../utils/dates'
 import { ChaseInboxPanel, ChaseModeBanner } from './ChaseInbox'
 import './dashboard.css'
@@ -70,22 +71,33 @@ const fmtDay = (iso: string): string =>
 
 const statusLabelText = (s: string): string => s.replace(/_/g, ' ')
 
-/**
- * Org board dates: the event rows carry no timezone (they span the whole
- * organisation), so the date part is read literally — midday UTC keeps the
- * calendar day stable either side of the date line.
- */
-const fmtEventDay = (iso: string): string => {
-  const day = iso.slice(0, 10)
-  const d = new Date(`${day}T12:00:00Z`)
-  if (Number.isNaN(d.getTime())) return iso
+/** A local `YYYY-MM-DD` day, formatted — midday UTC keeps the calendar day
+ * stable either side of the date line. */
+const fmtEventDay = (day: string): string => {
+  const d = new Date(`${day.slice(0, 10)}T12:00:00Z`)
+  if (Number.isNaN(d.getTime())) return day
   return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' })
 }
 
-const fmtEventRange = (starts: string, ends: string): string => {
-  const from = fmtEventDay(starts)
-  const to = fmtEventDay(ends)
-  return from === to ? from : `${from} – ${to}`
+/**
+ * Org board dates: the same inclusive local-day span the sidebar and agenda
+ * derive via `eventDays`. Reading the UTC date literally listed a "May 15"
+ * end for an event whose final local day was May 14 — `ends_at` is an instant
+ * late on the last day, which lands on the next UTC date for any timezone
+ * west of UTC.
+ */
+export const fmtEventRange = (starts: string, ends: string, timezone: string): string => {
+  try {
+    const days = eventDays(starts, ends, timezone || 'UTC')
+    const from = fmtEventDay(days[0])
+    const to = fmtEventDay(days[days.length - 1])
+    return from === to ? from : `${from} – ${to}`
+  } catch {
+    // Unparseable input or a bad timezone id: fall back to the literal dates.
+    const from = fmtEventDay(starts)
+    const to = fmtEventDay(ends)
+    return from === to ? from : `${from} – ${to}`
+  }
 }
 
 /** Contact-anchored seeds: every workspace tab narrows to this speaker. */
@@ -770,13 +782,17 @@ function TrackingBoard({ data, busy, onRemind, onSpeaker, onNavigate }: {
         </section>
         <section className="db-card">
           <h3>Speaker confirmation</h3>
-          <Donut
-            centre={String(t.accepted_speakers)}
-            segments={[
-              { label: 'Confirmed', color: 'var(--chart-good)', value: t.confirmation.confirmed },
-              { label: 'Awaiting confirmation', color: 'var(--chart-warn)', value: t.confirmation.awaiting },
-            ]}
-          />
+          {t.accepted_speakers === 0 ? (
+            <div className="db-empty">No accepted speakers yet.</div>
+          ) : (
+            <Donut
+              centre={String(t.accepted_speakers)}
+              segments={[
+                { label: 'Confirmed', color: 'var(--chart-good)', value: t.confirmation.confirmed },
+                { label: 'Awaiting confirmation', color: 'var(--chart-warn)', value: t.confirmation.awaiting },
+              ]}
+            />
+          )}
         </section>
         <section className="db-card db-span2">
           <h3>Top speakers by outstanding tasks</h3>
@@ -796,7 +812,16 @@ function TrackingBoard({ data, busy, onRemind, onSpeaker, onNavigate }: {
         </section>
         <section className="db-card">
           <h3>Asset completeness</h3>
-          {t.assets.length === 0 && <div className="db-empty">Every accepted speaker has a bio, headshot and slides.</div>}
+          {/* An empty list is only good news when there are speakers to be
+              complete: with zero accepted speakers the green assertion would
+              be vacuously true, so say what's actually going on instead. */}
+          {t.assets.length === 0 && (
+            <div className="db-empty">
+              {t.accepted_speakers === 0
+                ? 'No accepted speakers yet.'
+                : 'Every accepted speaker has a bio, headshot and slides.'}
+            </div>
+          )}
           {t.assets.map((a) => (
             <div className="db-asset-row clickable" key={a.contact_id}
               role="button" tabIndex={0}
@@ -991,7 +1016,7 @@ function OrgBoard({ data, onOpen }: {
                     onClick={() => onOpen({ view: 'workspace', tab: 'submissions', ev: ev.id, label: ev.name })}
                   >
                     <td className="db-td-title">{ev.name}</td>
-                    <td>{fmtEventRange(ev.starts_at, ev.ends_at)}</td>
+                    <td>{fmtEventRange(ev.starts_at, ev.ends_at, ev.timezone)}</td>
                     <td>
                       <span className={`status-chip status-${ev.agenda_published ? 'accepted' : 'draft'}`}>
                         {ev.agenda_published ? 'published' : 'draft'}

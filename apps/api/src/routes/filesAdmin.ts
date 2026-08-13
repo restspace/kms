@@ -112,6 +112,15 @@ filesAdminRoutes.get('/library', async (c) => {
     where.push(`fa.event_id IN (${eventIds.map(() => '?').join(', ')})`);
     params.push(...eventIds);
   }
+  // Replay defect #11: a single chain by its current upload row's id, so the
+  // admin SPA can resolve a `?rec=<upload_id>` deep link back to the row that
+  // seeds the file detail tab (versions/comments) — files were the only
+  // detail surface whose open state could not survive a URL navigation.
+  const uploadId = c.req.query('upload_id');
+  if (uploadId) {
+    where.push('u.id = ?');
+    params.push(uploadId);
+  }
   const submissionId = c.req.query('submission_id');
   if (submissionId) {
     // #9: u.submission_id is stamped from task_assignments.submission_id at

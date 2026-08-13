@@ -124,4 +124,24 @@ describe('ScheduleWidget', () => {
 
     expect(screen.getByText('No sessions match your search.')).toBeTruthy();
   });
+
+  // Same eval defect as SessionsWidget: an embed ?track= filter that matched
+  // nothing claimed "No sessions are scheduled yet." over a full agenda.
+  it('says the filter matched nothing instead of claiming the agenda is empty', async () => {
+    render(<ScheduleWidget eventSlug="devflow" filter={{ track: 'no-such-track' }} />);
+    await waitFor(() =>
+      expect(screen.getByText('No sessions match the selected filter (the "no-such-track" track).')).toBeTruthy(),
+    );
+    expect(screen.queryByText('No sessions are scheduled yet.')).toBeNull();
+  });
+
+  it('still reports a genuinely empty agenda as such when a filter is active', async () => {
+    const emptyFeed: AgendaFeed = { ...feed, days: [], sessions: [] };
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({ ok: true, json: async () => emptyFeed }) as Response),
+    );
+    render(<ScheduleWidget eventSlug="devflow" filter={{ track: 'Anything' }} />);
+    await waitFor(() => expect(screen.getByText('No sessions are scheduled yet.')).toBeTruthy());
+  });
 });

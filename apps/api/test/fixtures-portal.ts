@@ -118,6 +118,8 @@ export async function createQuestion(
     section?: 'abstract' | 'participant';
     maxChars?: number | null;
     options?: Array<{ value: string; label: string }> | null;
+    /** Field-level audience (0042): 'internal' fields are organiser-only. */
+    audience?: 'public' | 'internal';
     /** ConditionalRule json — show/hide this question based on an earlier one's answer. */
     visibility?: {
       action: 'show' | 'hide';
@@ -129,10 +131,10 @@ export async function createQuestion(
   const fieldId = `fld-${crypto.randomUUID()}`;
   const questionId = `q-${crypto.randomUUID()}`;
   await env.DB.prepare(
-    `INSERT INTO field_definitions (id, event_id, key, label, type, scope, options, max_chars, system)
-     VALUES (?, ?, ?, ?, ?, 'submission', ?, ?, 1)`,
+    `INSERT INTO field_definitions (id, event_id, key, label, type, scope, options, max_chars, system, audience)
+     VALUES (?, ?, ?, ?, ?, 'submission', ?, ?, 1, ?)`,
   )
-    .bind(fieldId, eventId, opts.key, opts.label, opts.type ?? 'text', opts.options ? JSON.stringify(opts.options) : null, opts.maxChars ?? null)
+    .bind(fieldId, eventId, opts.key, opts.label, opts.type ?? 'text', opts.options ? JSON.stringify(opts.options) : null, opts.maxChars ?? null, opts.audience ?? 'public')
     .run();
   await env.DB.prepare(
     `INSERT INTO form_questions (id, form_id, section, field_id, label, position, required, visibility)

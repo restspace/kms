@@ -862,10 +862,46 @@ function parseLinks(json: string | null): Record<string, string> {
   }
 }
 
+/**
+ * Stored biographies can be HTML: the CFP participant step's biography field
+ * is a wysiwyg question, and imports bring rich-text bios in verbatim — but
+ * the Profile form edits the bio in a plain <textarea>, which was showing the
+ * markup to the speaker character-for-character ("<p>…</p>"). Convert HTML to
+ * clean text on the way INTO the textarea; the save path then stores exactly
+ * the plain text the speaker sees, which every read surface already handles
+ * (the public widgets' toParagraphs treats blank lines as paragraph breaks —
+ * which is what block boundaries become here — and stripHtml is a no-op on
+ * plain text). A bio that is already plain text passes through untouched, so
+ * an unedited round trip cannot double-convert, escape or empty anything.
+ */
+function htmlBioToText(html: string): string {
+  return html
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<li[^>]*>/gi, '- ')
+    .replace(/<\/(p|div|h[1-6]|li|blockquote|ul|ol)>/gi, '\n\n')
+    .replace(/<[^>]*>/g, '')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+/** Only values that actually contain markup are converted — plain text (the
+ *  overwhelmingly common case after a first save) is returned verbatim. */
+export function bioForEditing(stored: string | null): string {
+  const value = stored ?? '';
+  return /<[a-z!/][^>]*>/i.test(value) ? htmlBioToText(value) : value;
+}
+
 function profileValuesFromContact(contact: ContactRow): ProfileValues {
   const links = parseLinks(contact.links);
   const values: ProfileValues = {
-    biography: contact.biography ?? '',
+    biography: bioForEditing(contact.biography),
     salutation: contact.salutation ?? '',
     first_name: contact.first_name ?? '',
     last_name: contact.last_name ?? '',
@@ -1732,14 +1768,21 @@ async function loadOwnSubmission(
   );
 }
 
+/** Abstract-section questions split by audience (0042): `questions` is what
+ *  the speaker sees and edits; `internalQuestionIds` are the organiser-only
+ *  fields whose stored answers a portal save must leave untouched. */
 async function loadAbstractQuestions(
   c: Context<AppEnv>,
   formId: string | null,
   eventId?: string,
-): Promise<QuestionDef[]> {
-  if (!formId) return [];
+): Promise<{ questions: QuestionDef[]; internalQuestionIds: string[] }> {
+  if (!formId) return { questions: [], internalQuestionIds: [] };
   const all = (await loadQuestions(c.env.DB, formId, eventId)) as unknown as QuestionDef[];
-  return all.filter((q) => q.section === 'abstract');
+  const abstract = all.filter((q) => q.section === 'abstract');
+  return {
+    questions: abstract.filter((q) => q.audience !== 'internal'),
+    internalQuestionIds: abstract.filter((q) => q.audience === 'internal').map((q) => q.id),
+  };
 }
 
 async function loadSubmissionAnswers(c: Context<AppEnv>, submissionId: string): Promise<Answers> {
@@ -2188,6 +2231,7 @@ async function resolveEditTarget(
   | {
       submission: EditableSubmissionRow;
       questions: QuestionDef[];
+      internalQuestionIds: string[];
       participants: EditParticipantRow[];
       roleConfig: ParticipantRoleConfig[];
     }
@@ -2226,7 +2270,7 @@ async function resolveEditTarget(
       403,
     );
   }
-  const questions = await loadAbstractQuestions(c, submission.form_id, ctx.event.id);
+  const { questions, internalQuestionIds } = await loadAbstractQuestions(c, submission.form_id, ctx.event.id);
   if (questions.length === 0) {
     return c.html(
       portalPage(
@@ -2241,7 +2285,7 @@ async function resolveEditTarget(
     loadEditParticipants(c, submission.id),
     loadParticipantRoleConfig(c, submission.form_id, ctx.event.id),
   ]);
-  return { submission, questions, participants, roleConfig };
+  return { submission, questions, internalQuestionIds, participants, roleConfig };
 }
 
 /**
@@ -2285,7 +2329,7 @@ portalRoutes.post('/:slug/submissions/:id/edit', async (c) => {
   const id = c.req.param('id');
   const target = await resolveEditTarget(c, ctx, id);
   if (target instanceof Response) return target;
-  const { submission, questions, participants, roleConfig } = target;
+  const { submission, questions, internalQuestionIds, participants, roleConfig } = target;
 
   const body = await c.req.parseBody({ all: true });
   const existing = await loadSubmissionAnswers(c, submission.id);
@@ -2356,7 +2400,14 @@ portalRoutes.post('/:slug/submissions/:id/edit', async (c) => {
       submission.id,
       ctx.event.id,
     ),
-    c.env.DB.prepare('DELETE FROM submission_answers WHERE submission_id = ?').bind(submission.id),
+    // Internal-audience questions (0042) are never rendered on this page, so
+    // their stored answers must survive the delete-and-reinsert untouched.
+    internalQuestionIds.length > 0
+      ? c.env.DB.prepare(
+          `DELETE FROM submission_answers WHERE submission_id = ?
+           AND question_id NOT IN (${internalQuestionIds.map(() => '?').join(', ')})`,
+        ).bind(submission.id, ...internalQuestionIds)
+      : c.env.DB.prepare('DELETE FROM submission_answers WHERE submission_id = ?').bind(submission.id),
   ];
   // Stored answers keep the same display-text shape the wizard writes
   // (submit.tsx storableAnswers): the track id goes back to its name so the

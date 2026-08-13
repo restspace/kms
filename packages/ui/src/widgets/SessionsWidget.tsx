@@ -3,6 +3,8 @@ import {
   applyFeedFilter,
   fetchAgenda,
   fieldVisible,
+  filteredEmptyMessage,
+  isEmptyFilter,
   type AgendaFeed,
   type FieldVisibility,
   type PublicFeedFilter,
@@ -136,7 +138,10 @@ function SessionCard({
  * fallback for the rare feed that hasn't been re-fetched with the new field.
  */
 export function SessionsWidget({ eventSlug, filter, show }: SessionsWidgetProps) {
-  const [feed, setFeed] = useState<AgendaFeed | null | undefined>(undefined)
+  // The raw feed is kept alongside the filtered view (rather than storing
+  // only `applyFeedFilter`'s output) so the empty state can tell "the agenda
+  // is empty" apart from "the embed's ?track=/?day= filter matched nothing".
+  const [rawFeed, setRawFeed] = useState<AgendaFeed | null | undefined>(undefined)
   const [query, setQuery] = useState('')
   const [track, setTrack] = useState(ALL)
   const [format, setFormat] = useState(ALL)
@@ -146,12 +151,17 @@ export function SessionsWidget({ eventSlug, filter, show }: SessionsWidgetProps)
   useEffect(() => {
     let cancelled = false
     fetchAgenda(eventSlug).then((data) => {
-      if (!cancelled) setFeed(applyFeedFilter(data, filter))
+      if (!cancelled) setRawFeed(data)
     })
     return () => {
       cancelled = true
     }
-  }, [eventSlug, filter?.track, filter?.day])
+  }, [eventSlug])
+
+  const feed = useMemo(
+    () => (rawFeed === undefined ? undefined : applyFeedFilter(rawFeed, filter)),
+    [rawFeed, filter?.track, filter?.day],
+  )
 
   const roomsById = useMemo(() => new Map((feed?.rooms ?? []).map((r) => [r.id, r])), [feed])
   const tracksById = useMemo(() => new Map((feed?.tracks ?? []).map((t) => [t.id, t])), [feed])
@@ -184,7 +194,17 @@ export function SessionsWidget({ eventSlug, filter, show }: SessionsWidgetProps)
 
   if (feed === undefined) return <p className="muted">Loading sessions…</p>
   if (feed === null) return <p className="event-widget-empty">The agenda isn't published yet — check back soon.</p>
-  if (feed.sessions.length === 0) return <p className="event-widget-empty">No sessions are scheduled yet.</p>
+  if (feed.sessions.length === 0) {
+    // Distinguish a genuinely empty agenda from an embed filter that matched
+    // nothing (eval defect: "No sessions are scheduled yet." on a full agenda
+    // narrowed by ?track=) — the raw feed says which one it is.
+    const filteredOut = !isEmptyFilter(filter) && (rawFeed?.sessions.length ?? 0) > 0
+    return (
+      <p className="event-widget-empty">
+        {filteredOut ? filteredEmptyMessage(rawFeed?.tracks, filter) : 'No sessions are scheduled yet.'}
+      </p>
+    )
+  }
 
   const openSession = openSessionId ? feed.sessions.find((s) => s.id === openSessionId) ?? null : null
 

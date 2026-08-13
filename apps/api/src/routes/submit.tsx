@@ -75,7 +75,12 @@ interface EventRow {
 interface FormContext {
   event: EventRow;
   form: FormRow;
+  /** Speaker-facing questions only — 'internal'-audience fields are filtered
+   *  out (0042) before anything renders or validates. */
   questions: QuestionDef[];
+  /** Question ids of the internal-audience fields this form carries: their
+   *  stored answers must survive a public-wizard save untouched. */
+  internalQuestionIds: string[];
   limit: number | null;
   closed: boolean;
 }
@@ -106,12 +111,21 @@ async function loadContext(db: D1Database, slug: string, formId: string): Promis
     .bind(formId, event.id)
     .first<FormRow>();
   if (!form) return null;
-  const questions = (await loadQuestions(db, form.id, event.id)) as unknown as QuestionDef[];
+  const allQuestions = (await loadQuestions(db, form.id, event.id)) as unknown as QuestionDef[];
+  // Defect #4 (workplan-17 replay): operational fields — Client Session ID,
+  // CEU Credits, Capacity, seeded for the importer's column mapping — were
+  // rendered to submitters as if they were CFP questions. The audience flag
+  // (field_definitions.audience, 0042) is the boundary: this whole route file
+  // is the speaker-facing surface, so internal fields are filtered out here,
+  // once, and every handler below (render, autosave, validate, submit)
+  // consistently never sees them.
+  const questions = allQuestions.filter((q) => q.audience !== 'internal');
   const closed = isFormClosed(form);
   return {
     event,
     form,
     questions,
+    internalQuestionIds: allQuestions.filter((q) => q.audience === 'internal').map((q) => q.id),
     limit: form.submission_limit ?? event.default_submission_limit ?? null,
     closed,
   };
@@ -160,6 +174,23 @@ function systemColumns(questions: QuestionDef[], answers: Answers): Record<strin
     }
   }
   return out;
+}
+
+/** The optional system columns the wizard's update paths may write (`title`
+ *  always writes, with its Untitled fallback). A column is only written when
+ *  the SPEAKER-FACING form actually asks the matching question — a column
+ *  with no public question (an internal-audience field per 0042, or simply a
+ *  form that never asked) keeps its stored value: the wizard never showed
+ *  it, so an autosave/submit must not null out what an import or organiser
+ *  set. Clearing still works for questions that ARE asked (an empty answer
+ *  maps to no `columns` entry, which binds NULL below). */
+const OPTIONAL_SYSTEM_KEYS = [
+  'description', 'format', 'level', 'language', 'capacity', 'ceu_credits', 'client_session_id',
+] as const;
+
+function writableSystemKeys(questions: QuestionDef[]): Array<(typeof OPTIONAL_SYSTEM_KEYS)[number]> {
+  const present = new Set(questions.map((q) => q.field_key));
+  return OPTIONAL_SYSTEM_KEYS.filter((k) => present.has(k));
 }
 
 /** Track names picked in the answers. A multiselect track question yields every
@@ -325,9 +356,24 @@ function tagAnswers(questions: QuestionDef[], answers: Answers): string[] {
  * inserted nothing (quota reached) fails cleanly on `changes === 0` rather
  * than on a foreign-key error.
  */
-function answerStatements(db: D1Database, submissionId: string, answers: Answers): D1PreparedStatement[] {
+function answerStatements(
+  db: D1Database,
+  submissionId: string,
+  answers: Answers,
+  /** Question ids whose stored rows must survive this save (0042): the
+   *  wizard never rendered the internal-audience questions, so a save from
+   *  it must not delete an answer an organiser/import put there. */
+  preserveQuestionIds: string[] = [],
+): D1PreparedStatement[] {
   const statements: D1PreparedStatement[] = [
-    db.prepare('DELETE FROM submission_answers WHERE submission_id = ?').bind(submissionId),
+    preserveQuestionIds.length > 0
+      ? db
+          .prepare(
+            `DELETE FROM submission_answers WHERE submission_id = ?
+             AND question_id NOT IN (${preserveQuestionIds.map(() => '?').join(', ')})`,
+          )
+          .bind(submissionId, ...preserveQuestionIds)
+      : db.prepare('DELETE FROM submission_answers WHERE submission_id = ?').bind(submissionId),
   ];
   for (const [qid, value] of Object.entries(answers)) {
     if (value === undefined) continue;
@@ -712,24 +758,22 @@ submitRoutes.post('/:slug/:formId/draft', async (c) => {
         )
     : db
         .prepare(
-          `UPDATE submissions SET title = ?, description = ?, format = ?, level = ?, language = ?,
-             capacity = ?, ceu_credits = ?, client_session_id = ?, updated_at = ?
+          `UPDATE submissions SET title = ?${writableSystemKeys(abstractQuestions)
+            .map((k) => `, ${k} = ?`)
+            .join('')}, updated_at = ?
            WHERE id = ?`,
         )
         .bind(
           (columns.title as string) ?? 'Untitled draft',
-          (columns.description as string) ?? null,
-          (columns.format as string) ?? null,
-          (columns.level as string) ?? null,
-          (columns.language as string) ?? null,
-          (columns.capacity as number) ?? null,
-          (columns.ceu_credits as number) ?? null,
-          (columns.client_session_id as string) ?? null,
+          ...writableSystemKeys(abstractQuestions).map((k) => (columns[k] as string | number | null | undefined) ?? null),
           ts,
           submissionId,
         );
 
-  const results = await db.batch([head, ...answerStatements(db, submissionId, storableAnswers(abstractQuestions, answers))]);
+  const results = await db.batch([
+    head,
+    ...answerStatements(db, submissionId, storableAnswers(abstractQuestions, answers), ctx.internalQuestionIds),
+  ]);
   if (isCreate && results[0]?.meta.changes === 0) {
     return c.json(limitReachedBody(), 409);
   }
@@ -1367,34 +1411,32 @@ submitRoutes.post('/:slug/:formId/submit', async (c) => {
           ),
       );
     } else {
+      // Same column rule as the draft autosave above: only the system columns
+      // the speaker-facing form asks about are written; the rest (internal-
+      // audience fields per 0042, or questions the form never had) keep
+      // their stored values.
+      const sysKeys = writableSystemKeys(abstractQuestions);
       statements.push(
         db
           .prepare(
-            `UPDATE submissions SET title = ?2, description = ?3, status = ?4, format = ?5, level = ?6,
-               language = ?7, capacity = ?8, ceu_credits = ?9, client_session_id = ?10, track_id = ?11,
-               evaluation_plan_id = ?12, updated_at = ?13
-             WHERE id = ?1 AND event_id = ?14`,
+            `UPDATE submissions SET title = ?, status = ?${sysKeys.map((k) => `, ${k} = ?`).join('')},
+               track_id = ?, evaluation_plan_id = ?, updated_at = ?
+             WHERE id = ? AND event_id = ?`,
           )
           .bind(
-            newId,
             title,
-            (columns.description as string) ?? null,
             status,
-            (columns.format as string) ?? null,
-            (columns.level as string) ?? null,
-            (columns.language as string) ?? null,
-            (columns.capacity as number) ?? null,
-            (columns.ceu_credits as number) ?? null,
-            (columns.client_session_id as string) ?? null,
+            ...sysKeys.map((k) => (columns[k] as string | number | null | undefined) ?? null),
             primaryTrackId,
             evaluationPlanId,
             ts,
+            newId,
             ctx.event.id,
           ),
       );
     }
 
-    statements.push(...answerStatements(db, newId, storableAnswers(abstractQuestions, answers)));
+    statements.push(...answerStatements(db, newId, storableAnswers(abstractQuestions, answers), ctx.internalQuestionIds));
 
     // Tags
     statements.push(db.prepare('DELETE FROM submission_tags WHERE submission_id = ?').bind(newId));

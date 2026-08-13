@@ -46,6 +46,13 @@ export interface QuestionDef {
   options: QuestionOption[] | null;
   max_chars: number | null;
   visibility: ConditionalRule | null;
+  /**
+   * Field-level audience (migration 0042): 'internal' marks an organiser-only
+   * field — skipped by the public CFP wizard and the portal edit page, still
+   * shown on every organiser surface. Optional so older cached shapes parse;
+   * absent means 'public'.
+   */
+  audience?: 'public' | 'internal';
 }
 
 export type AnswerValue = string | number | boolean | string[] | null | undefined;

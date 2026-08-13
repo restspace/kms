@@ -527,6 +527,9 @@ export interface OrgDashboardEventRow {
   id: string;
   name: string;
   slug: string;
+  /** Needed client-side to derive the local-day range: reading starts/ends as
+   * UTC dates shows the wrong final day for any event west of UTC. */
+  timezone: string;
   starts_at: string;
   ends_at: string;
   agenda_published: number;
@@ -624,7 +627,7 @@ async function orgDashboardPayload(
     // `funnelRow` query above): received excludes drafts, scheduled means an
     // accepted submission that owns both a slot and a room.
     db.prepare(
-      `SELECT e.id, e.name, e.slug, e.starts_at, e.ends_at, e.agenda_published,
+      `SELECT e.id, e.name, e.slug, e.timezone, e.starts_at, e.ends_at, e.agenda_published,
               (SELECT COUNT(*) FROM submissions s
                 WHERE s.event_id = e.id AND s.status != 'draft') AS submissions,
               (SELECT COUNT(*) FROM submissions s

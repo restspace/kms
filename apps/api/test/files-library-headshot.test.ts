@@ -127,4 +127,49 @@ describe('Files library — headshots (SPK-10)', () => {
     expect(after.items[0]!.filename).toBe('grace.png');
     expect(after.items[0]!.contact_id).toBe(speaker);
   });
+
+  // Replay defect #11: `?rec=<upload_id>` deep-link restore in the admin SPA
+  // resolves the detail tab's row through GET /library?upload_id=… — a single
+  // chain by its current upload row's id, still inside the accessible-event
+  // scope every other library read enforces.
+  it('upload_id narrows the library to that single chain', async () => {
+    const eventId = await createEvent();
+    const adminContactId = await createContact(eventId, { email: `admin4-${crypto.randomUUID()}@example.com` });
+    await createEventUser(eventId, adminContactId, 'admin');
+    const adminCookie = await sessionCookieFor({ contactId: adminContactId, eventId, eventSlug: eventId, role: 'admin' });
+
+    for (const [email, name] of [['a@example.com', 'a.png'], ['b@example.com', 'b.png']] as const) {
+      const speaker = await createContact(eventId, { email });
+      const form = new FormData();
+      form.set('headshot', fileFrom(pngBytes(), name, 'image/png'));
+      const res = await SELF.fetch(`${ORIGIN}/app/api/contacts/${speaker}/headshot`, {
+        method: 'POST',
+        headers: { cookie: adminCookie },
+        body: form,
+      });
+      expect(res.status).toBe(200);
+    }
+
+    const all = await library(adminCookie, eventId);
+    expect(all.total).toBe(2);
+    const target = all.items.find((r) => r.filename === 'a.png')!;
+
+    const one = await SELF.fetch(
+      `${ORIGIN}/app/api/files/library?upload_id=${target.upload_id}&event_id=${eventId}`,
+      { headers: { cookie: adminCookie } },
+    );
+    expect(one.status).toBe(200);
+    const body = (await one.json()) as { items: LibraryRow[]; total: number };
+    expect(body.total).toBe(1);
+    expect(body.items[0]!.upload_id).toBe(target.upload_id);
+    expect(body.items[0]!.filename).toBe('a.png');
+
+    // An unknown id resolves to nothing rather than erroring — the SPA drops
+    // the stale deep link.
+    const gone = await SELF.fetch(`${ORIGIN}/app/api/files/library?upload_id=nope`, {
+      headers: { cookie: adminCookie },
+    });
+    expect(gone.status).toBe(200);
+    expect(((await gone.json()) as { total: number }).total).toBe(0);
+  });
 });

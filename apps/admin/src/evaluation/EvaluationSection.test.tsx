@@ -422,4 +422,56 @@ describe('EvaluationSection — round editor (lane L3)', () => {
     expect(addCriterion).toHaveBeenCalledTimes(1)
     expect(addCriterion).toHaveBeenCalledWith('p1', { name: 'Originality', weight: 1, kind: 'score' })
   })
+
+  // Replay defect #1 (cross-round criteria bleed): after "+ Create plan" the
+  // new round's card appeared last and closed, while a previously opened
+  // criteria editor — the OLD round's — stayed the only active input, so
+  // criteria typed "for the new round" POSTed with the old round's plan id.
+  // The just-created round must open its own criteria editor, making it the
+  // active target.
+  it('opens the just-created round\'s criteria editor so new criteria attach to it, not the previous round', async () => {
+    getEvaluationOverview.mockResolvedValue(full)
+    createPlan.mockResolvedValue({ ok: true, id: 'p2' })
+    render(<EvaluationSection />)
+    await screen.findByDisplayValue('Round 1')
+
+    // The refetch after Create answers with both rounds.
+    getEvaluationOverview.mockResolvedValue({
+      ...full,
+      plans: [full.plans[0], { ...full.plans[0], id: 'p2', name: 'Final Review' }],
+      criteria: [
+        ...full.criteria,
+        { id: 'c9', plan_id: 'p2', name: 'Overall', description: null, weight: 1, position: 1 },
+      ],
+    })
+
+    const { fireEvent } = await import('@testing-library/preact')
+    fireEvent.input(screen.getByLabelText('New plan name'), { target: { value: 'Final Review' } })
+    fireEvent.click(screen.getByRole('button', { name: '+ Create plan' }))
+    await screen.findByDisplayValue('Final Review')
+
+    // The new card's criteria editor is already open — and it is the only
+    // open one, so the criterion-name input on screen belongs to Final Review.
+    const field = await screen.findByLabelText('New criterion name')
+    fireEvent.input(field, { target: { value: 'Final Score' } })
+    fireEvent.keyDown(field, { key: 'Enter' })
+
+    await waitFor(() => expect(addCriterion).toHaveBeenCalled())
+    expect(addCriterion).toHaveBeenCalledWith('p2', { name: 'Final Score', weight: 1, kind: 'score' })
+  })
+
+  // Replay defect #2: a second criterion with a name already on this
+  // scorecard (case-insensitive, trimmed) is refused inline, before any POST.
+  it('refuses a duplicate criterion name on the same round without POSTing', async () => {
+    await openCard()
+    const { fireEvent } = await import('@testing-library/preact')
+    fireEvent.click(screen.getByLabelText('Edit criteria'))
+    const field = screen.getByLabelText('New criterion name')
+    fireEvent.input(field, { target: { value: '  relevance ' } })
+    fireEvent.keyDown(field, { key: 'Enter' })
+
+    expect(await screen.findByRole('alert')).toBeTruthy()
+    expect(screen.getByRole('alert').textContent).toContain('already a criterion')
+    expect(addCriterion).not.toHaveBeenCalled()
+  })
 })

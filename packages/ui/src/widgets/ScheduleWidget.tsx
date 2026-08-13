@@ -4,6 +4,8 @@ import {
   applyFeedFilter,
   fetchAgenda,
   fieldVisible,
+  filteredEmptyMessage,
+  isEmptyFilter,
   type AgendaFeed,
   type FieldVisibility,
   type PublicFeedFilter,
@@ -222,7 +224,9 @@ function SessionCard({
  * of just the starred sessions.
  */
 export function ScheduleWidget({ eventSlug, filter, show }: ScheduleWidgetProps) {
-  const [feed, setFeed] = useState<AgendaFeed | null | undefined>(undefined)
+  // Raw feed kept alongside the filtered view so the empty state can tell
+  // "nothing scheduled" apart from "the embed filter matched nothing".
+  const [rawFeed, setRawFeed] = useState<AgendaFeed | null | undefined>(undefined)
   const [activeDay, setActiveDay] = useState<string | null>(null)
   const [query, setQuery] = useState('')
   const [starred, setStarred] = useState<Set<string>>(() => new Set())
@@ -235,13 +239,17 @@ export function ScheduleWidget({ eventSlug, filter, show }: ScheduleWidgetProps)
   useEffect(() => {
     let cancelled = false
     fetchAgenda(eventSlug).then((raw) => {
-      const data = applyFeedFilter(raw, filter)
-      if (!cancelled) setFeed(data)
+      if (!cancelled) setRawFeed(raw)
     })
     return () => {
       cancelled = true
     }
-  }, [eventSlug, filter?.track, filter?.day])
+  }, [eventSlug])
+
+  const feed = useMemo(
+    () => (rawFeed === undefined ? undefined : applyFeedFilter(rawFeed, filter)),
+    [rawFeed, filter?.track, filter?.day],
+  )
 
   // Load the saved selection once we're on the client (SSR has no localStorage).
   useEffect(() => {
@@ -334,6 +342,12 @@ export function ScheduleWidget({ eventSlug, filter, show }: ScheduleWidgetProps)
 
   if (feed === undefined) return <p className="muted">Loading schedule…</p>
   if (feed === null) return <p className="event-widget-empty">The agenda isn't published yet — check back soon.</p>
+  // An embed filter that matched nothing must not read as an empty agenda
+  // (same defect and fix as SessionsWidget) — checked ahead of the day-tab
+  // fallback so an event with a date range doesn't render tabs over nothing.
+  if (feed.sessions.length === 0 && !isEmptyFilter(filter) && (rawFeed?.sessions.length ?? 0) > 0) {
+    return <p className="event-widget-empty">{filteredEmptyMessage(rawFeed?.tracks, filter)}</p>
+  }
   if (days.length === 0) return <p className="event-widget-empty">No sessions are scheduled yet.</p>
 
   return (

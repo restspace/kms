@@ -88,11 +88,18 @@ function MessageSelectedDialog({ request, onClose }: { request: MessageSelectedR
         contact_ids: request.contactIds,
       })
       setPhase({ kind: 'sending', note: `Queued for ${r.total} recipient${r.total === 1 ? '' : 's'}…` })
+      // onSettled is re-entrant: a job settling 'done' with rows still queued
+      // keeps polling and re-reports fresher counts (see pollBulkJob). The
+      // banner should refresh every time; onSent (grid reloads) only once.
+      let reportedSent = false
       pollRef.current = pollBulkJob(r.job_id, {
         onProgress: (job) => setPhase({ kind: 'sending', note: describeRunningJob(job, 'message') }),
         onSettled: (job) => {
           setPhase({ kind: 'settled', note: describeSettledJob(job, 'message'), failed: job.status === 'failed' })
-          request.onSent?.()
+          if (!reportedSent) {
+            reportedSent = true
+            request.onSent?.()
+          }
         },
         onError: (message) => setPhase({ kind: 'settled', note: message, failed: true }),
       })

@@ -28,6 +28,7 @@ import {
 } from '../api'
 import { DesktopOnlyNotice } from '@kms/ui/desktop-only'
 import { appConfirm } from '../components/dialogs'
+import { EventScopeNote, useEventScopeOptional } from '../eventScope'
 import { navigate } from '../router'
 import { createMutationQueue } from './mutationQueue'
 import { ConflictsView } from './ConflictsView'
@@ -181,6 +182,13 @@ export function AgendaSection({
   const [isCompact, setIsCompact] = useState(() =>
     typeof window !== 'undefined' ? window.matchMedia(COMPACT_MEDIA_QUERY).matches : false
   )
+  // Eval defect: with the sidebar filter on "All events" the agenda kept
+  // showing one event with nothing naming the divergence — every other
+  // per-event surface (Forms, Evaluation, Dashboard, Settings) renders the
+  // EventScopeNote caveat ("this screen is bound to one event"). App.tsx wraps
+  // those sections; the agenda mounts bare, so the note renders from inside.
+  // Optional lookup keeps standalone test renders working without a provider.
+  const scope = useEventScopeOptional()
   const undoStack = useRef<UndoEntry[]>([])
   const toastTimer = useRef<number | null>(null)
   const jobTimer = useRef<number | null>(null)
@@ -888,6 +896,7 @@ export function AgendaSection({
 
   return (
     <div className="agenda">
+      {scope && <EventScopeNote scope={scope} />}
       <header className="agenda-header">
         <div>
           <h2>

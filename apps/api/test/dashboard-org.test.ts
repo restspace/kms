@@ -26,7 +26,7 @@ interface OrgBody {
   };
   top_companies: Array<{ company: string; n: number }>;
   events: Array<{
-    id: string; name: string; slug: string; starts_at: string; ends_at: string;
+    id: string; name: string; slug: string; timezone: string; starts_at: string; ends_at: string;
     agenda_published: number; submissions: number; accepted: number; scheduled: number;
   }>;
 }
@@ -49,7 +49,7 @@ const addParticipant = (submissionId: string, contactId: string) =>
 /** Org + two events in it, plus an admin seated on the first. */
 async function seedOrgWithTwoEvents() {
   const orgId = await createOrg(uid('org'), 'Contoso Events');
-  const eventA = await seedEvent({ org_id: orgId, name: 'Spring Summit', starts_at: '2026-04-01T08:00:00Z', ends_at: '2026-04-02T18:00:00Z' });
+  const eventA = await seedEvent({ org_id: orgId, name: 'Spring Summit', timezone: 'America/Los_Angeles', starts_at: '2026-04-01T08:00:00Z', ends_at: '2026-04-02T18:00:00Z' });
   const eventB = await seedEvent({ org_id: orgId, name: 'Autumn Summit', starts_at: '2026-10-01T08:00:00Z', ends_at: '2026-10-02T18:00:00Z' });
   const admin = await seedStaff(eventA, 'admin');
   return { orgId, eventA, eventB, admin };
@@ -156,6 +156,11 @@ describe('GET /app/api/dashboard/org', () => {
       scheduled: 1,
     });
     expect(body.events[1]).toMatchObject({ name: 'Spring Summit', submissions: 0, accepted: 0, scheduled: 0 });
+    // Each row carries its event's timezone: the client derives the displayed
+    // date range as local days (the UTC dates put the final day one late for
+    // any event west of UTC).
+    expect(body.events[1].timezone).toBe('America/Los_Angeles');
+    expect(body.events[0].timezone).toBe('UTC');
   });
 
   it('answers 304 on an unchanged ETag and re-issues after any event in the org bumps', async () => {
