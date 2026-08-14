@@ -78,8 +78,15 @@ export function HelpSection({ slug }: HelpSectionProps) {
     else bodyRef.current?.parentElement?.scrollTo?.({ top: 0 })
   }, [page?.slug])
 
+  /**
+   * Narrow screens show one pane at a time (help.css): the contents rail is the
+   * screen you land on, and choosing a page slides it in over the rail. The
+   * class says which pane is showing; the CSS decides whether that matters.
+   */
+  const hasSelection = active !== INDEX_SLUG
+
   return (
-    <div className="manual">
+    <div className={`manual${hasSelection ? ' manual-has-selection' : ''}`}>
       <nav className="manual-nav" aria-label="Manual contents">
         <button
           type="button"
@@ -108,6 +115,15 @@ export function HelpSection({ slug }: HelpSectionProps) {
         ))}
       </nav>
       <article className="manual-page">
+        {/* Only ever visible on a narrow screen, where the contents rail it
+            returns to is off-screen rather than beside this column. */}
+        <button
+          type="button"
+          className="manual-back"
+          onClick={() => navigate({ v: 'help', page: null })}
+        >
+          <span aria-hidden="true">←</span> Contents
+        </button>
         {loadError ? (
           <p className="manual-status" role="alert">
             The manual could not be loaded. Reload the page to try again.

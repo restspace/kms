@@ -159,19 +159,83 @@
   font-weight: 600;
 }
 
+/* The back arrow belongs to the narrow layout; beside a visible contents rail
+   it would point at something already on screen. */
+.manual-back { display: none; }
+
 @media (max-width: 900px) {
+  /* One pane at a time: the contents rail is the screen you arrive at, and
+     picking a page slides it in from the right over the rail. Each pane keeps
+     its own scroll, which is what lets the back bar stick to the top of the
+     page as it scrolls. */
   .manual {
     grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
+    overflow: hidden;
+  }
+
+  .manual-nav,
+  .manual-page {
+    grid-area: 1 / 1;
     overflow-y: auto;
   }
 
-  /* The rail becomes a contents block above the page rather than disappearing:
-     on a phone the manual is the one screen you arrive at without context. */
   .manual-nav {
     border-right: 0;
-    border-bottom: 1px solid var(--border);
-    overflow: visible;
   }
 
-  .manual-page { overflow: visible; }
+  /* Comfortable tap targets — the rail is the whole screen here, not a 240px
+     column of dense links. */
+  .manual-nav-link {
+    padding: 10px var(--space-4);
+    font-size: var(--text-base);
+    border-bottom: 1px solid var(--border);
+  }
+
+  .manual-nav-link.child { padding-left: var(--space-5); }
+
+  .manual:not(.manual-has-selection) .manual-page { display: none; }
+  .manual.manual-has-selection .manual-nav { display: none; }
+
+  .manual.manual-has-selection .manual-page {
+    animation: manual-slide-in 0.22s ease-out;
+  }
+
+  .manual-page {
+    /* The sticky bar supplies the top spacing the page would otherwise pad. */
+    padding: 0 var(--space-4) var(--space-5);
+  }
+
+  .manual-back {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    /* Full-bleed across the pane's padding so nothing scrolls up beside it. */
+    width: calc(100% + 2 * var(--space-4));
+    margin: 0 calc(-1 * var(--space-4)) var(--space-4);
+    padding: var(--space-3) var(--space-4);
+    border: 0;
+    border-bottom: 1px solid var(--border);
+    background: var(--chrome);
+    color: var(--accent-strong);
+    font: inherit;
+    font-size: var(--text-grid);
+    font-weight: 600;
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .manual-back span { font-size: 1.2em; line-height: 1; }
+}
+
+@keyframes manual-slide-in {
+  from { transform: translateX(12%); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .manual.manual-has-selection .manual-page { animation: none; }
 }

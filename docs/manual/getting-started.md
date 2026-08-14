@@ -57,6 +57,10 @@ opens the same manual at its contents page, and reviewers get both as well.
 > **Note:** the **?** is an ordinary link, so middle-clicking it (or ⌘/Ctrl-clicking) opens the
 > manual page in a second browser tab, to read alongside the screen it explains.
 
+On a phone or narrow window the manual shows one thing at a time: the contents list fills the
+screen, and tapping an entry slides that page in over it. A **← Contents** bar stays pinned to the
+top of the page as you read — tap it to go back to the list.
+
 ## Roles
 
 There are two roles: **Admin** (full access, same as you) and **Reviewer** (access only to the

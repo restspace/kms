@@ -22,6 +22,12 @@ import {
 } from './evaluationApi'
 import { appConfirm } from '../components/dialogs'
 import { buildAssignBody, buildScalePatch, parseCapInput, resolveDateInputBlur } from './evaluationLogic'
+// This section is built from the Forms section's shell classes (.forms-section,
+// .forms-header, .forms-scroll, .fbtn) but lived in its own chunk, so those
+// styles only arrived if the organiser had already opened Forms — otherwise the
+// header rendered unstyled (a 28px UA h1, no padding). Import them here too;
+// Vite dedupes the stylesheet across both chunks.
+import '../forms/forms.css'
 import '../workspace/review.css'
 
 /**
@@ -1256,8 +1262,11 @@ function SubmissionPicker({
           )}
           {data && data.items.length > 0 && (
             <div className="eval-sublist" style={{ maxHeight: 220, overflowY: 'auto', display: 'grid', gap: 2 }}>
+              {/* Classes rather than inline styles on the rows below: a narrow
+                  screen has to re-flow them (review.css), and an inline `flex`
+                  on the title can't be overridden from a stylesheet. */}
               {data.items.map((item) => (
-                <label key={item.id} style={{ display: 'flex', gap: 6, alignItems: 'center', fontSize: 12 }}>
+                <label key={item.id} className="eval-sub-row">
                   <input
                     type="checkbox"
                     aria-label={`${item.title} in this round`}
@@ -1273,10 +1282,10 @@ function SubmissionPicker({
                       )
                     }
                   />
-                  <span style={{ color: 'var(--text-faint)' }}>{item.code}</span>
-                  <span style={{ flex: 1 }}>{item.title}</span>
-                  <span className="pane-sub">{item.track_name ?? '—'} · {item.status}</span>
-                  {item.assignments > 0 && <span className="pane-sub">{item.assignments} assigned</span>}
+                  <span className="eval-sub-code">{item.code}</span>
+                  <span className="eval-sub-title">{item.title}</span>
+                  <span className="pane-sub eval-sub-meta">{item.track_name ?? '—'} · {item.status}</span>
+                  {item.assignments > 0 && <span className="pane-sub eval-sub-assigned">{item.assignments} assigned</span>}
                   {item.member === 1 && (
                     <input
                       type="checkbox"

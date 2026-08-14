@@ -592,6 +592,12 @@
 /* Compact (640): a single submission's detail panel reads top-to-bottom, and
    its Approve/Decline row clears a tap target. Appended; desktop untouched. */
 @media (max-width: 640px) {
+  /* The '?' button is absolutely positioned over this note's top-right corner;
+     at this width the note wraps under it, so reserve the button's width. */
+  .section-event-note {
+    padding-right: calc(var(--space-3) + 26px);
+  }
+
   .detail-panel { padding: var(--space-3); }
 
   .detail-panel dl { grid-template-columns: 1fr; }

@@ -346,6 +346,18 @@
    Replaces the old window.prompt() flow, which automation and some browsers
    suppress outright. */
 
+/* One submission in the round's picker: code, title, its track/status, and the
+   assign box. Was inline styles on the label — see EvaluationSection. */
+.eval-sub-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  font-size: 12px;
+}
+
+.eval-sub-code { color: var(--text-faint); }
+.eval-sub-title { flex: 1; }
+
 .eval-newplan { display: flex; align-items: center; gap: var(--space-2); margin-left: auto; }
 .eval-newplan input {
   padding: 4px 8px;
@@ -589,6 +601,60 @@
 @media (max-width: 640px) {
   .chip-filter {
     padding: 0 var(--space-2);
+  }
+}
+
+/* Compact (640): the Evaluation header is a title beside a create-a-round
+   control, which at this width squeezes the title into a one-word column and
+   pushes the button off-screen. Stack them, and let the input take the width
+   the row no longer has to share. */
+@media (max-width: 640px) {
+  .forms-header {
+    flex-wrap: wrap;
+    align-items: flex-start;
+    gap: var(--space-2);
+  }
+
+  .forms-header h1 {
+    flex: 1 1 100%;
+  }
+
+  .forms-header .forms-sub {
+    display: block;
+  }
+
+  .eval-newplan {
+    flex: 1 1 100%;
+    margin-left: 0;
+  }
+
+  .eval-newplan input {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  .eval-newplan .fbtn {
+    flex: 0 0 auto;
+  }
+
+  /* Picker rows: five things across one 390px line crushed the title to a
+     couple of characters a word. Title keeps line 1 with the code; the
+     track/status meta starts line 2 and the assign box trails it. */
+  .eval-sub-row {
+    flex-wrap: wrap;
+    align-items: baseline;
+    padding: var(--space-1) 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .eval-sub-title {
+    flex: 1 1 60%;
+  }
+
+  /* Wide enough that it can't share line 1, narrow enough that the assign
+     count and its box sit beside it on line 2 rather than each taking a line. */
+  .eval-sub-meta {
+    flex: 1 1 55%;
   }
 }
 
