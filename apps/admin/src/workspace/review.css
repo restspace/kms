@@ -584,6 +584,14 @@
   }
 }
 
+/* Compact (640): tighter chip padding leaves more room for the coverage
+   filter row to wrap without crowding narrow viewports. */
+@media (max-width: 640px) {
+  .chip-filter {
+    padding: 0 var(--space-2);
+  }
+}
+
 /* --- slot counter strip + lobby queue (workplan 15 W1) --- */
 
 /* Sits in the Submissions filter band beside the coverage bar; the band wraps,

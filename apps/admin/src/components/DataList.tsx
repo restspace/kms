@@ -833,7 +833,9 @@ export const DataList = <T extends Record<string, any>, TFilters extends Record<
   const mobileBreakpoint = mobileBreakpointWidth ?? DEFAULT_MOBILE_BREAKPOINT_WIDTH;
   const [isMobile, setIsMobile] = useState(() => isViewportMobile(mobileBreakpoint));
   const hasMobileRow2 = useMemo(() => columns.some(c => c.mobileRow === 2 && !c.mobileHidden), [columns]);
-  const effectiveItemSize = isMobile && hasMobileRow2 ? (mobileRowHeight ?? 88) : isMobile ? 78 : rowHeight;
+  // `mobileRowHeight` is the per-tab override; the defaults below only apply
+  // when a tab doesn't state one (two stacked sub-rows need more room than one).
+  const effectiveItemSize = isMobile ? (mobileRowHeight ?? (hasMobileRow2 ? 88 : 78)) : rowHeight;
   const listRef = useRef<any>(null);
   const scrollOffsetRef = useRef(0);
   const pendingScrollRestoreRef = useRef<number | null>(null);

@@ -577,6 +577,442 @@
   width: 100%;
 }
 
+/*
+ * Submissions mobile rows (scoped via the tab's `dataListClassName`): the title
+ * is the only thing worth reading at a glance, so it takes the whole line after
+ * the checkbox, and status + rating sit on a second line beneath it.
+ * Children in order: check cell, title, status, rating.
+ */
+.submissions-data-list .data-list-mobile-row1 {
+  display: grid;
+  grid-template-columns: auto max-content 1fr;
+  align-items: center;
+  column-gap: var(--space-3);
+  row-gap: 2px;
+}
+
+.submissions-data-list .data-list-mobile-row1 .data-list-check-cell {
+  grid-column: 1;
+  grid-row: 1;
+  align-self: center;
+}
+
+/* Title spans the rest of line 1 — no label, it needs no introduction. */
+.submissions-data-list .data-list-mobile-row1 .data-list-cell-mobile:nth-child(2) {
+  grid-column: 2 / -1;
+  grid-row: 1;
+  min-width: 0;
+}
+
+.submissions-data-list .data-list-mobile-row1 .data-list-cell-mobile:nth-child(2) .data-list-cell-mobile-label {
+  display: none;
+}
+
+/* Override the generic "right-align row1's second cell" rule (thumbnail lists). */
+.submissions-data-list .data-list-mobile-row1 .data-list-cell-mobile:nth-child(2) .data-list-cell-mobile-value {
+  text-align: left;
+}
+
+/* Status: line 2, aligned under the title, label dropped (the chip already
+   reads as a status). */
+.submissions-data-list .data-list-mobile-row1 .data-list-cell-mobile:nth-child(3) {
+  grid-column: 2;
+  grid-row: 2;
+  min-width: 0;
+}
+
+.submissions-data-list .data-list-mobile-row1 .data-list-cell-mobile:nth-child(3) .data-list-cell-mobile-label {
+  display: none;
+}
+
+/* Rating: line 2 alongside status, label inline to the left of the value. */
+.submissions-data-list .data-list-mobile-row1 .data-list-cell-mobile:nth-child(4) {
+  grid-column: 3;
+  grid-row: 2;
+  flex-direction: row;
+  align-items: baseline;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.submissions-data-list .data-list-mobile-row1 .data-list-cell-mobile:nth-child(4) .data-list-cell-mobile-value {
+  width: auto;
+}
+
+/* Row 2 (track, then submitter) continues the stack: one field per line with
+   the label to the left of its value. Subgrid keeps both values on the same
+   left edge regardless of label width. */
+.submissions-data-list .data-list-mobile-row2 {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  column-gap: var(--space-2);
+  row-gap: 2px;
+}
+
+.submissions-data-list .data-list-mobile-row2 .data-list-cell-mobile {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: subgrid;
+  align-items: baseline;
+  gap: 0 var(--space-2);
+  min-width: 0;
+}
+
+.submissions-data-list .data-list-mobile-row2 .data-list-cell-mobile-value {
+  width: auto;
+}
+
+/*
+ * Speakers mobile rows (scoped via the tab's `dataListClassName`): row 1 is the
+ * person's name and nothing else — first and last name butted together so they
+ * read as one full name — then company and email one per line beneath, each
+ * with its label to the left. Grid (not flex) for row 1 so the generic
+ * "row1 cells fill the line" flex rule above simply doesn't apply.
+ */
+.speakers-data-list .data-list-mobile-row1 {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(0, max-content);
+  justify-content: start;
+  align-items: center;
+  column-gap: 0.35em;
+}
+
+.speakers-data-list .data-list-mobile-row1 .data-list-check-cell {
+  margin-right: var(--space-2);
+  align-self: center;
+}
+
+.speakers-data-list .data-list-mobile-row1 .data-list-cell-mobile-label {
+  display: none;
+}
+
+/* Left-aligned and content-width, against the generic right-align-the-second-
+   cell rule meant for thumbnail lists. */
+.speakers-data-list .data-list-row-mobile .data-list-mobile-row1 .data-list-cell-mobile .data-list-cell-mobile-value {
+  width: auto;
+  text-align: left;
+}
+
+/* Row 2 carries company then email — DOM order is email first (its column is
+   declared first for the desktop grid), so swap them here. Subgrid keeps both
+   values on one left edge regardless of label width. */
+.speakers-data-list .data-list-mobile-row2 {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  column-gap: var(--space-2);
+  row-gap: 2px;
+}
+
+.speakers-data-list .data-list-mobile-row2 .data-list-cell-mobile {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: subgrid;
+  align-items: baseline;
+  gap: 0 var(--space-2);
+  min-width: 0;
+}
+
+.speakers-data-list .data-list-mobile-row2 .data-list-cell-mobile:nth-child(1) {
+  order: 2;
+}
+
+.speakers-data-list .data-list-mobile-row2 .data-list-cell-mobile:nth-child(2) {
+  order: 1;
+}
+
+.speakers-data-list .data-list-mobile-row2 .data-list-cell-mobile-value {
+  width: auto;
+}
+
+/*
+ * Comments mobile rows (scoped via the tab's `dataListClassName`): no labels at
+ * all — the submission code sits in a fixed block wide enough for a four-digit
+ * session number so the author names line up down the list, then kind, then the
+ * comment body. DOM order in row 1 is code, body, author, kind (the desktop
+ * column order), so the body is placed on the last line explicitly.
+ */
+.comments-data-list .data-list-mobile-row1 {
+  display: grid;
+  grid-template-columns: 9.5ch 1fr;
+  align-items: baseline;
+  column-gap: var(--space-2);
+  row-gap: 2px;
+}
+
+.comments-data-list .data-list-mobile-row1 .data-list-cell-mobile-label {
+  display: none;
+}
+
+/* Code — line 1, fixed block. */
+.comments-data-list .data-list-mobile-row1 .data-list-cell-mobile:nth-child(1) {
+  grid-column: 1;
+  grid-row: 1;
+  min-width: 0;
+}
+
+/* Comment body — last line, full width. */
+.comments-data-list .data-list-mobile-row1 .data-list-cell-mobile:nth-child(2) {
+  grid-column: 1 / -1;
+  grid-row: 3;
+  min-width: 0;
+}
+
+/* Author — line 1, beside the code. */
+.comments-data-list .data-list-mobile-row1 .data-list-cell-mobile:nth-child(3) {
+  grid-column: 2;
+  grid-row: 1;
+  min-width: 0;
+}
+
+/* Kind — line 2, full width. */
+.comments-data-list .data-list-mobile-row1 .data-list-cell-mobile:nth-child(4) {
+  grid-column: 1 / -1;
+  grid-row: 2;
+  min-width: 0;
+}
+
+.comments-data-list .data-list-row-mobile .data-list-mobile-row1 .data-list-cell-mobile .data-list-cell-mobile-value {
+  text-align: left;
+}
+
+/*
+ * Tasks mobile rows: task title, then assignee, then status with the due date
+ * starting halfway across the same line. Cell order in the DOM is task,
+ * assignee, status, due (submission code and completed date are mobileHidden).
+ */
+.tasks-data-list .data-list-mobile-row1 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  align-items: baseline;
+  column-gap: var(--space-2);
+  row-gap: 2px;
+}
+
+.tasks-data-list .data-list-mobile-row1 .data-list-cell-mobile:nth-child(1) {
+  grid-column: 1 / -1;
+  grid-row: 1;
+  min-width: 0;
+}
+
+.tasks-data-list .data-list-mobile-row1 .data-list-cell-mobile:nth-child(2) {
+  grid-column: 1 / -1;
+  grid-row: 2;
+  min-width: 0;
+}
+
+.tasks-data-list .data-list-mobile-row1 .data-list-cell-mobile:nth-child(3) {
+  grid-column: 1;
+  grid-row: 3;
+  min-width: 0;
+}
+
+/* Due — second half of the last line, its label kept and set beside the date. */
+.tasks-data-list .data-list-mobile-row1 .data-list-cell-mobile:nth-child(4) {
+  grid-column: 2;
+  grid-row: 3;
+  flex-direction: row;
+  align-items: baseline;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.tasks-data-list .data-list-mobile-row1 .data-list-cell-mobile:nth-child(1) .data-list-cell-mobile-label,
+.tasks-data-list .data-list-mobile-row1 .data-list-cell-mobile:nth-child(2) .data-list-cell-mobile-label,
+.tasks-data-list .data-list-mobile-row1 .data-list-cell-mobile:nth-child(3) .data-list-cell-mobile-label {
+  display: none;
+}
+
+.tasks-data-list .data-list-row-mobile .data-list-mobile-row1 .data-list-cell-mobile .data-list-cell-mobile-value {
+  width: auto;
+  text-align: left;
+}
+
+/*
+ * Messages mobile rows: subject, then the recipient, then queued date /
+ * template / status across the last line with status pinned to the right edge.
+ * DOM order is queued, template, to, subject, status (the desktop order).
+ */
+.messages-data-list .data-list-mobile-row1 {
+  display: grid;
+  grid-template-columns: max-content max-content 1fr;
+  align-items: baseline;
+  column-gap: var(--space-2);
+  row-gap: 2px;
+}
+
+/* Queued date — line 3, first. */
+.messages-data-list .data-list-mobile-row1 .data-list-cell-mobile:nth-child(1) {
+  grid-column: 1;
+  grid-row: 3;
+  min-width: 0;
+}
+
+/* Template — line 3, second. */
+.messages-data-list .data-list-mobile-row1 .data-list-cell-mobile:nth-child(2) {
+  grid-column: 2;
+  grid-row: 3;
+  min-width: 0;
+}
+
+/* To — line 2, label kept and set beside the address. */
+.messages-data-list .data-list-mobile-row1 .data-list-cell-mobile:nth-child(3) {
+  grid-column: 1 / -1;
+  grid-row: 2;
+  flex-direction: row;
+  align-items: baseline;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+/* Subject — line 1, full width. */
+.messages-data-list .data-list-mobile-row1 .data-list-cell-mobile:nth-child(4) {
+  grid-column: 1 / -1;
+  grid-row: 1;
+  min-width: 0;
+}
+
+/* Status — line 3, hard against the right edge. */
+.messages-data-list .data-list-mobile-row1 .data-list-cell-mobile:nth-child(5) {
+  grid-column: 3;
+  grid-row: 3;
+  justify-self: end;
+  min-width: 0;
+}
+
+.messages-data-list .data-list-mobile-row1 .data-list-cell-mobile:nth-child(1) .data-list-cell-mobile-label,
+.messages-data-list .data-list-mobile-row1 .data-list-cell-mobile:nth-child(2) .data-list-cell-mobile-label,
+.messages-data-list .data-list-mobile-row1 .data-list-cell-mobile:nth-child(4) .data-list-cell-mobile-label,
+.messages-data-list .data-list-mobile-row1 .data-list-cell-mobile:nth-child(5) .data-list-cell-mobile-label {
+  display: none;
+}
+
+.messages-data-list .data-list-row-mobile .data-list-mobile-row1 .data-list-cell-mobile .data-list-cell-mobile-value {
+  width: auto;
+  text-align: left;
+}
+
+/*
+ * Files mobile rows, on a quarter-width grid: filename; then By + For at the
+ * halves; then session; then uploaded date, version count at 50% and size at
+ * 75%. DOM order is filename, by, for, session, size, versions, uploaded.
+ */
+.files-data-list .data-list-mobile-row1 {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  align-items: baseline;
+  column-gap: var(--space-2);
+  row-gap: 2px;
+}
+
+.files-data-list .data-list-mobile-row1 .data-list-cell-mobile {
+  min-width: 0;
+}
+
+/* Filename — line 1, full width. */
+.files-data-list .data-list-mobile-row1 .data-list-cell-mobile:nth-child(1) {
+  grid-column: 1 / -1;
+  grid-row: 1;
+}
+
+/* By — line 2, first half. */
+.files-data-list .data-list-mobile-row1 .data-list-cell-mobile:nth-child(2) {
+  grid-column: 1 / 3;
+  grid-row: 2;
+  flex-direction: row;
+  align-items: baseline;
+  gap: var(--space-2);
+}
+
+/* For — line 2, second half. */
+.files-data-list .data-list-mobile-row1 .data-list-cell-mobile:nth-child(3) {
+  grid-column: 3 / 5;
+  grid-row: 2;
+  flex-direction: row;
+  align-items: baseline;
+  gap: var(--space-2);
+}
+
+/* Session — line 3, full width. */
+.files-data-list .data-list-mobile-row1 .data-list-cell-mobile:nth-child(4) {
+  grid-column: 1 / -1;
+  grid-row: 3;
+  flex-direction: row;
+  align-items: baseline;
+  gap: var(--space-2);
+}
+
+/* Size — line 4, last quarter. */
+.files-data-list .data-list-mobile-row1 .data-list-cell-mobile:nth-child(5) {
+  grid-column: 4;
+  grid-row: 4;
+}
+
+/* Versions — line 4, third quarter. */
+.files-data-list .data-list-mobile-row1 .data-list-cell-mobile:nth-child(6) {
+  grid-column: 3;
+  grid-row: 4;
+  flex-direction: row;
+  align-items: baseline;
+  gap: var(--space-2);
+}
+
+/* Uploaded date — line 4, first half. */
+.files-data-list .data-list-mobile-row1 .data-list-cell-mobile:nth-child(7) {
+  grid-column: 1 / 3;
+  grid-row: 4;
+}
+
+.files-data-list .data-list-mobile-row1 .data-list-cell-mobile:nth-child(1) .data-list-cell-mobile-label,
+.files-data-list .data-list-mobile-row1 .data-list-cell-mobile:nth-child(5) .data-list-cell-mobile-label,
+.files-data-list .data-list-mobile-row1 .data-list-cell-mobile:nth-child(7) .data-list-cell-mobile-label {
+  display: none;
+}
+
+.files-data-list .data-list-row-mobile .data-list-mobile-row1 .data-list-cell-mobile .data-list-cell-mobile-value {
+  width: auto;
+  text-align: left;
+}
+
+/*
+ * Events mobile rows: name, then the date range with the agenda status from
+ * 60% across. DOM order is name, dates, agenda.
+ */
+.events-data-list .data-list-mobile-row1 {
+  display: grid;
+  grid-template-columns: 60% 1fr;
+  align-items: baseline;
+  column-gap: var(--space-2);
+  row-gap: 2px;
+}
+
+.events-data-list .data-list-mobile-row1 .data-list-cell-mobile-label {
+  display: none;
+}
+
+.events-data-list .data-list-mobile-row1 .data-list-cell-mobile:nth-child(1) {
+  grid-column: 1 / -1;
+  grid-row: 1;
+  min-width: 0;
+}
+
+.events-data-list .data-list-mobile-row1 .data-list-cell-mobile:nth-child(2) {
+  grid-column: 1;
+  grid-row: 2;
+  min-width: 0;
+}
+
+.events-data-list .data-list-mobile-row1 .data-list-cell-mobile:nth-child(3) {
+  grid-column: 2;
+  grid-row: 2;
+  min-width: 0;
+}
+
+.events-data-list .data-list-row-mobile .data-list-mobile-row1 .data-list-cell-mobile .data-list-cell-mobile-value {
+  width: auto;
+  text-align: left;
+}
+
 .data-list-summary-mobile {
   display: flex;
   flex-wrap: wrap;

@@ -1874,11 +1874,17 @@ export function buildWorkspaceConfig(
         statusOptions: speakerStatusOptions.map((o) => ({ key: o.key, label: o.label })),
       },
     },
+    // Scopes the mobile layout override in DataList.css: first + last name run
+    // together as one unlabelled line, then company and email one per line with
+    // their labels to the left.
+    dataListClassName: 'speakers-data-list',
     columns: [
       { field: 'first_name', header: 'First name', sortable: true },
       { field: 'last_name', header: 'Last name', sortable: true },
       { field: 'email', header: 'Email', width: '1.5fr', sortable: true, mobileRow: 2 },
-      { field: 'company', header: 'Company', sortable: true },
+      // Mobile keeps row 1 for the name alone, so company joins email on row 2
+      // (CSS re-orders it above email there — see `.speakers-data-list`).
+      { field: 'company', header: 'Company', sortable: true, mobileRow: 2 },
       { field: 'job_title', header: 'Job title', mobileHidden: true },
       // Org mode answers "how many of our events is this person on", which is
       // the directory's whole point; `speaker_status` and `event_name` are
@@ -2083,6 +2089,11 @@ export function buildWorkspaceConfig(
     // (quick-add, export) always need to shift up out of the way — see
     // DataList's `bottomBarReserved`.
     reserveBottomBarSpace: (currentRoute().tab ?? 'speakers') === 'submissions',
+    // Scopes the mobile layout override in DataList.css: title on its own
+    // full-width line, status + rating beneath it, then track and submitter
+    // one per line. Four stacked lines need more than DataList's default 88px.
+    dataListClassName: 'submissions-data-list',
+    mobileRowHeight: 112,
     columns: [
       { field: 'code', header: 'Code', width: '84px', mobileHidden: true },
       { field: 'title', header: 'Title', width: '2.5fr', sortable: true },
@@ -2356,6 +2367,11 @@ export function buildWorkspaceConfig(
       defaultFilters: { [TASK_STATE_FILTER_KEY]: '' },
       FilterComponent: TaskStatusFilter,
     },
+    // Scopes the mobile layout override in DataList.css: task, then assignee,
+    // then status with the due date on the same line from halfway across.
+    // 3 lines = 62px + 10px top/bottom padding + the 1px bottom border.
+    dataListClassName: 'tasks-data-list',
+    mobileRowHeight: 83,
     columns: [
       { field: 'task_title', header: 'Task', width: '1.6fr', sortable: true },
       {
@@ -2445,6 +2461,11 @@ export function buildWorkspaceConfig(
     getItemId: (item) => item.id,
     getItemTitle: (item) => `${item.submission_code} — ${item.reviewer_name ?? 'Reviewer'}`,
     initialSort: { field: 'created_at', direction: 'desc' },
+    // Single mobile sub-row: its label+value stack measures 36px, so 36 + the
+    // row's 10px top/bottom padding + its 1px bottom border fits exactly, with
+    // equal breathing room above and below. (DataList's 78px default assumed a
+    // taller card and left a dead gap under the values.)
+    mobileRowHeight: 57,
     columns: [
       { field: 'submission_code', header: 'Code', width: '84px', sortable: true },
       { field: 'submission_title', header: 'Submission', width: '2fr' },
@@ -2512,6 +2533,12 @@ export function buildWorkspaceConfig(
     getItemId: (item) => item.id,
     getItemTitle: (item) => `${item.submission_code} — ${item.author_name ?? 'Someone'}`,
     initialSort: { field: 'created_at', direction: 'desc' },
+    // Scopes the mobile layout override in DataList.css: code + author on one
+    // unlabelled line, then kind, then the comment body — three stacked lines.
+    dataListClassName: 'comments-data-list',
+    // Those three lines measure 61px; + 10px top/bottom padding + the 1px
+    // bottom border they need 82, four more than DataList's 78px default.
+    mobileRowHeight: 82,
     columns: [
       { field: 'submission_code', header: 'Code', width: '84px', sortable: true },
       { field: 'body', header: 'Comment', width: '2.5fr' },
@@ -2562,6 +2589,11 @@ export function buildWorkspaceConfig(
     getItemId: (item) => item.id,
     getItemTitle: (item) => item.subject ?? item.template_key ?? item.id,
     initialSort: { field: 'created_at', direction: 'desc' },
+    // Scopes the mobile layout override in DataList.css: subject, then the
+    // recipient, then queued-date / template / status across one line.
+    // 3 lines = 62px + 10px top/bottom padding + the 1px bottom border.
+    dataListClassName: 'messages-data-list',
+    mobileRowHeight: 83,
     columns: [
       {
         field: 'created_at',
@@ -2576,7 +2608,9 @@ export function buildWorkspaceConfig(
         },
       },
       { field: 'template_key', header: 'Template', width: '150px', sortable: true },
-      { field: 'to_email', header: 'To', width: '1.2fr', sortable: true, mobileRow: 2 },
+      // Stays on mobile sub-row 1: the scoped CSS stacks all four fields itself,
+      // and a `mobileRow: 2` cell would always render below them.
+      { field: 'to_email', header: 'To', width: '1.2fr', sortable: true },
       { field: 'subject', header: 'Subject', width: '2fr' },
       {
         field: 'status',
@@ -2626,6 +2660,11 @@ export function buildWorkspaceConfig(
     dataSource: scopedSources.files,
     getItemId: (item) => item.upload_id,
     getItemTitle: (item) => item.filename,
+    // Scopes the mobile layout override in DataList.css: filename, then
+    // by/for, then session, then uploaded/version/size across one line.
+    // 4 lines = 82px + 10px top/bottom padding + the 1px bottom border.
+    dataListClassName: 'files-data-list',
+    mobileRowHeight: 103,
     columns: [
       {
         // Eval defect 1: this column is the grid's resolved `titleField`
@@ -2666,6 +2705,9 @@ export function buildWorkspaceConfig(
       {
         field: 'uploaded_by_name',
         header: 'Uploaded by',
+        // Mobile puts this label beside its value on a shared line, where the
+        // full header would crowd out the name.
+        mobileHeader: 'By',
         // Prefer the actual uploader (fa.uploaded_by_contact_id); older rows
         // and the self-service portal path never populated a distinct
         // uploaded_by_* (uploader == subject there), so fall back to the
@@ -2677,7 +2719,6 @@ export function buildWorkspaceConfig(
         field: 'submission_code',
         header: 'For',
         width: '80px',
-        mobileHidden: true,
         // Submission-scoped uploads show the submission code; a headshot (no
         // submission) shows the speaker it's for instead (SPK-10).
         render: (value: string | null, item) => value ?? item.uploader_name ?? item.uploader_email ?? '',
@@ -2690,12 +2731,11 @@ export function buildWorkspaceConfig(
         field: 'session_title',
         header: 'Session',
         width: '1fr',
-        mobileHidden: true,
         render: (value: string | null, item) =>
           item.session_id ? `${item.session_code ?? ''}${value ? ` — ${value}` : ''}`.trim() : '—',
       },
       { field: 'size_bytes', header: 'Size', width: '90px', render: (value: number | null) => formatBytes(value) },
-      { field: 'version_count', header: 'Versions', width: '90px' },
+      { field: 'version_count', header: 'Versions', width: '90px', mobileHeader: 'V' },
       { field: 'uploaded_at', header: 'Uploaded', width: '110px', render: (value: string) => fmtDate(value) },
       eventColumn,
     ],
@@ -2716,6 +2756,11 @@ export function buildWorkspaceConfig(
     dataSource: eventsDataSource,
     getItemId: (item) => item.id,
     getItemTitle: (item) => item.name,
+    // Scopes the mobile layout override in DataList.css: name, then dates with
+    // the agenda status alongside from 60% across.
+    // 2 lines = 41px + 10px top/bottom padding + the 1px bottom border.
+    dataListClassName: 'events-data-list',
+    mobileRowHeight: 62,
     columns: [
       { field: 'name', header: 'Name', width: '2fr', sortable: true },
       {

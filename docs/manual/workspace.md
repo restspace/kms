@@ -25,6 +25,11 @@ beside its parent list, rather than replacing the list — so you can keep both 
 between them. Detail, create, and edit tabs can be closed; list tabs are permanent fixtures and
 stay open.
 
+**On a phone or narrow window** the row of tab labels is replaced by a single dropdown selector
+showing the tab you're on. Tap it to see every open tab and switch between them. A closable tab
+(detail, create, or edit) carries a **✕**: one next to the selector closes the tab you're
+currently on, and each closable tab in the dropdown list has its own ✕ beside it.
+
 ## Controls common to every list tab
 
 - **Sortable columns** — click a column header to sort by it; click again to reverse, and again

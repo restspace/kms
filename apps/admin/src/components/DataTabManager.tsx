@@ -3003,6 +3003,15 @@ export const DataTabManager: React.FC<DataTabManagerProps> = ({
     .filter((entry): entry is { index: number; tab: DataTabState } => Boolean(entry.tab));
   const activeTabTitle = state.tabs[state.activeTabIndex]?.title ?? '';
   /**
+   * Detail/create/edit tabs can be closed; list tabs are fixtures of the mode.
+   * The desktop tab strip puts a × on each closable label, but that strip is
+   * hidden on mobile — hence the same affordance on the mobile trigger and on
+   * each closable row of the mobile dropdown.
+   */
+  const isClosableTab = (tab: DataTabState) =>
+    tab.type === 'detail' || tab.type === 'create' || tab.type === 'edit';
+  const activeTab = state.tabs[state.activeTabIndex];
+  /**
    * The header search only queries the ACTIVE list tab (see
    * wrapDataSourceWithSearch / `isActiveList` in renderTabContent), so the
    * placeholder names it. On a non-list tab search has nothing to filter, so
@@ -3147,21 +3156,47 @@ export const DataTabManager: React.FC<DataTabManagerProps> = ({
             <span>{activeTabTitle}</span>
             <span className="data-tab-mobile-chevron" aria-hidden="true">▾</span>
           </button>
+          {activeTab && isClosableTab(activeTab) && (
+            <button
+              type="button"
+              className="data-tab-mobile-close"
+              onClick={(e) => handleTabClose(activeTab.id, e)}
+              title="Close tab"
+              aria-label={`Close ${getTabTitle(activeTab)}`}
+            >
+              ×
+            </button>
+          )}
           {isMobileMenuOpen && (
             <>
               <div className="data-tab-mobile-backdrop" onClick={() => setIsMobileMenuOpen(false)} />
               <div className="data-tab-mobile-dropdown" role="listbox">
                 {visibleTabs.map(({ tab, index }) => (
-                  <button
-                    key={tab.id}
-                    className={`data-tab-mobile-option ${index === state.activeTabIndex ? 'active' : ''}`}
-                    role="option"
-                    aria-selected={index === state.activeTabIndex}
-                    type="button"
-                    onClick={() => { handleTabClick(index); setIsMobileMenuOpen(false); }}
-                  >
-                    {getTabTitle(tab)}
-                  </button>
+                  <div key={tab.id} className="data-tab-mobile-option-row" role="presentation">
+                    <button
+                      className={`data-tab-mobile-option ${index === state.activeTabIndex ? 'active' : ''}`}
+                      role="option"
+                      aria-selected={index === state.activeTabIndex}
+                      type="button"
+                      onClick={() => { handleTabClick(index); setIsMobileMenuOpen(false); }}
+                    >
+                      {getTabTitle(tab)}
+                    </button>
+                    {isClosableTab(tab) && (
+                      <button
+                        type="button"
+                        className="data-tab-mobile-option-close"
+                        onClick={(e) => {
+                          handleTabClose(tab.id, e);
+                          setIsMobileMenuOpen(false);
+                        }}
+                        title="Close tab"
+                        aria-label={`Close ${getTabTitle(tab)}`}
+                      >
+                        ×
+                      </button>
+                    )}
+                  </div>
                 ))}
               </div>
             </>

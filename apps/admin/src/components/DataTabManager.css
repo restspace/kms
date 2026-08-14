@@ -701,9 +701,29 @@
   }
 
   .data-tab-mobile-nav {
-    display: block;
+    display: flex;
+    align-items: center;
     position: relative;
     flex: 1 1 auto;
+  }
+
+  /* Closes the tab named on the trigger — the mobile stand-in for the × on the
+     desktop tab strip, which is hidden at this width. */
+  .data-tab-mobile-close {
+    flex: 0 0 auto;
+    width: var(--tab-height);
+    height: var(--tab-height);
+    border: none;
+    background: transparent;
+    color: var(--text-muted);
+    font-size: 1.35em;
+    line-height: 1;
+    cursor: pointer;
+  }
+
+  .data-tab-mobile-close:hover {
+    background: var(--surface-hover);
+    color: var(--text);
   }
 
   .data-tab-mobile-trigger {
@@ -752,12 +772,38 @@
     overflow-y: auto;
   }
 
+  /* The row owns the divider so the option and its close button share one. */
+  .data-tab-mobile-option-row {
+    display: flex;
+    align-items: stretch;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .data-tab-mobile-option-row:hover {
+    background: var(--surface-hover);
+  }
+
+  .data-tab-mobile-option-close {
+    flex: 0 0 auto;
+    width: 44px;
+    border: none;
+    background: transparent;
+    color: var(--text-muted);
+    font-size: 1.35em;
+    line-height: 1;
+    cursor: pointer;
+  }
+
+  .data-tab-mobile-option-close:hover {
+    color: var(--danger);
+  }
+
   .data-tab-mobile-option {
     display: block;
-    width: 100%;
+    flex: 1 1 auto;
+    min-width: 0;
     padding: var(--space-3) var(--space-2);
     border: none;
-    border-bottom: 1px solid var(--border);
     background: transparent;
     font-size: var(--text-grid);
     text-align: left;
