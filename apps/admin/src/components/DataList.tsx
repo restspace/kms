@@ -510,6 +510,13 @@ export interface DataListProps<T = any, TFilters extends Record<string, any> = R
   batchSize?: number;
   className?: string;
   reloadKey?: number | string;
+  /**
+   * Set when a bottom bar rendered outside this list (e.g. App.tsx's
+   * Submissions bulk-action bar) is currently floating over this panel, so
+   * the corner buttons shift up the same way they already do for a sticky
+   * summary row, instead of sitting underneath it.
+   */
+  bottomBarReserved?: boolean;
   rowDrag?: DataListRowDragConfig<T>;
   rowDrop?: DataListRowDropConfig<T>;
   /**
@@ -728,6 +735,7 @@ export const DataList = <T extends Record<string, any>, TFilters extends Record<
   batchSize = DEFAULT_BATCH_SIZE,
   className = '',
   reloadKey,
+  bottomBarReserved,
   rowDrag,
   rowDrop,
   getEditAccess,
@@ -961,6 +969,24 @@ export const DataList = <T extends Record<string, any>, TFilters extends Record<
     const otherChecks = getOtherChecks && tabName ? getOtherChecks(tabName) : [];
     onChecklist(Array.from(new Set(otherChecks)));
   }, [checklistResetKey]);
+
+  // List tabs unmount when inactive (DataTabManager only keeps create/edit
+  // tabs mounted), so `checkedItemIds` above is seeded from `restoredState`
+  // on every remount — but that seeding never told the host, which only ever
+  // hears about checks via onChecklist calls from a row click. Left alone,
+  // a tab you switch back to can show a restored checkbox while the host's
+  // own selection count (and anything driven by it, e.g. a bulk-action bar)
+  // still reads zero. Report the restored set once on mount so both stay in
+  // sync from the start.
+  useEffect(() => {
+    if (!onChecklist || checkedItemIds.size === 0) return;
+    onLocalChecksChange?.(Array.from(checkedItemIds));
+    const otherChecks = getOtherChecks && tabName ? getOtherChecks(tabName) : [];
+    onChecklist(Array.from(new Set([...checkedItemIds, ...otherChecks])));
+    // Mount-only: reports the initial (restored) value, not every subsequent
+    // change — row clicks already report themselves via handleToggleCheck.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     selectionChangeRef.current = onSelectionChange;
@@ -1723,6 +1749,10 @@ export const DataList = <T extends Record<string, any>, TFilters extends Record<
   const itemCount = endReached ? items.length : items.length + 1;
   const FilterComponent = filterConfig?.FilterComponent;
   const hasSummaryData = Boolean(summaryData && Object.keys(summaryData).length > 0);
+  // Corner buttons already shift up for a sticky summary row (`with-summary-row`
+  // below) — an externally-rendered bottom bar needs the same clearance, so it
+  // reuses that offset rather than defining a second one.
+  const reserveBottomOffset = hasSummaryData || Boolean(bottomBarReserved);
   const visibleMobileSummaryColumns = useMemo(
     () => columns.filter((column) => !column.mobileHidden && summaryData?.[String(column.field)] !== undefined),
     [columns, summaryData]
@@ -2472,7 +2502,7 @@ export const DataList = <T extends Record<string, any>, TFilters extends Record<
                 )}
               </InfiniteLoader>
               {exportConfig && !isMobile && (
-                <div className={`data-list-export-buttons ${hasSummaryData ? 'with-summary-row' : ''}`}>
+                <div className={`data-list-export-buttons ${reserveBottomOffset ? 'with-summary-row' : ''}`}>
                   {(['csv', 'xlsx'] as const).map((format) => (
                     <button
                       key={format}
@@ -2512,7 +2542,7 @@ export const DataList = <T extends Record<string, any>, TFilters extends Record<
               )}
               {toolbarActions && toolbarActions.length > 0 && !isMobile && (
                 <div
-                  className={`data-list-export-buttons data-list-toolbar-actions ${hasSummaryData ? 'with-summary-row' : ''} ${exportConfig ? 'after-export' : ''}`}
+                  className={`data-list-export-buttons data-list-toolbar-actions ${reserveBottomOffset ? 'with-summary-row' : ''} ${exportConfig ? 'after-export' : ''}`}
                 >
                   {toolbarActions.map((action) => {
                     const checkedIds = Array.from(checkedItemIds);
@@ -2546,7 +2576,7 @@ export const DataList = <T extends Record<string, any>, TFilters extends Record<
               {fastAdd && !isMobile && (
                 <button
                   type="button"
-                  className={`data-list-add-button data-list-fast-add-button ${hasSummaryData ? 'with-summary-row' : ''}`}
+                  className={`data-list-add-button data-list-fast-add-button ${reserveBottomOffset ? 'with-summary-row' : ''}`}
                   onClick={() => (draftItem ? cancelDraft() : openDraft())}
                   disabled={(!fastAddAccess.enabled && !draftItem) || isCommittingDraft}
                   title={draftItem

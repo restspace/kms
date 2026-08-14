@@ -19,6 +19,7 @@ import {
   createTask,
   updateTask,
   deleteContact,
+  enrollPipelineCard,
   enrollSubmissionsInPipeline,
   getMe,
   getSubmissionDetail,
@@ -99,6 +100,13 @@ import {
   type EventScopeValue,
 } from './eventScope'
 import { NEW_SPEAKER_REC, currentRoute, navigate, stableStringify, useRoute, type ViewKey } from './router'
+import {
+  ENROLL_NEW_STAGE,
+  clearEnrollIntent,
+  hasEnrollIntent,
+  setEnrollHighlight,
+  takeEnrollIntent,
+} from './crm/enrollIntent'
 import { helpSlugFor } from './help/helpTopics'
 import { MANUAL_PAGE_META } from './help/manualNav.generated'
 import { AdminErrorBoundary } from './components/AdminErrorBoundary'
@@ -1994,6 +2002,27 @@ export function buildWorkspaceConfig(
           : existing
             ? updateContact(existing.id, payload)
             : createContact(payload))
+        // Pipeline's "+ Enroll New" round trip: the organiser came here from
+        // the board, so a successful create puts the person straight onto it
+        // at Identified and hands them back. Enrollment failing is not a save
+        // failure — the contact exists either way — so it only downgrades to
+        // an explanation, leaving them on the directory record.
+        if (orgMode && !existing && takeEnrollIntent()) {
+          const contactId = (saved as ContactRow).id
+          void enrollPipelineCard({ contact_id: contactId, stage: ENROLL_NEW_STAGE })
+            .then((card) => {
+              setEnrollHighlight(card.id)
+              navigate({ v: 'pipeline', rec: null, tab: null })
+            })
+            .catch((e) => {
+              void appAlert(
+                `${contactName(saved as ContactRow)} was saved, but adding them to the pipeline failed: ${
+                  e instanceof Error ? e.message : String(e)
+                }. Use “+ Enroll Existing” on the Pipeline board to add them.`,
+                'Saved, but not enrolled',
+              )
+            })
+        }
         // The server row is the raw shape (no cf__/link_* flat keys). Merge it
         // over what we already knew and re-hydrate, so the detail/edit tabs
         // REFRESH_TAB_ITEMS re-seeds from stay form-ready (defect #4) and
@@ -2049,6 +2078,11 @@ export function buildWorkspaceConfig(
     },
     onChecklist,
     checklistResetKey,
+    // The bulk-action bar or its zero-selected hint is always floating over
+    // this tab (see the render below), so its bottom-corner buttons
+    // (quick-add, export) always need to shift up out of the way — see
+    // DataList's `bottomBarReserved`.
+    reserveBottomBarSpace: (currentRoute().tab ?? 'speakers') === 'submissions',
     columns: [
       { field: 'code', header: 'Code', width: '84px', mobileHidden: true },
       { field: 'title', header: 'Title', width: '2.5fr', sortable: true },
@@ -2793,6 +2827,11 @@ export default function App() {
   const [checklistResetKey, setChecklistResetKey] = useState(0)
   const [bulkBusy, setBulkBusy] = useState(false)
   const [bulkNote, setBulkNote] = useState<string | null>(null)
+  // Bumped after any bulk action that mutates submission status (queue moves,
+  // decision sends) so DataTabManager's DataList actually refetches — without
+  // this, checklistResetKey alone only clears the checkbox UI, and the grid
+  // keeps showing pre-action statuses until a manual page refresh.
+  const [listReloadKey, setListReloadKey] = useState(0)
   // Workplan 13 W3: per-send opt-in for the employer-approval ask. Read via a
   // ref so sendDecisionsForReal keeps its stable identity.
   const [approvalAsk, setApprovalAsk] = useState(false)
@@ -3155,6 +3194,17 @@ export default function App() {
   }, [route, view, eventFilterId, contactFields])
 
   /**
+   * Disarm the Pipeline "+ Enroll New" round trip if the organiser walks away
+   * from the contact form (cancel, sidebar click, Back). Without this the
+   * intent would sit in sessionStorage and hijack whatever contact they
+   * created next, somewhere else entirely.
+   */
+  useEffect(() => {
+    if (view === 'workspace' && route.tab === 'speakers') return
+    if (hasEnrollIntent()) clearEnrollIntent()
+  }, [view, route.tab])
+
+  /**
    * Workspace → route: active list tab. Detail tabs keep the parent's key. The
    * manager's very first report (landing on the default tab) replaces rather
    * than pushes, so Back doesn't bounce between `?v=workspace` and
@@ -3170,6 +3220,16 @@ export default function App() {
     // detail tab on the tab the user just switched to.
     const tabChanged = previousTab !== null && previousTab !== tab.configKey
     if (tabChanged) handledRec.current = null
+    // The bulk-action bar's selection is Submissions-specific state, but it
+    // lives above DataTabManager (App.tsx, not the tab panel), so switching
+    // tabs never unmounted it — leaving the bar floating over whatever tab
+    // the user switched to. Drop it here, the one place every tab change
+    // passes through.
+    if (tabChanged && tab.configKey !== 'submissions') {
+      setCheckedIds([])
+      setBulkNote(null)
+      setChecklistResetKey((k) => k + 1)
+    }
     navigate(
       tabChanged ? { tab: tab.configKey, rec: null } : { tab: tab.configKey },
       { replace: previousTab === null },
@@ -3296,6 +3356,7 @@ export default function App() {
               // Notified checkmarks. Bump the list version again now that
               // the flip has actually landed.
               setChecklistResetKey((k) => k + 1)
+              setListReloadKey((k) => k + 1)
             },
             onError: (message) => {
               setBulkNote(message)
@@ -3315,6 +3376,7 @@ export default function App() {
               )
               setBulkBusy(false)
               setChecklistResetKey((k) => k + 1)
+              setListReloadKey((k) => k + 1)
             },
           })
         }
@@ -3400,6 +3462,7 @@ export default function App() {
         try {
           const r = await bulkDecision(checkedIds, reviseGuidanceRef.current.trim() || null)
           setBulkNote(`${r.changed} flagged Revise & resubmit — they keep their decline status`)
+          setListReloadKey((k) => k + 1)
         } catch (e) {
           setBulkNote(e instanceof Error ? e.message : 'Action failed')
         } finally {
@@ -3417,6 +3480,7 @@ export default function App() {
         setBulkNote(`${r.changed} moved to ${statusLabel(action)}`)
         setCheckedIds([])
         setChecklistResetKey((k) => k + 1)
+        setListReloadKey((k) => k + 1)
       } catch (e) {
         setBulkNote(e instanceof Error ? e.message : 'Action failed')
       } finally {
@@ -3595,6 +3659,7 @@ export default function App() {
               defaultTabs={['speakers', 'submissions', 'reviews', 'comments', 'tasks', 'messages', 'files', 'events']}
               activeTabRequest={wsTabRequest}
               detailRequest={detailRequest}
+              reloadKey={listReloadKey}
               onActiveTabChange={handleActiveTabChange}
               onSelectionChange={handleWorkspaceSelection}
               onGlobalFilterChange={setWsGlobalFilter}
@@ -3618,6 +3683,11 @@ export default function App() {
               searchValue={route.q ?? ''}
               onSearchChange={handleSearchChange}
             />
+            {(route.tab ?? 'speakers') === 'submissions' && checkedIds.length === 0 && bulkNote === null && (
+              <div className="bulk-bar-hint" role="status">
+                Select rows below to accept, decline, or send decisions
+              </div>
+            )}
             {(checkedIds.length > 0 || bulkNote !== null) && (
               <BulkBar
                 count={checkedIds.length}

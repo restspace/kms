@@ -310,6 +310,13 @@ export interface TabConfig<T = any> {
    */
   checklistResetKey?: number | string;
   /**
+   * Set when a host-rendered bottom bar (e.g. App.tsx's Submissions bulk-action
+   * bar) is currently floating over this tab's panel, so its own bottom-corner
+   * controls (quick-add, export buttons) shift up out of the way — the same
+   * offset DataList already applies for its own sticky summary row.
+   */
+  reserveBottomBarSpace?: boolean;
+  /**
    * Optional registration point for hosts that need to drive this tab from
    * outside it (see TabExternalActions). Called with the actions whenever they
    * (re)bind and with null on cleanup.
@@ -2764,6 +2771,7 @@ export const DataTabManager: React.FC<DataTabManagerProps> = ({
           mobileRowHeight={tabConfig.mobileRowHeight}
           className={listClassName}
           reloadKey={`${reloadKey ?? 0}:${state.listVersions[tab.id] ?? 0}`}
+          bottomBarReserved={tabConfig.reserveBottomBarSpace}
         />
       );
     } else if (tab.type === 'detail' && tab.item) {

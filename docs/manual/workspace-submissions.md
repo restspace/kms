@@ -21,14 +21,19 @@ Track, Submitter, Event.
 
 ## Bulk actions
 
-This is the one Workspace tab with bulk actions — check some rows and a bar appears:
+This is the one Workspace tab with bulk actions. With nothing checked, a subtle hint near the
+bottom of the list reminds you that checking rows unlocks these actions; check one or more rows
+and it's replaced by the action bar:
 
 - **→ Accept Queue / → Decline Queue / → Pending** — move every checked row to that status at
-  once.
+  once. The list updates immediately, without needing a manual refresh.
 - **Send decision emails** — previews the batch (counts and any warnings) before sending, and
   includes an opt-in checkbox for asking for employer approval on the covered submissions. See
   [Reviewing and deciding on submissions → Making and sending decisions](reviewing-submissions.md#making-and-sending-decisions)
   for what happens next.
+
+The action bar (and any checked rows) is specific to this tab — switching to another Workspace
+tab clears the selection rather than leaving the bar floating over unrelated data.
 
 ## Toolbar
 

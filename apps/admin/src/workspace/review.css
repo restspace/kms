@@ -70,6 +70,27 @@
   max-width: calc(100% - 32px);
 }
 
+/* Zero-selected placeholder: same slot as .bulk-bar, low-key styling so it
+   doesn't compete with the grid until the user actually checks a row. */
+.bulk-bar-hint {
+  position: absolute;
+  left: 50%;
+  bottom: 18px;
+  transform: translateX(-50%);
+  background: var(--surface);
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+  padding: var(--space-1) var(--space-3);
+  color: var(--text-muted);
+  font-size: var(--text-caption);
+  z-index: 3;
+  pointer-events: none;
+  max-width: calc(100% - 32px);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .bulk-bar .bulk-count {
   font-weight: 700;
   font-size: var(--text-label);
