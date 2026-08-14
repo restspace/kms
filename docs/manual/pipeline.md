@@ -15,10 +15,13 @@ Confirmed and Declined are treated as closed/terminal stages.
 
 - **+ Enroll Existing** opens a dialog to search your organisation's full contact directory and
   add someone to the board with a starting stage, an optional 0–100 score, and a rationale note.
-- **+ Enroll New** jumps to the org-wide contact directory (Workspace, "All events") and opens the
-  new-contact form directly — the pipeline only searches existing contacts, it doesn't create
-  them, so this is the shortcut for a prospect who isn't in the directory yet. Once they're
-  saved, come back and use **+ Enroll Existing** to put them on the board.
+- **+ Enroll New** is the shortcut for a prospect who isn't in the directory yet (the pipeline
+  itself only searches existing contacts, it doesn't create them). It jumps to the org-wide
+  contact directory (Workspace, "All events") and opens the new-contact form directly. **Save**
+  there and the round trip completes itself: the new contact is added to the board at
+  **Identified** and you land back on Pipeline, with their card outlined and marked "Just added"
+  for a few seconds so it's easy to find. Cancelling the form, or navigating away from it,
+  abandons the trip — nothing is added.
 
 ## Moving a prospect
 

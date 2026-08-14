@@ -24,6 +24,7 @@ import {
 } from '../api'
 import { ModalDialog, appConfirm } from '../components/dialogs'
 import { NEW_SPEAKER_REC, navigate } from '../router'
+import { setEnrollIntent, takeEnrollHighlight } from './enrollIntent'
 import './crm.css'
 
 /** Display labels for the server's fixed stage vocabulary. Terminal stages
@@ -425,6 +426,13 @@ export function PipelineSection({ me }: { me: Me }) {
   const [openCardId, setOpenCardId] = useState<string | null>(null)
   const [dragOverStage, setDragOverStage] = useState<string | null>(null)
   const dragCardId = useRef<string | null>(null)
+  /**
+   * Card the "+ Enroll New" round trip just created (see enrollIntent). Read
+   * once on mount — the organiser lands here straight from saving the contact
+   * — then flashed for a few seconds and forgotten, so a later reload of the
+   * board shows an ordinary card.
+   */
+  const [highlightId, setHighlightId] = useState<string | null>(() => takeEnrollHighlight())
 
   const reload = useCallback(() => {
     fetchPipeline()
@@ -441,6 +449,16 @@ export function PipelineSection({ me }: { me: Me }) {
   }, [])
 
   useEffect(() => reload(), [reload])
+
+  // Scroll the freshly enrolled card into view once the board has rendered it,
+  // and drop the highlight after the flash so it doesn't linger on the card.
+  useEffect(() => {
+    if (!highlightId || !loaded) return
+    const node = document.querySelector(`[data-card-id="${highlightId}"]`)
+    node?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+    const timer = setTimeout(() => setHighlightId(null), 6000)
+    return () => clearTimeout(timer)
+  }, [highlightId, loaded])
 
   const move = useCallback(
     (cardId: string, stage: string) => {
@@ -473,8 +491,13 @@ export function PipelineSection({ me }: { me: Me }) {
         <div className="pl-header-actions">
           <button
             type="button"
-            title="This person isn't in the directory yet — add them there first"
-            onClick={() => navigate({ v: 'workspace', ev: 'all', tab: 'speakers', rec: NEW_SPEAKER_REC })}
+            title="This person isn't in the directory yet — add them, and they come straight back onto the board"
+            onClick={() => {
+              // Arm the return trip *before* navigating: saving the contact
+              // enrolls them at Identified and brings the organiser back here.
+              setEnrollIntent()
+              navigate({ v: 'workspace', ev: 'all', tab: 'speakers', rec: NEW_SPEAKER_REC })
+            }}
           >
             + Enroll New
           </button>
@@ -523,7 +546,8 @@ export function PipelineSection({ me }: { me: Me }) {
                   {columnCards.map((card) => (
                     <article
                       key={card.id}
-                      className="pl-card"
+                      data-card-id={card.id}
+                      className={`pl-card ${highlightId === card.id ? 'just-added' : ''}`}
                       draggable
                       onDragStart={(e) => {
                         dragCardId.current = card.id
@@ -537,6 +561,7 @@ export function PipelineSection({ me }: { me: Me }) {
                     >
                       <button type="button" className="pl-card-open" onClick={() => setOpenCardId(card.id)}>
                         <span className="pl-card-name">{cardName(card)}</span>
+                        {highlightId === card.id && <span className="pl-card-new">Just added</span>}
                         {(card.company || card.job_title) && (
                           <span className="pl-card-meta">
                             {[card.job_title, card.company].filter(Boolean).join(' · ')}
