@@ -295,6 +295,7 @@ describe('POST /auth/login', () => {
 
     const app = await SELF.fetch(`${ORIGIN}/app`, { headers: { cookie } });
     expect(app.status).toBe(200);
+    expect(app.headers.get('cache-control')).toBe('no-cache');
   });
 
   it('re-renders the admin login page when surface=admin', async () => {

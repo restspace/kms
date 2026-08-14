@@ -89,6 +89,10 @@ adminRoutes.get('/', async (c) => {
   // per-surface decision: the public /e/:slug pages opt *in*, this opts out).
   // X-Frame-Options for older agents, CSP frame-ancestors for current ones.
   return c.html(await shell.text(), 200, {
+    // Vite's hashed lazy chunks can disappear on the next deployment. Always
+    // revalidate the entry HTML so a recovery reload cannot receive an old
+    // bundle that still references the removed filenames.
+    'cache-control': 'no-cache',
     'x-frame-options': 'DENY',
     'content-security-policy': "frame-ancestors 'none'",
   });
