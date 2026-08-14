@@ -804,8 +804,14 @@ export const DataList = <T extends Record<string, any>, TFilters extends Record<
   // Deduplicate in-flight requests
   const inFlight = useRef<Set<string>>(new Set());
   const dataSourceRef = useRef(dataSource);
-  /** Last total handed to `onTotalChange` — reset when the underlying source changes. */
+  /** Last total handed to `onTotalChange` — see the guard at its call site. */
   const lastReportedTotalRef = useRef<number | null>(null);
+  /**
+   * Ids of the first page behind that total. An unchanged total over changed
+   * rows is still news to the host; an unchanged total over the same rows is
+   * the reload loop. Closure identity cannot tell those apart — the rows can.
+   */
+  const lastFirstPageKeyRef = useRef<string | null>(null);
   const selectionChangeRef = useRef(onSelectionChange);
   const selectedItemRef = useRef<T | null>(selectedItem ?? null);
   const activeRowDragPayloadRef = useRef<DataListRowDragPayload | null>(null);
@@ -900,9 +906,6 @@ export const DataList = <T extends Record<string, any>, TFilters extends Record<
     }
     pendingScrollRestoreRef.current = scrollOffsetRef.current;
     dataSourceRef.current = dataSource;
-    // The same number from a different source is still new information to the
-    // host (for example after an event-scope or metadata-driven source change).
-    lastReportedTotalRef.current = null;
     if (dataSourceBumpTimerRef.current !== null) {
       clearTimeout(dataSourceBumpTimerRef.current);
     }
@@ -1190,14 +1193,30 @@ export const DataList = <T extends Record<string, any>, TFilters extends Record<
 
         if (result.total !== undefined && result.total !== null) {
           setTotalCount(result.total);
-          // Only announce a total that actually moved. Hosts route this into
-          // their own state (the tab-count badge cache), so re-announcing an
-          // unchanged total on every reload closes a feedback loop: host
-          // re-render -> fresh `dataSource` closure -> wipe + refetch -> same
-          // total announced again, forever. That loop is what pinned the
-          // workspace grids on a permanent reload storm.
-          if (onTotalChange && lastReportedTotalRef.current !== result.total) {
+          // Announce a total that moved — or one that stayed put while the
+          // rows underneath it changed, which is a different source reporting
+          // the same count (an event-scope switch, say) and is news to the
+          // host. What must NOT re-announce is the same count over the same
+          // rows: hosts route this into their own state (the tab-count badge
+          // cache), so an unconditional announce closes a feedback loop —
+          // host re-render -> fresh `dataSource` closure -> wipe + refetch ->
+          // same total announced again, forever. That loop is what pinned the
+          // workspace grids on a permanent reload storm, and closure identity
+          // cannot distinguish the two cases because the host rebuilds the
+          // closure on every render either way.
+          //
+          // Only a `from === 0` load re-keys: an append adds rows without
+          // changing which source they came from.
+          const firstPageKey =
+            from === 0
+              ? result.items.map((item) => getItemId(item)).join('')
+              : lastFirstPageKeyRef.current;
+          if (
+            onTotalChange &&
+            (lastReportedTotalRef.current !== result.total || firstPageKey !== lastFirstPageKeyRef.current)
+          ) {
             lastReportedTotalRef.current = result.total;
+            lastFirstPageKeyRef.current = firstPageKey;
             onTotalChange(result.total);
           }
         }
@@ -1235,7 +1254,7 @@ export const DataList = <T extends Record<string, any>, TFilters extends Record<
     // stale `requestSignature` whenever the signature moves for a reason the
     // other deps can't see (reload key, dataSource identity, fast-add counter),
     // and every response it produces is then discarded as stale.
-    [endReached, items.length, batchSize, buildFilters, sortState, dataSource, onTotalChange, querySignature]
+    [endReached, items.length, batchSize, buildFilters, sortState, dataSource, getItemId, onTotalChange, querySignature]
   );
 
   /**
@@ -1260,6 +1279,7 @@ export const DataList = <T extends Record<string, any>, TFilters extends Record<
     // total to be re-announced once the page finally lands.
     attemptsRef.current = { failures: 0, rearms: 0, at: 0, message: null };
     lastReportedTotalRef.current = null;
+    lastFirstPageKeyRef.current = null;
     needsInitialLoadRef.current = true;
     setEndReached(false);
   }, []);
