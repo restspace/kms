@@ -84,6 +84,15 @@ the columns are added.
 Airtable adds the reciprocal column on the other side by itself, so `Events` ends up with a
 `Submissions` column listing that event's talks, `Contacts` with the messages sent to each
 person, and so on. Nothing creates those — they appear as a side effect of the links above.
+In practice that is 12 extra columns on `Events` and 9 on `Contacts`.
+
+A create-time quirk worth knowing if you hand-build or script this: `linkedTableId` is the
+**only** option the metadata API accepts for a link field. `isReversed` and
+`prefersSingleRecordLink` read back on the field afterwards, which makes them look settable,
+but sending either on create 422s with `INVALID_FIELD_TYPE_OPTIONS_FOR_CREATE`. Both are
+things the base owner changes in the Airtable UI later; every link here is many-to-one, so
+switching one to "single record" is reasonable and does not affect the mirror, which sends a
+one-element array either way.
 
 **Only `Events` and `Contacts` are linked to, and that is a constraint, not a preference.**
 The mirror sends `typecast: true`, and Airtable resolves a link by matching the string against

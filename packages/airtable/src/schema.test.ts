@@ -200,10 +200,14 @@ describe('ensureBaseSchema', () => {
 
     const events = tables.find((t) => t.name === 'Events')!;
     const field = tables.find((t) => t.name === 'Tasks')!.fields.find((f) => f.name === 'Event Link');
-    expect(field).toMatchObject({
-      type: 'multipleRecordLinks',
-      options: { linkedTableId: events.id, prefersSingleRecordLink: true },
-    });
+    expect(field).toMatchObject({ type: 'multipleRecordLinks' });
+    // toEqual, not toMatchObject: linkedTableId is the only option the create
+    // endpoint accepts. isReversed and prefersSingleRecordLink read back on the
+    // field once it exists, which makes them look settable — sending either
+    // (or both) 422s the whole setup run with
+    // INVALID_FIELD_TYPE_OPTIONS_FOR_CREATE. The fake meta client here accepts
+    // anything, so this assertion is what stands in for the real API.
+    expect(field!.options).toEqual({ linkedTableId: events.id });
   });
 
   it('appends missing columns to an existing table without touching its data', async () => {

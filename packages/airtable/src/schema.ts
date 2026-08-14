@@ -386,9 +386,15 @@ export async function ensureBaseSchema(meta: AirtableMetaClient, baseId: string)
           await meta.createField(baseId, found.id, {
             name: spot.name,
             type: 'multipleRecordLinks',
-            // Every one of these is many-to-one (a submission has one event), so
-            // Airtable should show a single chip and stop at one record.
-            options: { linkedTableId: target.id, prefersSingleRecordLink: true },
+            // linkedTableId and nothing else. isReversed and
+            // prefersSingleRecordLink read back on the field but are rejected
+            // on create ("not included in the ... options schema", 422
+            // INVALID_FIELD_TYPE_OPTIONS_FOR_CREATE) — they are settings the
+            // base owner changes in the UI afterwards. Every link here is
+            // many-to-one, so switching one to a single record is a reasonable
+            // thing to do there; the mirror sends a one-element array either
+            // way, so it keeps working.
+            options: { linkedTableId: target.id },
           });
           report.addedFields.push(`${spec.name}.${spot.name}`);
           touched.add(spec.name);
