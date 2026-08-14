@@ -292,19 +292,14 @@
 
 /* Detail tabs (read-only record panels).
    The scroll container spans the *full* panel width so the scrollbar hugs
-   the panel's right edge; the 720px readable-width cap moves to the direct
-   children instead of the scrolling box itself — putting max-width on the
-   same element that scrolls left a gap between the (narrower) box and the
-   panel's actual edge, stranding the scrollbar in the middle of the pane. */
+   the panel's right edge. The old 720px readable-width cap (first on this
+   box — stranding the scrollbar mid-pane — then on its children) is gone
+   entirely: the detail form now extends to the pane's right edge. */
 .detail-panel {
   height: 100%;
   box-sizing: border-box;
   padding: var(--space-5);
   overflow-y: auto;
-}
-
-.detail-panel > * {
-  max-width: 720px;
 }
 
 .detail-panel h2 { font-family: var(--font-display);
@@ -397,7 +392,12 @@
 }
 
 .detail-panel .detail-actions {
-  margin-top: var(--space-4);
+  /* The row now leads the panel (Edit unmissable on open — CNT-09/CNT-12
+     reasoning), so it needs the bottom margin too. */
+  margin: var(--space-4) 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
 }
 
 .detail-panel .detail-actions button {
@@ -414,6 +414,19 @@
 
 .detail-panel .detail-actions button:hover {
   background: var(--surface-hover);
+}
+
+/* Edit is the row's primary action (speaker + submission panels). This was
+   an unstyled class on the submission panel's Edit until the row moved to
+   the top of every detail panel. */
+.detail-panel .detail-actions button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-contrast);
+}
+
+.detail-panel .detail-actions button.primary:hover {
+  background: var(--accent-strong);
 }
 
 /* CNT-10: the headshot upload control sits under the name/company block in

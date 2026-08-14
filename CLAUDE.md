@@ -1,1 +1,2 @@
 - When running evals from C:\dev\killmysaas-evals on production, ensure that the event is published before starting 
+- When changing how the user interacts with the app in any way, update the help files accordingly

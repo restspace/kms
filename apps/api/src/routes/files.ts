@@ -55,7 +55,13 @@ fileRoutes.get('/:id', async (c) => {
   );
   if (!allowed) return c.text('Not found', 404);
   const contentType = found.row.content_type ?? 'application/octet-stream';
-  const disposition = contentType.startsWith('image/') ? 'inline' : 'attachment';
+  // Inline only for types the browser renders in a sandboxed viewer (images,
+  // PDFs) — Chrome downloads anything marked attachment, which made PDFs
+  // un-previewable. Everything else (notably text/html) stays attachment so a
+  // stored file can never execute in this origin; nosniff below keeps the
+  // browser from second-guessing the type.
+  const disposition =
+    contentType.startsWith('image/') || contentType === 'application/pdf' ? 'inline' : 'attachment';
   return new Response(found.body, {
     headers: {
       'content-type': contentType,

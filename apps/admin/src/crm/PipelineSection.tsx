@@ -23,7 +23,7 @@ import {
   type PipelineCard,
 } from '../api'
 import { ModalDialog, appConfirm } from '../components/dialogs'
-import { navigate } from '../router'
+import { NEW_SPEAKER_REC, navigate } from '../router'
 import './crm.css'
 
 /** Display labels for the server's fixed stage vocabulary. Terminal stages
@@ -470,9 +470,18 @@ export function PipelineSection({ me }: { me: Me }) {
             Prospects across the whole organisation — drag a card between stages, or open it for notes and history.
           </div>
         </div>
-        <button type="button" className="primary" onClick={() => setEnrolling(true)}>
-          + Enroll
-        </button>
+        <div className="pl-header-actions">
+          <button
+            type="button"
+            title="This person isn't in the directory yet — add them there first"
+            onClick={() => navigate({ v: 'workspace', ev: 'all', tab: 'speakers', rec: NEW_SPEAKER_REC })}
+          >
+            + Enroll New
+          </button>
+          <button type="button" className="primary" onClick={() => setEnrolling(true)}>
+            + Enroll Existing
+          </button>
+        </div>
       </div>
 
       {error && <div className="pl-error" role="alert">{error}</div>}

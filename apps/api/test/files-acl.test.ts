@@ -147,3 +147,32 @@ describe('GET /files/:id decision table', () => {
     expect(await denied.text()).toBe(await missing.text());
   });
 });
+
+describe('GET /files/:id content-disposition', () => {
+  // PDFs must render in the browser's viewer, not force a download; anything
+  // that is neither an image nor a PDF stays an attachment so a stored file
+  // can never execute in this origin.
+  it('serves PDFs inline and images inline, other types as attachment', async () => {
+    const cookie = await sessionCookieFor({
+      contactId: world.contacts.admin as string,
+      eventId: world.eventId,
+      role: 'admin',
+    });
+    const docx = await createFileAsset(world.eventId, {
+      uploadedBy: null,
+      filename: 'notes.docx',
+      contentType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    });
+
+    const pdf = await SELF.fetch(`${ORIGIN}/files/${world.assets.taskUploadA}`, { headers: { cookie } });
+    expect(pdf.status).toBe(200);
+    expect(pdf.headers.get('content-type')).toBe('application/pdf');
+    expect(pdf.headers.get('content-disposition')).toMatch(/^inline;/);
+
+    const image = await SELF.fetch(`${ORIGIN}/files/${world.assets.headshotA}`, { headers: { cookie } });
+    expect(image.headers.get('content-disposition')).toMatch(/^inline;/);
+
+    const other = await SELF.fetch(`${ORIGIN}/files/${docx}`, { headers: { cookie } });
+    expect(other.headers.get('content-disposition')).toMatch(/^attachment;/);
+  });
+});

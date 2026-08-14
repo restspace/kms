@@ -148,6 +148,14 @@ export function EvaluationSection() {
     return () => { alive.current = false }
   }, [])
 
+  // Notes are transient confirmations — dismiss themselves after a moment.
+  // Errors stay until retried or dismissed.
+  useEffect(() => {
+    if (!note) return
+    const t = window.setTimeout(() => { if (alive.current) setNote(null) }, 6000)
+    return () => window.clearTimeout(t)
+  }, [note])
+
   // Replay defect #1 (supporting fix): every mutation triggers a reload, so
   // two quick edits put two overview fetches in flight — and if the older
   // response resolved last it silently reinstated a stale overview (criteria
@@ -224,7 +232,6 @@ export function EvaluationSection() {
         <h1>
           Evaluation <span className="forms-sub">Review rounds, criteria and reviewer assignment</span>
         </h1>
-        {note && <span className="builder-saved">{note}</span>}
         <div className="eval-newplan">
           <input
             aria-label="New plan name"
@@ -239,12 +246,6 @@ export function EvaluationSection() {
         </div>
       </div>
       <div className="forms-scroll">
-        {error && (
-          <div className="builder-error eval-error" role="alert">
-            <span>{error}</span>
-            <button className="fbtn" onClick={reload}>Retry</button>
-          </div>
-        )}
         {loading && <p className="pane-sub">Loading…</p>}
         {!loading && overview && overview.plans.length === 0 && !error && (
           <div className="eval-empty">
@@ -272,6 +273,30 @@ export function EvaluationSection() {
           </div>
         )}
       </div>
+      {/*
+        * Transient outcome/error reporting. These used to render at the TOP
+        * (a note beside the h1, an error block at the head of the scroll
+        * area), so every confirmation reflowed the whole section — visible
+        * jank on each click. The bar overlays the bottom edge instead
+        * (position: absolute in review.css), so showing or clearing a
+        * message never moves the content above it.
+        */}
+      {(error || note) && (
+        <div
+          className={`eval-status-bar${error ? ' is-error' : ''}`}
+          role={error ? 'alert' : 'status'}
+        >
+          <span className="eval-status-bar-text">{error ?? note}</span>
+          {error && <button className="fbtn" onClick={reload}>Retry</button>}
+          <button
+            className="fbtn"
+            aria-label="Dismiss message"
+            onClick={() => { setError(null); setNote(null) }}
+          >
+            ×
+          </button>
+        </div>
+      )}
     </div>
   )
 }
@@ -750,7 +775,7 @@ function PlanCard({
             <table className="eval-revtable">
               <thead>
                 <tr>
-                  <th />
+                  <th>Active</th>
                   <th>Name</th>
                   <th>Done</th>
                   <th>All Plans</th>

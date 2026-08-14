@@ -6,6 +6,8 @@
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  /* Anchor for the evaluation section's bottom status bar (review.css). */
+  position: relative;
 }
 
 .forms-header {

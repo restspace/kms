@@ -71,7 +71,11 @@
 .data-tab-label {
   border: none;
   background-color: transparent;
-  padding: 0 var(--space-4);
+  /* space-3, not space-4: matches the left pad of the workspace scope-title
+     row above (shell.css `.ws-scope-title`), so the first tab's text sits
+     flush under the title's text. */
+  padding: 0 var(--space-3);
+  max-width: 240px;
   cursor: pointer;
   color: var(--text-muted);
   font-size: var(--text-grid);
@@ -92,11 +96,17 @@
   align-items: center;
   justify-content: center;
   gap: 1px;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .data-tab-label-text {
   white-space: nowrap;
   font-weight: 500;
+  /* Backstop for record titles the word-boundary shortener can't break. */
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .data-tab-label-count {

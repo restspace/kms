@@ -1,8 +1,10 @@
+/* No max-width here: this is the scrolling box, and capping it strands the
+   scrollbar mid-pane — same reasoning as .detail-panel (shell.css). The form
+   fills its tab to the right edge. */
 .record-form {
   display: flex;
   flex-direction: column;
   height: 100%;
-  max-width: 640px;
   padding: var(--space-4) var(--space-5);
   overflow-y: auto;
   box-sizing: border-box;

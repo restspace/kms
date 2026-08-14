@@ -98,7 +98,7 @@ import {
   type EventFilter,
   type EventScopeValue,
 } from './eventScope'
-import { currentRoute, navigate, stableStringify, useRoute, type ViewKey } from './router'
+import { NEW_SPEAKER_REC, currentRoute, navigate, stableStringify, useRoute, type ViewKey } from './router'
 import { helpSlugFor } from './help/helpTopics'
 import { MANUAL_PAGE_META } from './help/manualNav.generated'
 import { AdminErrorBoundary } from './components/AdminErrorBoundary'
@@ -392,9 +392,8 @@ const NAV_ITEMS: ReadonlyArray<{ key: ViewKey; label: string; soon: string | nul
 
 /**
  * The '?' in the corner of every screen: opens the manual at the page for the
- * screen you are on (see help/helpTopics.ts). A real anchor, so it can be
- * middle-clicked into a second tab and read alongside the screen it explains;
- * plain clicks stay in the SPA.
+ * screen you are on (see help/helpTopics.ts), always in a new tab so it can
+ * be read alongside the screen it explains without losing SPA state.
  */
 function HelpButton({ view, tab }: { view: ViewKey; tab: string | null }) {
   const slug = helpSlugFor(view, tab)
@@ -405,11 +404,8 @@ function HelpButton({ view, tab }: { view: ViewKey; tab: string | null }) {
       href={`/app?v=help&page=${slug}`}
       title={`Help: ${title}`}
       aria-label={`Help: ${title}`}
-      onClick={(e) => {
-        if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return
-        e.preventDefault()
-        navigate({ v: 'help', page: slug })
-      }}
+      target="_blank"
+      rel="noopener"
     >
       ?
     </a>
@@ -1137,6 +1133,9 @@ export const buildSpeakerSavePayload = (
  * once per input change via useMemo in App — see `speakerDetailComponent`
  * there) keeps the subtree mounted across config rebuilds.
  */
+/** Muted em-dash for a field with no value yet (speaker detail panel). */
+const EmptyFieldMark = () => <span style={{ color: 'var(--text-faint)' }}>—</span>
+
 export function SpeakerDetailPanel({
   item,
   onClose,
@@ -1195,10 +1194,42 @@ export function SpeakerDetailPanel({
           )}
         </div>
       </div>
+      {/* Actions live at the top of the panel — same reasoning as the
+        * submission panel (CNT-09/CNT-12): "Edit" should be unmissable the
+        * moment the record opens, not below the fold.
+        * SPK-06: the invite is deliberately outside the `onEdit` guard —
+        * inviting is not an edit, and the panel renders without `onEdit` in
+        * read-only contexts where the invite is still the useful action. */}
+      <div className="detail-actions">
+        {onEdit && <button type="button" className="primary" onClick={onEdit}>Edit</button>}
+        <PortalInviteButton contactId={item.id} contactName={contactName(item)} />
+        {/*
+          * The tab's own Delete detaches from this event (adminApi.ts's
+          * DELETE /contacts/:id); this destroys the person org-wide, so it
+          * lives here rather than in `onDelete` where the two would be
+          * indistinguishable. `onItemSaved` before `onClose` is what
+          * refreshes the parent list — the tab manager has no "deleted"
+          * channel for a detail panel, and reporting the row it no longer
+          * finds is enough to invalidate the list behind it.
+          */}
+        <DeleteFromOrgButton
+          contactId={item.id}
+          contactName={contactName(item)}
+          onDeleted={() => {
+            onItemSaved?.(item)
+            onClose()
+          }}
+        />
+      </div>
+      {/* Every field renders, set or not — an em-dash marks "empty", so the
+        * organiser can see at a glance what still needs filling in instead
+        * of unset fields silently disappearing from the panel. */}
       <dl>
-        <dt>Email</dt><dd>{item.email}</dd>
-        {item.mobile_phone && <><dt>Mobile</dt><dd>{item.mobile_phone}</dd></>}
-        {item.pronouns && <><dt>Pronouns</dt><dd>{item.pronouns}</dd></>}
+        <dt>Email</dt><dd>{item.email || <EmptyFieldMark />}</dd>
+        <dt>Mobile</dt><dd>{item.mobile_phone || <EmptyFieldMark />}</dd>
+        <dt>Pronouns</dt><dd>{item.pronouns || <EmptyFieldMark />}</dd>
+        <dt>Company</dt><dd>{item.company || <EmptyFieldMark />}</dd>
+        <dt>Job title</dt><dd>{item.job_title || <EmptyFieldMark />}</dd>
         {orgMode ? (
           <>
             <dt>Events</dt>
@@ -1211,39 +1242,41 @@ export function SpeakerDetailPanel({
             </dd>
           </>
         ) : (
-          item.event_name && <><dt>Event</dt><dd>{item.event_name}</dd></>
+          <><dt>Event</dt><dd>{item.event_name || <EmptyFieldMark />}</dd></>
         )}
-        {contactFields.map((def) =>
-          customValues[def.key] ? (
-            <Fragment key={def.id}>
-              <dt>{def.label}</dt><dd>{customValues[def.key]}</dd>
-            </Fragment>
-          ) : null,
-        )}
+        {contactFields.map((def) => (
+          <Fragment key={def.id}>
+            <dt>{def.label}</dt><dd>{customValues[def.key] || <EmptyFieldMark />}</dd>
+          </Fragment>
+        ))}
         <dt>Created</dt><dd>{fmtDate(item.created_at)}</dd>
+        <dt>Updated</dt><dd>{fmtDate(item.updated_at)}</dd>
       </dl>
-      {item.biography && <div className="detail-body">{stripHtml(item.biography)}</div>}
-      {item.notes && (
-        <div className="detail-body">
-          <h3>Internal notes</h3>
-          {stripHtml(item.notes)}
-        </div>
-      )}
-      {SOCIAL_LINK_FORM_FIELDS.some(([, key]) => socialLinks[key]) && (
-        <div className="detail-body">
-          <h3>Links</h3>
-          <dl>
-            {SOCIAL_LINK_FORM_FIELDS.map(([, key, label]) =>
-              socialLinks[key] ? (
-                <Fragment key={key}>
-                  <dt>{label}</dt>
-                  <dd><a href={socialLinks[key]} target="_blank" rel="noreferrer">{socialLinks[key]}</a></dd>
-                </Fragment>
-              ) : null,
-            )}
-          </dl>
-        </div>
-      )}
+      <div className="detail-body">
+        <h3>Biography</h3>
+        {item.biography ? stripHtml(item.biography) : <EmptyFieldMark />}
+      </div>
+      <div className="detail-body">
+        <h3>Internal notes</h3>
+        {item.notes ? stripHtml(item.notes) : <EmptyFieldMark />}
+      </div>
+      <div className="detail-body">
+        <h3>Links</h3>
+        <dl>
+          {SOCIAL_LINK_FORM_FIELDS.map(([, key, label]) => (
+            <Fragment key={key}>
+              <dt>{label}</dt>
+              <dd>
+                {socialLinks[key] ? (
+                  <a href={socialLinks[key]} target="_blank" rel="noreferrer">{socialLinks[key]}</a>
+                ) : (
+                  <EmptyFieldMark />
+                )}
+              </dd>
+            </Fragment>
+          ))}
+        </dl>
+      </div>
       <SpeakerSessions contactId={item.id} />
       {/*
         * Workplan 5 §4: what this person is to the organisation, next to
@@ -1274,33 +1307,6 @@ export function SpeakerDetailPanel({
           onRestored={(fields) => onItemSaved?.({ ...item, ...fields })}
         />
       )}
-      {/*
-        * SPK-06: the organiser can now put a known contact into the speaker
-        * portal directly. Deliberately outside the `onEdit` guard — inviting
-        * is not an edit, and the panel renders without `onEdit` in read-only
-        * contexts where the invite is still the useful action.
-        */}
-      <div className="detail-actions">
-        {onEdit && <button onClick={onEdit}>Edit</button>}
-        <PortalInviteButton contactId={item.id} contactName={contactName(item)} />
-        {/*
-          * The tab's own Delete detaches from this event (adminApi.ts's
-          * DELETE /contacts/:id); this destroys the person org-wide, so it
-          * lives here rather than in `onDelete` where the two would be
-          * indistinguishable. `onItemSaved` before `onClose` is what
-          * refreshes the parent list — the tab manager has no "deleted"
-          * channel for a detail panel, and reporting the row it no longer
-          * finds is enough to invalidate the list behind it.
-          */}
-        <DeleteFromOrgButton
-          contactId={item.id}
-          contactName={contactName(item)}
-          onDeleted={() => {
-            onItemSaved?.(item)
-            onClose()
-          }}
-        />
-      </div>
     </div>
   )
 }
@@ -1602,10 +1608,23 @@ export function buildWorkspaceConfig(
    * (TabConfig.registerTabActions) once its list tab exists. Held here rather
    * than in App because the only caller is a toolbar button on the same
    * config; the closure lives exactly as long as the config object does.
+   *
+   * Re-registered on every tab-state change (DataTabManager's effect deps
+   * include `state.tabs`), which doubles as the retry loop for the deep-link
+   * below: the very first registration can race the list tab's own mount, so
+   * `openCreateTab` returning false there is expected — the next
+   * re-registration tries again. `rec` only clears once it actually opens.
    */
   let speakerTabActions: TabExternalActions | null = null
   const registerSpeakerTabActions = (actions: TabExternalActions | null) => {
     speakerTabActions = actions
+    if (!actions || !orgMode) return
+    const current = currentRoute()
+    if (current.v === 'workspace' && current.tab === 'speakers' && current.rec === NEW_SPEAKER_REC) {
+      if (actions.openCreateTab({ title: 'New contact' })) {
+        navigate({ rec: null }, { replace: true })
+      }
+    }
   }
   // Export buttons (M6): each tab downloads its current view — active filters
   // and anchor included — through the workspace export endpoint, which scopes
@@ -3100,6 +3119,9 @@ export default function App() {
   useEffect(() => {
     const { rec, tab } = route
     if (view !== 'workspace' || !rec || !isWorkspaceTabKey(tab)) return
+    // Sentinel for "open the create form", not a real record — see
+    // `registerSpeakerTabActions`, which consumes and clears it.
+    if (rec === NEW_SPEAKER_REC) return
     const key = `${tab}:${rec}`
     if (handledRec.current === key) return
     handledRec.current = key

@@ -613,6 +613,24 @@ const resolveCreateTabTitle = (configKey: string, tabConfig?: TabConfig): string
 };
 
 /**
+ * Detail/edit tab titles come from record data (a submission title, a
+ * contact's full name) and can be arbitrarily long. Shorten at a word
+ * boundary so the label stays scannable; the full title remains available
+ * via the tab's tooltip, and CSS max-width backstops anything unbreakable.
+ */
+const TAB_TITLE_MAX_CHARS = 28;
+export const shortenTabTitle = (title: string): string => {
+  const collapsed = title.trim().replace(/\s+/g, ' ');
+  if (collapsed.length <= TAB_TITLE_MAX_CHARS) return collapsed;
+  const cut = collapsed.slice(0, TAB_TITLE_MAX_CHARS);
+  const lastSpace = cut.lastIndexOf(' ');
+  // Only break at the space when it keeps a meaningful amount of text —
+  // a single enormous first word falls back to a hard cut.
+  const head = lastSpace > TAB_TITLE_MAX_CHARS / 2 ? cut.slice(0, lastSpace) : cut;
+  return `${head.replace(/[\s,;:.\-–—(]+$/, '')}…`;
+};
+
+/**
  * Internal tab state representation
  */
 interface DataTabState {
@@ -1544,6 +1562,37 @@ export const DataTabManager: React.FC<DataTabManagerProps> = ({
       }
     };
 
+    // The double-click-to-edit gesture is invisible until discovered; this
+    // names it. Same gate and access check as handleItemDoubleClick's edit
+    // branch, and the hint advertises the faster gesture.
+    const editOption = tabConfig?.onUpsert && tabConfig?.schema
+      ? [{
+          label: 'Edit',
+          hint: (tabConfig.openDetailOnDoubleClick ?? true) !== false ? 'Dbl Click' : undefined,
+          onClick: () => {
+            closeMenu();
+            const editAccess = tabConfig.getEditAccess?.(item);
+            const isAllowed = typeof editAccess === 'boolean'
+              ? editAccess
+              : (editAccess?.allowed ?? true);
+            const deniedMessage = typeof editAccess === 'object' ? editAccess.message : undefined;
+            if (!isAllowed) {
+              if (deniedMessage) void appAlert(deniedMessage);
+              return;
+            }
+            requestChildTabReplace(tabId, 'edit', () => dispatch({
+              type: 'OPEN_EDIT_TAB',
+              payload: {
+                item,
+                configKey,
+                parentTabId: tabId,
+                title: `Edit: ${resolveItemTitle(item, tabConfig)}`
+              }
+            }));
+          }
+        }]
+      : [];
+
     // D2: without this the read-only detail panel was unreachable on any tab
     // that can also be edited — double-click prefers the edit form whenever the
     // config has `schema` + `onUpsert`, and nothing else opened a detail tab.
@@ -1554,7 +1603,7 @@ export const DataTabManager: React.FC<DataTabManagerProps> = ({
       ? [{ label: 'View details', hint: 'read-only', onClick: openDetailTab }]
       : [];
 
-    return [...tabOptions, ...detailOption, filterOption];
+    return [...tabOptions, ...editOption, ...detailOption, filterOption];
   }, [config, listContextMenu, notifyRecordsChanged, invalidateTabCounts, state.globalFilterSources, requestChildTabReplace, resolveItemTitle]);
 
   /**
@@ -2494,7 +2543,9 @@ export const DataTabManager: React.FC<DataTabManagerProps> = ({
    * Get tab title without count.
    */
   const getTabTitle = useCallback((tab: DataTabState) => {
-    return tab.title;
+    // List tab titles are short config-driven names; record-driven tabs get
+    // the word-boundary shortening (full title stays in the tooltip).
+    return tab.type === 'list' ? tab.title : shortenTabTitle(tab.title);
   }, []);
 
   /**
@@ -2943,6 +2994,15 @@ export const DataTabManager: React.FC<DataTabManagerProps> = ({
     .map((index) => ({ index, tab: state.tabs[index] }))
     .filter((entry): entry is { index: number; tab: DataTabState } => Boolean(entry.tab));
   const activeTabTitle = state.tabs[state.activeTabIndex]?.title ?? '';
+  /**
+   * The header search only queries the ACTIVE list tab (see
+   * wrapDataSourceWithSearch / `isActiveList` in renderTabContent), so the
+   * placeholder names it. On a non-list tab search has nothing to filter, so
+   * the generic label is honest there.
+   */
+  const searchPlaceholder = state.tabs[state.activeTabIndex]?.type === 'list'
+    ? `Search ${activeTabTitle}…`
+    : 'Search…';
   const isGlobalFilterActive = effectiveGlobalFilterSources.length > 0;
   const isReceiverPanelShown = Boolean(itemReceiverPanel && isReceiverActive && !isMobileSplit);
   /**
@@ -2998,6 +3058,7 @@ export const DataTabManager: React.FC<DataTabManagerProps> = ({
             }`}
             data-testid={getTabTestId(tab)}
             role="tab"
+            title={tab.type !== 'list' && getTabTitle(tab) !== tab.title ? tab.title : undefined}
             aria-label={getTabAriaLabel(tab)}
             aria-selected={index === state.activeTabIndex}
             aria-controls={`data-tab-panel-${tab.id}`}
@@ -3105,7 +3166,7 @@ export const DataTabManager: React.FC<DataTabManagerProps> = ({
                 type="search"
                 aria-label="Search"
                 className="data-tab-search"
-                placeholder="Search…"
+                placeholder={searchPlaceholder}
                 value={searchInput}
                 onChange={(e) => handleSearchInputChange((e.target as HTMLInputElement).value)}
               />

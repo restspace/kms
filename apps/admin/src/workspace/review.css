@@ -642,3 +642,36 @@
   padding-bottom: var(--space-2);
   font-size: var(--text-caption);
 }
+
+/* Evaluation status bar: transient notes/errors overlay the section's bottom
+   edge instead of inserting at the top, so messages never reflow the content
+   above them. `.forms-section` (forms.css) is position: relative for this. */
+.eval-status-bar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-4);
+  background: var(--chrome);
+  border-top: 1px solid var(--border);
+  font-size: var(--text-label);
+  color: var(--text-secondary);
+}
+
+.eval-status-bar.is-error {
+  background: var(--danger-soft);
+  border-top-color: var(--danger-border);
+  color: var(--danger);
+}
+
+.eval-status-bar-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

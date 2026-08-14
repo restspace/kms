@@ -37,6 +37,14 @@ export type ViewKey = (typeof VIEW_KEYS)[number]
 
 export const DEFAULT_VIEW: ViewKey = 'dashboard'
 
+/**
+ * Sentinel `rec` value meaning "open the create form", not "load this
+ * record". Consumed once the target tab's create action is registered (see
+ * `registerSpeakerTabActions` in App.tsx), which then clears it from the URL
+ * — the generic rec-restore effect must never try to fetch it as a real id.
+ */
+export const NEW_SPEAKER_REC = '__new__'
+
 /** Every URL-addressable bit of app state. `null` means "not in the URL". */
 export interface RouteState {
   /** Which top-level section is showing. */
