@@ -136,6 +136,35 @@ describe('DataList initial load across a mid-flight query change', () => {
     await waitFor(() => expect(onTotalChange).toHaveBeenCalledWith(2));
   });
 
+  it('re-announces the total when a replacement dataSource returns the same number', async () => {
+    const first = vi.fn(async () => ({ items: [{ id: 'first', name: 'First' }], total: 1 }));
+    const second = vi.fn(async () => ({ items: [{ id: 'second', name: 'Second' }], total: 1 }));
+    const onTotalChange = vi.fn();
+
+    const { rerender } = render(
+      <DataList<Row>
+        dataSource={first as any}
+        columns={columns as any}
+        getItemId={getItemId}
+        onTotalChange={onTotalChange}
+      />
+    );
+
+    await waitFor(() => expect(onTotalChange).toHaveBeenCalledTimes(1));
+    rerender(
+      <DataList<Row>
+        dataSource={second as any}
+        columns={columns as any}
+        getItemId={getItemId}
+        onTotalChange={onTotalChange}
+      />
+    );
+
+    await waitFor(() => expect(second).toHaveBeenCalled());
+    await waitFor(() => expect(onTotalChange).toHaveBeenCalledTimes(2));
+    expect(onTotalChange.mock.calls).toEqual([[1], [1]]);
+  });
+
   it('refetches when the global filter changes while a request is pending', async () => {
     const { source, resolvers } = makeDeferredSource();
     const onTotalChange = vi.fn();

@@ -29,6 +29,7 @@ vi.mock('react-window-infinite-loader', () => ({
 }));
 
 import { DataTabManager, type TabConfig } from './DataTabManager';
+import type { DataSourceParams } from './DataList';
 
 beforeAll(() => {
   if (!window.matchMedia) {
@@ -54,11 +55,11 @@ beforeAll(() => {
 
 type Row = { id: string; name: string };
 
-const rowsFor = (prefix: string) =>
-  vi.fn(async () => ({ items: [{ id: `${prefix}-1`, name: `${prefix} one` }], total: 1 }));
+const rowsFor = (prefix: string, total: number) =>
+  vi.fn(async (_params: DataSourceParams) => ({ items: [{ id: `${prefix}-1`, name: `${prefix} one` }], total }));
 
 function makeConfig(): { config: Record<string, TabConfig>; sources: Record<string, ReturnType<typeof rowsFor>> } {
-  const sources = { speakers: rowsFor('speakers'), submissions: rowsFor('submissions') };
+  const sources = { speakers: rowsFor('speakers', 1), submissions: rowsFor('submissions', 2) };
   const tab = (key: 'speakers' | 'submissions', title: string): TabConfig<Row> => ({
     displayTitle: title,
     dataSource: sources[key] as any,
@@ -106,13 +107,18 @@ function MirroringHost({
 }
 
 describe('DataTabManager activate requests', () => {
-  it('loads only the active list and learns its badge count from that page response', async () => {
+  it('loads the active list and fetches a count-only result for unopened tabs', async () => {
     const { config, sources } = makeConfig();
     const { container } = render(<DataTabManager config={config} defaultTabs={['speakers', 'submissions']} />);
 
     await waitFor(() => expect(sources.speakers).toHaveBeenCalledTimes(1));
-    expect(sources.submissions).not.toHaveBeenCalled();
-    expect(container.querySelector('.data-tab-label.active')?.textContent).toContain('1');
+    await waitFor(() => expect(sources.submissions).toHaveBeenCalledTimes(1));
+
+    expect(sources.speakers.mock.calls[0]?.[0]?.size).toBeGreaterThan(1);
+    expect(sources.submissions).toHaveBeenCalledWith(expect.objectContaining({ from: 0, size: 1 }));
+    const labels = Array.from(container.querySelectorAll('.data-tab-label')).map((label) => label.textContent);
+    expect(labels.find((label) => label?.includes('Speakers'))).toContain('1');
+    expect(labels.find((label) => label?.includes('Submissions'))).toContain('2');
   });
 
   it('never reports a tab it is only passing through', async () => {
@@ -127,11 +133,11 @@ describe('DataTabManager activate requests', () => {
     // Only the requested tab is ever announced, and only once — the default
     // tab it starts on is an implementation detail the host must not see.
     expect(reports).toEqual(['submissions']);
-    // The default tab's grid mounts for the single commit before the request
-    // lands, so one fetch each is expected — what must not happen is the two
-    // grids taking turns remounting, which is what the loop looked like.
-    expect(sources.speakers.mock.calls.length).toBeLessThanOrEqual(1);
-    expect(sources.submissions.mock.calls.length).toBeLessThanOrEqual(1);
+    // A source can receive one full-page request while active and one count-only
+    // request while inactive. What must not happen is the two grids taking turns
+    // remounting, which is what the old URL feedback loop looked like.
+    expect(sources.speakers.mock.calls.length).toBeLessThanOrEqual(2);
+    expect(sources.submissions.mock.calls.length).toBeLessThanOrEqual(2);
     expect(sources.submissions).toHaveBeenCalled();
   });
 

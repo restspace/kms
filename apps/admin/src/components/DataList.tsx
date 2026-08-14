@@ -804,6 +804,8 @@ export const DataList = <T extends Record<string, any>, TFilters extends Record<
   // Deduplicate in-flight requests
   const inFlight = useRef<Set<string>>(new Set());
   const dataSourceRef = useRef(dataSource);
+  /** Last total handed to `onTotalChange` — reset when the underlying source changes. */
+  const lastReportedTotalRef = useRef<number | null>(null);
   const selectionChangeRef = useRef(onSelectionChange);
   const selectedItemRef = useRef<T | null>(selectedItem ?? null);
   const activeRowDragPayloadRef = useRef<DataListRowDragPayload | null>(null);
@@ -898,6 +900,9 @@ export const DataList = <T extends Record<string, any>, TFilters extends Record<
     }
     pendingScrollRestoreRef.current = scrollOffsetRef.current;
     dataSourceRef.current = dataSource;
+    // The same number from a different source is still new information to the
+    // host (for example after an event-scope or metadata-driven source change).
+    lastReportedTotalRef.current = null;
     if (dataSourceBumpTimerRef.current !== null) {
       clearTimeout(dataSourceBumpTimerRef.current);
     }
@@ -1134,9 +1139,6 @@ export const DataList = <T extends Record<string, any>, TFilters extends Record<
     at: 0,
     message: null,
   });
-  /** Last total handed to `onTotalChange` — see the guard at its call site. */
-  const lastReportedTotalRef = useRef<number | null>(null);
-
   /**
    * Load more items from the data source
    */
@@ -2575,4 +2577,3 @@ export const DataList = <T extends Record<string, any>, TFilters extends Record<
     </div>
   );
 };
-

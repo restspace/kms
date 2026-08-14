@@ -1223,9 +1223,25 @@ export const DataTabManager: React.FC<DataTabManagerProps> = ({
     typeof window !== 'undefined' ? window.matchMedia(MEDIUM_MEDIA_QUERY).matches : false
   );
   const isMobileSplitRef = useRef(isMobileSplit);
-  /** Counts learned from real list responses, keyed by config and filters. */
-  const [tabCounts, setTabCounts] = useState<Record<string, number>>({});
-  const invalidateTabCounts = useCallback(() => setTabCounts({}), []);
+  /**
+   * Totals keyed by config + effective filters. Keep the source alongside the
+   * value so changing event scope cannot reuse a count produced by an older
+   * dataSource closure with the same visible filters.
+   */
+  const [tabCounts, setTabCounts] = useState<Record<string, {
+    dataSource: TabConfig['dataSource'];
+    total: number;
+  }>>({});
+  const latestConfigRef = useRef(config);
+  latestConfigRef.current = config;
+  const tabCountsRef = useRef(tabCounts);
+  tabCountsRef.current = tabCounts;
+  const [tabCountGeneration, setTabCountGeneration] = useState(0);
+  const invalidateTabCounts = useCallback(() => {
+    tabCountsRef.current = {};
+    setTabCounts({});
+    setTabCountGeneration((generation) => generation + 1);
+  }, []);
   const lastGlobalFilterSignature = useRef<string | null>(null);
 
   const applyReceiverActive = useCallback((active: boolean) => {
@@ -2143,6 +2159,75 @@ export const DataTabManager: React.FC<DataTabManagerProps> = ({
     return { ...localFilters, ...(globalFiltersByTab[tabId] ?? {}) };
   }, [config, globalFiltersByTab, tabListQueries]);
 
+  const getTabCountCacheKey = useCallback((configKey: string, filters: Record<string, any>): string => (
+    `${reloadKey ?? 0}:${tabCountGeneration}:${configKey}:${stableSerialize(filters)}`
+  ), [reloadKey, tabCountGeneration]);
+
+  /**
+   * Fetch only totals for inactive list tabs. Inactive DataLists remain
+   * unmounted (so they do not load/render a page), but every visible workspace
+   * tab still gets the record-count badge users rely on for navigation.
+   *
+   * The active list supplies its total through onTotalChange from its real page
+   * response, avoiding the duplicate list + count request that the earlier
+   * React Query implementation made for the active tab.
+   */
+  const inactiveTabCountRequests = useMemo(() => {
+    const activeTabId = state.tabs[state.activeTabIndex]?.id;
+    return state.tabs.flatMap((tab) => {
+      if (tab.type !== 'list' || tab.id === activeTabId) return [];
+      const tabConfig = config[tab.configKey];
+      if (!tabConfig) return [];
+      const filters = getEffectiveTabFilters(tab.id, tab.configKey);
+      return [{
+        cacheKey: getTabCountCacheKey(tab.configKey, filters),
+        dataSource: tabConfig.dataSource,
+        filters,
+        configKey: tab.configKey
+      }];
+    });
+  }, [config, getEffectiveTabFilters, getTabCountCacheKey, state.activeTabIndex, state.tabs]);
+
+  const tabCountRequestsInFlightRef = useRef(new Map<string, TabConfig['dataSource']>());
+  useEffect(() => {
+    const pending = inactiveTabCountRequests.filter((request) => {
+      const cached = tabCountsRef.current[request.cacheKey];
+      const inFlightSource = tabCountRequestsInFlightRef.current.get(request.cacheKey);
+      return (!cached || cached.dataSource !== request.dataSource)
+        && inFlightSource !== request.dataSource;
+    });
+
+    for (const request of pending) {
+      tabCountRequestsInFlightRef.current.set(request.cacheKey, request.dataSource);
+      void request.dataSource({ from: 0, size: 1, filters: request.filters })
+        .then((response) => {
+          // An event-scope change may replace the source while its old count is
+          // still in flight. Never let that stale response overwrite the new
+          // scope's badge.
+          if (latestConfigRef.current[request.configKey]?.dataSource !== request.dataSource) return;
+          const total = response.total ?? 0;
+          setTabCounts((previous) => {
+            const cached = previous[request.cacheKey];
+            if (cached?.dataSource === request.dataSource && cached.total === total) return previous;
+            const next = {
+              ...previous,
+              [request.cacheKey]: { dataSource: request.dataSource, total }
+            };
+            tabCountsRef.current = next;
+            return next;
+          });
+        })
+        .catch((error) => {
+          console.error(`Failed to load count for tab "${request.configKey}"`, error);
+        })
+        .finally(() => {
+          if (tabCountRequestsInFlightRef.current.get(request.cacheKey) === request.dataSource) {
+            tabCountRequestsInFlightRef.current.delete(request.cacheKey);
+          }
+        });
+    }
+  }, [inactiveTabCountRequests]);
+
   /**
    * Handle total count change
    */
@@ -2153,11 +2238,18 @@ export const DataTabManager: React.FC<DataTabManagerProps> = ({
       const effectiveFilters = isActiveList && committedSearch.trim()
         ? { ...filters, q: committedSearch.trim() }
         : filters;
-      const filterSig = stableSerialize(effectiveFilters);
-      const key = `${configKey}:${filterSig}`;
-      setTabCounts((prev) => (prev[key] === total ? prev : { ...prev, [key]: total }));
+      const key = getTabCountCacheKey(configKey, effectiveFilters);
+      const dataSource = config[configKey]?.dataSource;
+      if (!dataSource) return;
+      setTabCounts((previous) => {
+        const cached = previous[key];
+        if (cached?.dataSource === dataSource && cached.total === total) return previous;
+        const next = { ...previous, [key]: { dataSource, total } };
+        tabCountsRef.current = next;
+        return next;
+      });
     };
-  }, [committedSearch, getEffectiveTabFilters, state.activeTabIndex, state.tabs]);
+  }, [committedSearch, config, getEffectiveTabFilters, getTabCountCacheKey, state.activeTabIndex, state.tabs]);
 
   /**
    * Handle add button click in a list
@@ -2467,21 +2559,20 @@ export const DataTabManager: React.FC<DataTabManagerProps> = ({
     [fetchRelatedRecords, config, dataVersions]
   );
 
-  /**
-   * Return a badge only after this list has supplied a total with a real page.
-   * Inactive, unvisited tabs stay request-free and deliberately show no count.
-   */
+  /** Return the total learned from a real page or a lightweight inactive-tab query. */
   const getTabCount = useCallback((tab: DataTabState) => {
     if (tab.type !== 'list') return null;
+    const dataSource = config[tab.configKey]?.dataSource;
+    if (!dataSource) return null;
     const filters = getEffectiveTabFilters(tab.id, tab.configKey);
     const isActiveList = tab.id === state.tabs[state.activeTabIndex]?.id;
     const effectiveFilters = isActiveList && committedSearch.trim()
       ? { ...filters, q: committedSearch.trim() }
       : filters;
-    const total = tabCounts[`${tab.configKey}:${stableSerialize(effectiveFilters)}`];
-    if (total !== undefined) return total.toLocaleString();
+    const cached = tabCounts[getTabCountCacheKey(tab.configKey, effectiveFilters)];
+    if (cached?.dataSource === dataSource) return cached.total.toLocaleString();
     return null;
-  }, [committedSearch, getEffectiveTabFilters, state.activeTabIndex, state.tabs, tabCounts]);
+  }, [committedSearch, config, getEffectiveTabFilters, getTabCountCacheKey, state.activeTabIndex, state.tabs, tabCounts]);
 
   /**
    * Wrap toolbar actions to add export status feedback. When the files-zip
