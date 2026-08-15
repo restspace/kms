@@ -9,7 +9,18 @@ day-to-day workflow this tab supports.
 Default columns: Code, Title, Status (an inline-editable dropdown — changing it here writes
 immediately), Rating (click to cycle sort descending → ascending → off; hover a value to see how
 many reviews it's based on), Notified (a checkmark once decision emails have gone out), Format,
-Track, Submitter, Event.
+Track, Submitter, Starts, Ends, Room, Event.
+
+**Starts / Ends / Room** are the session's place on the agenda. An accepted submission *is* the
+session — scheduling it on the [Agenda](agenda.md) fills these in on the same row, so you can see
+what's placed without leaving the Workspace. Times show in the event's timezone on a 24-hour
+clock, and an unscheduled row shows a dash. Starts and Room are sortable; either way round,
+unscheduled rows sort last, so sorting by Starts ascending gives you a running order rather than
+a wall of blanks. Ends shows the time alone — its date is the one in Starts.
+
+With the schedule columns in play the list is wider than most screens, so it scrolls sideways
+rather than squeezing Title down to a few words. On a phone each row's bottom line carries the
+whole schedule instead — `11th Aug 15:30 TO 16:30 Hall B`, or `Unscheduled`.
 
 **Filters:**
 

@@ -74,6 +74,25 @@
   flex: 1 1 auto;
   min-height: 0;
   min-width: 0;
+  /* Positioning parent for the bottom-corner controls (export, toolbar
+     actions, quick add). They sit outside `-main-scroller` on purpose — an
+     absolutely positioned box inside a scroll container scrolls with its
+     content, which would carry them off-screen on a `minTableWidth` list. */
+  position: relative;
+}
+
+.data-list-main-scroller {
+  height: 100%;
+  min-height: 0;
+  min-width: 0;
+}
+
+/* Horizontal scroll for tabs that declare `minTableWidth` (Submissions, whose
+   schedule columns push it past a laptop panel). Vertical scrolling still
+   belongs to the virtualized list inside, so only the X axis moves here. */
+.data-list-main-scroll-x {
+  overflow-x: auto;
+  overflow-y: hidden;
 }
 
 .data-list-main-content {
@@ -660,6 +679,13 @@
 
 .submissions-data-list .data-list-mobile-row2 .data-list-cell-mobile-value {
   width: auto;
+}
+
+/* The schedule line ("11th Aug 15:30 TO 16:30 Hall B") is one unlabelled cell
+   spanning both subgrid columns — the column sets `display: block` inline, so
+   it opts out of the label/value split the track and submitter lines use. */
+.submissions-data-list .data-list-mobile-row2 .schedule-unscheduled {
+  color: var(--text-faint);
 }
 
 /*

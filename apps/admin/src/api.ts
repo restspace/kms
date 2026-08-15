@@ -79,6 +79,13 @@ export interface SubmissionRow {
   track_name: string | null
   submitter_contact_id: string | null
   submitter_name: string | null
+  /** Schedule (docs/07): a Session is the accepted Submission row itself. */
+  starts_at: string | null
+  ends_at: string | null
+  room_id: string | null
+  room_name: string | null
+  /** The owning event's timezone — every schedule value renders in it (NFR-12). */
+  event_timezone?: string | null
   /** organiser-only; never rendered in portal/public surfaces */
   notes: string | null
   /** CNT-12/w3 public-feed visibility gate, independent of `status` — default 1. See 0010 migration. */

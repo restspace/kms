@@ -507,6 +507,13 @@ export interface DataListProps<T = any, TFilters extends Record<string, any> = R
    * Defaults to 88.
    */
   mobileRowHeight?: number;
+  /**
+   * Minimum width (px) of the desktop grid. When the panel is narrower than
+   * this, the header and rows keep their declared column widths and the whole
+   * table scrolls horizontally instead of squeezing the `1fr` columns to
+   * nothing. Ignored in mobile card layout, which has no columns to align.
+   */
+  minTableWidth?: number;
   batchSize?: number;
   className?: string;
   reloadKey?: number | string;
@@ -732,6 +739,7 @@ export const DataList = <T extends Record<string, any>, TFilters extends Record<
   rowHeight = DEFAULT_ROW_HEIGHT,
   mobileBreakpointWidth,
   mobileRowHeight,
+  minTableWidth,
   batchSize = DEFAULT_BATCH_SIZE,
   className = '',
   reloadKey,
@@ -2347,283 +2355,300 @@ export const DataList = <T extends Record<string, any>, TFilters extends Record<
             </button>
           )}
         </div>
+        {/* `minTableWidth` (desktop only) makes the header + rows a fixed-width
+            slab inside the horizontally scrolling `-main-scroller`. Both live
+            in `-main-content`, so they scroll together and stay column-aligned;
+            the virtualized list measures that widened wrapper, so react-window
+            renders at the slab width rather than the panel width. The corner
+            buttons stay outside the scroller (anchored to `-main`) — an
+            absolutely positioned box inside a scroll container scrolls with
+            its content, which would carry Import/Files off-screen the moment
+            you looked at the rightmost column. */}
         <div className="data-list-main">
-          <div className="data-list-main-content">
-            {!isMobile && (
-              <div className="data-list-header" style={{ gridTemplateColumns }}>
-                {onChecklist && (
-                  <div className="data-list-header-cell data-list-check-header" aria-hidden="true" />
-                )}
-                {columns.map((column, index) => {
-                  if (!column.sortable) {
-                    return (
-                      <div key={index} className="data-list-header-cell">
-                        <span>{column.header}</span>
-                      </div>
-                    );
-                  }
-                  const field = String(column.field);
-                  const isActiveSort =
-                    sortState.field === field ||
-                    (column.sortCycle?.some((entry) => entry.field === sortState.field) ?? false);
-                  const ariaSort: React.AriaAttributes['aria-sort'] = isActiveSort
-                    ? (sortState.direction === 'asc' ? 'ascending' : 'descending')
-                    : 'none';
-                  return (
-                    <div key={index} role="columnheader" aria-sort={ariaSort} className="data-list-header-cell sortable">
-                      <button
-                        type="button"
-                        className="data-list-header-button"
-                        onClick={() => handleHeaderClick(column)}
-                      >
-                        <span>{column.header}</span>
-                        {getSortIndicator(column) && (
-                          <span className="data-list-sort-indicator" aria-hidden="true">{getSortIndicator(column)}</span>
-                        )}
-                      </button>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-            {loadError && (
-              <div className="data-list-error" role="alert">
-                <span className="data-list-error-message">Failed to load items: {loadError}</span>
-                <button type="button" className="data-list-error-retry" onClick={handleRetryLoad}>
-                  Retry
-                </button>
-              </div>
-            )}
-            {!isMobile && fastAdd && draftItem && (
-              <div
-                ref={draftRowRef}
-                className="data-list-row data-list-row-draft"
-                style={{ gridTemplateColumns, height: rowHeight }}
-                role="row"
-                aria-label="New record draft — Enter saves, Escape cancels"
-                data-testid="data-list-fast-add-row"
-                onKeyDown={(event) => {
-                  if (event.key === 'Enter' && !(event.target instanceof HTMLTextAreaElement)) {
-                    event.preventDefault();
-                    event.stopPropagation();
-                    void commitDraft();
-                  } else if (event.key === 'Escape') {
-                    event.preventDefault();
-                    event.stopPropagation();
-                    cancelDraft();
-                  }
-                }}
-              >
-                {onChecklist && (
-                  <div className="data-list-cell data-list-check-cell" aria-hidden="true" />
-                )}
-                {columns.map((column, colIndex) => {
-                  const fieldName = String(column.field);
-                  const value = (draftItem as Record<string, unknown>)[fieldName];
-                  const isEditable = column.editable
-                    ? (typeof column.editable === 'function' ? column.editable(draftItem) : column.editable)
-                    : false;
-                  const hasError = draftErrors.has(fieldName);
-
-                  if (!isEditable) {
-                    return (
-                      <div key={colIndex} className="data-list-cell data-list-cell-draft-static">
-                        {column.render ? column.render(value, draftItem) : (value as React.ReactNode)}
-                      </div>
-                    );
-                  }
-
-                  const handleValueChange = (next: unknown) => handleDraftCellChange(column, next);
-                  const editContent = column.editRenderer
-                    ? column.editRenderer({ value, item: draftItem, index: -1, field: fieldName, onChange: handleValueChange })
-                    : (
-                      <input
-                        type={typeof value === 'number' ? 'number' : 'text'}
-                        className="data-list-cell-input"
-                        data-column={fieldName}
-                        placeholder={column.header}
-                        value={value === null || value === undefined ? '' : String(value)}
-                        disabled={isCommittingDraft}
-                        onClick={(event) => event.stopPropagation()}
-                        onChange={(event) => handleValueChange(event.target.value)}
-                      />
-                    );
-
-                  return (
-                    <div
-                      key={colIndex}
-                      className={`data-list-cell data-list-cell-editable ${hasError ? 'data-list-cell-draft-error' : ''}`}
-                      data-column={fieldName}
-                    >
-                      {editContent}
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-            <div className="data-list-list-wrapper" ref={wrapperRef}>
-              {items.length === 0 && isListComplete && !loadError && !draftItem && (
-                <div className="data-list-empty" role="status">
-                  No records match the current filters.
-                </div>
-              )}
-              <InfiniteLoader
-                key={`${querySignature}-${isMobile ? 'm' : 'd'}`}
-                isItemLoaded={isItemLoaded}
-                itemCount={itemCount}
-                loadMoreItems={loadMoreItems}
-                minimumBatchSize={batchSize}
-                threshold={20}
-              >
-                {({ onItemsRendered, ref }: { onItemsRendered: (props: ListOnItemsRenderedProps) => void, ref: any }) => (
-                  <List
-                    className="data-list-list"
-                    height={Math.max(1, size.height)}
-                    itemData={itemData}
-                    itemCount={itemCount}
-                    itemSize={effectiveItemSize}
-                    width={Math.max(1, size.width)}
-                    onScroll={({ scrollOffset }: ListOnScrollProps) => {
-                      scrollOffsetRef.current = scrollOffset;
-                    }}
-                    onItemsRendered={onItemsRendered}
-                    ref={(instance: any) => {
-                      listRef.current = instance;
-                      if (typeof ref === 'function') {
-                        ref(instance);
-                        return;
-                      }
-                      if (ref && typeof ref === 'object') {
-                        ref.current = instance;
-                      }
-                    }}
-                    outerElementType={DataListOuterElement}
-                  >
-                    {Row}
-                  </List>
-                )}
-              </InfiniteLoader>
-              {exportConfig && !isMobile && (
-                <div className={`data-list-export-buttons ${reserveBottomOffset ? 'with-summary-row' : ''}`}>
-                  {(['csv', 'xlsx'] as const).map((format) => (
-                    <button
-                      key={format}
-                      type="button"
-                      className="data-list-export-button"
-                      disabled={exportNotice?.kind === 'busy'}
-                      title={exportConfig.title ?? `Export the current view as ${format.toUpperCase()} (honours active filters)`}
-                      onClick={() => {
-                        const sort = sortState.field && sortState.direction
-                          ? { field: sortState.field, direction: sortState.direction }
-                          : undefined;
-                        const url = exportConfig.buildUrl(format, { filters: mergedFilters, sort });
-                        showExportNotice({ kind: 'busy', text: `Exporting ${format.toUpperCase()}…` });
-                        downloadExport(url, `export.${format}`).then(
-                          (filename) => showExportNotice({ kind: 'ok', text: `Downloaded ${filename}` }),
-                          (err: unknown) =>
-                            showExportNotice({
-                              kind: 'error',
-                              text: `Export failed — ${err instanceof Error ? err.message : 'the request did not complete'}`,
-                            }),
-                        );
-                      }}
-                    >
-                      ↓ {format.toUpperCase()}
-                    </button>
-                  ))}
-                  {exportNotice && (
-                    <span
-                      className={`data-list-export-notice ${exportNotice.kind}`}
-                      role="status"
-                      aria-live="polite"
-                    >
-                      {exportNotice.text}
-                    </span>
-                  )}
-                </div>
-              )}
-              {toolbarActions && toolbarActions.length > 0 && !isMobile && (
-                <div
-                  className={`data-list-export-buttons data-list-toolbar-actions ${reserveBottomOffset ? 'with-summary-row' : ''} ${exportConfig ? 'after-export' : ''}`}
-                >
-                  {toolbarActions.map((action) => {
-                    const checkedIds = Array.from(checkedItemIds);
-                    const blocked = action.disabled?.({ checkedIds }) ?? false;
-                    const label = typeof action.label === 'function' ? action.label({ checkedIds }) : action.label;
-                    return (
-                      <button
-                        key={action.id}
-                        type="button"
-                        className="data-list-export-button"
-                        disabled={Boolean(blocked)}
-                        title={blocked || action.title || label}
-                        onClick={() => {
-                          const sort = sortState.field && sortState.direction
-                            ? { field: sortState.field, direction: sortState.direction }
-                            : undefined;
-                          void action.onClick({
-                            filters: mergedFilters,
-                            sort,
-                            checkedIds,
-                            reload: () => setLocalReloadCounter((count) => count + 1),
-                          });
-                        }}
-                      >
-                        {label}
-                      </button>
-                    );
-                  })}
-                </div>
-              )}
-              {fastAdd && !isMobile && (
-                <button
-                  type="button"
-                  className={`data-list-add-button data-list-fast-add-button ${reserveBottomOffset ? 'with-summary-row' : ''}`}
-                  onClick={() => (draftItem ? cancelDraft() : openDraft())}
-                  disabled={(!fastAddAccess.enabled && !draftItem) || isCommittingDraft}
-                  title={draftItem
-                    ? 'Cancel quick add'
-                    : fastAddAccess.enabled
-                      ? 'Quick add — type into the new row, Enter saves'
-                      : fastAddAccess.message ?? 'Quick add unavailable'}
-                  aria-label={draftItem ? 'Cancel quick add' : 'Quick add row'}
-                >
-                  {draftItem ? '×' : '⚡'}
-                </button>
-              )}
-            </div>
-            {hasSummaryData && summaryData && (
-              isMobile ? (
-                <div className="data-list-summary-mobile" role="status" aria-label="List summary">
-                  {visibleMobileSummaryColumns.map((column, index) => {
-                    const fieldName = String(column.field);
-                    const value = summaryData[fieldName] ?? '';
-                    const label = column.mobileHeader ?? column.header;
-                    return (
-                      <div key={index} className="data-list-summary-mobile-cell">
-                        {label && <span className="data-list-summary-mobile-label">{label}</span>}
-                        <span className="data-list-summary-mobile-value" title={value}>{value}</span>
-                      </div>
-                    );
-                  })}
-                </div>
-              ) : (
-                <div className="data-list-summary-row" style={{ gridTemplateColumns }} role="status" aria-label="List summary">
+          <div className={`data-list-main-scroller${!isMobile && minTableWidth ? ' data-list-main-scroll-x' : ''}`}>
+            <div
+              className="data-list-main-content"
+              style={!isMobile && minTableWidth ? { minWidth: minTableWidth } : undefined}
+            >
+              {!isMobile && (
+                <div className="data-list-header" style={{ gridTemplateColumns }}>
                   {onChecklist && (
-                    <div className="data-list-summary-cell data-list-check-summary" aria-hidden="true" />
+                    <div className="data-list-header-cell data-list-check-header" aria-hidden="true" />
                   )}
                   {columns.map((column, index) => {
-                    const value = summaryData[String(column.field)] ?? '';
+                    if (!column.sortable) {
+                      return (
+                        <div key={index} className="data-list-header-cell">
+                          <span>{column.header}</span>
+                        </div>
+                      );
+                    }
+                    const field = String(column.field);
+                    const isActiveSort =
+                      sortState.field === field ||
+                      (column.sortCycle?.some((entry) => entry.field === sortState.field) ?? false);
+                    const ariaSort: React.AriaAttributes['aria-sort'] = isActiveSort
+                      ? (sortState.direction === 'asc' ? 'ascending' : 'descending')
+                      : 'none';
                     return (
-                      <div key={index} className="data-list-summary-cell" title={value}>
-                        {value}
+                      <div key={index} role="columnheader" aria-sort={ariaSort} className="data-list-header-cell sortable">
+                        <button
+                          type="button"
+                          className="data-list-header-button"
+                          onClick={() => handleHeaderClick(column)}
+                        >
+                          <span>{column.header}</span>
+                          {getSortIndicator(column) && (
+                            <span className="data-list-sort-indicator" aria-hidden="true">{getSortIndicator(column)}</span>
+                          )}
+                        </button>
                       </div>
                     );
                   })}
                 </div>
-              )
-            )}
+              )}
+              {loadError && (
+                <div className="data-list-error" role="alert">
+                  <span className="data-list-error-message">Failed to load items: {loadError}</span>
+                  <button type="button" className="data-list-error-retry" onClick={handleRetryLoad}>
+                    Retry
+                  </button>
+                </div>
+              )}
+              {!isMobile && fastAdd && draftItem && (
+                <div
+                  ref={draftRowRef}
+                  className="data-list-row data-list-row-draft"
+                  style={{ gridTemplateColumns, height: rowHeight }}
+                  role="row"
+                  aria-label="New record draft — Enter saves, Escape cancels"
+                  data-testid="data-list-fast-add-row"
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter' && !(event.target instanceof HTMLTextAreaElement)) {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      void commitDraft();
+                    } else if (event.key === 'Escape') {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      cancelDraft();
+                    }
+                  }}
+                >
+                  {onChecklist && (
+                    <div className="data-list-cell data-list-check-cell" aria-hidden="true" />
+                  )}
+                  {columns.map((column, colIndex) => {
+                    const fieldName = String(column.field);
+                    const value = (draftItem as Record<string, unknown>)[fieldName];
+                    const isEditable = column.editable
+                      ? (typeof column.editable === 'function' ? column.editable(draftItem) : column.editable)
+                      : false;
+                    const hasError = draftErrors.has(fieldName);
+
+                    if (!isEditable) {
+                      return (
+                        <div key={colIndex} className="data-list-cell data-list-cell-draft-static">
+                          {column.render ? column.render(value, draftItem) : (value as React.ReactNode)}
+                        </div>
+                      );
+                    }
+
+                    const handleValueChange = (next: unknown) => handleDraftCellChange(column, next);
+                    const editContent = column.editRenderer
+                      ? column.editRenderer({ value, item: draftItem, index: -1, field: fieldName, onChange: handleValueChange })
+                      : (
+                        <input
+                          type={typeof value === 'number' ? 'number' : 'text'}
+                          className="data-list-cell-input"
+                          data-column={fieldName}
+                          placeholder={column.header}
+                          value={value === null || value === undefined ? '' : String(value)}
+                          disabled={isCommittingDraft}
+                          onClick={(event) => event.stopPropagation()}
+                          onChange={(event) => handleValueChange(event.target.value)}
+                        />
+                      );
+
+                    return (
+                      <div
+                        key={colIndex}
+                        className={`data-list-cell data-list-cell-editable ${hasError ? 'data-list-cell-draft-error' : ''}`}
+                        data-column={fieldName}
+                      >
+                        {editContent}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+              <div className="data-list-list-wrapper" ref={wrapperRef}>
+                {items.length === 0 && isListComplete && !loadError && !draftItem && (
+                  <div className="data-list-empty" role="status">
+                    No records match the current filters.
+                  </div>
+                )}
+                <InfiniteLoader
+                  key={`${querySignature}-${isMobile ? 'm' : 'd'}`}
+                  isItemLoaded={isItemLoaded}
+                  itemCount={itemCount}
+                  loadMoreItems={loadMoreItems}
+                  minimumBatchSize={batchSize}
+                  threshold={20}
+                >
+                  {({ onItemsRendered, ref }: { onItemsRendered: (props: ListOnItemsRenderedProps) => void, ref: any }) => (
+                    <List
+                      className="data-list-list"
+                      height={Math.max(1, size.height)}
+                      itemData={itemData}
+                      itemCount={itemCount}
+                      itemSize={effectiveItemSize}
+                      width={Math.max(1, size.width)}
+                      onScroll={({ scrollOffset }: ListOnScrollProps) => {
+                        scrollOffsetRef.current = scrollOffset;
+                      }}
+                      onItemsRendered={onItemsRendered}
+                      ref={(instance: any) => {
+                        listRef.current = instance;
+                        if (typeof ref === 'function') {
+                          ref(instance);
+                          return;
+                        }
+                        if (ref && typeof ref === 'object') {
+                          ref.current = instance;
+                        }
+                      }}
+                      outerElementType={DataListOuterElement}
+                    >
+                      {Row}
+                    </List>
+                  )}
+                </InfiniteLoader>
+              </div>
+              {hasSummaryData && summaryData && (
+                isMobile ? (
+                  <div className="data-list-summary-mobile" role="status" aria-label="List summary">
+                    {visibleMobileSummaryColumns.map((column, index) => {
+                      const fieldName = String(column.field);
+                      const value = summaryData[fieldName] ?? '';
+                      const label = column.mobileHeader ?? column.header;
+                      return (
+                        <div key={index} className="data-list-summary-mobile-cell">
+                          {label && <span className="data-list-summary-mobile-label">{label}</span>}
+                          <span className="data-list-summary-mobile-value" title={value}>{value}</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <div className="data-list-summary-row" style={{ gridTemplateColumns }} role="status" aria-label="List summary">
+                    {onChecklist && (
+                      <div className="data-list-summary-cell data-list-check-summary" aria-hidden="true" />
+                    )}
+                    {columns.map((column, index) => {
+                      const value = summaryData[String(column.field)] ?? '';
+                      return (
+                        <div key={index} className="data-list-summary-cell" title={value}>
+                          {value}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )
+              )}
+            </div>
           </div>
+          {/* Corner controls live outside `-main-scroller` so a sideways scroll
+              (see `minTableWidth`) cannot carry them off-screen; `-main` is
+              their positioning parent and shares the scroller's bottom edge. */}
+          {exportConfig && !isMobile && (
+            <div className={`data-list-export-buttons ${reserveBottomOffset ? 'with-summary-row' : ''}`}>
+              {(['csv', 'xlsx'] as const).map((format) => (
+                <button
+                  key={format}
+                  type="button"
+                  className="data-list-export-button"
+                  disabled={exportNotice?.kind === 'busy'}
+                  title={exportConfig.title ?? `Export the current view as ${format.toUpperCase()} (honours active filters)`}
+                  onClick={() => {
+                    const sort = sortState.field && sortState.direction
+                      ? { field: sortState.field, direction: sortState.direction }
+                      : undefined;
+                    const url = exportConfig.buildUrl(format, { filters: mergedFilters, sort });
+                    showExportNotice({ kind: 'busy', text: `Exporting ${format.toUpperCase()}…` });
+                    downloadExport(url, `export.${format}`).then(
+                      (filename) => showExportNotice({ kind: 'ok', text: `Downloaded ${filename}` }),
+                      (err: unknown) =>
+                        showExportNotice({
+                          kind: 'error',
+                          text: `Export failed — ${err instanceof Error ? err.message : 'the request did not complete'}`,
+                        }),
+                    );
+                  }}
+                >
+                  ↓ {format.toUpperCase()}
+                </button>
+              ))}
+              {exportNotice && (
+                <span
+                  className={`data-list-export-notice ${exportNotice.kind}`}
+                  role="status"
+                  aria-live="polite"
+                >
+                  {exportNotice.text}
+                </span>
+              )}
+            </div>
+          )}
+          {toolbarActions && toolbarActions.length > 0 && !isMobile && (
+            <div
+              className={`data-list-export-buttons data-list-toolbar-actions ${reserveBottomOffset ? 'with-summary-row' : ''} ${exportConfig ? 'after-export' : ''}`}
+            >
+              {toolbarActions.map((action) => {
+                const checkedIds = Array.from(checkedItemIds);
+                const blocked = action.disabled?.({ checkedIds }) ?? false;
+                const label = typeof action.label === 'function' ? action.label({ checkedIds }) : action.label;
+                return (
+                  <button
+                    key={action.id}
+                    type="button"
+                    className="data-list-export-button"
+                    disabled={Boolean(blocked)}
+                    title={blocked || action.title || label}
+                    onClick={() => {
+                      const sort = sortState.field && sortState.direction
+                        ? { field: sortState.field, direction: sortState.direction }
+                        : undefined;
+                      void action.onClick({
+                        filters: mergedFilters,
+                        sort,
+                        checkedIds,
+                        reload: () => setLocalReloadCounter((count) => count + 1),
+                      });
+                    }}
+                  >
+                    {label}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+          {fastAdd && !isMobile && (
+            <button
+              type="button"
+              className={`data-list-add-button data-list-fast-add-button ${reserveBottomOffset ? 'with-summary-row' : ''}`}
+              onClick={() => (draftItem ? cancelDraft() : openDraft())}
+              disabled={(!fastAddAccess.enabled && !draftItem) || isCommittingDraft}
+              title={draftItem
+                ? 'Cancel quick add'
+                : fastAddAccess.enabled
+                  ? 'Quick add — type into the new row, Enter saves'
+                  : fastAddAccess.message ?? 'Quick add unavailable'}
+              aria-label={draftItem ? 'Cancel quick add' : 'Quick add row'}
+            >
+              {draftItem ? '×' : '⚡'}
+            </button>
+          )}
         </div>
       </div>
     </div>

@@ -370,6 +370,11 @@ export interface TabConfig<T = any> {
    */
   mobileRowHeight?: number;
   /**
+   * Optional minimum desktop grid width (px). Below it the list scrolls
+   * horizontally rather than squeezing its columns. Passed to DataList.
+   */
+  minTableWidth?: number;
+  /**
    * Optional className applied to the DataList container for tab-specific styling.
    */
   dataListClassName?: string;
@@ -2769,6 +2774,7 @@ export const DataTabManager: React.FC<DataTabManagerProps> = ({
           rowDrop={tabConfig.rowDrop}
           rowHeight={tabConfig.rowHeight}
           mobileRowHeight={tabConfig.mobileRowHeight}
+          minTableWidth={tabConfig.minTableWidth}
           className={listClassName}
           reloadKey={`${reloadKey ?? 0}:${state.listVersions[tab.id] ?? 0}`}
           bottomBarReserved={tabConfig.reserveBottomBarSpace}

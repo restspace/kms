@@ -111,6 +111,7 @@ import { helpSlugFor } from './help/helpTopics'
 import { MANUAL_PAGE_META } from './help/manualNav.generated'
 import { AdminErrorBoundary } from './components/AdminErrorBoundary'
 import { eventDays, formatEventDateRange } from './agenda/timeUtils'
+import { fmtScheduleEnd, fmtScheduleStart, fmtScheduleSummary } from './utils/dates'
 import './shell.css'
 
 // Each major screen is its own Vite chunk. The workspace shell remains eager
@@ -1608,6 +1609,13 @@ export function buildWorkspaceConfig(
     speakersSource?: (params: DataSourceParams) => Promise<DataSourceResult<ContactRow>>
     tasksSource?: (params: DataSourceParams) => Promise<DataSourceResult<TaskAssignmentRow>>
   } = {},
+  /**
+   * Fallback timezone for the Submissions list's schedule columns (NFR-12:
+   * schedule values render in the EVENT timezone, never the viewer's). Rows
+   * carry their own `event_timezone` — this only covers a row that predates
+   * that column or arrives from a stubbed source, and defaults to UTC.
+   */
+  currentEventTimezone = 'UTC',
 ): Record<string, TabConfig> {
   // CRM-01: "All events" turns the Speakers tab into the org contact directory.
   const orgMode = eventFilterId === null
@@ -2091,9 +2099,15 @@ export function buildWorkspaceConfig(
     reserveBottomBarSpace: (currentRoute().tab ?? 'speakers') === 'submissions',
     // Scopes the mobile layout override in DataList.css: title on its own
     // full-width line, status + rating beneath it, then track and submitter
-    // one per line. Four stacked lines need more than DataList's default 88px.
+    // one per line, then the schedule line. Five stacked lines need more than
+    // DataList's default 88px.
     dataListClassName: 'submissions-data-list',
-    mobileRowHeight: 112,
+    mobileRowHeight: 132,
+    // Code + Status + Rating + Notified + Format + Starts + Ends + Room +
+    // Event are fixed widths; below this the 1fr columns (Title, Track,
+    // Submitter) start losing words, so the grid scrolls sideways instead.
+    // Submissions is the only tab wide enough to need it.
+    minTableWidth: 1416,
     columns: [
       { field: 'code', header: 'Code', width: '84px', mobileHidden: true },
       { field: 'title', header: 'Title', width: '2.5fr', sortable: true },
@@ -2156,6 +2170,57 @@ export function buildWorkspaceConfig(
       { field: 'format', header: 'Format', width: '100px', sortable: true, mobileHidden: true },
       { field: 'track_name', header: 'Track', sortable: true, mobileRow: 2 },
       { field: 'submitter_name', header: 'Submitter', sortable: true, mobileRow: 2 },
+      // Schedule (docs/02 §Session: a Session IS the accepted submission row,
+      // so its time and room live here rather than on a separate record).
+      // Last in the array so the mobile stack ends on the schedule line the
+      // three collapse into; on desktop they trail Submitter, which is why the
+      // tab carries `minTableWidth` to scroll rather than crush Title.
+      {
+        field: 'starts_at',
+        header: 'Starts',
+        width: '80px',
+        sortable: true,
+        // Row 2's single schedule line: "11th Aug 15:30 TO 16:30 Hall B", or
+        // "Unscheduled". Ends/Room are mobileHidden and folded in here — three
+        // labelled lines for one fact is exactly the stack mobile can't spend.
+        mobileRow: 2,
+        mobileHeader: '',
+        mobileCellStyle: { display: 'block' },
+        render: (value: string | null, item) => (
+          <span style={value ? undefined : { color: 'var(--text-faint)' }}>
+            {fmtScheduleStart(value, item.event_timezone || currentEventTimezone) || '—'}
+          </span>
+        ),
+        mobileRender: (_value: string | null, item) => (
+          <span className={item.starts_at || item.room_id ? '' : 'schedule-unscheduled'}>
+            {fmtScheduleSummary(
+              item.starts_at,
+              item.ends_at,
+              item.room_name,
+              item.event_timezone || currentEventTimezone,
+            )}
+          </span>
+        ),
+      },
+      {
+        field: 'ends_at',
+        header: 'Ends',
+        width: '40px',
+        mobileHidden: true,
+        render: (value: string | null, item) =>
+          fmtScheduleEnd(value, item.event_timezone || currentEventTimezone) || (
+            <span style={{ color: 'var(--text-faint)' }}>—</span>
+          ),
+      },
+      {
+        field: 'room_name',
+        header: 'Room',
+        width: '110px',
+        sortable: true,
+        mobileHidden: true,
+        render: (value: string | null) =>
+          value || <span style={{ color: 'var(--text-faint)' }}>—</span>,
+      },
       eventColumn,
     ],
     // A single row click opens this panel, so it carries the record's primary
@@ -3123,6 +3188,7 @@ export default function App() {
         eventOptions,
         speakerStatusOptions,
         stableWorkspacePieces,
+        me?.event.timezone ?? 'UTC',
       ),
     [
       handleChecklist,
@@ -3138,6 +3204,7 @@ export default function App() {
       eventOptions,
       speakerStatusOptions,
       stableWorkspacePieces,
+      me?.event.timezone,
     ],
   )
 
