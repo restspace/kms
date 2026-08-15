@@ -243,9 +243,21 @@ const like = (expr: string): FilterBuilder => (value) => {
   return v === null ? null : { sql: `${expr} LIKE ?`, params: [`%${v}%`] };
 };
 
-const SUBMISSION_STATUSES = new Set([
+// Exported: /api/v1's write routes validate against the same vocabulary, and the
+// generated OpenAPI document publishes it as an enum, so the three cannot drift.
+export const SUBMISSION_STATUSES = new Set([
   'draft', 'pending', 'accept_queue', 'accepted', 'decline_queue', 'declined', 'withdrawn',
 ]);
+
+/** task_assignments.status vocabulary (0001_init CHECK), exported for the same
+ * reason as SUBMISSION_STATUSES: the tasks filter and the spec share one list. */
+export const TASK_ASSIGNMENT_STATUSES = ['not_started', 'in_progress', 'complete'] as const;
+
+/** submission_comments.kind vocabulary — same single-source rule. */
+export const COMMENT_KINDS = ['rationale', 'discussion'] as const;
+
+/** message_log.status vocabulary (0001_init CHECK). */
+export const MESSAGE_STATUSES = ['queued', 'sent', 'failed', 'bounced'] as const;
 
 /**
  * Workplan 15 W5a (D9): the post-accept editorial state, a flag alongside
@@ -458,12 +470,19 @@ const RESOURCE_SPECS: Record<string, Omit<ResourceDef, 'fromSql'>> = {
               JOIN events ev ON ev.id = s.event_id
               LEFT JOIN tracks t ON t.id = s.track_id
               LEFT JOIN contacts sc ON sc.id = s.submitter_contact_id
+              LEFT JOIN rooms rm ON rm.id = s.room_id
               LEFT JOIN evaluation_plans ep ON ep.id = s.evaluation_plan_id`,
     eventExpr: 's.event_id',
     idExpr: 's.id',
     defaultCursorSort: { field: 'created_at', direction: 'desc' },
     selectSql: `SELECT s.*, ev.name AS event_name, t.name AS track_name,
                 NULLIF(TRIM(COALESCE(sc.first_name, '') || ' ' || COALESCE(sc.last_name, '')), '') AS submitter_name,
+                rm.name AS room_name,
+                -- Schedule columns render in the EVENT timezone, never the
+                -- viewer's (NFR-12) — and "All events" mixes rows from events
+                -- in different zones, so the tz travels per row rather than
+                -- being read once from the current event.
+                ev.timezone AS event_timezone,
                 ep.name AS plan_name,
                 -- Across every round the submission has been scored in, not
                 -- just the legacy evaluation_plan_id routing column: since
@@ -497,6 +516,11 @@ const RESOURCE_SPECS: Record<string, Omit<ResourceDef, 'fromSql'>> = {
       submitter_name: 'sc.last_name',
       created_at: 's.created_at',
       notified_at: 's.notified_at',
+      // Unscheduled rows (starts_at / room NULL) sort last in BOTH directions
+      // via the NULL-ordering wrapper in queryResource — ascending Starts is
+      // the "what's on first" worklist, not a wall of blanks.
+      starts_at: 's.starts_at',
+      room_name: 'rm.name',
       approval_state: 's.approval_state',
       // Workplan 15 W2: sorting the conditions by when they were signed off —
       // NULL (still outstanding) sorts to one end, which is the worklist.
@@ -704,7 +728,7 @@ const RESOURCE_SPECS: Record<string, Omit<ResourceDef, 'fromSql'>> = {
       },
       status: (value) => {
         const v = asText(value);
-        return v !== null && ['not_started', 'in_progress', 'complete'].includes(v)
+        return v !== null && (TASK_ASSIGNMENT_STATUSES as readonly string[]).includes(v)
           ? { sql: 'ta.status = ?', params: [v] }
           : null;
       },
@@ -888,7 +912,7 @@ const RESOURCE_SPECS: Record<string, Omit<ResourceDef, 'fromSql'>> = {
       submission_id: eq('sc.submission_id'),
       kind: (value) => {
         const v = asText(value);
-        return v === 'rationale' || v === 'discussion'
+        return v !== null && (COMMENT_KINDS as readonly string[]).includes(v)
           ? { sql: 'sc.kind = ?', params: [v] }
           : null;
       },

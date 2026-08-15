@@ -10,7 +10,7 @@ import { cors } from 'hono/cors';
 import type { Context } from 'hono';
 import type { Env } from '../env';
 import { getRevalidatedPrivilegedSession } from '../session';
-import { RESOURCES, queryResource, shapeExportRows, type ResourceDef } from './adminApi';
+import { RESOURCES, SUBMISSION_STATUSES, queryResource, shapeExportRows, type ResourceDef } from './adminApi';
 import { toCsv, toXlsx } from '../export';
 import { sha256Hex } from '../hashing';
 import { decodeCursor, encodeCursor, keysetWhere, type CursorPayload } from '../cursor';
@@ -384,9 +384,8 @@ restApiRoutes.get('/events/:event_id/contacts/:id', async (c) => {
 // POST /events/:event_id/submissions/:id/status { status } — the one write the
 // v1 surface exposes for now. Decision *emails* stay in the app's
 // send-decisions flow, so an API status change never sends mail by surprise.
-const SUBMISSION_STATUSES = new Set([
-  'draft', 'pending', 'accept_queue', 'accepted', 'decline_queue', 'declined', 'withdrawn',
-]);
+// The vocabulary itself comes from the registry module (one list, three
+// surfaces: the SPA filter, this write route, and the OpenAPI enum).
 
 restApiRoutes.post('/events/:event_id/submissions/:id/status', async (c) => {
   const body = await readBody(c);
@@ -950,14 +949,6 @@ restApiRoutes.get('/events/:event_id/forms/:fid', async (c) => {
 // edits to adminApi.ts. Offset mode (no ?cursor=) is unchanged for back-compat.
 // ---------------------------------------------------------------------------
 
-/** Primary-key column alias per resource's fromSql — the keyset tiebreaker. */
-const CURSOR_ID_EXPR: Record<string, string> = {
-  contacts: 'c.id',
-  submissions: 's.id',
-  tasks: 'ta.id',
-  messages: 'm.id',
-};
-
 // The only sort field whose JSON value is a number, not a string — everything
 // else (titles, statuses, ISO timestamps) sorts correctly as text.
 const NUMERIC_SORT_FIELDS = new Set(['rating']);
@@ -967,11 +958,13 @@ const NULL_NUMBER_SENTINEL = -1e15;
 /** Resolve the SQL sort expression + JSON row key for cursor mode. Falls back
  * to ordering by id when no (valid) ?sort= is given — a total, stable order. */
 function cursorSort(
-  resource: string,
   def: ResourceDef,
   field: string | null,
 ): { orderExpr: string; idExpr: string; rowKey: string; numeric: boolean } {
-  const idExpr = CURSOR_ID_EXPR[resource] ?? 'id';
+  // The registry's own idExpr, not a local copy: a resource added there (reviews,
+  // comments) used to fall back to a bare `id`, which is ambiguous across the
+  // joins and made cursor mode fail outright on exactly the newest resources.
+  const idExpr = def.idExpr;
   if (field && def.sortable[field]) {
     const numeric = NUMERIC_SORT_FIELDS.has(field);
     const wrapped = numeric
@@ -982,7 +975,7 @@ function cursorSort(
   return { orderExpr: idExpr, idExpr, rowKey: 'id', numeric: false };
 }
 
-async function handleCursorList(c: Context<RestEnv>, resource: string, def: ResourceDef, cursorRaw: string) {
+async function handleCursorList(c: Context<RestEnv>, def: ResourceDef, cursorRaw: string) {
   const eventId = c.get('event').id;
   const cursor: CursorPayload | null = cursorRaw === '' ? null : decodeCursor(cursorRaw);
   if (cursorRaw !== '' && !cursor) return apiError(c, 400, 'invalid_cursor', 'The cursor parameter is not valid.');
@@ -1001,7 +994,7 @@ async function handleCursorList(c: Context<RestEnv>, resource: string, def: Reso
       direction = desc ? 'desc' : 'asc';
     }
   }
-  const { orderExpr, idExpr, rowKey, numeric } = cursorSort(resource, def, sortField);
+  const { orderExpr, idExpr, rowKey, numeric } = cursorSort(def, sortField);
 
   const filterClauses: { sql: string; params: unknown[] }[] = [];
   for (const name of Object.keys(def.filters)) {
@@ -1075,7 +1068,7 @@ restApiRoutes.get('/events/:event_id/:resource', async (c) => {
   }
 
   const cursorRaw = c.req.query('cursor');
-  if (cursorRaw !== undefined) return handleCursorList(c, resource, def, cursorRaw);
+  if (cursorRaw !== undefined) return handleCursorList(c, def, cursorRaw);
 
   const parsed = queryFromParams(c, resource, { maxSize: 200, defaultSize: 25 });
   if (!parsed) {

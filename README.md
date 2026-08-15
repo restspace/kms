@@ -40,8 +40,8 @@ plain-language user manual — also served in-app under **Help** — is in [docs
   outside website, as a styled `<script>` embed, an iframe or a raw feed (including
   `/e/:slug/agenda.xml`), with named configurations saved for reuse.
 - **REST API** — `/api/v1` with org-scoped bearer tokens, OpenAPI 3.1 at
-  `/api/v1/openapi.json`, rendered docs at `/docs`, CSV/XLSX exports that honour the same
-  filters the admin grid uses. Tokens are managed under Settings.
+  `/api/v1/openapi.json`, rendered docs at `/docs`, an agent briefing at `/llms.txt`, CSV/XLSX
+  exports that honour the same filters the admin grid uses. Tokens are managed under Settings.
 - **Import** — spreadsheet import with a named Sessionboard mode, undo in one click, and
   everything unmapped preserved on the record.
 - **Airtable mirror** — optional one-way D1 → Airtable copy, off by default, set up entirely from
@@ -73,7 +73,7 @@ link is shown directly on the page after you enter an email, so no email provide
 - **Admin**: sign in as `james@atelyr.com` (seeded owner) → the admin shell at `/app`
 - **Speaker**: sign in as `ada@example.com` at `/portal/ai-engineer-sandbox-event`
 - **Public CFP**: `/submit/ai-engineer-sandbox-event/form0000-0000-4000-8000-000000000001`
-- `/docs` — API reference; `/health` — liveness check
+- `/docs` — API reference; `/llms.txt` — agent briefing; `/health` — liveness check
 
 Order matters: migrate before seed, and seed before dev, or pages render with no event.
 `npm run dev` runs the full build first — theme tokens, the manual, both frontends — so re-run it

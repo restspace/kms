@@ -260,7 +260,44 @@ re-running it with a different title under that key is a `422 idempotency_mismat
 An OpenAPI 3.1 document is published at `/api/v1/openapi.json`, generated at request time from
 the same `RESOURCES` registry the query executor runs — it cannot describe an endpoint that
 doesn't exist. A minimal rendered view (Scalar, CDN-loaded, with a no-JS fallback linking the raw
-JSON) is served at `/docs`.
+JSON) is served at `/docs`. The document itself is public: a client can read the whole surface
+before it has a token.
+
+It is written for an agent as much as a human, which in practice means:
+
+- **Stable `operationId`s** on all 29 operations (`listSubmissions`, `setSubmissionStatus`,
+  `removeContactFromEvent`, …) — tool generators turn these into function names, so they are part
+  of the contract.
+- **Named row schemas** (`Submission`, `ContactListRow`, `TaskAssignment`, `Review`, …) rather
+  than bare `object`, with the surprises called out per field: JSON columns come back as
+  *strings*, booleans as `0`/`1`, submission `starts_at` is wall-clock in the event timezone, and
+  the decision *flags* (`approval_state`, `decision_outcome`, `materials_state`,
+  `accept_condition`) are independent of `status`. Row schemas are `additionalProperties: true`
+  because several list rows are `SELECT table.*`.
+- **Enums sourced from the modules that enforce them** — `SUBMISSION_STATUSES`, `APPROVAL_STATES`,
+  `MATERIALS_STATES`, `DECISION_OUTCOMES`, `TASK_ASSIGNMENT_STATUSES`, `COMMENT_KINDS`,
+  `MESSAGE_STATUSES` are all exported and imported into the generator, so a published enum cannot
+  drift from the validator.
+- **An `error.code` enum**, so a caller branches on the code rather than the prose message.
+- **A preamble that states the absences** (§6 below, in short form) and the traps: the
+  `tasks` resource lists *assignments* while the `tasks` writes act on *definitions*; the two
+  registry filters that a query string cannot carry (`contact_ids`, `events`) are named as
+  unavailable instead of being silently published.
+
+### `/llms.txt`
+
+A root-level [llmstxt.org](https://llmstxt.org) briefing, served as `text/markdown` and generated
+from the same constants: what this product is, the API base URL, how to authenticate, the
+quickstart, the four conventions that trip callers up (status changes send no email; unknown
+filters are ignored; decision flags are not `status`; JSON columns are strings), the absences, and
+links on to the spec, `/docs`, `/health` and the human surfaces. It is deliberately *not* a second
+copy of the reference — its job is to hand over the OpenAPI URL along with enough orientation to
+use it. Public, CORS-open, cached an hour.
+
+`test/openapi-doc.test.ts` holds the checks a reviewer cannot do by eye: every `$ref` resolves,
+every `operationId` is unique, every registry filter is either published or explicitly excluded,
+and every documented path is a real route (each answers `401` with a JSON body rather than Hono's
+plain-text router 404).
 
 ---
 

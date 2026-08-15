@@ -88,6 +88,17 @@ creates a new history entry, so nothing is ever truly lost.
 Links to the interactive API reference and the raw OpenAPI spec, plus this event's ID and a ready
 example `curl` command using your token, for anyone integrating externally.
 
+The spec is written for automated callers as much as human ones: every endpoint names the exact
+fields it returns, the filter vocabulary matches the one the workspace lists use, and the
+introduction spells out what the API deliberately *won't* do — most importantly, that changing a
+submission's status through the API never emails the speaker.
+
+If you're pointing an AI assistant or agent at the API rather than writing the integration
+yourself, give it **`/llms.txt`** instead. That's a short plain-text briefing at the site root, in
+the format agents are built to look for: the API's base address, how to authenticate, where to
+start, the handful of conventions that trip callers up, and links on to the full spec. One URL and
+the assistant has its bearings.
+
 ## Demo data
 
 **Reset demo data** wipes every record for the demo event and replays the seed data from scratch.

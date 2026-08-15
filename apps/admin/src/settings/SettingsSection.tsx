@@ -289,6 +289,11 @@ export function SettingsSection({ me }: { me: Me }) {
           <a href="/api/v1/openapi.json" target="_blank" rel="noopener">/api/v1/openapi.json</a>. This event's
           id is <code>{me.event.id}</code>.
         </p>
+        <p className="settings-hint">
+          Pointing an AI assistant at the API? Give it{' '}
+          <a href="/llms.txt" target="_blank" rel="noopener">/llms.txt</a> — the base URL, how to authenticate
+          and what the API deliberately won't do, in the format agents look for.
+        </p>
         <pre className="settings-curl"><code>{curlExample}</code></pre>
       </section>
 

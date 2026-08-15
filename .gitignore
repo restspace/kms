@@ -13,3 +13,9 @@ dist/
 .wrangler/
 .dev.vars
 *.local
+
+# Local dev debris: spike server logs and the tsc -b incremental cache
+spikes/.serve.log
+spikes/.serve.err
+spikes/.wrangler-restart.log
+*.tsbuildinfo

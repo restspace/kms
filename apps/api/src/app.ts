@@ -5,7 +5,7 @@ import { portalRoutes } from './routes/portal';
 import { adminRoutes } from './routes/admin';
 import { adminApiRoutes } from './routes/adminApi';
 import { restApiRoutes } from './routes/restApi';
-import { buildOpenApi, docsHtml } from './openapi';
+import { buildOpenApi, docsHtml, llmsTxt } from './openapi';
 import { fileRoutes } from './routes/files';
 import { filesAdminRoutes } from './routes/filesAdmin';
 import { exportRoutes, importRoutes } from './routes/importExport';
@@ -28,6 +28,17 @@ export function createApp() {
   // Docs + spec are public and must register before the authed /api/v1 mount.
   app.get('/api/v1/openapi.json', (c) => c.json(buildOpenApi(new URL(c.req.url).origin)));
   app.get('/docs', (c) => c.html(docsHtml(new URL(c.req.url).origin)));
+
+  // llmstxt.org: the root-level file an agent fetches to orient itself. Public,
+  // CORS-open and cacheable — it is generated from constants, holds nothing
+  // event- or tenant-specific, and mainly exists to hand over the OpenAPI URL.
+  app.get('/llms.txt', (c) =>
+    c.body(llmsTxt(new URL(c.req.url).origin), 200, {
+      'Content-Type': 'text/markdown; charset=utf-8',
+      'Access-Control-Allow-Origin': '*',
+      'Cache-Control': 'public, max-age=3600',
+    }),
+  );
   app.route('/api/v1', restApiRoutes); // public REST API, bearer-token auth (docs/10)
 
   app.route('/auth', authRoutes);
