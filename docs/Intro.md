@@ -14,4 +14,6 @@ Then you can shift click an item to make it a Global Filter which means all the 
 
 Another biggie is although it wasn't asked for we made the app as mobile friendly as possible, so you can write reviews sitting in the back of a car.
 
+Also you have an agent-friendly API. Get your agent to read https://kms.r-s.workers.dev/llms.txt, generate an API key on Settings and give it to the agent, and it can drive the API to do work for you.
+
 The nature of this competition is that it's not possible to humanly QA the app as fully as it would ideally need, however if you want to use it I'll be available to quickly fix any issues.

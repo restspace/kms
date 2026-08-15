@@ -1197,8 +1197,9 @@
 
 /* Export buttons (M6): bottom-left counterpart to the add button. */
 .data-list-export-buttons {
+  --data-list-corner-bottom: max(16px, env(safe-area-inset-bottom));
   position: absolute;
-  bottom: max(16px, env(safe-area-inset-bottom));
+  bottom: var(--data-list-corner-bottom);
   left: max(16px, env(safe-area-inset-left));
   display: flex;
   gap: 6px;
@@ -1206,7 +1207,14 @@
 }
 
 .data-list-export-buttons.with-summary-row {
-  bottom: max(52px, calc(env(safe-area-inset-bottom) + 52px));
+  --data-list-corner-bottom: max(52px, calc(env(safe-area-inset-bottom) + 52px));
+}
+
+/* Toolbar actions claim the same bottom-left corner. When export buttons are
+   there too, stack the actions above them: the export row's width varies with
+   the transient download notice, so a side-by-side offset cannot be safe. */
+.data-list-export-buttons.data-list-toolbar-actions.after-export {
+  bottom: calc(var(--data-list-corner-bottom) + 34px);
 }
 
 .data-list-export-button {
