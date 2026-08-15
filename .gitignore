@@ -19,3 +19,4 @@ spikes/.serve.log
 spikes/.serve.err
 spikes/.wrangler-restart.log
 *.tsbuildinfo
+docs/extras-checks.md

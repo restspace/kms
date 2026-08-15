@@ -47,6 +47,13 @@ ul.list{list-style:none;margin:.5rem 0 0;padding:0}
 ul.list li{display:flex;align-items:baseline;gap:.6rem;padding:.55rem 0;border-bottom:1px solid var(--border)}
 .code{white-space:nowrap}
 .devlink{background:var(--accent-soft);border:1px solid var(--accent-border);border-radius:var(--radius);padding:.6rem .8rem;font-size:.85rem;word-break:break-all;margin-top:1rem}
+/* Banner above the page heading — the one thing a first-time visitor should
+   read before anything else on the page competes for attention. */
+.notice{background:var(--accent-soft);border:1px solid var(--accent-border);border-radius:var(--radius);padding:.8rem .9rem;margin:0 0 1.5rem}
+.notice strong{display:block;font-family:var(--font-display);font-size:.95rem;margin-bottom:.15rem}
+.notice ul{list-style:none;margin:.4rem 0 0;padding:0}
+.notice li{padding:.2rem 0}
+.notice .muted{font-size:.85rem;margin:0}
 
 /* Compact (640): phone layout. Appended so the desktop rules above stand.
    The table rule matters for the listing pages that reuse page() — they

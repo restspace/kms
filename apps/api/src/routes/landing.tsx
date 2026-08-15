@@ -21,6 +21,21 @@ import { matchTrackIds } from './embed';
 
 export const landingRoutes = new Hono<AppEnv>();
 
+/** The repo's docs folder on GitHub — the demo is public and the source is too,
+ * so the orientation a tester needs is one link away rather than pasted here. */
+const REPO_DOCS = 'https://github.com/restspace/kms/blob/main/docs';
+
+/** Banner above everything else on the front door: a tester arriving cold reads
+ * this before the sign-in buttons start competing for their attention. */
+const testersNotice = `<div class="notice">
+  <strong>Testers please read</strong>
+  <p class="muted">Two short documents, on GitHub — worth five minutes before you click anything.</p>
+  <ul>
+    <li><a href="${REPO_DOCS}/Intro.md" target="_blank" rel="noopener noreferrer">Intro</a> — what this is, and how it answers the brief.</li>
+    <li><a href="${REPO_DOCS}/SuppliedExtras.md" target="_blank" rel="noopener noreferrer">Extras</a> — things to try that the brief never asked for.</li>
+  </ul>
+</div>`;
+
 interface DemoLogins {
   eventName: string;
   eventSlug: string;
@@ -128,7 +143,8 @@ landingRoutes.get('/', async (c) => {
     return c.html(
       page(
         'KMS',
-        `<h1>KMS</h1>
+        `${testersNotice}
+<h1>KMS</h1>
 <p>No event has been seeded yet. Run <span class="code">npm run seed:local</span>, then reload.</p>`,
       ),
     );
@@ -168,7 +184,8 @@ landingRoutes.get('/', async (c) => {
   return c.html(
     page(
       'KMS — event knowledge management',
-      `<h1>KMS — ${esc(logins.eventName)}</h1>
+      `${testersNotice}
+<h1>KMS — ${esc(logins.eventName)}</h1>
 <p>A speaker and session management system: call for papers, review and scoring, agenda,
 speaker comms. Pick a door — the sign-in link is shown on the next page. Fixture passwords also work: admin demo-admin-pass, speaker demo-speaker-pass.</p>
 ${adminBlock}
