@@ -1171,7 +1171,11 @@ evaluationRoutes.get('/submissions/:id/detail', async (c) => {
        ORDER BY p.created_at, r.created_at`,
     ).bind(id, session.eventId).all(),
     db.prepare(
-      `SELECT tg.name FROM submission_tags st JOIN tags tg ON tg.id = st.tag_id WHERE st.submission_id = ?`,
+      // id and colour as well as the name: the detail panel's chips are an
+      // editor now (PUT /app/api/submissions/:id/tags takes ids), not a
+      // read-only comma-joined list.
+      `SELECT tg.id, tg.name, tg.color FROM submission_tags st JOIN tags tg ON tg.id = st.tag_id
+       WHERE st.submission_id = ? ORDER BY tg.name COLLATE NOCASE`,
     ).bind(id).all(),
     loadThread(db, id),
   ]);
@@ -1206,7 +1210,7 @@ evaluationRoutes.get('/submissions/:id/detail', async (c) => {
     participants: participants.results,
     reviews: reviews.results,
     review_plan_means,
-    tags: tags.results.map((t) => (t as { name: string }).name),
+    tags: tags.results,
     comments,
   });
 });

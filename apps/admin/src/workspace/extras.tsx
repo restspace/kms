@@ -5,17 +5,20 @@ import { appConfirm } from '../components/dialogs'
 import {
   addSubmissionComment,
   addSubmissionParticipant,
+  createTag,
   getMaterialsOwners,
   getSubmissionDetail,
   getSubmissionFileComments,
   getSubmissionRevisions,
   listFormats,
   listRooms,
+  listTags,
   listTracks,
   PARTICIPANT_ROLES,
   queryResource,
   removeSubmissionParticipant,
   setSubmissionParticipantConfirmed,
+  setSubmissionTags,
   updateSubmission,
   updateSubmissionApproval,
   updateSubmissionCondition,
@@ -30,6 +33,8 @@ import {
   type SubmissionComment,
   type SubmissionDetail,
   type SubmissionFileComment,
+  type SubmissionTag,
+  type TagRow,
   type TrackRow,
 } from '../api'
 import { LobbyRail } from '../review/LobbyQueue'
@@ -303,15 +308,227 @@ function SlotCounterStrip({
 }
 
 /**
+ * The tags on one submission, as editable chips. Attaching a tag was
+ * previously impossible from the app at all: `submission_tags` was written
+ * only by the public form (from the Tags answer plus a form's routing rules)
+ * and by the importer, so an organiser reading a proposal could see its tags
+ * but never add "needs AV" to it.
+ *
+ * Whole-set write (setSubmissionTags) rather than add/remove calls, so the
+ * chips and the stored set cannot drift apart; the panel then reloads from the
+ * server, which is also what re-sorts the chips into name order.
+ *
+ * The picker offers this event's vocabulary minus what is already on, plus an
+ * inline "New tag" — a tag most often gets invented at the moment someone
+ * needs it (mid decision-meeting), and sending them to Settings to create it
+ * would lose the record they were reading.
+ */
+function SubmissionTagsEditor({
+  submissionId,
+  tags,
+  onChanged,
+}: {
+  submissionId: string
+  tags: SubmissionTag[]
+  onChanged: () => Promise<unknown> | void
+}) {
+  const [vocabulary, setVocabulary] = useState<TagRow[] | null>(null)
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [newName, setNewName] = useState<string | null>(null)
+
+  const loadVocabulary = () => {
+    listTags()
+      .then((r) => setVocabulary(r.items))
+      .catch(() => setVocabulary([]))
+  }
+  useEffect(loadVocabulary, [])
+
+  const write = async (ids: string[]) => {
+    setSaving(true)
+    setError(null)
+    try {
+      await setSubmissionTags(submissionId, ids)
+      await onChanged()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not save the tags')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const commitNewTag = async () => {
+    const name = (newName ?? '').trim()
+    if (!name) {
+      setNewName(null)
+      return
+    }
+    setSaving(true)
+    setError(null)
+    try {
+      // An existing name (case-insensitively) is 409 name_exists server-side —
+      // attach that tag instead of reporting a collision at someone who was
+      // only trying to label a talk.
+      const existing = (vocabulary ?? []).find((t) => t.name.toLowerCase() === name.toLowerCase())
+      const tag = existing ?? (await createTag({ name }))
+      setNewName(null)
+      loadVocabulary()
+      await setSubmissionTags(submissionId, [...tags.map((t) => t.id), tag.id])
+      await onChanged()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not create the tag')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const unassigned = (vocabulary ?? []).filter((t) => !tags.some((cur) => cur.id === t.id))
+
+  return (
+    <div className="submission-tags" role="group" aria-label="Tags">
+      <span className="submission-tags-label">Tags</span>
+      {tags.map((t) => (
+        <span
+          key={t.id}
+          className="tag-chip"
+          // The colour is the tag's own; the border carries it at full
+          // strength while the fill is the same hue at reading weight.
+          style={t.color ? { borderColor: t.color, background: `${t.color}22` } : undefined}
+        >
+          {t.name}
+          <button
+            type="button"
+            aria-label={`Remove tag ${t.name}`}
+            disabled={saving}
+            onClick={() => void write(tags.filter((cur) => cur.id !== t.id).map((cur) => cur.id))}
+          >
+            ×
+          </button>
+        </span>
+      ))}
+      {tags.length === 0 && <span className="submission-tags-empty">None</span>}
+      {newName !== null ? (
+        <input
+          type="text"
+          className="submission-tags-new"
+          placeholder="New tag name"
+          aria-label="New tag name"
+          autoFocus
+          value={newName}
+          disabled={saving}
+          onChange={(e) => setNewName((e.target as HTMLInputElement).value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              e.preventDefault()
+              void commitNewTag()
+            } else if (e.key === 'Escape') {
+              e.preventDefault()
+              setNewName(null)
+            }
+          }}
+          onBlur={() => {
+            if ((newName ?? '').trim() === '') setNewName(null)
+            else void commitNewTag()
+          }}
+        />
+      ) : (
+        <select
+          className="submission-tags-add"
+          aria-label="Add a tag"
+          value=""
+          disabled={saving}
+          onChange={(e) => {
+            const value = (e.target as HTMLSelectElement).value
+            if (value === '') return
+            if (value === '__new__') setNewName('')
+            else void write([...tags.map((t) => t.id), value])
+          }}
+        >
+          <option value="">+ Add tag…</option>
+          {unassigned.map((t) => (
+            <option key={t.id} value={t.id}>
+              {t.name}
+            </option>
+          ))}
+          <option value="__new__">New tag…</option>
+        </select>
+      )}
+      {saving && <span className="detail-save-note" role="status">Saving…</span>}
+      {error && <span className="internal-notes-error" role="alert">{error}</span>}
+    </div>
+  )
+}
+
+/**
+ * Tag filter for the Submissions tab. The `tag_id` filter has existed on the
+ * submissions resource since M3 with nothing in the UI setting it — this is
+ * that control.
+ *
+ * A select rather than a chip group: tags are a user-created vocabulary with
+ * no upper bound, so a chip per tag would push the coverage bar and slot
+ * counter off the row on any event that leans on tagging. One tag at a time,
+ * matching the filter's own grammar (a single bound id).
+ *
+ * An event with no tags renders nothing at all — the control would be a dead
+ * dropdown, and the Settings card is where tags come from.
+ */
+function TagFilter({ filters, setFilters }: DataListFilterProps<Record<string, unknown>>) {
+  const [tags, setTags] = useState<TagRow[] | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    listTags()
+      .then((r) => !cancelled && setTags(r.items))
+      // Not load bearing: a failed fetch hides the control rather than
+      // breaking the filter row the rest of the tab depends on.
+      .catch(() => !cancelled && setTags([]))
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  const active = typeof filters.tag_id === 'string' ? filters.tag_id : ''
+  if (tags === null || tags.length === 0) return null
+  return (
+    <label className="tag-filter">
+      Tag
+      <select
+        aria-label="Tag filter"
+        value={active}
+        onChange={(e) => {
+          const next = (e.target as HTMLSelectElement).value
+          setFilters((prev) => {
+            const filters = { ...prev }
+            // Removed rather than set to '' so "no tag filter" leaves nothing
+            // in the restored URL state or the Clear Filters comparison.
+            if (next === '') delete filters.tag_id
+            else filters.tag_id = next
+            return filters
+          })
+        }}
+      >
+        <option value="">All tags</option>
+        {tags.map((t) => (
+          <option key={t.id} value={t.id}>
+            {t.name}
+          </option>
+        ))}
+      </select>
+    </label>
+  )
+}
+
+/**
  * The Submissions tab's filter row: the status chips plus the coverage
  * worklist chip ("everything with fewer than two reads" as a filter, not just
- * a sort — workplan 13 W2) and the coverage bar reading the same filters.
- * `eventFilterId` arrives via filterConfig.filterProps so the bar's counts
- * are scoped exactly like the grid's own dataSource.
+ * a sort — workplan 13 W2), the tag filter, and the coverage bar reading the
+ * same filters. `eventFilterId` arrives via filterConfig.filterProps so the
+ * bar's counts are scoped exactly like the grid's own dataSource.
  */
 export function SubmissionsFilter({
   filters,
   setFilters,
+  resetFilters,
   eventFilterId,
 }: DataListFilterProps<Record<string, unknown>> & { eventFilterId?: string | null }) {
   const underReviewed = filters.max_reviews === COVERAGE_MIN_READS - 1
@@ -345,6 +562,7 @@ export function SubmissionsFilter({
           Under-reviewed
         </button>
       </div>
+      <TagFilter filters={filters} setFilters={setFilters} resetFilters={resetFilters} />
       <SubmissionCoverageBar filters={filters} eventFilterId={eventFilterId} />
       <SlotCounterStrip filters={filters} eventFilterId={eventFilterId} />
       <LobbyRail />
@@ -1497,6 +1715,10 @@ export function SubmissionDetailPanel({ id, onEdit, onItemSaved }: {
         {fieldError && <span className="internal-notes-error" role="alert">{fieldError}</span>}
       </div>
 
+      {/* Above the read-only pairs because it is an editor, and next to the
+          status controls because tagging happens in the same pass as deciding. */}
+      <SubmissionTagsEditor submissionId={id} tags={detail.tags} onChanged={load} />
+
       <dl>
         {s.description ? (
           <DetailPair term="Description">
@@ -1506,7 +1728,6 @@ export function SubmissionDetailPanel({ id, onEdit, onItemSaved }: {
         {s.format ? <DetailPair term="Format">{String(s.format)}</DetailPair> : null}
         {s.track_name ? <DetailPair term="Track">{String(s.track_name)}</DetailPair> : null}
         {s.plan_name ? <DetailPair term="Evaluation plan">{String(s.plan_name)}</DetailPair> : null}
-        {detail.tags.length > 0 && <DetailPair term="Tags">{detail.tags.join(', ')}</DetailPair>}
         {detail.answers
           // The submission form's own "Title"/"Description"/"Track"/"Format"
           // questions duplicate canonical columns rendered above (heading,

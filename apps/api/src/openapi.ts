@@ -700,7 +700,7 @@ export function buildOpenApi(origin: string): Record<string, unknown> {
       status: { type: 'string', enum: list(SUBMISSION_STATUSES), description: 'Update only — ignored on create, which always starts `pending`.' },
     },
     additionalProperties: false,
-    description: 'Only these fields are writable. Anything else in the body is ignored — the schedule, decision flags, answers, participants and tags are not settable through this API.',
+    description: 'Only these fields are writable. Anything else in the body is ignored — the schedule, decision flags, answers and participants are not settable through this API. Tags have their own endpoint (PUT /events/{event_id}/submissions/{id}/tags).',
   };
 
   addOps('/events/{event_id}/submissions', {
@@ -708,7 +708,7 @@ export function buildOpenApi(origin: string): Record<string, unknown> {
       operationId: 'createSubmission',
       summary: 'Create a submission (manual)',
       description:
-        'An admin-authored proposal, not one that came through a public form. `status` starts `pending`, `source` is `manual`, and `code` is allocated as SESS-<n> by the same allocator the rest of the app uses. Answers, participants and tags cannot be attached here — a submission that needs them belongs on a form.',
+        'An admin-authored proposal, not one that came through a public form. `status` starts `pending`, `source` is `manual`, and `code` is allocated as SESS-<n> by the same allocator the rest of the app uses. Answers and participants cannot be attached here — a submission that needs them belongs on a form. Tags go on afterwards with PUT /events/{event_id}/submissions/{id}/tags.',
       tags: ['Submissions'],
       parameters: [paramRef('EventId'), paramRef('IdempotencyKey')],
       requestBody: {
@@ -803,6 +803,89 @@ export function buildOpenApi(origin: string): Record<string, unknown> {
         '403': responseRef('Forbidden'),
         '404': responseRef('NotFound'),
         '422': json(ref('Error'), 'Invalid status value (`invalid_status`), or this Idempotency-Key was already used with a different body (`idempotency_mismatch`).'),
+      },
+    },
+  });
+
+  addOps('/events/{event_id}/submissions/{id}/tags', {
+    put: {
+      operationId: 'setSubmissionTags',
+      summary: "Replace a submission's tags",
+      description:
+        'Tags by NAME, matched case-insensitively — the same strings the detail GET returns, so you can read a submission, add one to the list you got back, and send it. Whole-set replace: what you send is exactly what the submission ends up carrying, and an empty array clears it. A name the event does not have is refused (422 `unknown_tag`) rather than silently dropped or silently created; send `create_missing: true` when you do mean to coin one. GET /events/{event_id}/tags lists the vocabulary.',
+      tags: ['Submissions'],
+      parameters: [paramRef('EventId'), idParam('submission')],
+      requestBody: {
+        required: true,
+        content: {
+          'application/json': {
+            schema: {
+              type: 'object',
+              required: ['tags'],
+              properties: {
+                tags: {
+                  type: 'array',
+                  items: { type: 'string' },
+                  description: 'Tag names. Duplicates (case-insensitively) collapse; at most 100.',
+                },
+                create_missing: {
+                  type: 'boolean',
+                  description: 'Create any name this event does not have yet, instead of refusing. Default false.',
+                },
+              },
+              additionalProperties: false,
+            },
+            example: { tags: ['needs AV', 'first-time speaker'] },
+          },
+        },
+      },
+      responses: {
+        '200': json(
+          {
+            type: 'object',
+            properties: { ok: { type: 'boolean' }, tags: { type: 'array', items: { type: 'string' } } },
+          },
+          'The stored set, in name order.',
+        ),
+        '401': responseRef('Unauthorized'),
+        '403': responseRef('Forbidden'),
+        '404': responseRef('NotFound'),
+        '422': json(ref('Error'), 'A name this event does not have (`unknown_tag`), or a malformed list (`invalid_tags`).'),
+      },
+    },
+  });
+
+  addOps('/events/{event_id}/tags', {
+    get: {
+      operationId: 'listTags',
+      summary: "List the event's tags",
+      description:
+        "The event's tag vocabulary in name order — the names the submission tags endpoint accepts. Tags are labels that cut across tracks; they are created in the app's Settings, by an import, or by a tags write sending `create_missing`.",
+      tags: ['Submissions'],
+      parameters: [paramRef('EventId')],
+      responses: {
+        '200': json(
+          {
+            type: 'object',
+            properties: {
+              items: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  properties: {
+                    id: { type: 'string' },
+                    name: { type: 'string' },
+                    color: { type: ['string', 'null'] },
+                  },
+                },
+              },
+            },
+          },
+          'The tags.',
+        ),
+        '401': responseRef('Unauthorized'),
+        '403': responseRef('Forbidden'),
+        '404': responseRef('EventNotFound'),
       },
     },
   });
@@ -1202,8 +1285,9 @@ export function llmsTxt(origin: string): string {
     '',
     `Listable, filterable, exportable resources: ${resources.map((r) => `\`${r}\``).join(', ')}. Each supports the same grammar — named filters, \`sort\` (prefix \`-\` to reverse), and either keyset pagination (send \`cursor=\` empty, then follow \`next_cursor\`) or offset pagination (\`limit\`/\`offset\`). Full detail endpoints exist for submissions and contacts; writes exist for submissions, contacts and task definitions.`,
     '',
-    'Read the OpenAPI document for the field-level detail. Four things in it are worth knowing before you write any parsing code:',
+    'Read the OpenAPI document for the field-level detail. Five things in it are worth knowing before you write any parsing code:',
     '',
+    "- **A submission's tags are written by name, through their own endpoint** (`PUT /events/{event_id}/submissions/{id}/tags`) — the same strings the detail endpoint returns. It replaces the whole set, and refuses a name the event does not have unless you send `create_missing: true`.",
     '- **Changing a submission\'s status never emails anyone.** Decision batches are sent from the admin app on purpose, so an automated status change cannot notify hundreds of speakers by accident.',
     '- **Unknown filter names are ignored, never rejected** — a typo returns unfiltered rows, so check `total` rather than trusting that a filter applied.',
     '- **Decision flags are separate columns from `status`.** A "revise and resubmit" outcome keeps a `declined` status; employer approval, accept conditions and post-accept materials each have their own column. Filter on the flag.',

@@ -770,3 +770,94 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* --- tags: the Submissions filter control and the detail panel's chips --- */
+
+/* Sits in the filter row beside the chip groups; the label is part of the
+   control so the select is never an unexplained dropdown. */
+.tag-filter {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: 0 var(--space-2);
+  font-size: var(--text-caption);
+  font-weight: 600;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.tag-filter select {
+  font: inherit;
+  font-size: var(--text-caption);
+  height: 22px;
+  /* 1px bottom padding raises the label to sit optically centred in the pill,
+     the same nudge .chip-filter button carries — the two sit side by side. */
+  padding-bottom: 1px;
+  border-radius: 999px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  color: var(--text-secondary);
+  max-width: 180px;
+}
+
+.submission-tags {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  margin: var(--space-2) 0;
+}
+
+.submission-tags-label {
+  font-size: var(--text-label);
+  font-weight: 600;
+  color: var(--text-muted);
+  margin-right: var(--space-1);
+}
+
+.submission-tags-empty {
+  font-size: var(--text-caption);
+  color: var(--text-faint);
+}
+
+.tag-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  height: 22px;
+  padding: 0 var(--space-1) 1px var(--space-2);
+  border-radius: 999px;
+  /* Overridden inline by the tag's own colour when it has one. */
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  font-size: var(--text-caption);
+  font-weight: 600;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.tag-chip button {
+  border: none;
+  background: none;
+  padding: 0 2px;
+  font: inherit;
+  font-size: 14px;
+  line-height: 1;
+  color: var(--text-faint);
+  cursor: pointer;
+}
+
+.tag-chip button:hover:not(:disabled) { color: var(--danger); }
+
+.submission-tags-add,
+.submission-tags-new {
+  font: inherit;
+  font-size: var(--text-caption);
+  height: 22px;
+  border-radius: 999px;
+  border: 1px dashed var(--border-strong);
+  background: var(--surface);
+  color: var(--text-muted);
+  padding: 0 var(--space-2);
+  max-width: 180px;
+}

@@ -403,6 +403,102 @@ restApiRoutes.post('/events/:event_id/submissions/:id/status', async (c) => {
   return c.json({ ok: true, status });
 });
 
+// PUT /events/:event_id/submissions/:id/tags { tags: string[], create_missing? }
+//
+// Tags by NAME, not id — the detail GET returns names, so an agent can read a
+// submission, add a string to the list it got back, and send it, without a
+// second round trip to resolve a vocabulary. Names match case-insensitively,
+// the way the importer already links them.
+//
+// Whole-set replace: what you send is what the submission ends up carrying.
+// Unknown names are refused (422, naming them) rather than quietly dropped or
+// quietly created — a typo would otherwise fork the vocabulary invisibly.
+// `create_missing: true` is the explicit opt-in for callers that do mean to
+// coin a new tag.
+restApiRoutes.put('/events/:event_id/submissions/:id/tags', async (c) => {
+  const db = c.env.DB;
+  const eventId = c.get('event').id;
+  const id = c.req.param('id');
+  const submission = await db
+    .prepare('SELECT id FROM submissions WHERE id = ? AND event_id = ?')
+    .bind(id, eventId)
+    .first<{ id: string }>();
+  if (!submission) return apiError(c, 404, 'not_found', 'No submission with this id in this event.');
+
+  const body = await readBody(c);
+  if (!Array.isArray(body.tags)) {
+    return apiError(c, 422, 'invalid_tags', 'tags must be an array of tag names.');
+  }
+  const names: string[] = [];
+  for (const raw of body.tags as unknown[]) {
+    if (typeof raw !== 'string') {
+      return apiError(c, 422, 'invalid_tags', 'tags must be an array of tag names.');
+    }
+    const name = raw.trim().slice(0, 200);
+    if (name && !names.some((n) => n.toLowerCase() === name.toLowerCase())) names.push(name);
+  }
+  if (names.length > 100) return apiError(c, 422, 'invalid_tags', 'A submission takes at most 100 tags.');
+
+  const { results: vocabulary } = await db
+    .prepare('SELECT id, name FROM tags WHERE event_id = ?')
+    .bind(eventId)
+    .all<{ id: string; name: string }>();
+  const byName = new Map(vocabulary.map((t) => [t.name.toLowerCase(), t]));
+
+  const missing = names.filter((n) => !byName.has(n.toLowerCase()));
+  if (missing.length > 0 && body.create_missing !== true) {
+    return apiError(
+      c,
+      422,
+      'unknown_tag',
+      `No tag named ${missing.map((n) => `"${n}"`).join(', ')} on this event. ` +
+        'Send create_missing: true to create it, or use an existing name (GET /events/{event_id}/tags).',
+    );
+  }
+  const ts = new Date().toISOString();
+  if (missing.length > 0) {
+    await db.batch(
+      missing.map((name) => {
+        const tagId = crypto.randomUUID();
+        byName.set(name.toLowerCase(), { id: tagId, name });
+        return db
+          .prepare('INSERT INTO tags (id, event_id, name, color, updated_at) VALUES (?, ?, ?, NULL, ?)')
+          .bind(tagId, eventId, name, ts);
+      }),
+    );
+  }
+
+  await db.batch([
+    db.prepare('DELETE FROM submission_tags WHERE submission_id = ?').bind(id),
+    ...names.map((name) =>
+      db
+        .prepare('INSERT OR IGNORE INTO submission_tags (submission_id, tag_id) VALUES (?, ?)')
+        .bind(id, byName.get(name.toLowerCase())!.id),
+    ),
+    db.prepare('UPDATE submissions SET updated_at = ? WHERE id = ?').bind(ts, id),
+  ]);
+  await bumpEventRevision(c.env, eventId);
+
+  const { results } = await db
+    .prepare(
+      `SELECT tg.name FROM submission_tags st JOIN tags tg ON tg.id = st.tag_id
+       WHERE st.submission_id = ? ORDER BY tg.name COLLATE NOCASE`,
+    )
+    .bind(id)
+    .all<{ name: string }>();
+  return c.json({ ok: true, tags: results.map((r) => r.name) });
+});
+
+// GET /events/:event_id/tags — the vocabulary the write above accepts, so a
+// caller can see the real names before sending any.
+restApiRoutes.get('/events/:event_id/tags', async (c) => {
+  const { results } = await c.env.DB
+    .prepare('SELECT id, name, color FROM tags WHERE event_id = ? ORDER BY name COLLATE NOCASE')
+    .bind(c.get('event').id)
+    .all();
+  return c.json({ items: results });
+});
+
 // ---------------------------------------------------------------------------
 // Contacts CRUD (work item 2). Field whitelist kept local — do not import
 // adminApi.ts's CONTACT_FIELDS, which is under concurrent edit elsewhere.

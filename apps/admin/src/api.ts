@@ -164,6 +164,10 @@ const ERROR_MESSAGES: Record<string, string> = {
   event_required: 'Choose an event to add them to.',
   no_seat_at_event: 'You do not have a seat on that event.',
   duplicate_criterion_name: 'A criterion with that name already exists on this round — names must be unique within a scorecard.',
+  name_exists: 'A tag with that name already exists on this event.',
+  name_required: 'A name is required.',
+  invalid_tag_id: 'One of those tags no longer exists — reload and try again.',
+  tag_ids_required: 'The tag list could not be read.',
 }
 
 function readableError(code: string): string {
@@ -309,6 +313,51 @@ export const updateFormat = (id: string, data: { name: string }) =>
   request<FormatRow>(`/app/api/formats/${id}`, { method: 'PUT', body: JSON.stringify(data) })
 export const deleteFormat = (id: string) =>
   request<{ ok: boolean }>(`/app/api/formats/${id}`, { method: 'DELETE' })
+
+/**
+ * A tag: the event's flat, cross-cutting label vocabulary. No `position` — the
+ * server orders by name (tags are scanned alphabetically, unlike rooms/tracks
+ * whose order is the running order of the day).
+ */
+export interface TagRow {
+  id: string
+  event_id: string
+  name: string
+  color: string | null
+}
+
+export const listTags = () => request<{ items: TagRow[] }>('/app/api/tags')
+export const createTag = (data: { name: string; color?: string | null }) =>
+  request<TagRow>('/app/api/tags', { method: 'POST', body: JSON.stringify(data) })
+export const updateTag = (id: string, data: { name?: string; color?: string | null }) =>
+  request<TagRow>(`/app/api/tags/${id}`, { method: 'PUT', body: JSON.stringify(data) })
+/** What deleting this tag would unlink — feeds the confirm dialog. */
+export const getTagUsage = (id: string) =>
+  request<{ submission_count: number; contact_count: number }>(`/app/api/tags/${id}/usage`)
+/** The links come back with the row so the Undo below can re-make them. */
+export const deleteTag = (id: string) =>
+  request<{ ok: boolean; tag: TagRow; submission_ids: string[]; contact_ids: string[] }>(`/app/api/tags/${id}`, {
+    method: 'DELETE',
+  })
+export const restoreTag = (tag: TagRow, submissionIds: string[], contactIds: string[]) =>
+  request<{ ok: boolean; tag: TagRow }>(`/app/api/tags/${tag.id}/restore`, {
+    method: 'POST',
+    body: JSON.stringify({
+      name: tag.name,
+      color: tag.color,
+      submission_ids: submissionIds,
+      contact_ids: contactIds,
+    }),
+  })
+/** A tag as it hangs off a record — no event_id, that is the parent's. */
+export type SubmissionTag = Pick<TagRow, 'id' | 'name' | 'color'>
+
+/** Replaces the submission's whole tag set; returns what was stored. */
+export const setSubmissionTags = (submissionId: string, tagIds: string[]) =>
+  request<{ ok: boolean; tags: SubmissionTag[] }>(`/app/api/submissions/${submissionId}/tags`, {
+    method: 'PUT',
+    body: JSON.stringify({ tag_ids: tagIds }),
+  })
 
 export const listTracks = () => request<{ items: TrackRow[] }>('/app/api/tracks')
 // Mutations via /app/api/agenda/tracks for the settings-history row, like rooms.
@@ -953,7 +1002,9 @@ export interface SubmissionDetail {
    *  plan_id, just also handed to the client so round-level results stay
    *  readable next to the (deliberately pooled) grid rating column. */
   review_plan_means: Array<{ plan_id: string; plan_name: string | null; mean: number; count: number }>
-  tags: string[]
+  /** Full rows, not names: the detail panel's chips are an editor and the
+   *  write takes ids (setSubmissionTags). */
+  tags: SubmissionTag[]
 }
 
 /**

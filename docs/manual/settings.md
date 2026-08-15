@@ -34,6 +34,25 @@ confirmation.
   slot but lose the room/track reference. Deleting a format doesn't change existing submissions'
   recorded format text; it just stops being offered going forward.
 
+## Tags
+
+Free-form labels that cut across tracks — "keynote material", "needs AV", "first-time speaker".
+One flat list, name-ordered, each row a **name** and a **colour**.
+
+- **+ Add tag** opens an inline name box; the tag is only created when you press Enter on a
+  non-empty name, so a stray click leaves nothing behind. Escape cancels.
+- Editing a name or colour saves the moment you click away. Names must be unique within the event
+  (case doesn't count as a difference) — a clash is refused and the stored name comes back.
+- **Remove** (×) asks first, and tells you how many submissions and contacts will lose the tag.
+  After deleting, an **Undo** appears for 15 seconds; it puts the tag back *with* everything it
+  was on. Once that window passes there's no way back.
+
+Where tags are used: attach them to a submission from its detail panel in
+[Workspace → Submissions](workspace-submissions.md#tags), filter the Submissions list by one, add
+them automatically with a form's [routing rules](forms.md), and offer them to submitters through a
+form's Tags question. An [import](workspace-submissions.md) creates any tag name it meets that
+isn't here yet, so the list can grow without you adding rows by hand.
+
 ## Speaker fields
 
 Custom fields shown on every speaker record for this event — for example a "Travel preferences"

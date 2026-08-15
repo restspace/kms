@@ -9,7 +9,11 @@ day-to-day workflow this tab supports.
 Default columns: Code, Title, Status (an inline-editable dropdown — changing it here writes
 immediately), Rating (click to cycle sort descending → ascending → off; hover a value to see how
 many reviews it's based on), Notified (a checkmark once decision emails have gone out), Format,
-Track, Submitter, Starts, Ends, Room, Event.
+Track, Tags, Submitter, Starts, Ends, Room, Event.
+
+**Tags** is a read-only comma-separated list in name order, a dash when the submission has none;
+hover to see the full list if the cell runs out of room. Tags are attached and removed from the
+[detail panel](#tags), not from the grid.
 
 **Starts / Ends / Room** are the session's place on the agenda. An accepted submission *is* the
 session — scheduling it on the [Agenda](agenda.md) fills these in on the same row, so you can see
@@ -27,6 +31,8 @@ whole schedule instead — `11th Aug 15:30 TO 16:30 Hall B`, or `Unscheduled`.
 - A status chip row covering every submission status.
 - **Under-reviewed** — a toggle that narrows to submissions with fewer reviews than your
   coverage threshold, functioning as a worklist rather than just a sort.
+- **Tag** — narrows to submissions carrying one tag. It only appears once the event has at least
+  one tag (see [Settings → Tags](settings.md#tags)); one tag at a time, and "All tags" clears it.
 - A review-coverage bar showing counts for whatever's currently filtered.
 - The header search box.
 
@@ -60,12 +66,27 @@ autosave independently (with their own Saving/Saved feedback): Status, Approval 
 onward, with a note field), and a **Visible in public agenda** checkbox controlling whether this
 submission can appear on the public agenda. An **Edit submission** button opens the full editor.
 
-Below that: description, format, track, evaluation plan, tags, the raw form answers (with
+Below that: an editable row of **tags** (see below), then description, format, track, evaluation
+plan, the raw form answers (with
 anything already shown as a canonical field filtered out of the raw list), any unmapped columns
 carried over from an import, an internal-notes box (organiser-only, explicit Save), a
 participants editor (add/remove), attached files, a content edit history with restore, reviews
 grouped by evaluation round with each round's mean score, and a discussion thread of reviewer
 rationales and free comments.
+
+### Tags
+
+The detail panel's tag row is editable, not just a readout — this is where a submission gets
+labelled after it arrives (the public form and imports are the only other things that tag one).
+
+- Each tag is a chip in its own colour; its **×** takes it off.
+- **+ Add tag…** lists this event's tags that aren't already on this submission. Picking one
+  attaches it immediately.
+- **New tag…** in that same dropdown opens a name box: Enter creates the tag for the whole event
+  *and* attaches it here in one step. Typing a name the event already has attaches that existing
+  tag rather than complaining about the duplicate.
+
+Every change saves straight away; the tags come back in name order.
 
 ## Creating or editing
 

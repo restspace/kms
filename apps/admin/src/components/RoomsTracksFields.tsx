@@ -173,6 +173,71 @@ export function TrackRowEditor({
   )
 }
 
+export interface TagDraftRow {
+  key: string
+  name: string
+  color: string
+}
+
+interface TagRowEditorProps {
+  row: TagDraftRow
+  onNameChange: (name: string) => void
+  onColorChange: (color: string) => void
+  onRemove: () => void
+  onNameBlur?: () => void
+  onColorBlur?: () => void
+  disabled?: boolean
+  nameLabel?: string
+  removeLabel?: string
+}
+
+/** Name + colour, the same row shape as a track minus the slot target — a tag
+ * is a label, not a container with a capacity. */
+export function TagRowEditor({
+  row,
+  onNameChange,
+  onColorChange,
+  onRemove,
+  onNameBlur,
+  onColorBlur,
+  disabled,
+  nameLabel = 'Tag name',
+  removeLabel = 'Remove tag',
+}: TagRowEditorProps) {
+  return (
+    <div className="rt-row">
+      <input
+        type="text"
+        className="rt-row-name"
+        placeholder="Tag name"
+        aria-label={nameLabel}
+        value={row.name}
+        onChange={(e) => onNameChange((e.target as HTMLInputElement).value)}
+        onBlur={onNameBlur}
+        disabled={disabled}
+      />
+      <input
+        type="color"
+        className="rt-row-color"
+        aria-label="Tag color"
+        value={row.color || DEFAULT_TRACK_COLOR}
+        onChange={(e) => onColorChange((e.target as HTMLInputElement).value)}
+        onBlur={onColorBlur}
+        disabled={disabled}
+      />
+      <button
+        type="button"
+        className="rt-row-remove"
+        aria-label={removeLabel}
+        onClick={onRemove}
+        disabled={disabled}
+      >
+        ×
+      </button>
+    </div>
+  )
+}
+
 export interface FormatDraftRow {
   key: string
   name: string

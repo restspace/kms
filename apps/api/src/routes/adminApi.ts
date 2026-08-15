@@ -506,7 +506,19 @@ const RESOURCE_SPECS: Record<string, Omit<ResourceDef, 'fromSql'>> = {
                         FROM json_each(COALESCE(s.rating_cache, '{}')) je
                         JOIN evaluation_plans p ON p.id = je.key), 2) AS rating,
                 (SELECT COUNT(*) FROM reviews r
-                 WHERE r.submission_id = s.id) AS review_count`,
+                 WHERE r.submission_id = s.id) AS review_count,
+                -- The grid's Tags column, and with it the /api/v1 list rows and
+                -- the CSV/XLSX export (one registry entry, four surfaces).
+                -- GROUP_CONCAT's own order is arbitrary, so the names are
+                -- sorted in an inner subquery rather than by an ORDER BY inside
+                -- the aggregate (only SQLite 3.44+); NULL when untagged, which
+                -- the column renders as a dash.
+                (SELECT GROUP_CONCAT(name, ', ') FROM (
+                   SELECT tg.name FROM submission_tags st
+                   JOIN tags tg ON tg.id = st.tag_id
+                   WHERE st.submission_id = s.id
+                   ORDER BY tg.name COLLATE NOCASE
+                 )) AS tag_names`,
     sortable: {
       code: 's.code',
       title: 's.title',
@@ -3893,6 +3905,279 @@ adminApiRoutes.delete('/formats/:id', async (c) => {
   if (result.meta.changes === 0) return c.json({ error: 'not_found' }, 404);
   await bumpEventRevision(c.env, session.eventId);
   return c.json({ ok: true });
+});
+
+// ---------------------------------------------------------------------------
+// Tags: the event's cross-cutting label vocabulary. Until now the table had no
+// write surface at all outside the seed and the importer's create-by-name —
+// the form builder's "add tags" routing action and the submissions `tag_id`
+// filter both read a list nothing could add to. These are that surface, plus
+// the per-submission attach/detach the workspace detail panel uses.
+//
+// Ordered by name, not position: tags carry no position column (0001_init) and
+// are a flat vocabulary an organiser scans alphabetically, unlike rooms and
+// tracks whose order is the running order of the day.
+//
+// DELETE takes the links with it (submission_tags / contact_tags cascade), so
+// it returns them for the undo — same toast-with-Undo affordance as a room
+// delete, and the only way back from a tag that was carrying a decision-meeting
+// worklist.
+// ---------------------------------------------------------------------------
+
+const TAG_NAME_MAX_CHARS = 200;
+
+function pickTagFields(raw: unknown, { requireName }: { requireName: boolean }): TrackFields {
+  const body = (raw ?? {}) as Record<string, unknown>;
+  const values: Record<string, string | number | null> = {};
+  const fail = (error: string): TrackFields => ({ values: {}, error });
+
+  if (requireName || 'name' in body) {
+    const name = typeof body.name === 'string' ? body.name.trim() : '';
+    if (!name) return fail('name_required');
+    values.name = name.slice(0, TAG_NAME_MAX_CHARS);
+  }
+  if ('color' in body) {
+    const v = body.color;
+    if (v === null || v === '') values.color = null;
+    else if (typeof v === 'string') values.color = v.trim().slice(0, 20);
+    else return fail('invalid_color');
+  }
+  return { values };
+}
+
+const tagRow = (db: D1Database, id: string, eventId: string) =>
+  db.prepare('SELECT id, event_id, name, color FROM tags WHERE id = ? AND event_id = ?')
+    .bind(id, eventId)
+    .first<{ id: string; event_id: string; name: string; color: string | null }>();
+
+/** Name uniqueness is per event and case-insensitive: the importer already
+ * matches tags by `lower(name)` when linking, so two tags differing only in
+ * case would make which one an import lands on arbitrary. */
+const tagNameTaken = async (db: D1Database, eventId: string, name: string, exceptId?: string) => {
+  const row = await db
+    .prepare(
+      `SELECT id FROM tags WHERE event_id = ? AND lower(name) = lower(?) AND id != ?`,
+    )
+    .bind(eventId, name, exceptId ?? '')
+    .first<{ id: string }>();
+  return row !== null;
+};
+
+// GET /app/api/tags — the event's tag vocabulary, name order.
+adminApiRoutes.get('/tags', async (c) => {
+  const session = c.get('session');
+  const { results } = await c.env.DB.prepare(
+    'SELECT id, event_id, name, color FROM tags WHERE event_id = ? ORDER BY name COLLATE NOCASE',
+  )
+    .bind(session.eventId)
+    .all();
+  return c.json({ items: results });
+});
+
+// GET /app/api/tags/:id/usage — what deleting this tag would unlink, for the
+// confirm dialog's blast radius (the room delete's pattern).
+adminApiRoutes.get('/tags/:id/usage', async (c) => {
+  const session = c.get('session');
+  const id = c.req.param('id');
+  if (!(await tagRow(c.env.DB, id, session.eventId))) return c.json({ error: 'not_found' }, 404);
+  const counts = await c.env.DB.prepare(
+    `SELECT (SELECT COUNT(*) FROM submission_tags st
+              JOIN submissions s ON s.id = st.submission_id
+              WHERE st.tag_id = ?1 AND s.event_id = ?2) AS submission_count,
+            (SELECT COUNT(*) FROM contact_tags WHERE tag_id = ?1) AS contact_count`,
+  )
+    .bind(id, session.eventId)
+    .first<{ submission_count: number; contact_count: number }>();
+  return c.json({
+    submission_count: counts?.submission_count ?? 0,
+    contact_count: counts?.contact_count ?? 0,
+  });
+});
+
+adminApiRoutes.post('/tags', async (c) => {
+  const session = c.get('session');
+  if (!isWriter(session.role)) return c.json({ error: 'forbidden' }, 403);
+  const { values, error } = pickTagFields(await c.req.json().catch(() => ({})), { requireName: true });
+  if (error) return c.json({ error }, 400);
+  if (await tagNameTaken(c.env.DB, session.eventId, values.name as string)) {
+    return c.json({ error: 'name_exists' }, 409);
+  }
+
+  const id = crypto.randomUUID();
+  await c.env.DB.prepare(
+    'INSERT INTO tags (id, event_id, name, color, updated_at) VALUES (?, ?, ?, ?, ?)',
+  )
+    .bind(id, session.eventId, values.name, values.color ?? null, new Date().toISOString())
+    .run();
+  await bumpEventRevision(c.env, session.eventId);
+  return c.json(await tagRow(c.env.DB, id, session.eventId), 201);
+});
+
+adminApiRoutes.put('/tags/:id', async (c) => {
+  const session = c.get('session');
+  if (!isWriter(session.role)) return c.json({ error: 'forbidden' }, 403);
+  const id = c.req.param('id');
+  const { values, error } = pickTagFields(await c.req.json().catch(() => ({})), { requireName: false });
+  if (error) return c.json({ error }, 400);
+
+  const before = await tagRow(c.env.DB, id, session.eventId);
+  if (!before) return c.json({ error: 'not_found' }, 404);
+  if (
+    typeof values.name === 'string' &&
+    (await tagNameTaken(c.env.DB, session.eventId, values.name, id))
+  ) {
+    return c.json({ error: 'name_exists' }, 409);
+  }
+
+  const cols = Object.keys(values);
+  // A no-op write skips the UPDATE so `updated_at` (and with it the Airtable
+  // mirror's watermark) only moves when something actually changed.
+  if (cols.length > 0 && watchedFieldsChanged(before as unknown as Record<string, unknown>, values, cols)) {
+    await c.env.DB.prepare(
+      `UPDATE tags SET ${cols.map((k) => `${k} = ?`).join(', ')}, updated_at = ? WHERE id = ? AND event_id = ?`,
+    )
+      .bind(...cols.map((k) => values[k]), new Date().toISOString(), id, session.eventId)
+      .run();
+    await bumpEventRevision(c.env, session.eventId);
+  }
+  return c.json(await tagRow(c.env.DB, id, session.eventId));
+});
+
+// DELETE /app/api/tags/:id — the row plus its links, with both sets of ids
+// returned so the client's Undo can put them back.
+adminApiRoutes.delete('/tags/:id', async (c) => {
+  const session = c.get('session');
+  if (!isWriter(session.role)) return c.json({ error: 'forbidden' }, 403);
+  const id = c.req.param('id');
+  const db = c.env.DB;
+  const tag = await tagRow(db, id, session.eventId);
+  if (!tag) return c.json({ error: 'not_found' }, 404);
+
+  const [{ results: subs }, { results: contacts }] = await Promise.all([
+    db.prepare(
+      `SELECT st.submission_id AS id FROM submission_tags st
+       JOIN submissions s ON s.id = st.submission_id
+       WHERE st.tag_id = ? AND s.event_id = ?`,
+    ).bind(id, session.eventId).all<{ id: string }>(),
+    db.prepare('SELECT contact_id AS id FROM contact_tags WHERE tag_id = ?').bind(id).all<{ id: string }>(),
+  ]);
+
+  await db.batch([
+    stageAirtableDeletes(db, 'tags', 'id = ? AND event_id = ?', id, session.eventId),
+    // submission_tags / contact_tags go with it by ON DELETE CASCADE.
+    db.prepare('DELETE FROM tags WHERE id = ? AND event_id = ?').bind(id, session.eventId),
+  ]);
+  await bumpEventRevision(c.env, session.eventId);
+  return c.json({
+    ok: true,
+    tag,
+    submission_ids: subs.map((r) => r.id),
+    contact_ids: contacts.map((r) => r.id),
+  });
+});
+
+// POST /app/api/tags/:id/restore — the Undo half of the delete: the tag back
+// under its original id, and its links re-made. INSERT OR IGNORE throughout so
+// a double-fired undo (or a link an organiser re-made by hand in the meantime)
+// is a no-op rather than a constraint error.
+adminApiRoutes.post('/tags/:id/restore', async (c) => {
+  const session = c.get('session');
+  if (!isWriter(session.role)) return c.json({ error: 'forbidden' }, 403);
+  const id = c.req.param('id');
+  const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+  const { values, error } = pickTagFields(body, { requireName: true });
+  if (error) return c.json({ error }, 400);
+  const idList = (key: string) =>
+    Array.isArray(body[key])
+      ? (body[key] as unknown[]).filter((v): v is string => typeof v === 'string').slice(0, 500)
+      : [];
+  const submissionIds = idList('submission_ids');
+  const contactIds = idList('contact_ids');
+
+  const db = c.env.DB;
+  const ts = new Date().toISOString();
+  await db
+    .prepare('INSERT OR IGNORE INTO tags (id, event_id, name, color, updated_at) VALUES (?, ?, ?, ?, ?)')
+    .bind(id, session.eventId, values.name, values.color ?? null, ts)
+    .run();
+  // Event-scoped read-back: an id colliding with another event's tag restores
+  // nothing rather than re-linking this event's records to a foreign row.
+  const tag = await tagRow(db, id, session.eventId);
+  if (!tag) return c.json({ error: 'conflict' }, 409);
+
+  const statements = [
+    ...submissionIds.map((sid) =>
+      db.prepare(
+        `INSERT OR IGNORE INTO submission_tags (submission_id, tag_id)
+         SELECT ?1, ?2 WHERE EXISTS (SELECT 1 FROM submissions WHERE id = ?1 AND event_id = ?3)`,
+      ).bind(sid, id, session.eventId),
+    ),
+    ...contactIds.map((cid) =>
+      db.prepare(
+        `INSERT OR IGNORE INTO contact_tags (contact_id, tag_id)
+         SELECT ?1, ?2 WHERE EXISTS (SELECT 1 FROM event_contacts WHERE contact_id = ?1 AND event_id = ?3)`,
+      ).bind(cid, id, session.eventId),
+    ),
+  ];
+  if (statements.length > 0) await db.batch(statements);
+  await bumpEventRevision(c.env, session.eventId);
+  return c.json({ ok: true, tag });
+});
+
+// PUT /app/api/submissions/:id/tags — replace a submission's tag set. Whole-set
+// rather than add/remove calls: the detail panel edits chips, and a replace
+// cannot leave the panel and the row disagreeing about what came off.
+adminApiRoutes.put('/submissions/:id/tags', async (c) => {
+  const session = c.get('session');
+  if (!isWriter(session.role)) return c.json({ error: 'forbidden' }, 403);
+  const id = c.req.param('id');
+  const db = c.env.DB;
+  const submission = await db
+    .prepare('SELECT id FROM submissions WHERE id = ? AND event_id = ?')
+    .bind(id, session.eventId)
+    .first<{ id: string }>();
+  if (!submission) return c.json({ error: 'not_found' }, 404);
+
+  const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+  if (!Array.isArray(body.tag_ids)) return c.json({ error: 'tag_ids_required' }, 400);
+  const requested = [
+    ...new Set((body.tag_ids as unknown[]).filter((v): v is string => typeof v === 'string')),
+  ].slice(0, 100);
+
+  // Silently dropping an unknown id would leave the panel showing a tag the
+  // server did not store, so a foreign or bogus id is a 400 instead.
+  let valid: string[] = [];
+  if (requested.length > 0) {
+    const { results } = await db
+      .prepare(
+        `SELECT id FROM tags WHERE event_id = ? AND id IN (${requested.map(() => '?').join(', ')})`,
+      )
+      .bind(session.eventId, ...requested)
+      .all<{ id: string }>();
+    valid = results.map((r) => r.id);
+    if (valid.length !== requested.length) return c.json({ error: 'invalid_tag_id' }, 400);
+  }
+
+  await db.batch([
+    db.prepare('DELETE FROM submission_tags WHERE submission_id = ?').bind(id),
+    ...valid.map((tagId) =>
+      db.prepare('INSERT OR IGNORE INTO submission_tags (submission_id, tag_id) VALUES (?, ?)').bind(id, tagId),
+    ),
+    // The submission itself changed shape for every downstream reader (the
+    // mirror's watermark sweep included), so its row moves too.
+    db.prepare('UPDATE submissions SET updated_at = ? WHERE id = ?').bind(new Date().toISOString(), id),
+  ]);
+  await bumpEventRevision(c.env, session.eventId);
+
+  const { results } = await db
+    .prepare(
+      `SELECT tg.id, tg.name, tg.color FROM submission_tags st
+       JOIN tags tg ON tg.id = st.tag_id
+       WHERE st.submission_id = ? ORDER BY tg.name COLLATE NOCASE`,
+    )
+    .bind(id)
+    .all();
+  return c.json({ ok: true, tags: results });
 });
 
 // ---------------------------------------------------------------------------

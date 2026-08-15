@@ -147,6 +147,8 @@ POST   /events/:event_id/submissions
 PUT    /events/:event_id/submissions/:id
 DELETE /events/:event_id/submissions/:id
 POST   /events/:event_id/submissions/:id/status   # { "status": "..." } — pipeline move only, no email
+PUT    /events/:event_id/submissions/:id/tags     # { "tags": ["needs AV", ...] } — replaces the set
+GET    /events/:event_id/tags                     # the event's tag vocabulary
 ```
 
 `POST` (manual/admin-authored create — not through a public form):
@@ -168,6 +170,21 @@ POST   /events/:event_id/submissions/:id/status   # { "status": "..." } — pipe
 
 `DELETE` cascades: answers, participants, tags, review assignments/reviews, and task assignments
 tied to the submission are removed with it.
+
+**Tags** are written by NAME, through their own endpoint — the same strings the detail `GET`
+returns, so a caller can read a submission, add a string to the list it got back, and send it:
+
+```json
+PUT /events/:event_id/submissions/:id/tags
+{ "tags": ["needs AV", "first-time speaker"], "create_missing": false }
+```
+- Whole-set replace: the submission ends up carrying exactly what you send, and `[]` clears it.
+  Names match case-insensitively and duplicates collapse; at most 100.
+- A name the event doesn't have is `422 { "error": { "code": "unknown_tag" } }` naming it, rather
+  than being dropped or created silently — a typo would otherwise fork the vocabulary invisibly.
+  Send `"create_missing": true` when you do mean to coin one.
+- `GET /events/:event_id/tags` lists `{ id, name, color }` in name order. Editing and deleting
+  tags stays admin-UI only (Settings → Tags).
 
 ### 3.3 Tasks
 
@@ -319,9 +336,10 @@ denial that they'd be useful.
 - **Public submission endpoint** (`POST /public/events/:slug/forms/:form_id/submissions`). Public
   form submission is a server-rendered flow (`packages/ui/src/SubmitPage.tsx` → `submit.tsx`),
   not a documented JSON API — building a second, parallel JSON path for it is deferred.
-- **Sessions/agenda, evaluation, communications, library (tracks/rooms/tags/fields), files, and
+- **Sessions/agenda, evaluation, communications, library (tracks/rooms/fields), files, and
   dashboard endpoints.** All exist as admin-UI features (see docs 06–09) but have no `/api/v1`
-  surface yet.
+  surface yet. Tags are the one exception: readable as a vocabulary and writable per submission
+  (§3.2), though the tags themselves are still created/renamed/deleted in the admin UI.
 - **Forms CRUD.** Read-only in this preview (§3.4); creation/editing is admin-UI only.
 - **Task assignment endpoints** (assigning a task to contacts/submissions, marking complete,
   sending a reminder). The task *definition* has full CRUD (§3.3); assignment operations do not.

@@ -62,6 +62,11 @@ vi.mock('../api', () => ({
   queryResource: () => api.contactSearch,
   listTracks: async () => ({ items: [] }),
   listRooms: async () => ({ items: [] }),
+  // The detail panel's tag chips are an editor: it reads the vocabulary on
+  // mount and writes the whole set. Not under test here.
+  listTags: async () => ({ items: [] }),
+  createTag: async () => ({ id: 't-1', event_id: 'evt-1', name: 'new', color: null }),
+  setSubmissionTags: async () => ({ ok: true, tags: [] }),
   getSubmissionRevisions: async () => ({ items: [] }),
   getMaterialsOwners: api.getMaterialsOwners,
   getSubmissionFileComments: api.getSubmissionFileComments,

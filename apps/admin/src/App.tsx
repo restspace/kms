@@ -2104,10 +2104,11 @@ export function buildWorkspaceConfig(
     dataListClassName: 'submissions-data-list',
     mobileRowHeight: 132,
     // Code + Status + Rating + Notified + Format + Starts + Ends + Room +
-    // Event are fixed widths; below this the 1fr columns (Title, Track,
+    // Event are fixed widths; below this the 1fr columns (Title, Track, Tags,
     // Submitter) start losing words, so the grid scrolls sideways instead.
-    // Submissions is the only tab wide enough to need it.
-    minTableWidth: 1416,
+    // Submissions is the only tab wide enough to need it. +160 for the Tags
+    // column, which is a fourth claimant on the flexible space.
+    minTableWidth: 1576,
     columns: [
       { field: 'code', header: 'Code', width: '84px', mobileHidden: true },
       { field: 'title', header: 'Title', width: '2.5fr', sortable: true },
@@ -2169,6 +2170,24 @@ export function buildWorkspaceConfig(
       },
       { field: 'format', header: 'Format', width: '100px', sortable: true, mobileHidden: true },
       { field: 'track_name', header: 'Track', sortable: true, mobileRow: 2 },
+      {
+        // Read-only here on purpose: attaching and removing tags is the detail
+        // panel's chip editor (one write, the whole set). This column is for
+        // scanning and for the Tag filter's answer — "what else is on this
+        // one?" — so it renders the names as they come back from the query,
+        // already in name order.
+        field: 'tag_names',
+        header: 'Tags',
+        width: '1fr',
+        mobileHidden: true,
+        render: (value: string | null) =>
+          value ? (
+            // The cell ellipsises; the tooltip carries the rest.
+            <span title={value}>{value}</span>
+          ) : (
+            <span style={{ color: 'var(--text-faint)' }}>—</span>
+          ),
+      },
       { field: 'submitter_name', header: 'Submitter', sortable: true, mobileRow: 2 },
       // Schedule (docs/02 §Session: a Session IS the accepted submission row,
       // so its time and room live here rather than on a separate record).

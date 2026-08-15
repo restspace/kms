@@ -11,6 +11,7 @@ import {
 import { DesktopOnlyNotice } from '@kms/ui/desktop-only'
 import { appAlert, appConfirm } from '../components/dialogs'
 import { RoomsTracksCard } from './RoomsTracksCard'
+import { TagsCard } from './TagsCard'
 import { SettingsHistory } from './SettingsHistory'
 import { ContactFieldsCard } from './ContactFieldsCard'
 import { SpeakerStatusesCard } from './SpeakerStatusesCard'
@@ -251,6 +252,8 @@ export function SettingsSection({ me }: { me: Me }) {
       </section>
 
       <RoomsTracksCard />
+
+      <TagsCard />
 
       <ContactFieldsCard />
 
