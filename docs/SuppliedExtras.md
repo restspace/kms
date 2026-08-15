@@ -69,13 +69,31 @@ the written rationale, all sortable and filterable, with the same CSV and XLSX e
 every other tab. The exports respect whatever filter and anchor you've currently got set, so you
 get what's on screen rather than everything.
 
-### 7. Drive it entirely over the API
+### 7. Drive it entirely over the API — or hand it to an agent
 
 **Settings → API tokens**, create a token, then hit `/api/v1/events` with
 `Authorization: Bearer kms_…`. Rendered documentation is at `/docs` and the raw spec at
 `/api/v1/openapi.json`. Both are generated from the same definitions the admin screens query, so
 anything you can filter, sort or export in the UI works identically over HTTP — including the
 XLSX exports.
+
+The part nobody asked for: that spec is written for an AI agent as much as for a person. There's
+an **`/llms.txt`** at the root — the file agents are built to look for — with the base URL, how to
+authenticate and where to start. The OpenAPI document names every field it returns *and* the
+things that trip callers up (JSON columns come back as strings, booleans as `0`/`1`, scheduled
+times are in the event's timezone, and the approval/conditional/revise flags are separate columns
+from the status rather than values inside it). Every endpoint has a stable id, so tooling can turn
+the document straight into callable functions, and the accepted values come from the same code
+that enforces them, so a published list can't quietly drift from what the server will take.
+
+It's equally explicit about what it *won't* do — no webhooks, no bulk endpoints, and above all no
+email: changing a submission's status over the API never writes to a speaker, because decision
+batches are sent from the app on purpose. An agent given a token can't accidentally notify two
+hundred people.
+
+Worth testing: give an AI assistant the URL `<host>/llms.txt` and a token, then ask it something
+real — "which accepted speakers still owe us a headshot?", or "how many pending submissions have
+fewer than two reviews?" It should get there without you explaining the API.
 
 ### 8. Embed the schedule and the speaker gallery on another site
 
