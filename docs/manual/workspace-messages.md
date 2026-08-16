@@ -12,6 +12,12 @@ coloured chip — pending, queued, sent, failed, and so on), Event.
 There are no built-in filter chips; sortable columns are Queued, Template, To, Status, defaulting
 to newest-first. There's no bulk action here.
 
+> **Note:** the app sends any given email once. If you re-trigger something that has already gone
+> out — sending decisions or schedule confirmations a second time, say — the repeats are skipped
+> rather than logged again, so a run can produce fewer rows here than it had recipients. The
+> action that triggered it reports how many were skipped. A genuinely new send (a rescheduled
+> session emailing an updated invite) counts as a different email and does get its own row.
+
 ## Detail
 
 Shows the recipient's name and email, when it was queued, when it was sent (if it was), and the

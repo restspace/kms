@@ -163,6 +163,16 @@ export async function resetDemoData(db: D1Database, redirectEmail?: string | nul
   // has never run, which makes the whole thing a no-op on a normal deployment.
   const mirrorIds = await snapshotMirrorIds(db);
 
+  // The seed never mentions `outbox`, so without this every reset leaves the
+  // previous day's rows behind while cascading message_log away — and the next
+  // send for a seeded (contact, submission) pair regenerates a key outbox
+  // already holds as 'done', so its enqueue no-ops and the message never
+  // leaves. outbox is a work queue, not a ledger: message_log is what answers
+  // "did they get it?", and the seed replay is rebuilding exactly the rows
+  // these jobs referred to. Anything genuinely mid-flight at 09:00 UTC is a
+  // demo send seconds old, which the replay is about to invalidate anyway.
+  await db.prepare('DELETE FROM outbox').run();
+
   const statements = seedStatements();
   const chunkSize = 40;
   for (let i = 0; i < statements.length; i += chunkSize) {

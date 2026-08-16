@@ -2,6 +2,8 @@
 // outbox → immediate attempt. Every outbound email flows through here so
 // "did they get it?" is always answerable from message_log, and no trigger
 // can double-send — the INSERT OR IGNORE on the idempotency key is the gate.
+// Both tables carry that gate, and `alreadyEnqueued` below reconciles them
+// when they disagree.
 
 import type { Context } from 'hono';
 import { createDb } from '@kms/db';
@@ -109,6 +111,37 @@ async function loadTheme(db: D1Database, eventId: string, themeId: string | null
 }
 
 /**
+ * Has this key already been through the queue?
+ *
+ * message_log and outbox are two INSERT OR IGNORE gates on the same key, so
+ * in a healthy installation they agree and this is never the deciding check —
+ * the log gate has already returned 'duplicate' by the time we get here. They
+ * can only diverge if one table is emptied without the other, which is exactly
+ * what the demo reset does: `resetDemoData` replays seed.sql, whose leading
+ * DELETEs cascade through message_log while outbox (which the seed never
+ * mentions) keeps every row from every previous day. Seeded ids are
+ * deterministic, so the next send regenerates a key that outbox already holds
+ * as 'done', the enqueue silently no-ops, and the fresh log row sits at
+ * 'queued' for ever — indistinguishable, in the Messages tab, from a dead
+ * provider. Five schedule_confirmed invites stalled that way on the live demo
+ * on 2026-08-16.
+ *
+ * Checking first turns that into the same honest 'duplicate' the log gate
+ * already produces. Deliberately NOT a revival of the outbox row: the key
+ * encodes "this exact email" (a legitimate re-send bumps `version` — see
+ * scheduleMail.ts's ICS SEQUENCE), so a key outbox has already delivered must
+ * stay delivered. One indexed read per first-time send, on a UNIQUE column,
+ * next to a render and two template lookups.
+ */
+async function alreadyEnqueued(db: D1Database, logKey: string): Promise<boolean> {
+  const row = await db
+    .prepare('SELECT 1 AS present FROM outbox WHERE idempotency_key = ?')
+    .bind(logKey)
+    .first<{ present: number }>();
+  return row !== null;
+}
+
+/**
  * Render one templated email into message_log + outbox without attempting
  * delivery — the caller (or the next sweep tick) delivers. Returns
  * 'duplicate' when this exact (template, contact, entity, version) was
@@ -125,6 +158,8 @@ export async function queueTemplated(
   if (!rendered) return { outcome: 'template_disabled' };
 
   const logKey = `${args.templateKey}:${args.contactId ?? 'none'}:${args.entityId}:v${args.version ?? 1}`;
+  // Before writing a log row that the enqueue below might silently drop.
+  if (await alreadyEnqueued(db, logKey)) return { outcome: 'duplicate' };
   const ts = new Date().toISOString();
   const inserted = await db
     .prepare(
@@ -198,7 +233,9 @@ export interface PreparedEmail {
  * them, so callers can commit the message_log/outbox rows inside their own
  * `db.batch` together with the domain writes (sweep item P0-1: the
  * confirmation email must be part of the submission transaction). Returns
- * null when the template is disabled for the event. After the batch commits,
+ * null when there is nothing to send: the template is disabled for the event,
+ * or this key has already been queued (see `alreadyEnqueued`). Both mean the
+ * caller adds no statements and no email goes out. After the batch commits,
  * pass the PreparedEmail to `attemptImmediate` for the request fast path —
  * or do nothing and let the cron sweep deliver it.
  */
@@ -209,6 +246,9 @@ export async function prepareTemplated(db: D1Database, args: SendTemplatedArgs):
   if (!rendered) return null;
 
   const logKey = `${args.templateKey}:${args.contactId ?? 'none'}:${args.entityId}:v${args.version ?? 1}`;
+  // Same reconciliation as queueTemplated: the batch's INSERT OR IGNORE pair
+  // would otherwise commit a log row whose outbox sibling is dropped.
+  if (await alreadyEnqueued(db, logKey)) return null;
   const ts = new Date().toISOString();
   const payload: OutboxEmailPayload = {
     to: args.toEmail,
