@@ -496,6 +496,33 @@ export interface TaskRow {
 export const createTask = (data: Record<string, unknown>) =>
   request<TaskRow>('/app/api/tasks', { method: 'POST', body: JSON.stringify(data) })
 
+/** Full task-definition row (Settings → Automatic tasks), unlike `TaskRow`
+ * which only carries what the create-form response needs. */
+export interface TaskDefinitionRow {
+  id: string
+  title: string
+  description: string | null
+  target: 'contact' | 'group' | 'submission'
+  assignment_mode: 'manual' | 'automatic'
+  trigger: 'on_accept' | 'on_schedule' | 'none'
+  action_type: 'file_upload' | 'portal_form' | 'acknowledge' | 'external_link'
+  portal_form_id: string | null
+  file_request_id: string | null
+  due_at: string | null
+  /** Raw JSON-in-TEXT, e.g. "[7,2,0]" — the server never parses this column. */
+  reminder_offsets_days: string | null
+  required: number
+  created_at: string
+}
+
+export const listTaskDefinitions = (mode?: 'automatic' | 'manual') =>
+  request<{ items: Array<TaskDefinitionRow & { assignment_count: number }> }>(
+    `/app/api/tasks/definitions${mode ? `?mode=${mode}` : ''}`,
+  )
+
+export const getTaskDefinition = (id: string) =>
+  request<{ task: TaskDefinitionRow }>(`/app/api/tasks/definitions/${id}`)
+
 /** Task audiences (CNT-01) — named assignee sets the create form can target
  * ("all speakers") instead of picking contacts one at a time. Counts are
  * task-flavored (no email requirement), hence not the messaging endpoint. */
@@ -881,6 +908,8 @@ export interface FormRow {
   routing_rules: Record<string, unknown> | null
   participant_roles: Array<{ role: string; min: number; max: number | null }> | null
   confirmation_email_enabled: number
+  notify_admins_on_create: string[] | null
+  notify_admins_on_update: string[] | null
   created_at: string
   updated_at: string
   submission_count?: number
@@ -909,6 +938,7 @@ export interface BuilderMeta {
   tracks: Array<{ id: string; name: string; color: string | null }>
   tags: Array<{ id: string; name: string; color: string | null }>
   plans: Array<{ id: string; name: string; status: string }>
+  staff: Array<{ id: string; email: string; name: string | null }>
 }
 
 export interface FormWithQuestions {

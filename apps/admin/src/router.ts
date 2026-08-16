@@ -45,6 +45,13 @@ export const DEFAULT_VIEW: ViewKey = 'dashboard'
  */
 export const NEW_SPEAKER_REC = '__new__'
 
+/**
+ * Sentinel `taskRule` value meaning "open the automatic-task create form"
+ * (see `AutomaticTaskRuleForm` in App.tsx) — the Settings → Automatic tasks
+ * card's "+ Add" button. A real task id instead means "edit this rule".
+ */
+export const NEW_TASK_RULE = '__new__'
+
 /** Every URL-addressable bit of app state. `null` means "not in the URL". */
 export interface RouteState {
   /** Which top-level section is showing. */
@@ -69,6 +76,19 @@ export interface RouteState {
   fstep: string | null
   /** Manual page slug shown by the Help section (defaults to its index). */
   page: string | null
+  /**
+   * Automatic-task rule id open in the Workspace → Tasks tab's rule editor
+   * (see `AutomaticTaskRuleForm`), or `NEW_TASK_RULE` to create one. Set by
+   * Settings → Automatic tasks' Add/Edit buttons; cleared (and `sec` set)
+   * when the editor bounces back to Settings on Save or Cancel.
+   */
+  taskRule: string | null
+  /**
+   * Settings-page section anchor id to scroll to on load/return — set when
+   * deep-linking into a Settings card, or when `taskRule`'s editor bounces
+   * back. Consumed once by SettingsSection, then cleared.
+   */
+  sec: string | null
 }
 
 export type RoutePatch = Partial<RouteState>
@@ -85,13 +105,15 @@ export const DEFAULT_ROUTE: RouteState = {
   form: null,
   fstep: null,
   page: null,
+  taskRule: null,
+  sec: null,
 }
 
 /**
  * Parameters whose change is a *navigation*: the user expects Back to undo it.
  * Everything else refines the current screen and replaces the entry.
  */
-export const PUSH_KEYS: ReadonlyArray<keyof RouteState> = ['v', 'tab', 'rec', 'form', 'page']
+export const PUSH_KEYS: ReadonlyArray<keyof RouteState> = ['v', 'tab', 'rec', 'form', 'page', 'taskRule']
 
 /** Custom event name fired after a programmatic navigation. */
 const ROUTE_EVENT = 'kms:routechange'
@@ -164,6 +186,8 @@ export function parseRoute(search: string | null | undefined): RouteState {
     form: text(params, 'form'),
     fstep: text(params, 'fstep'),
     page: text(params, 'page'),
+    taskRule: text(params, 'taskRule'),
+    sec: text(params, 'sec'),
   }
 }
 
@@ -185,6 +209,8 @@ export function routeToSearch(state: RouteState): string {
     ['form', state.form],
     ['fstep', state.fstep],
     ['page', state.page],
+    ['taskRule', state.taskRule],
+    ['sec', state.sec],
   ]
   for (const [key, value] of optional) {
     if (value !== null && value !== undefined && String(value).trim().length > 0) {

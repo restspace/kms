@@ -137,6 +137,8 @@ describe('parse/serialise round-trips', () => {
       form: 'frm_1',
       fstep: 'settings',
       page: 'workspace-submissions',
+      taskRule: 'task_1',
+      sec: 'automatic-tasks',
     },
     { ...DEFAULT_ROUTE, v: 'help', page: 'agenda' },
   ]
@@ -193,6 +195,6 @@ describe('shouldPush decision table', () => {
   it('lists exactly the navigation parameters', () => {
     // `page` is here because moving between manual pages is a navigation the
     // reader expects Back to undo, exactly like changing tab or record.
-    expect([...PUSH_KEYS]).toEqual(['v', 'tab', 'rec', 'form', 'page'])
+    expect([...PUSH_KEYS]).toEqual(['v', 'tab', 'rec', 'form', 'page', 'taskRule'])
   })
 })

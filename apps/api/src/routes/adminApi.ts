@@ -153,17 +153,27 @@ adminApiRoutes.get('/builder-meta', async (c) => {
   const session = c.get('session');
   const db = c.env.DB;
   try {
-    const [fields, tracks, tags, plans] = await Promise.all([
+    const [fields, tracks, tags, plans, staff] = await Promise.all([
       db.prepare('SELECT id, key, label, type, scope, options, max_chars, system FROM field_definitions WHERE event_id = ? ORDER BY label').bind(session.eventId).all(),
       db.prepare('SELECT id, name, color FROM tracks WHERE event_id = ? ORDER BY position').bind(session.eventId).all(),
       db.prepare('SELECT id, name, color FROM tags WHERE event_id = ? ORDER BY name').bind(session.eventId).all(),
       db.prepare('SELECT id, name, status FROM evaluation_plans WHERE event_id = ? ORDER BY name').bind(session.eventId).all(),
+      // Admin-notify recipient picker (Settings → Submission notifications):
+      // only staff with a role event_users/submit.tsx's resolveRecipients
+      // actually accepts (owner/admin/reviewer) are worth offering.
+      db.prepare(
+        `SELECT c.id, c.email, NULLIF(TRIM(COALESCE(c.first_name, '') || ' ' || COALESCE(c.last_name, '')), '') AS name
+         FROM event_users eu JOIN contacts c ON c.id = eu.contact_id
+         WHERE eu.event_id = ? AND eu.role IN ('owner', 'admin', 'reviewer') AND c.email IS NOT NULL AND c.email != ''
+         ORDER BY c.last_name`,
+      ).bind(session.eventId).all(),
     ]);
     return c.json({
       fields: fields.results,
       tracks: tracks.results,
       tags: tags.results,
       plans: plans.results,
+      staff: staff.results,
     });
   } catch (err) {
     console.error('GET /builder-meta failed', err);
@@ -3413,6 +3423,37 @@ adminApiRoutes.get('/tasks/audiences', async (c) => {
     })),
   );
   return c.json({ audiences });
+});
+
+// GET /app/api/tasks/definitions — task *definition* rows (the `tasks` table
+// itself), independent of whether they've produced any assignments yet.
+// Settings → Automatic tasks lists these (?mode=automatic); the workspace
+// Tasks grid never does — see the CNT-01 doc comment below on why that grid
+// is assignments, not definitions.
+adminApiRoutes.get('/tasks/definitions', async (c) => {
+  const session = c.get('session');
+  const mode = c.req.query('mode');
+  const modeFilter = mode === 'automatic' || mode === 'manual';
+  const { results } = await c.env.DB.prepare(
+    `SELECT t.id, t.title, t.description, t.target, t.assignment_mode, t."trigger", t.action_type,
+            t.portal_form_id, t.file_request_id, t.due_at, t.reminder_offsets_days, t.required, t.created_at,
+            (SELECT COUNT(*) FROM task_assignments ta WHERE ta.task_id = t.id) AS assignment_count
+     FROM tasks t WHERE t.event_id = ?${modeFilter ? ' AND t.assignment_mode = ?' : ''}
+     ORDER BY t.created_at`,
+  )
+    .bind(...(modeFilter ? [session.eventId, mode] : [session.eventId]))
+    .all();
+  return c.json({ items: results });
+});
+
+// GET /app/api/tasks/definitions/:id — single definition, for the Settings →
+// Automatic tasks edit form. Reload-safe: fetches fresh by id rather than
+// relying on the list response staying in memory across a navigation.
+adminApiRoutes.get('/tasks/definitions/:id', async (c) => {
+  const session = c.get('session');
+  const row = await taskRow(c.env.DB, c.req.param('id'), session.eventId);
+  if (!row) return c.json({ error: 'not_found' }, 404);
+  return c.json({ task: row });
 });
 
 adminApiRoutes.post('/tasks', async (c) => {

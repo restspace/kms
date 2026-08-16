@@ -1406,8 +1406,8 @@ function NotificationsStep({ form, patch }: { form: FormRow; patch: (c: Partial<
         </span>
       </label>
       <p className="bhelp">
-        Template customisation and admin new/updated-submission alerts arrive with the
-        communications milestone (M2).
+        Recipients for new/updated-submission admin alerts, and wording for every notification
+        email, are set under Settings → Submission notifications and Email templates.
       </p>
     </section>
   )

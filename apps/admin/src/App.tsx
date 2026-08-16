@@ -100,6 +100,7 @@ import {
   type EventScopeValue,
 } from './eventScope'
 import { NEW_SPEAKER_REC, currentRoute, navigate, stableStringify, useRoute, type ViewKey } from './router'
+import { AutomaticTaskRuleForm } from './workspace/AutomaticTaskRuleForm'
 import {
   ENROLL_NEW_STAGE,
   clearEnrollIntent,
@@ -2156,7 +2157,8 @@ export function buildWorkspaceConfig(
     // Event are fixed widths; below this the 1fr columns (Title, Track, Tags,
     // Submitter) start losing words, so the grid scrolls sideways instead.
     // Submissions is the only tab wide enough to need it. +160 for the Tags
-    // column, which is a fourth claimant on the flexible space.
+    // column, which carries that as an actual minmax() floor rather than
+    // competing for a share of the flexible space.
     minTableWidth: 1576,
     columns: [
       { field: 'code', header: 'Code', width: '84px', mobileHidden: true },
@@ -2227,7 +2229,13 @@ export function buildWorkspaceConfig(
         // already in name order.
         field: 'tag_names',
         header: 'Tags',
-        width: '1fr',
+        // A floor, not a share. As a plain 1fr this was the fourth claimant on
+        // the flexible space behind Title's 2.5fr, which left it around 120px
+        // — narrow enough that a second tag was cut off mid-word and a routed
+        // tag could look as though it had never been applied. 160px fits two
+        // short names; past that the cell still ellipsises and the tooltip
+        // carries the rest.
+        width: 'minmax(160px, 1fr)',
         mobileHidden: true,
         render: (value: string | null) =>
           value ? (
@@ -3829,6 +3837,10 @@ export default function App() {
           // no EventScopeNote, and no `key` that would reset the reader on an
           // event switch.
           <HelpSection slug={route.page} />
+        ) : view === 'workspace' && !isReviewer && route.tab === 'tasks' && route.taskRule ? (
+          <div className="section-with-event">
+            <AutomaticTaskRuleForm ruleId={route.taskRule} returnAnchor={route.sec} />
+          </div>
         ) : view === 'workspace' && !isReviewer ? (
           <>
             <div className="ws-scope-title" role="status" title={wsScopeTitle}>
@@ -3964,7 +3976,7 @@ export default function App() {
         ) : view === 'settings' && !isReviewer ? (
           <div className="section-with-event" key={me.event.id}>
             <EventScopeNote scope={scope} />
-            <SettingsSection me={me} />
+            <SettingsSection me={me} anchor={route.sec} />
           </div>
         ) : view === 'review' ? (
           <ReviewerWorkspace />

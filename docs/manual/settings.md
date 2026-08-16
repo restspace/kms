@@ -89,6 +89,39 @@ blank on day one.
   reference for what's available specifically to it. A merge field that doesn't resolve renders
   as empty text rather than an error.
 
+## Submission notifications
+
+One row per form, showing how many people are set to be alerted on new and on updated
+submissions.
+
+- **Edit** expands the row into two checkbox lists — **new submissions** and **updated
+  submissions** — of this event's staff (owners, admins and reviewers). Tick who should be
+  emailed, then **Save recipients**. Leave both empty and nobody gets an admin alert for that
+  form.
+- Only staff with an owner, admin or reviewer role on the event can be picked; if someone's
+  missing, add them to the event's team first.
+- This picks *who* gets the alert. The wording of the alert emails themselves —
+  `submission_received_admin` and `submission_updated_admin` — is edited above, under **Email
+  templates**, same as every other system email.
+
+## Automatic tasks
+
+A rule assigns itself when its trigger fires, rather than waiting for an organiser to hand it to
+someone — today that means the **On accept** trigger only, which fires when a submission's
+acceptance is actually *sent* (queuing an accept isn't enough by itself; Send Decisions is what
+sets it off). This is a different thing from the Workspace → Tasks tab, which lists individual
+assignments, one row per assignee — a rule with nobody matched yet has no assignment rows to show
+there, so it lives here instead, visible whether or not it's fired for anyone yet.
+
+- Each row is one rule: its title, trigger, target (contacts or submissions), action, and how many
+  assignments it's produced so far.
+- **+ Add automatic task** and **Edit** both open the rule in the Workspace Tasks tab's task
+  form — the same form **+ New task** uses there, minus the assignee/audience pickers (editing a
+  rule never hands it to anyone directly; only its trigger does that). Save or Cancel brings you
+  straight back here.
+- Editing a rule never touches assignments already made — raising a due date, say, doesn't change
+  anyone already assigned under the old one.
+
 ## Chase inbox
 
 One control: **Chase mode**, either **Auto** (the default — reminders send themselves on

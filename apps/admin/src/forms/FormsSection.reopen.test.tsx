@@ -35,6 +35,8 @@ function makeForm(overrides: Partial<FormRow> = {}): FormRow {
     routing_rules: null,
     participant_roles: [],
     confirmation_email_enabled: 0,
+    notify_admins_on_create: null,
+    notify_admins_on_update: null,
     created_at: '2026-01-01T00:00:00Z',
     updated_at: '2026-01-01T00:00:00Z',
     submission_count: 0,

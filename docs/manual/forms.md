@@ -113,9 +113,10 @@ for participant details.
 
 ### 6. Notifications
 
-Currently one live control: the **Submission Confirmation** toggle, which turns the confirmation
-email to submitters on or off. (Admin alert routing and per-template customisation from this
-screen are not built yet.)
+One live control here: the **Submission Confirmation** toggle, which turns the confirmation
+email to submitters on or off. Choosing *who* gets alerted about this form's new or edited
+submissions, and editing the wording of any notification email, is done from
+[Settings](settings.md#submission-notifications) rather than from the builder.
 
 ## Next step
 

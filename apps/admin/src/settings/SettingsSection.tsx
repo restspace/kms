@@ -16,9 +16,12 @@ import { SettingsHistory } from './SettingsHistory'
 import { ContactFieldsCard } from './ContactFieldsCard'
 import { SpeakerStatusesCard } from './SpeakerStatusesCard'
 import { EmailTemplatesCard } from './EmailTemplatesCard'
+import { SubmissionNotificationsCard } from './SubmissionNotificationsCard'
+import { AutomaticTasksCard } from './AutomaticTasksCard'
 import { ChaseSettingsCard } from './ChaseSettingsCard'
 import { FileCollectionDefaultsCard } from './FileCollectionDefaultsCard'
 import { AirtableSettingsCard } from './AirtableSettingsCard'
+import { navigate } from '../router'
 import './settings.css'
 
 /**
@@ -46,7 +49,7 @@ const plusExample = (email: string): string => {
   return `${email.slice(0, at).split('+')[0]}+ada@${email.slice(at + 1)}`
 }
 
-export function SettingsSection({ me }: { me: Me }) {
+export function SettingsSection({ me, anchor = null }: { me: Me; anchor?: string | null }) {
   const [tokens, setTokens] = useState<ApiTokenRow[] | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [name, setName] = useState('')
@@ -79,6 +82,41 @@ export function SettingsSection({ me }: { me: Me }) {
       .then((r) => setRedirectEmail(r.redirect_email ?? ''))
       .catch(() => setRedirectEmail(''))
   }, [])
+
+  // `?sec=` deep link (e.g. from a dashboard link, or AutomaticTaskRuleForm
+  // bouncing back after Save/Cancel): scroll the named card into view, then
+  // drop the param so it doesn't re-fire on an unrelated re-render or survive
+  // into a reload/bookmark of this exact scroll position. Cards above the
+  // anchor (Email templates, Submission notifications, …) fetch their own
+  // data and grow past their "Loading…" placeholder well after mount, on
+  // whatever schedule their own request happens to land — a fixed delay
+  // guessed wrong under slower D1 latency. `.settings-shell` itself never
+  // resizes (it's `height: 100%`; that's what makes it scroll internally
+  // instead of the page), so a ResizeObserver on it never fires either — this
+  // polls its `scrollHeight` instead and re-scrolls whenever a card above the
+  // anchor grows, for a few seconds, however many are still settling.
+  useEffect(() => {
+    if (!anchor) return
+    // 'auto' (instant), not 'smooth': the immediate re-render `navigate` below
+    // triggers (clearing `sec` from the URL) was cancelling an in-flight
+    // smooth-scroll animation partway, landing well short of the target.
+    const scroll = () => document.getElementById(anchor)?.scrollIntoView({ behavior: 'auto', block: 'start' })
+    scroll()
+    let lastHeight = document.querySelector('.settings-shell')?.scrollHeight ?? 0
+    const poll = window.setInterval(() => {
+      const height = document.querySelector('.settings-shell')?.scrollHeight ?? 0
+      if (height !== lastHeight) {
+        lastHeight = height
+        scroll()
+      }
+    }, 150)
+    const stop = window.setTimeout(() => window.clearInterval(poll), 4000)
+    navigate({ sec: null }, { replace: true })
+    return () => {
+      window.clearInterval(poll)
+      window.clearTimeout(stop)
+    }
+  }, [anchor])
 
   const handleCreate = async () => {
     setCreating(true)
@@ -161,7 +199,7 @@ export function SettingsSection({ me }: { me: Me }) {
     <div className="settings-shell kms-wide-only">
       <h1>Settings</h1>
 
-      <section className="settings-card">
+      <section className="settings-card" id="api-tokens">
         <h2>API tokens</h2>
         <p className="settings-hint">
           Bearer tokens for the <a href="/docs" target="_blank" rel="noopener">REST API</a>. Tokens can reach
@@ -251,21 +289,25 @@ export function SettingsSection({ me }: { me: Me }) {
         )}
       </section>
 
-      <RoomsTracksCard />
+      <div id="rooms-tracks"><RoomsTracksCard /></div>
 
-      <TagsCard />
+      <div id="tags"><TagsCard /></div>
 
-      <ContactFieldsCard />
+      <div id="contact-fields"><ContactFieldsCard /></div>
 
-      <SpeakerStatusesCard />
+      <div id="speaker-statuses"><SpeakerStatusesCard /></div>
 
-      <EmailTemplatesCard />
+      <div id="email-templates"><EmailTemplatesCard /></div>
 
-      <ChaseSettingsCard />
+      <div id="submission-notifications"><SubmissionNotificationsCard /></div>
 
-      <FileCollectionDefaultsCard />
+      <AutomaticTasksCard />
 
-      <AirtableSettingsCard />
+      <div id="chase-inbox"><ChaseSettingsCard /></div>
+
+      <div id="file-collection-defaults"><FileCollectionDefaultsCard /></div>
+
+      <div id="airtable"><AirtableSettingsCard /></div>
 
       {/*
         * Wave E (workplan 14, D8): pre-edit snapshots of the event's settings
@@ -276,7 +318,7 @@ export function SettingsSection({ me }: { me: Me }) {
         * itself; rooms/tracks rows are informational (their way back is the
         * delete confirmation's Undo).
         */}
-      <section className="settings-card">
+      <section className="settings-card" id="settings-history">
         <h2>Settings history</h2>
         <p className="settings-hint">
           Every change to the event's details — including room and track edits — is recorded; restore puts
@@ -285,7 +327,7 @@ export function SettingsSection({ me }: { me: Me }) {
         <SettingsHistory eventId={me.event.id} />
       </section>
 
-      <section className="settings-card">
+      <section className="settings-card" id="api-docs">
         <h2>API docs</h2>
         <p className="settings-hint">
           Interactive reference at <a href="/docs" target="_blank" rel="noopener">/docs</a> · raw spec at{' '}
@@ -300,7 +342,7 @@ export function SettingsSection({ me }: { me: Me }) {
         <pre className="settings-curl"><code>{curlExample}</code></pre>
       </section>
 
-      <section className="settings-card">
+      <section className="settings-card" id="demo-data">
         <h2>Demo data</h2>
         <p className="settings-hint">
           Restore the demo event to its seeded state (also runs automatically every night on the public demo).

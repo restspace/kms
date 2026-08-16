@@ -26,8 +26,8 @@ file).
 
 ## Creating a task
 
-Rows in this tab are assignments, but **+ New** creates the underlying **task definition** — there
-is no separate edit form for that shape, only this create form. Fields worth knowing:
+Rows in this tab are assignments, but **+ New** creates the underlying **task definition**. Fields
+worth knowing:
 
 - **Target** — Contacts or Submissions.
 - **Assignment mode** — Manual or Automatic.
@@ -36,6 +36,12 @@ is no separate edit form for that shape, only this create form. Fields worth kno
 - **Assign to** (contact target) — either search and pick specific people, or choose a named
   audience (e.g. "Accepted speakers"), which shows a live headcount as you select it — a faster
   path than picking people one by one when you mean "everyone in this group."
+
+An **Automatic**-mode rule doesn't need anyone picked here — it assigns itself when its trigger
+fires, and produces no rows in this tab's list until it does. To see and edit those rules
+independent of whether they've matched anyone yet, use
+[Settings → Automatic tasks](settings.md#automatic-tasks) instead — its Edit button opens the same
+form shown here, then returns you to Settings on Save or Cancel.
 
 ## Export
 

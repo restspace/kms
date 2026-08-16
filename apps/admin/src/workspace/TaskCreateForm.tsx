@@ -46,7 +46,25 @@ const readableEnum = (value: string) =>
 const contactName = (c: ContactRow) =>
   [c.first_name, c.last_name].filter(Boolean).join(' ') || c.email
 
-export function TaskCreateForm({ initialValues, onSubmit, onCancel, title, onDirtyChange }: CreateFormProps) {
+export function TaskCreateForm({
+  initialValues,
+  onSubmit,
+  onCancel,
+  title,
+  onDirtyChange,
+  hideTargetPicker,
+}: CreateFormProps & {
+  /**
+   * Settings → Automatic tasks' rule editor (AutomaticTaskRuleForm): editing
+   * a `tasks` definition via PUT never touches assignments (pickTaskFields
+   * ignores assignee_contact_ids/submission_ids/audience), so showing the
+   * assignee/audience pickers here would suggest re-targeting does something
+   * it doesn't — the same reasoning App.tsx's TaskEditPanel doc comment gives
+   * for not reusing this form's pickers on an edit at all. This just skips
+   * rendering (and validating) them, rather than forking a second form.
+   */
+  hideTargetPicker?: boolean
+}) {
   const [fields, setFields] = useState({
     title: typeof initialValues?.title === 'string' ? initialValues.title : '',
     description: typeof initialValues?.description === 'string' ? initialValues.description : '',
@@ -171,8 +189,11 @@ export function TaskCreateForm({ initialValues, onSubmit, onCancel, title, onDir
       : (Object.values(targetIds)[0] as string[]).length
     // A manual task with no targets can only ever produce zero assignment
     // rows — the exact silent-failure shape CNT-01 flagged. Automatic tasks
-    // are legitimately definition-only until their trigger fires.
-    if (targetCount === 0 && fields.assignment_mode === 'manual') {
+    // are legitimately definition-only until their trigger fires. None of
+    // this applies with hideTargetPicker: the pickers aren't shown, and (PUT
+    // /tasks/:id) ignores these keys entirely — editing a rule never creates
+    // or removes assignments.
+    if (!hideTargetPicker && targetCount === 0 && fields.assignment_mode === 'manual') {
       setSubmitError(
         useAudience
           ? 'That audience has nobody in it yet — pick another, or select people directly.'
@@ -193,13 +214,13 @@ export function TaskCreateForm({ initialValues, onSubmit, onCancel, title, onDir
         action_type: fields.action_type,
         due_at: fields.due_at || null,
         required,
-        ...targetIds,
+        ...(hideTargetPicker ? {} : targetIds),
       })
       if (!ok) {
         setSubmitError('The task could not be saved.')
         return
       }
-      if (targetCount === 0) {
+      if (!hideTargetPicker && targetCount === 0) {
         // Nothing will appear in the grid yet — say so rather than closing on
         // an apparently empty list (the CNT-01 symptom).
         await appAlert(
@@ -283,7 +304,7 @@ export function TaskCreateForm({ initialValues, onSubmit, onCancel, title, onDir
           </label>
         </div>
 
-        {fields.target === 'contact' && (
+        {!hideTargetPicker && fields.target === 'contact' && (
           <div className="record-form-field">
             <label htmlFor="task-audience">Assign to</label>
             <select
@@ -307,7 +328,7 @@ export function TaskCreateForm({ initialValues, onSubmit, onCancel, title, onDir
           </div>
         )}
 
-        {(fields.target === 'submission' || audience === '') && (
+        {!hideTargetPicker && (fields.target === 'submission' || audience === '') && (
         <div className="record-form-field">
           <label htmlFor="task-target-search">
             {fields.target === 'submission' ? 'Submissions' : 'Assignees'}
@@ -375,6 +396,12 @@ export function TaskCreateForm({ initialValues, onSubmit, onCancel, title, onDir
             </p>
           )}
         </div>
+        )}
+        {hideTargetPicker && (
+          <p style={{ color: 'var(--text-muted)', fontSize: 12 }}>
+            This edits the rule only — it never adds or removes anyone's assignment. New assignments still only
+            come from the trigger firing.
+          </p>
         )}
       </div>
 

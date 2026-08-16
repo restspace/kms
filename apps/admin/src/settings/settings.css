@@ -356,6 +356,33 @@
   padding: 6px 8px;
 }
 
+/* Submission notifications: per-form recipient checkboxes. */
+.settings-recipient-editor {
+  display: flex;
+  gap: 24px;
+  flex-wrap: wrap;
+  padding: 10px 0;
+}
+.settings-recipient-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 200px;
+}
+.settings-recipient-group > span {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-faint);
+  margin-bottom: 2px;
+}
+.settings-recipient-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 400;
+}
+
 /* Compact (640) — Tier C refusal. Appended; desktop rules above are untouched. */
 @media (max-width: 640px) {
   .settings-compact-summary {
