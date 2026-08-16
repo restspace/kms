@@ -16,6 +16,7 @@ import { sha256Hex } from '../hashing';
 import { decodeCursor, encodeCursor, keysetWhere, type CursorPayload } from '../cursor';
 import { bumpEventRevision } from '../revision';
 import { stageAirtableDeletes, stageContactCascades } from '../airtableStage';
+import { trackChangeStatements } from '../submissionRouting';
 import { isValidEmailShape } from '@kms/core';
 import { createDb } from '@kms/db';
 
@@ -820,15 +821,38 @@ restApiRoutes.put('/events/:event_id/submissions/:sid', async (c) => {
     sets.push('status = ?');
     params.push(status);
   }
+  const now = new Date().toISOString();
   sets.push('updated_at = ?');
-  params.push(new Date().toISOString());
+  params.push(now);
 
-  const result = await c.env.DB.prepare(
-    `UPDATE submissions SET ${sets.join(', ')} WHERE id = ? AND event_id = ?`,
-  )
-    .bind(...params, id, eventId)
-    .run();
-  if (result.meta.changes === 0) return apiError(c, 404, 'not_found', 'No submission with this id in this event.');
+  // Same routing rules as the admin PUT this endpoint twins (evaluation.ts):
+  // a track change carries the Track ANSWER and submission_tracks with it and
+  // re-runs routing, and is refused outright once that answer is frozen.
+  // Without this the /api/v1 surface would be a way around both.
+  const statements: D1PreparedStatement[] = [
+    c.env.DB.prepare(`UPDATE submissions SET ${sets.join(', ')} WHERE id = ? AND event_id = ?`).bind(
+      ...params,
+      id,
+      eventId,
+    ),
+  ];
+  if (trackId !== undefined) {
+    const sync = await trackChangeStatements(c.env.DB, eventId, id, trackId, now);
+    if (sync.locked) {
+      return apiError(
+        c,
+        400,
+        'routing_locked',
+        'This submission is past a decision, and its track decides how it was routed — it can no longer change.',
+      );
+    }
+    statements.push(...sync.statements);
+  }
+
+  const [result] = await c.env.DB.batch(statements);
+  if (!result || result.meta.changes === 0) {
+    return apiError(c, 404, 'not_found', 'No submission with this id in this event.');
+  }
   await bumpEventRevision(c.env, eventId);
   const row = await c.env.DB.prepare('SELECT * FROM submissions WHERE id = ? AND event_id = ?').bind(id, eventId).first();
   return c.json(row);

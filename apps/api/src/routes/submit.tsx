@@ -23,9 +23,7 @@ import {
   validateAnswers,
   type Answers,
   type QuestionDef,
-  type RoutingActions,
   type RoutingConfig,
-  type RoutingOutcome,
 } from '@kms/core';
 import { createDb } from '@kms/db';
 import { Page, SubmitPage, type SubmitBootstrap, type SubmitViewer } from '@kms/ui';
@@ -35,6 +33,7 @@ import { buildPortalParticipantStatements } from '../participants';
 import { bumpEventRevision } from '../revision';
 import { isSubmissionCodeCollision, nextSessionCodeSql, peekNextSessionCode } from '../sessionCode';
 import { createSessionToken, getSession, setSessionCookie, type SessionPayload } from '../session';
+import { parseRoutingConfig, resolveRoutingTargets, serialiseRoutingState } from '../submissionRouting';
 import { CONFIRM_TTL_SECONDS, mintToken, sha256hex } from '../tokens';
 import { requestMagicLink } from './auth';
 import { loadQuestions } from './formsAdmin';
@@ -956,26 +955,6 @@ function identityFromAnswers(
   return identity;
 }
 
-/** `assign_track_ids` rides on the routing action object as an optional extra
- *  (RoutingActions is frozen); read it off the matched rules by hand. */
-type MultiTrackActions = RoutingActions & { assign_track_ids?: unknown };
-
-function routingTrackIds(config: RoutingConfig | null, routing: RoutingOutcome): string[] {
-  const out: string[] = [];
-  const collect = (actions: MultiTrackActions | undefined) => {
-    const list = actions?.assign_track_ids;
-    if (!Array.isArray(list)) return;
-    for (const value of list) {
-      if (typeof value === 'string' && value !== '' && !out.includes(value)) out.push(value);
-    }
-  };
-  for (const rule of config?.rules ?? []) {
-    if (routing.applied_rule_ids.includes(rule.id)) collect(rule.then as MultiTrackActions);
-  }
-  if (routing.used_fallback) collect(config?.fallback as MultiTrackActions | undefined);
-  return out;
-}
-
 function parseIdList(json: string | null): string[] {
   if (!json) return [];
   try {
@@ -1245,12 +1224,7 @@ submitRoutes.post('/:slug/:formId/submit', async (c) => {
   }
 
   // Routing (docs/04 §4) — answers keyed by question id.
-  let routingConfig: RoutingConfig | null = null;
-  try {
-    routingConfig = ctx.form.routing_rules ? (JSON.parse(ctx.form.routing_rules) as RoutingConfig) : null;
-  } catch {
-    routingConfig = null;
-  }
+  const routingConfig: RoutingConfig | null = parseRoutingConfig(ctx.form.routing_rules);
   // Routing (and the visibility rules the builder writes alongside it) compares
   // against what a submitter *saw*, not the wire value: a derived Track option
   // submits a track id, but every rule — including those authored before the
@@ -1280,24 +1254,11 @@ submitRoutes.post('/:slug/:formId/submit', async (c) => {
   if (replayOf) return replayResponse(replayOf);
 
   // Resolve configured references inside this event. Routing JSON is editable
-  // input, so foreign tenant IDs must not be allowed to cross-link records.
-  const trackCandidates: string[] = [];
-  const pushCandidate = (id: string | undefined) => {
-    if (id && !trackCandidates.includes(id)) trackCandidates.push(id);
-  };
-  pushCandidate(routing.set_track_id);
-  for (const id of routingTrackIds(routingConfig, routing)) pushCandidate(id);
-
-  const resolvedTrackIds: string[] = [];
-  if (trackCandidates.length > 0) {
-    const placeholders = trackCandidates.map(() => '?').join(', ');
-    const { results } = await db
-      .prepare(`SELECT id FROM tracks WHERE event_id = ? AND id IN (${placeholders})`)
-      .bind(ctx.event.id, ...trackCandidates)
-      .all<{ id: string }>();
-    const valid = new Set(results.map((r) => r.id));
-    for (const id of trackCandidates) if (valid.has(id) && !resolvedTrackIds.includes(id)) resolvedTrackIds.push(id);
-  }
+  // input, so foreign tenant IDs must not be allowed to cross-link records —
+  // that scoping, and the tag/plan/status resolution below, is shared with the
+  // re-route path (../submissionRouting) so both agree on what a rule means.
+  const routingTargets = await resolveRoutingTargets(db, ctx.event.id, routingConfig, routing);
+  const resolvedTrackIds: string[] = [...routingTargets.trackIds];
   // A multiselect track question resolves EVERY selected value, not just one.
   const trackNames = trackAnswers(abstractQuestions, answers);
   // The canonical Track question's options are the event's tracks keyed by id
@@ -1331,29 +1292,12 @@ submitRoutes.post('/:slug/:formId/submit', async (c) => {
       if (id && !resolvedTrackIds.includes(id)) resolvedTrackIds.push(id);
     }
   }
-  const routedTrackId = routing.set_track_id && resolvedTrackIds.includes(routing.set_track_id)
-    ? routing.set_track_id
-    : null;
+  const routedTrackId = routingTargets.primaryTrackId;
 
-  let evaluationPlanId: string | null = null;
-  if (routing.assign_evaluation_plan_id) {
-    const row = await db
-      .prepare('SELECT id FROM evaluation_plans WHERE id = ? AND event_id = ?')
-      .bind(routing.assign_evaluation_plan_id, ctx.event.id)
-      .first<{ id: string }>();
-    evaluationPlanId = row?.id ?? null;
-  }
+  const evaluationPlanId: string | null = routingTargets.planId;
 
   // Tags: the tags answer (names) plus event-scoped routing tag ids.
-  const tagIds = new Set<string>();
-  if (routing.add_tag_ids.length > 0) {
-    const placeholders = routing.add_tag_ids.map(() => '?').join(', ');
-    const { results } = await db
-      .prepare(`SELECT id FROM tags WHERE event_id = ? AND id IN (${placeholders})`)
-      .bind(ctx.event.id, ...routing.add_tag_ids)
-      .all<{ id: string }>();
-    for (const row of results) tagIds.add(row.id);
-  }
+  const tagIds = new Set<string>(routingTargets.tagIds);
   const tagNames = tagAnswers(abstractQuestions, answers);
   if (tagNames.length > 0) {
     const placeholders = tagNames.map(() => '?').join(', ');
@@ -1364,8 +1308,9 @@ submitRoutes.post('/:slug/:formId/submit', async (c) => {
     for (const row of results) tagIds.add(row.id);
   }
 
-  const routableStatuses = new Set(['pending', 'accept_queue', 'decline_queue']);
-  const status = routing.set_status && routableStatuses.has(routing.set_status) ? routing.set_status : 'pending';
+  // set_status is honoured HERE only. A later re-route never moves a
+  // submission's status — see ../submissionRouting.
+  const status = routingTargets.status;
 
   // Existing row state the update path needs (primary track is sticky).
   let existing: { code: string; track_id: string | null } | null = null;
@@ -1492,6 +1437,33 @@ submitRoutes.post('/:slug/:formId/submit', async (c) => {
           ),
       );
     }
+
+    // Routing provenance (0046). Recorded as a separate statement rather than
+    // a column on the insert above: that INSERT ... SELECT is the single
+    // expression the quota check and code allocation ride on, and is not worth
+    // destabilising for a value nothing reads back in this request. It records
+    // only what ROUTING set — an answer-derived track or tag is the submitter's
+    // own pick, not a rule's, and a later re-route must not treat it as its own
+    // to move (../submissionRouting).
+    statements.push(
+      db
+        .prepare('UPDATE submissions SET routing_state = ? WHERE id = ? AND event_id = ?')
+        .bind(
+          serialiseRoutingState(
+            routing,
+            {
+              track_id: routedTrackId,
+              track_ids: routingTargets.trackIds,
+              evaluation_plan_id: evaluationPlanId,
+              tag_ids: routingTargets.tagIds,
+              status,
+            },
+            ts,
+          ),
+          newId,
+          ctx.event.id,
+        ),
+    );
 
     statements.push(...answerStatements(db, newId, storableAnswers(abstractQuestions, answers), ctx.internalQuestionIds));
 

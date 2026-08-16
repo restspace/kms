@@ -1014,6 +1014,15 @@ export interface SubmissionDetail {
   /** Full rows, not names: the detail panel's chips are an editor and the
    *  write takes ids (setSubmissionTags). */
   tags: SubmissionTag[]
+  /** Category-based routing (0046): which rules put this submission where it
+   *  is, and whether its track is now a frozen routing input — the Track
+   *  picker must not offer a change the API would refuse. */
+  routing?: {
+    applied: string[]
+    used_fallback: boolean
+    locked_track: boolean
+    locked_reason: string | null
+  }
 }
 
 /**

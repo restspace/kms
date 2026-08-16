@@ -1728,6 +1728,17 @@ export function SubmissionDetailPanel({ id, onEdit, onItemSaved }: {
         {s.format ? <DetailPair term="Format">{String(s.format)}</DetailPair> : null}
         {s.track_name ? <DetailPair term="Track">{String(s.track_name)}</DetailPair> : null}
         {s.plan_name ? <DetailPair term="Evaluation plan">{String(s.plan_name)}</DetailPair> : null}
+        {/* Why this submission landed where it did (0046). The routing rules
+            that fired are recorded on the submission, so the track, plan and
+            tags above are traceable to the answers that chose them — and stay
+            traceable, because an edit re-runs the rules. */}
+        {detail.routing && (detail.routing.applied.length > 0 || detail.routing.used_fallback) ? (
+          <DetailPair term="Routed by">
+            {detail.routing.applied.length > 0
+              ? detail.routing.applied.join('; ')
+              : 'No rule matched — the form’s fallback applied.'}
+          </DetailPair>
+        ) : null}
         {detail.answers
           // The submission form's own "Title"/"Description"/"Track"/"Format"
           // questions duplicate canonical columns rendered above (heading,
@@ -2074,6 +2085,12 @@ export function SubmissionEditForm({ initialValues, onSubmit, onCancel, onDelete
   const [submitError, setSubmitError] = useState<string | null>(null)
   const [isSubmitting, setIsSubmitting] = useState(false)
 
+  // Routing (0046): the Track answer is what a routing rule keys off, so once
+  // this submission is past a decision the API refuses to change it. Disable
+  // the picker rather than let the organiser make a choice that comes back a
+  // 400 — the server check stands regardless, this is the affordance.
+  const trackLocked = detail?.routing?.locked_track === true
+
   // Track/room pickers need the event's lists whether creating or editing;
   // only the existing-record detail (participants, reviews, files, the
   // room already on the record) is conditional on an id existing yet.
@@ -2261,7 +2278,13 @@ export function SubmissionEditForm({ initialValues, onSubmit, onCancel, onDelete
         </div>
         <div className="record-form-field">
           <label htmlFor="sub-edit-track">Track</label>
-          <select id="sub-edit-track" value={fields.track_id} disabled={isSubmitting} onChange={(e) => setField('track_id', e.target.value)}>
+          <select
+            id="sub-edit-track"
+            value={fields.track_id}
+            disabled={isSubmitting || trackLocked}
+            title={trackLocked ? (detail?.routing?.locked_reason ?? undefined) : undefined}
+            onChange={(e) => setField('track_id', e.target.value)}
+          >
             <option value="">— No track —</option>
             {/* #29: before `tracks` has loaded, a synthetic option keeps a
                 stored track_id from rendering as the misleading "No track"
@@ -2274,6 +2297,9 @@ export function SubmissionEditForm({ initialValues, onSubmit, onCancel, onDelete
             )}
             {tracks.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
           </select>
+          {trackLocked && (
+            <p className="record-form-note">🔒 {detail?.routing?.locked_reason}</p>
+          )}
           {unmatchedTrackAnswer && (
             <p className="record-form-note">
               Submitted as “{unmatchedTrackAnswer}”, which is not one of this event’s tracks.

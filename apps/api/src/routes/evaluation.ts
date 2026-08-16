@@ -18,6 +18,7 @@ import { snapshotParticipantsRevision } from '../participants';
 import { isWriter } from '../access';
 import type { SessionPayload } from '../session';
 import { reviewWindowState } from '../reviewWindow';
+import { routingSummary, trackChangeStatements } from '../submissionRouting';
 import {
   addComment,
   appendRationale,
@@ -841,9 +842,17 @@ evaluationRoutes.put('/submissions/:id', async (c) => {
     sets.push('content_approved = ?');
     params.push(v === true || v === 1 ? 1 : 0);
   }
+  // The track is a routing INPUT as well as a routed output: a rule can key
+  // off the Track question, whose stored answer this change has to move in
+  // step with (../submissionRouting). nextTrackId is resolved here and the
+  // synchronising statements are built after validation, so nothing is written
+  // if a later field turns out to be invalid.
+  let trackChanged = false;
+  let nextTrackId: string | null = null;
   if ('track_id' in body) {
     const v = body.track_id;
     if (v === null || v === '') {
+      trackChanged = true;
       sets.push('track_id = ?');
       params.push(null);
     } else if (typeof v === 'string') {
@@ -851,6 +860,8 @@ evaluationRoutes.put('/submissions/:id', async (c) => {
         .bind(v, session.eventId)
         .first();
       if (!track) return c.json({ error: 'invalid_track' }, 400);
+      trackChanged = true;
+      nextTrackId = v;
       sets.push('track_id = ?');
       params.push(v);
     } else {
@@ -916,8 +927,19 @@ evaluationRoutes.put('/submissions/:id', async (c) => {
       session.eventId,
     ),
   );
+  // Track answer + submission_tracks + re-route, appended to the same batch so
+  // the routed values can never be committed out of step with the input that
+  // decided them. A frozen routing input is refused outright — neither changing
+  // it nor letting it drift from the routed result is allowed.
+  const updateIndex = statements.length - 1;
+  if (trackChanged) {
+    const sync = await trackChangeStatements(c.env.DB, session.eventId, id, nextTrackId, nowIso());
+    if (sync.locked) return c.json({ error: 'routing_locked' }, 400);
+    statements.push(...sync.statements);
+  }
+
   const batchResults = await c.env.DB.batch(statements);
-  const updateResult = batchResults[batchResults.length - 1];
+  const updateResult = batchResults[updateIndex];
   if (!updateResult || updateResult.meta.changes === 0) return c.json({ error: 'not_found' }, 404);
   await bumpEventRevision(c.env, session.eventId);
   const row = await c.env.DB.prepare('SELECT * FROM submissions WHERE id = ? AND event_id = ?')
@@ -1212,6 +1234,13 @@ evaluationRoutes.get('/submissions/:id/detail', async (c) => {
     review_plan_means,
     tags: tags.results,
     comments,
+    // Why it landed where it did, and whether the track can still move (0046).
+    routing: await routingSummary(db, session.eventId, {
+      id,
+      form_id: (submission.form_id as string | null) ?? null,
+      status: String(submission.status ?? ''),
+      routing_state: (submission.routing_state as string | null) ?? null,
+    }),
   });
 });
 

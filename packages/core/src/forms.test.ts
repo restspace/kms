@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   isValidEmailShape,
   isValidUrlShape,
+  routingInputQuestionIds,
   validateAnswers,
   validateConditionalRuleConfig,
   validateParticipantRolesConfig,
@@ -116,6 +117,22 @@ describe('config guards', () => {
     const issues = validateRoutingConfig({ rules: [{ id: '', when: { op: 'equals' }, then: { add_tag_ids: 'oops' } }] });
     expect(issues.length).toBeGreaterThan(0);
     expect(issues.some((i) => i.path.includes('add_tag_ids'))).toBe(true);
+  });
+
+  it('lists the question ids a routing config keys off', () => {
+    expect(routingInputQuestionIds(null)).toEqual([]);
+    expect(
+      routingInputQuestionIds({
+        rules: [
+          { id: 'a', when: { question_id: 'q-format', op: 'equals', value: 'Workshop' }, then: {} },
+          { id: 'b', when: { question_id: 'q-track', op: 'equals', value: 'Infra' }, then: {} },
+          // Same input twice — de-duped, order stable.
+          { id: 'c', when: { question_id: 'q-format', op: 'equals', value: 'Talk' }, then: {} },
+        ],
+        // The fallback carries no condition, so it contributes no inputs.
+        fallback: { add_tag_ids: ['t1'] },
+      }),
+    ).toEqual(['q-format', 'q-track']);
   });
 
   it('validates participant role configs', () => {

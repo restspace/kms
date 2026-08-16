@@ -56,7 +56,23 @@ The question list for the talk/session itself, plus a **Routing** panel:
   later rule can overwrite what an earlier one set.
 - **Fallback plan** — the evaluation plan assigned when no rule matches.
 - Every rule's application is recorded on the submission, so you can always see later why a
-  particular proposal ended up where it did.
+  particular proposal ended up where it did — it shows as **Routed by** on the submission's
+  detail view.
+
+Rules don't only run once at submission. If the answer a rule keys off later changes — the
+speaker edits it from their portal, or you change the track from the Workspace — the rules run
+again and the evaluation plan, tags and track follow. Two things limit that, so re-routing can
+never surprise you:
+
+- **Your own changes win.** Re-routing only moves values the rules themselves set. An evaluation
+  plan you reassigned by hand, or a tag you attached yourself, stays put.
+- **It stops at a decision.** Once a submission reaches an accept or decline queue, the answers
+  the rules key off are locked — for the speaker and for you — so a proposal already out for a
+  decision can't be reshuffled underneath it. Everything else about the submission stays
+  editable.
+
+Re-routing never changes a submission's status, even if a rule has a *set status* action. That
+one applies at submission only; after that the accept/decline workflow owns the status.
 
 ### 4. Participant Information
 

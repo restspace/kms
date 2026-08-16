@@ -387,6 +387,23 @@ export function applyRouting(config: RoutingConfig | null | undefined, answers: 
   return outcome;
 }
 
+/**
+ * The question ids a routing config keys off — i.e. the answers whose value
+ * decides where a submission lands. Callers use this to keep the routing
+ * invariant: while these can still change, routing must be re-run; once the
+ * submission is past the point where re-routing is meaningful, they are frozen.
+ *
+ * The fallback carries no condition, so it contributes no inputs.
+ */
+export function routingInputQuestionIds(config: RoutingConfig | null | undefined): string[] {
+  const ids: string[] = [];
+  for (const rule of config?.rules ?? []) {
+    const id = rule.when?.question_id;
+    if (id && !ids.includes(id)) ids.push(id);
+  }
+  return ids;
+}
+
 // ---------------------------------------------------------------------------
 // Participant roles config (submission_forms.participant_roles json)
 // ---------------------------------------------------------------------------

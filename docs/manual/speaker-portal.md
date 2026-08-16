@@ -16,7 +16,10 @@ Once in, four sections sit across the top: **Home · Submissions · Profile · T
   Draft, Withdrawn), a summary of your profile, and your outstanding tasks.
 - **Submissions** — full detail on everything you've submitted. You can still **edit** a
   submission after submitting it — even after it's been accepted — right up until it's declined
-  or you withdraw it. You can also **withdraw** a submission yourself if your plans change.
+  or you withdraw it. Once organisers have started deciding on it, a couple of answers may show
+  with a padlock: those are the ones that determined which review track the proposal went to, and
+  they can't move at that point. Everything else stays editable. You can also **withdraw** a
+  submission yourself if your plans change.
 - **Profile** — your bio, headshot, pronouns, company/title, and links (LinkedIn, X, website).
   This is the one place you update your own information — organisers don't edit it for you.
   A short biography and a headshot are what make your listing complete on the organiser's side,

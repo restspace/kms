@@ -1,0 +1,28 @@
+-- Routing provenance. Category-based routing (docs/04 §4) ran once, at submit,
+-- and threw its result away: applied_rule_ids/used_fallback were returned in the
+-- HTTP response and never stored, even though docs/manual/submission-lifecycle.md
+-- has always claimed "every rule that fires is recorded so you can see later why
+-- a submission landed where it did".
+--
+-- Storing it makes that claim true AND makes re-routing safe. When a routing
+-- input changes (a speaker edits the answer a rule keys off, an organiser
+-- changes the track), routing re-runs — but it must not stomp on decisions an
+-- organiser made by hand in the meantime. `set` below records exactly what
+-- routing itself last wrote, which is what lets a re-route tell an untouched
+-- value from a deliberate override: overwrite only where the stored value still
+-- equals the one routing put there.
+--
+-- Shape (json, written by apps/api/src/lib/submissionRouting.ts):
+--   { "applied_rule_ids": ["r1"], "used_fallback": false, "at": "<iso>",
+--     "set": { "track_id": null, "evaluation_plan_id": null,
+--              "tag_ids": [], "status": "pending" } }
+--
+-- NO BACKFILL is possible: deriving it for existing rows would mean replaying
+-- each form's rules against each submission's answers, which is application
+-- logic, not SQL. NULL therefore means "routing provenance unknown", and the
+-- re-route path treats every value on such a submission as organiser-owned —
+-- it may ADD a tag, but it will never re-point an existing track or evaluation
+-- plan. Submissions that predate this migration are thus never silently moved;
+-- they pick up provenance the first time routing runs over them again.
+
+ALTER TABLE submissions ADD COLUMN routing_state TEXT;

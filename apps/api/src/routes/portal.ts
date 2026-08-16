@@ -14,6 +14,7 @@ import {
   normalizeXHandleToUrl,
   parseParticipantRoles,
   redactInternal,
+  routingInputQuestionIds,
   sanitizeRichHtml,
   validateAnswers,
   visibleQuestionIds,
@@ -22,6 +23,7 @@ import {
   type Event,
   type ParticipantRoleConfig,
   type QuestionDef,
+  type RoutingConfig,
 } from '@kms/core';
 import type { AppEnv } from '../env';
 import { esc } from '../html';
@@ -39,6 +41,12 @@ import { buildPortalParticipantStatements, snapshotParticipantsRevision } from '
 import { loadQuestions } from './formsAdmin';
 import { isFormClosed, normaliseTrackAnswers, storableAnswers, synthesizeAnswersFromColumns } from './submit';
 import { clearSessionCookie, getSession, type SessionPayload } from '../session';
+import {
+  isRoutingFrozen,
+  parseRoutingConfig,
+  rerouteStatements,
+  ROUTING_FROZEN_REASON,
+} from '../submissionRouting';
 import { getPortalEvents, type PortalEvent } from '../access';
 import {
   addComment,
@@ -1812,6 +1820,10 @@ interface EditableSubmissionRow {
   track_id: string | null;
   submitter_contact_id: string | null;
   updated_at: string;
+  // Routing (0046) — loadOwnSubmission selects s.*, so these ride along; the
+  // edit route needs them to re-run routing over the edited answers.
+  evaluation_plan_id: string | null;
+  routing_state: string | null;
 }
 
 /** The submission, but only when this speaker submitted it or participates. */
@@ -1892,7 +1904,13 @@ const answerList = (v: AnswerValue): string[] =>
  * duration they had typed is gone, same as it would be on a fresh
  * submission.
  */
-function editControlHtml(q: QuestionDef, value: AnswerValue, errors: FieldError[], visible: boolean): string {
+function editControlHtml(
+  q: QuestionDef,
+  value: AnswerValue,
+  errors: FieldError[],
+  visible: boolean,
+  frozen = false,
+): string {
   const id = esc(fieldId(q.id));
   const name = esc(`q_${q.id}`);
   const aria = invalidAttrs(errors, q.id);
@@ -1901,8 +1919,20 @@ function editControlHtml(q: QuestionDef, value: AnswerValue, errors: FieldError[
   const help = q.help_text ? `<p class="qhelp">${esc(q.help_text)}</p>` : '';
   const label = `<label for="${id}">${esc(q.label)}${star}</label>`;
   const maxlen = q.max_chars ? ` maxlength="${q.max_chars}"` : '';
+  // A frozen routing input (0046) is wrapped in a disabled <fieldset> rather
+  // than having every branch below grow a `disabled` attribute: the element
+  // disables all its descendants in one go, and the browser then leaves them
+  // out of the POST entirely — which is exactly what the server wants, since
+  // readEditAnswers falls back to the stored value for anything not posted.
+  // The server enforces it again regardless; this is the affordance, not the
+  // guard.
   const wrap = (inner: string) =>
-    `<div class="qfield" id="${esc(`qwrap-${q.id}`)}"${visible ? '' : ' style="display:none"'}>${inner}</div>`;
+    `<div class="qfield" id="${esc(`qwrap-${q.id}`)}"${visible ? '' : ' style="display:none"'}>${
+      frozen
+        ? `<fieldset disabled style="border:0;margin:0;padding:0">${inner}</fieldset>` +
+          `<p class="qhelp">\u{1F512} ${esc(ROUTING_FROZEN_REASON)}</p>`
+        : inner
+    }</div>`;
 
   switch (q.type) {
     case 'heading':
@@ -2052,7 +2082,9 @@ function editPageHtml(
   flash: string | null,
   participants: EditParticipantRow[],
   roleConfig: ParticipantRoleConfig[],
+  frozenQuestionIds: string[] = [],
 ): string {
+  const frozen = new Set(frozenQuestionIds);
   const base = `/portal/${esc(ctx.event.slug)}`;
   const detail = `${base}/submissions/${esc(submission.id)}`;
   const decided = submission.status === 'accepted' || submission.status === 'accept_queue' || submission.status === 'decline_queue';
@@ -2064,7 +2096,7 @@ function editPageHtml(
 <h2><span class="code">${esc(submission.code)}</span> Edit submission ${statusChipHtml(submission.status)}</h2>
 ${decided ? '<p class="small muted">This submission already has a decision \u2014 the organisers are notified of any change you save.</p>' : ''}
 <form method="post" action="${detail}/edit" id="edit-submission-form">
-${questions.map((q) => editControlHtml(q, answers[q.id], errors, visible.has(q.id))).join('\n')}
+${questions.map((q) => editControlHtml(q, answers[q.id], errors, visible.has(q.id), frozen.has(q.id))).join('\n')}
 <p style="margin-top:1.2rem"><button type="submit">Save changes</button>
 <a class="btn secondary" style="margin-left:.5rem" href="${detail}">Cancel</a></p>
 </form>
@@ -2297,6 +2329,11 @@ async function resolveEditTarget(
       internalQuestionIds: string[];
       participants: EditParticipantRow[];
       roleConfig: ParticipantRoleConfig[];
+      routingConfig: RoutingConfig | null;
+      /** Questions this speaker may no longer change, because their answers
+       *  decide routing and the submission is past re-routing (0046). Empty
+       *  while the submission is still draft/pending. */
+      frozenQuestionIds: string[];
     }
   | Response
 > {
@@ -2344,11 +2381,41 @@ async function resolveEditTarget(
       403,
     );
   }
-  const [participants, roleConfig] = await Promise.all([
+  const [participants, roleConfig, routingConfig] = await Promise.all([
     loadEditParticipants(c, submission.id),
     loadParticipantRoleConfig(c, submission.form_id, ctx.event.id),
+    loadRoutingConfig(c, submission.form_id, ctx.event.id),
   ]);
-  return { submission, questions, internalQuestionIds, participants, roleConfig };
+  // The freeze is narrower than isEditLocked above: the rest of the proposal
+  // stays editable right through acceptance (that is the point of the portal),
+  // but the answers a routing rule keys off stop moving once a decision is
+  // queued — otherwise the routed track/plan/tags would have to be recomputed
+  // against a decision batch that has already gone out for review.
+  const frozenQuestionIds = isRoutingFrozen(submission.status)
+    ? routingInputQuestionIds(routingConfig).filter((id) => questions.some((q) => q.id === id))
+    : [];
+  return {
+    submission,
+    questions,
+    internalQuestionIds,
+    participants,
+    roleConfig,
+    routingConfig,
+    frozenQuestionIds,
+  };
+}
+
+/** submission_forms.routing_rules for the form a submission came from. */
+async function loadRoutingConfig(
+  c: Context<AppEnv>,
+  formId: string | null,
+  eventId: string,
+): Promise<RoutingConfig | null> {
+  if (!formId) return null;
+  const row = await c.env.DB.prepare('SELECT routing_rules FROM submission_forms WHERE id = ? AND event_id = ?')
+    .bind(formId, eventId)
+    .first<{ routing_rules: string | null }>();
+  return parseRoutingConfig(row?.routing_rules ?? null);
 }
 
 /**
@@ -2381,7 +2448,17 @@ portalRoutes.get('/:slug/submissions/:id/edit', async (c) => {
     target.submission,
   );
   return c.html(
-    editPageHtml(ctx, target.submission, target.questions, answers, [], flashOf(c), target.participants, target.roleConfig),
+    editPageHtml(
+      ctx,
+      target.submission,
+      target.questions,
+      answers,
+      [],
+      flashOf(c),
+      target.participants,
+      target.roleConfig,
+      target.frozenQuestionIds,
+    ),
   );
 });
 
@@ -2392,7 +2469,8 @@ portalRoutes.post('/:slug/submissions/:id/edit', async (c) => {
   const id = c.req.param('id');
   const target = await resolveEditTarget(c, ctx, id);
   if (target instanceof Response) return target;
-  const { submission, questions, internalQuestionIds, participants, roleConfig } = target;
+  const { submission, questions, internalQuestionIds, participants, roleConfig, routingConfig, frozenQuestionIds } =
+    target;
 
   const body = await c.req.parseBody({ all: true });
   const existing = await loadSubmissionAnswers(c, submission.id);
@@ -2405,8 +2483,28 @@ portalRoutes.post('/:slug/submissions/:id/edit', async (c) => {
     key: e.question_id,
     message: e.message,
   }));
+
+  // Frozen routing inputs (0046). The edit page renders these disabled, so an
+  // ordinary save never reaches here with a change — but the page can be stale,
+  // and a form POST is trivially forgeable, so the invariant is enforced on the
+  // value rather than on the markup. Compared in the same normalised shape both
+  // sides, or a Track answer stored as its label would read as a change against
+  // the id the select posts.
+  if (frozenQuestionIds.length > 0) {
+    const stored = hydrateEditAnswers(questions, existing, submission);
+    for (const qid of frozenQuestionIds) {
+      if (JSON.stringify(answers[qid] ?? null) !== JSON.stringify(stored[qid] ?? null)) {
+        errors.push({ key: qid, message: ROUTING_FROZEN_REASON });
+      }
+      answers[qid] = stored[qid];
+    }
+  }
+
   if (errors.length > 0) {
-    return c.html(editPageHtml(ctx, submission, questions, answers, errors, null, participants, roleConfig), 400);
+    return c.html(
+      editPageHtml(ctx, submission, questions, answers, errors, null, participants, roleConfig, frozenQuestionIds),
+      400,
+    );
   }
 
   const kept = discardHiddenAnswers(questions, answers);
@@ -2475,13 +2573,43 @@ portalRoutes.post('/:slug/submissions/:id/edit', async (c) => {
   // Stored answers keep the same display-text shape the wizard writes
   // (submit.tsx storableAnswers): the track id goes back to its name so the
   // portal detail view, organiser panel and exports read it directly.
-  for (const [questionId, value] of Object.entries(storableAnswers(questions, kept))) {
+  const stored = storableAnswers(questions, kept);
+  for (const [questionId, value] of Object.entries(stored)) {
     if (value === undefined) continue;
     statements.push(
       c.env.DB.prepare(
         'INSERT INTO submission_answers (submission_id, question_id, value_json) VALUES (?, ?, ?)',
       ).bind(submission.id, questionId, JSON.stringify(value)),
     );
+  }
+
+  // Re-route (0046). The answers a rule keys off may have just changed, so the
+  // routed track, evaluation plan and tags are recomputed and the difference
+  // applied in THIS batch — the edit and the routing it implies commit
+  // together, or neither does. Only values routing itself set are moved; an
+  // organiser's manual override survives. Skipped once frozen, where the
+  // inputs cannot have changed anyway.
+  if (!isRoutingFrozen(submission.status)) {
+    const reroute = await rerouteStatements(
+      c.env.DB,
+      {
+        id: submission.id,
+        event_id: ctx.event.id,
+        status: submission.status,
+        // The PRE-edit track: it is the baseline for "did routing set this, or
+        // did somebody change it by hand". The statement above has already
+        // written the speaker's answer-derived track, and routing's own write
+        // (if it asserts one) lands after it in this same batch — the same
+        // precedence the submit path applies in one statement.
+        track_id: submission.track_id,
+        evaluation_plan_id: submission.evaluation_plan_id ?? null,
+        routing_state: submission.routing_state ?? null,
+      },
+      routingConfig,
+      stored,
+      updatedAt,
+    );
+    statements.push(...reroute.statements);
   }
 
   // Notification rows commit with the edit: no update without its notice.

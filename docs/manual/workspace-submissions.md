@@ -43,7 +43,9 @@ bottom of the list reminds you that checking rows unlocks these actions; check o
 and it's replaced by the action bar:
 
 - **→ Accept Queue / → Decline Queue / → Pending** — move every checked row to that status at
-  once. The list updates immediately, without needing a manual refresh.
+  once. The list updates immediately, without needing a manual refresh, and the rows you moved
+  stay checked afterward — handy when the next step is acting on the same rows again, like
+  sending their decision emails.
 - **Send decision emails** — previews the batch (counts and any warnings) before sending, and
   includes an opt-in checkbox for asking for employer approval on the covered submissions. See
   [Reviewing and deciding on submissions → Making and sending decisions](reviewing-submissions.md#making-and-sending-decisions)
@@ -67,7 +69,8 @@ onward, with a note field), and a **Visible in public agenda** checkbox controll
 submission can appear on the public agenda. An **Edit submission** button opens the full editor.
 
 Below that: an editable row of **tags** (see below), then description, format, track, evaluation
-plan, the raw form answers (with
+plan, **Routed by** (the [routing rules](forms.md) that put it there, if any fired), the raw form
+answers (with
 anything already shown as a canonical field filtered out of the raw list), any unmapped columns
 carried over from an import, an internal-notes box (organiser-only, explicit Save), a
 participants editor (add/remove), attached files, a content edit history with restore, reviews
@@ -94,3 +97,9 @@ Both double-clicking a row and **+ New** open a dedicated form (not the generic 
 Track, Room, Format, Level, and Language pickers. Level auto-fills from the submitter's original
 form answer if it's otherwise blank. Status can only be set at creation — after that, change it
 from the grid's inline status dropdown, not the edit form.
+
+Changing **Track** does more than move the label: it also updates the submitter's own Track
+answer, so the record and the answer it came from can't disagree. If your form
+[routes on the track](forms.md), the rules re-run and the evaluation plan and tags follow the new
+one. That also means the Track picker locks once the submission has reached an accept or decline
+queue and a rule keys off it — it shows the reason under the field.

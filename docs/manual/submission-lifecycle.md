@@ -29,7 +29,9 @@ A visitor fills out the public call-for-speakers form (see
 [Building your call for speakers](call-for-speakers.md)) and lands at **Pending** the moment they
 submit — or stays at **Draft** if they save and leave without finishing. Any routing rules on the
 form (auto-tagging, auto-assigning to an evaluation plan) run at this moment, and every rule that
-fires is recorded so you can see later why a submission landed where it did.
+fires is recorded — it shows as **Routed by** on the submission's detail view — so you can see
+later why a submission landed where it did. The rules run again on any later edit that changes
+what they key off, up until the point described in §6.
 
 ## 2. Reviewed
 
@@ -79,3 +81,10 @@ withdrawn or declined — acceptance doesn't lock it. Organisers can edit the op
 (track, room, capacity, and so on) at any point from the submission's detail view in
 [Workspace → Submissions](workspace-submissions.md), with a full history of changes kept
 alongside it.
+
+One narrow exception: the answers your [routing rules](forms.md) key off. Those decide the
+evaluation plan, tags and track, so while a submission is still Draft or Pending they stay
+editable and the rules re-run on every change. From the moment it enters an accept or decline
+queue they're frozen — shown with a padlock and a reason, on the speaker's edit page and on your
+own — because a proposal already out for a decision shouldn't be re-routed underneath it. The
+rest of the submission carries on being editable as before.
