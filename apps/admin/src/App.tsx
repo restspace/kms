@@ -1170,6 +1170,21 @@ export function SpeakerDetailPanel({
   // Org mode: the row is a person, not a membership, so `event_id` is null
   // and the events line comes from the folded-in `events_json` instead.
   const eventNames = parseEventNames(item.events_json)
+  // SPK-15: in org mode the profile columns (company, job title, status,
+  // biography, custom fields) are one membership's answer — the most recent —
+  // not something the person owns org-wide. Naming that event is the
+  // difference between "this speaker has no status" and "this speaker's status
+  // on Forward Summit is Confirmed"; `contactFields` are the SESSION event's
+  // definitions, so org mode renders the keys the row actually carries and
+  // only falls back to a definition for the label.
+  const profileEventName = typeof item.profile_event_name === 'string' ? item.profile_event_name : null
+  const customEntries = orgMode
+    ? Object.entries(customValues).map(([key, value]) => ({
+        key,
+        label: contactFields.find((d) => d.key === key)?.label ?? key,
+        value,
+      }))
+    : contactFields.map((def) => ({ key: def.key, label: def.label, value: customValues[def.key] ?? '' }))
   return (
     <div className="detail-panel">
       <div className="detail-panel-head">
@@ -1253,9 +1268,27 @@ export function SpeakerDetailPanel({
         ) : (
           <><dt>Event</dt><dd>{item.event_name || <EmptyFieldMark />}</dd></>
         )}
-        {contactFields.map((def) => (
-          <Fragment key={def.id}>
-            <dt>{def.label}</dt><dd>{customValues[def.key] || <EmptyFieldMark />}</dd>
+        {/* SPK-15: say which membership the fields above and below came from,
+          * rather than presenting an event-owned answer as the person's own. */}
+        {orgMode && profileEventName && (
+          <>
+            <dt>Profile from</dt>
+            <dd title="Company, job title, status, biography and custom fields on this card are this event's answer for this person. Edits here write to that event.">
+              {profileEventName}
+            </dd>
+            <dt>Status</dt>
+            <dd>
+              {item.speaker_status ? (
+                <span className="status-chip">{speakerStatusLabel(item.speaker_status, statusOptions)}</span>
+              ) : (
+                <EmptyFieldMark />
+              )}
+            </dd>
+          </>
+        )}
+        {customEntries.map((entry) => (
+          <Fragment key={entry.key}>
+            <dt>{entry.label}</dt><dd>{entry.value || <EmptyFieldMark />}</dd>
           </Fragment>
         ))}
         <dt>Created</dt><dd>{fmtDate(item.created_at)}</dd>
@@ -1967,22 +2000,29 @@ export function buildWorkspaceConfig(
     editSchema: orgMode ? orgContactEditSchema : undefined,
     /**
      * Org mode edit gate. PUT /contacts/:id joins event_contacts for the event
-     * it writes (the session's, since a directory row carries no event_id), so
-     * a person who is not on that event — including anyone on no event at all —
-     * cannot be saved through it, identity fields included. Blocking up front
-     * beats a form that 404s on Save. `events_json` carries names rather than
-     * ids, so the membership test is by name against the session's event.
+     * it writes, so a person on no event at all cannot be saved through it,
+     * identity fields included — blocking up front beats a form that 404s on
+     * Save. SPK-15: the target is now the row's own `profile_event_id` (the
+     * membership the directory read its profile columns from) rather than
+     * whatever the sidebar happens to have selected, so the edit no longer has
+     * to be preceded by switching events — it only has to be an event this
+     * seat can actually write.
      */
     getEditAccess: orgMode
       ? (item: ContactRow) => {
-          const names = parseEventNames(item.events_json)
-          if (names.includes(currentEventName)) return true
+          const targetId = typeof item.profile_event_id === 'string' ? item.profile_event_id : ''
+          if (!targetId) {
+            return {
+              allowed: false,
+              message: `${contactName(item)} is not on any event yet. Add them to an event (“＋ EXISTING” with that event picked in the sidebar) before editing their details.`,
+            }
+          }
+          if (targetId === currentEventId || accessibleEvents.some((e) => e.id === targetId)) return true
           return {
             allowed: false,
-            message:
-              names.length === 0
-                ? `${contactName(item)} is not on any event yet. Add them to an event (“＋ EXISTING” with that event picked in the sidebar) before editing their details.`
-                : `${contactName(item)} is on ${names.join(', ')}, not on ${currentEventName}. Pick one of their events in the sidebar to edit them.`,
+            message: `${contactName(item)}’s details live on ${
+              item.profile_event_name ?? 'an event'
+            }, which this account cannot edit. Ask an organiser on that event to make the change.`,
           }
         }
       : undefined,
@@ -2010,6 +2050,15 @@ export function buildWorkspaceConfig(
       // event's membership row. Previously the whole-record submit carried the
       // row's event_id implicitly; the narrowed payload sends it explicitly.
       if (!orgMode && existing?.event_id) payload.event_id = existing.event_id
+      // SPK-15: a directory row's company/job title are its PROFILE event's
+      // (the most recent membership — `profile_event_id`, the same row the
+      // panel captions). The PUT used to fall back to the session's event, so
+      // an organiser could correct a value read from event A and have it
+      // written to event B, where nothing they saw would change. Addressing
+      // the row's own event makes the edit land where the value came from.
+      if (orgMode && existing && typeof existing.profile_event_id === 'string') {
+        payload.event_id = existing.profile_event_id
+      }
       try {
         const saved = await (orgMode && !existing
           ? createContact({ ...payload, no_event: true })
@@ -3289,6 +3338,17 @@ export default function App() {
   useEffect(() => {
     const { rec, tab } = route
     if (view !== 'workspace' || !rec || !isWorkspaceTabKey(tab)) return
+    // SPK-15 root cause: `filter` reads 'all' until `/api/me` lands (it cannot
+    // validate `route.ev` against the accessible set before then), so an
+    // effect that ran on mount resolved the record in ORG scope even when the
+    // URL named an event — and an org row carries no event_name, no
+    // speaker_status and no custom_fields_json at all. The detail tab it
+    // seeded therefore showed "Event —", "Status —" and every custom field
+    // empty on a record whose values were saved perfectly well, and because
+    // `handledRec` was already stamped the corrected re-run below bailed out,
+    // so the panel never healed. Waiting for `me` costs one render and makes
+    // the scope the URL asked for the scope the record is read in.
+    if (!me) return
     // Sentinel for "open the create form", not a real record — see
     // `registerSpeakerTabActions`, which consumes and clears it.
     if (rec === NEW_SPEAKER_REC) return
@@ -3322,7 +3382,7 @@ export default function App() {
     return () => {
       cancelled = true
     }
-  }, [route, view, eventFilterId, contactFields])
+  }, [route, view, me, eventFilterId, contactFields])
 
   /**
    * Disarm the Pipeline "+ Enroll New" round trip if the organiser walks away

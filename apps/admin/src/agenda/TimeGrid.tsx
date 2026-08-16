@@ -55,6 +55,14 @@ interface TimeGridProps {
   onDropDay?: (id: string, day: string) => void
   /** Returns a column key to confine an unscheduled drag's drop target to, or null for no restriction. */
   confineColumnKey?: (id: string) => string | null
+  /**
+   * AIA-S2: flip a session's "Content approved" switch back on from the board.
+   * The blocks for sessions it is off for carry a "Hidden" badge — placing,
+   * confirming and publishing them is otherwise a complete-looking sequence
+   * that still leaves them off the public agenda, with the only switch on a
+   * screen (Edit submission) nobody has reason to open at that moment.
+   */
+  onMakePublic?: (id: string) => void
 }
 
 interface Ghost {
@@ -153,6 +161,7 @@ export function TimeGrid({
   previewDrop,
   onDropDay,
   confineColumnKey,
+  onMakePublic,
 }: TimeGridProps) {
   const [ghost, setGhost] = useState<Ghost | null>(null)
   const [dayOverKey, setDayOverKey] = useState<string | null>(null)
@@ -472,7 +481,9 @@ export function TimeGrid({
                   draggable
                   tabIndex={0}
                   role="button"
-                  aria-label={`${s.title}, ${fmtMinutes(local.minutes)}.${note ? ` Conflict: ${note}` : ''} Press Enter to move.`}
+                  aria-label={`${s.title}, ${fmtMinutes(local.minutes)}.${note ? ` Conflict: ${note}` : ''}${
+                    s.content_approved === 0 ? ' Hidden from the public agenda.' : ''
+                  } Press Enter to move.`}
                   title={conflictTitle(s.id) || `${s.code} · ${s.title}`}
                   onDragStart={(e) => {
                     setDrag({ id: s.id, durationMin: baseDur, fromTray: false })
@@ -503,6 +514,31 @@ export function TimeGrid({
                     {fmtMinutes(local.minutes)} – {fmtMinutes(local.minutes + dur)}
                   </div>
                   <div className="tg-block-title">{s.title}</div>
+                  {/* AIA-S2: scheduled, published — and still not on the
+                      public agenda, because the submission's "Content
+                      approved" switch is off. Say so where the scheduling
+                      happens, and make the fix one click rather than a trip
+                      to Edit submission. */}
+                  {s.content_approved === 0 && (
+                    <button
+                      type="button"
+                      className="tg-block-hidden"
+                      draggable={false}
+                      title={
+                        onMakePublic
+                          ? `${s.code} is hidden from the public agenda (Content approved is off). Click to make it public.`
+                          : `${s.code} is hidden from the public agenda (Content approved is off).`
+                      }
+                      onMouseDown={(e) => e.stopPropagation()}
+                      onDoubleClick={(e) => e.stopPropagation()}
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        onMakePublic?.(s.id)
+                      }}
+                    >
+                      Hidden
+                    </button>
+                  )}
                   {/* The conflict message reads on the block itself — the
                       hover title and the Conflicts tab are no longer the only
                       places it exists (AIA-04). blockHeightPx has budgeted the

@@ -62,6 +62,38 @@ filesAdminRoutes.use('*', async (c, next) => {
  * the same (contact, chain) pair — the same file_request_id/contact_id
  * identity loadChainVersions keys a chain on — before giving up.
  */
+/**
+ * CNT-13: the session an upload belongs to, in the one place every surface can
+ * share. Three steps, first answer wins:
+ *
+ *  1. `u.submission_id` — stamped at upload time when the task was targeted at
+ *     a submission, and now also when the portal could resolve the speaker's
+ *     one session itself (portal.ts).
+ *  2. Any task_assignment for the same (contact, chain) pair that DOES carry a
+ *     submission — covers a chain whose first version predates the stamp.
+ *  3. The uploader's single accepted session in the file's own event. The
+ *     portal's stock "Upload Session Presentation" task is targeted at the
+ *     CONTACT, so steps 1 and 2 both come up empty for the normal path and the
+ *     library's SESSION column read blank while the per-submission Files tab
+ *     said "No files uploaded for this submission" — the same file, missing
+ *     from both ends. `HAVING COUNT(*) = 1` is the ambiguity guard: with two
+ *     sessions (or none) this yields NULL and the organiser links it by hand
+ *     through PUT /uploads/:id/submission rather than the server guessing.
+ */
+const RESOLVED_SUBMISSION_ID = `COALESCE(
+  u.submission_id,
+  (SELECT ta.submission_id FROM task_assignments ta JOIN tasks t2 ON t2.id = ta.task_id
+    WHERE ta.contact_id = u.contact_id AND ta.submission_id IS NOT NULL
+      AND (t2.file_request_id = u.file_request_id OR ('file-request-task-' || t2.id) = u.file_request_id)
+    LIMIT 1),
+  (SELECT MIN(s3.id) FROM submissions s3
+    WHERE s3.event_id = fa.event_id AND s3.status = 'accepted'
+      AND (s3.submitter_contact_id = u.contact_id
+           OR EXISTS (SELECT 1 FROM submission_participants sp3
+                       WHERE sp3.submission_id = s3.id AND sp3.contact_id = u.contact_id))
+   HAVING COUNT(*) = 1)
+)`;
+
 const LIBRARY_SELECT = `SELECT u.id AS upload_id, u.file_asset_id, u.uploaded_at, u.version,
        u.submission_id, u.file_request_id, u.contact_id,
        fa.filename, fa.content_type, fa.size_bytes, fa.event_id,
@@ -82,13 +114,7 @@ const LIBRARY_SELECT = `SELECT u.id AS upload_id, u.file_asset_id, u.uploaded_at
 FROM file_request_uploads u
 JOIN file_assets fa ON fa.id = u.file_asset_id
 LEFT JOIN file_requests fr ON fr.id = u.file_request_id
-LEFT JOIN submissions s ON s.id = COALESCE(
-  u.submission_id,
-  (SELECT ta.submission_id FROM task_assignments ta JOIN tasks t2 ON t2.id = ta.task_id
-    WHERE ta.contact_id = u.contact_id AND ta.submission_id IS NOT NULL
-      AND (t2.file_request_id = u.file_request_id OR ('file-request-task-' || t2.id) = u.file_request_id)
-    LIMIT 1)
-)
+LEFT JOIN submissions s ON s.id = ${RESOLVED_SUBMISSION_ID}
 LEFT JOIN contacts c ON c.id = u.contact_id
 LEFT JOIN contacts ub ON ub.id = fa.uploaded_by_contact_id`;
 
@@ -123,25 +149,16 @@ filesAdminRoutes.get('/library', async (c) => {
   }
   const submissionId = c.req.query('submission_id');
   if (submissionId) {
-    // #9: u.submission_id is stamped from task_assignments.submission_id at
-    // upload time (portal.ts), which is only ever set when the task itself
-    // was targeted at that submission — a task assigned directly to a
-    // contact (expandTaskTargets' single-match fallback) can leave it NULL
-    // even though the upload plainly belongs to that speaker's session. Also
-    // match via the task-assignment chain identity (file_request_id +
-    // contact_id, the same pair loadChainVersions keys a chain on) so a
-    // session's Files section finds uploads made against any of that
-    // session's tasks, not only the ones whose upload row got the
-    // submission_id column stamped directly.
-    where.push(`(u.submission_id = ? OR (
-      u.submission_id IS NULL AND EXISTS (
-        SELECT 1 FROM task_assignments ta
-        JOIN tasks t2 ON t2.id = ta.task_id
-        WHERE ta.contact_id = u.contact_id AND ta.submission_id = ?
-          AND (t2.file_request_id = u.file_request_id OR ('file-request-task-' || t2.id) = u.file_request_id)
-      )
-    ))`);
-    params.push(submissionId, submissionId);
+    // CNT-13: one resolution for both surfaces. The per-submission Files tab
+    // and the library used to disagree — the tab matched only the stamped
+    // column plus the task-assignment chain, so a file the library happily
+    // listed under a session was invisible on that session's own tab.
+    // (#9's task-assignment chain match is step 2 of RESOLVED_SUBMISSION_ID:
+    // u.submission_id is only stamped when the task itself was targeted at
+    // that submission, so a task assigned directly to a contact leaves it
+    // NULL even though the upload plainly belongs to that speaker's session.)
+    where.push(`${RESOLVED_SUBMISSION_ID} = ?`);
+    params.push(submissionId);
   }
   const contactId = c.req.query('contact_id');
   if (contactId) {
@@ -162,13 +179,9 @@ filesAdminRoutes.get('/library', async (c) => {
   const from = Math.max(Number(c.req.query('from') ?? 0) || 0, 0);
 
   const clause = where.join(' AND ');
-  const resolvedSessionJoin = `LEFT JOIN submissions s ON s.id = COALESCE(
-      u.submission_id,
-      (SELECT ta.submission_id FROM task_assignments ta JOIN tasks t3 ON t3.id = ta.task_id
-        WHERE ta.contact_id = u.contact_id AND ta.submission_id IS NOT NULL
-          AND (t3.file_request_id = u.file_request_id OR ('file-request-task-' || t3.id) = u.file_request_id)
-        LIMIT 1)
-    )`;
+  // The count query only needs `s` when the free-text filter reaches into the
+  // session's code/title; every other clause resolves the session inline.
+  const resolvedSessionJoin = `LEFT JOIN submissions s ON s.id = ${RESOLVED_SUBMISSION_ID}`;
   const [list, count] = await Promise.all([
     c.env.DB.prepare(`${LIBRARY_SELECT} WHERE ${clause} ORDER BY u.uploaded_at DESC LIMIT ? OFFSET ?`)
       .bind(...params, size, from)
@@ -421,6 +434,58 @@ filesAdminRoutes.post('/uploads', async (c) => {
     { ok: true, upload_id: appended.uploadId, version: appended.version, versions },
     201,
   );
+});
+
+/**
+ * PUT /app/api/files/uploads/:uploadId/submission { submission_id } — link a
+ * file to a session by hand, or unlink it with `null`.
+ *
+ * CNT-13: RESOLVED_SUBMISSION_ID above answers the unambiguous cases on its
+ * own, but a speaker with two accepted sessions (or none) has no answer the
+ * server can safely guess, and before this the organiser had nowhere to say
+ * which one it was — the SESSION column just stayed blank forever. The write
+ * lands on the whole chain, not one version: `submission_id` is part of the
+ * chain identity every other query groups on (version_count, comment_count,
+ * loadChainVersions), so moving only the current row would split one file's
+ * history in two.
+ */
+filesAdminRoutes.put('/uploads/:uploadId/submission', async (c) => {
+  const session = c.get('session');
+  if (session.role !== 'owner' && session.role !== 'admin') return c.json({ error: 'forbidden' }, 403);
+  const eventIds = await accessibleEventIds(c);
+  const uploadId = c.req.param('uploadId');
+  const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+  const raw = body.submission_id;
+  if (raw !== null && typeof raw !== 'string') return c.json({ error: 'invalid_submission_id' }, 400);
+  const submissionId = typeof raw === 'string' && raw !== '' ? raw : null;
+
+  const upload = await c.env.DB.prepare(
+    `SELECT u.file_request_id, u.contact_id, u.submission_id, fa.event_id
+     FROM file_request_uploads u JOIN file_assets fa ON fa.id = u.file_asset_id
+     WHERE u.id = ?`,
+  )
+    .bind(uploadId)
+    .first<{ file_request_id: string; contact_id: string; submission_id: string | null; event_id: string }>();
+  if (!upload || !eventIds.includes(upload.event_id)) return c.json({ error: 'not_found' }, 404);
+
+  // The session has to be one in the file's OWN event — otherwise a link would
+  // quietly carry a file across the tenancy boundary the library scopes on.
+  if (submissionId) {
+    const target = await c.env.DB.prepare('SELECT id FROM submissions WHERE id = ? AND event_id = ?')
+      .bind(submissionId, upload.event_id)
+      .first();
+    if (!target) return c.json({ error: 'invalid_submission' }, 400);
+  }
+
+  await c.env.DB.prepare(
+    `UPDATE file_request_uploads SET submission_id = ?
+      WHERE file_request_id = ? AND contact_id = ?
+        AND COALESCE(submission_id, '') = COALESCE(?, '')`,
+  )
+    .bind(submissionId, upload.file_request_id, upload.contact_id, upload.submission_id)
+    .run();
+  await bumpEventRevision(c.env, upload.event_id);
+  return c.json({ ok: true, submission_id: submissionId });
 });
 
 // POST /app/api/files/uploads/:uploadId/comments { body } — an organiser reply

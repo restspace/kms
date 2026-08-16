@@ -313,9 +313,23 @@ describe('profile bio falls back to a submission-participant bio (defect #12)', 
     expect(html).toContain('The real, current profile bio.');
   });
 
-  it('still warns when neither store has a bio', async () => {
+  it('still warns when neither store has a bio, naming what is missing (D4)', async () => {
     await seedSubmission();
     const html = await (await SELF.fetch(`${ORIGIN}/portal/${slug}`, { headers: { cookie } })).text();
-    expect(html).toContain('bio or headshot is missing');
+    // CFP-S2: the old wording ("your bio or headshot is missing") could not
+    // say which, so a speaker who had just written a bio in the submission's
+    // participant step read it as their words having been lost.
+    expect(html).toContain('Your biography and headshot are missing');
+    expect(html).toContain('/profile#field-biography');
+  });
+
+  it('names only the headshot once a bio exists', async () => {
+    await seedSubmission();
+    await env.DB.prepare('UPDATE event_contacts SET biography = ? WHERE event_id = ? AND contact_id = ?')
+      .bind('A bio that came from the participant step.', eventId, speakerId)
+      .run();
+    const html = await (await SELF.fetch(`${ORIGIN}/portal/${slug}`, { headers: { cookie } })).text();
+    expect(html).toContain('Your headshot is missing');
+    expect(html).not.toContain('Your biography');
   });
 });

@@ -99,12 +99,18 @@ describe('POST /app/api/contacts/query — scope: org', () => {
     expect(both).toMatchObject({
       company: 'Beta Corp', job_title: 'CTO', biography: 'Beta bio', notes: 'Beta notes',
     });
-    // Per-event concepts have no org-level answer and read null (the client
-    // hides the columns), while the row shape still carries the keys.
+    // The row is a person, not a membership, so it names no event of its own;
+    // `confirmation` is a cross-submission tally with no org-level answer.
     expect(both.event_id).toBeNull();
     expect(both.event_name).toBeNull();
-    expect(both.custom_fields_json).toBeNull();
     expect(both.confirmation).toBeNull();
+    // SPK-15: speaker_status and custom_fields_json are the most-recent
+    // membership's answer (like company/job_title/biography above), and the
+    // row says which membership that was — reading them as NULL is what made
+    // the directory panel show "Status —" for a speaker who has one.
+    expect(both.profile_event_id).toBe(eventB);
+    expect(both.profile_event_name).toBe('Beta Summit');
+    expect(both.custom_fields_json).toBe('{}');
     // Identity columns still come straight off `contacts`.
     expect(both).toMatchObject({ email: 'twice@example.com', first_name: 'Ada', last_name: 'Lovelace' });
 

@@ -21,6 +21,7 @@ import {
   sendScheduleConfirmations,
   setAgendaPublished,
   setConflictIgnored,
+  updateSubmission,
   type AgendaConflictRow,
   type AgendaPayload,
   type AgendaSessionRow,
@@ -663,6 +664,16 @@ export function AgendaSection({
     () => (data?.sessions ?? []).filter((s) => s.starts_at !== null && s.pencilled_at === null && s.invited === 0).length,
     [data],
   )
+  /**
+   * AIA-S2: scheduled sessions the public feeds will skip anyway, because the
+   * submission's "Content approved" switch is off (migration 0010). Counted
+   * off the whole board, not the filtered view — "3 hidden" has to be true of
+   * the agenda, not of whatever the search box currently narrows it to.
+   */
+  const hiddenSessions = useMemo(
+    () => (data?.sessions ?? []).filter((s) => s.starts_at !== null && s.content_approved === 0),
+    [data],
+  )
   const errorCount = liveConflicts.filter((c) => c.severity === 'error').length
   const warningCount = liveConflicts.filter((c) => c.severity === 'warning').length
   const conflictCount = errorCount + warningCount
@@ -728,6 +739,28 @@ export function AgendaSection({
 
   const published = data.event.agenda_published === 1
 
+  /**
+   * AIA-S2: the "Hidden" badge's one-click fix. Flips the submission's
+   * content_approved back on and patches the board in place — going to Edit
+   * submission for a single switch, having already placed and confirmed the
+   * session here, is the detour that made a scheduled session's absence from
+   * the public agenda look like a bug in publishing.
+   */
+  const makeSessionPublic = async (id: string) => {
+    const target = dataRef.current?.sessions.find((s) => s.id === id)
+    try {
+      await updateSubmission(id, { content_approved: true })
+      setData((cur) =>
+        cur === null
+          ? cur
+          : { ...cur, sessions: cur.sessions.map((s) => (s.id === id ? { ...s, content_approved: 1 } : s)) },
+      )
+      showToast({ message: `${target?.code ?? 'Session'} will now appear on the public agenda` })
+    } catch (e: unknown) {
+      showToast({ message: e instanceof Error ? e.message : 'Could not update the session' })
+    }
+  }
+
   /** FR-AGENDA-9: the flag gates the public GET /e/:slug/agenda.json feed. */
   const togglePublish = async () => {
     const current = dataRef.current
@@ -751,6 +784,27 @@ export function AgendaSection({
         const confirmed = await appConfirm(
           `${unplaced.length} accepted session${unplaced.length === 1 ? ' is' : 's are'} not scheduled yet and will NOT appear on the public agenda:\n\n${listed.join('\n')}\n\nPublish anyway?`,
           { title: 'Unscheduled sessions will be missing', confirmLabel: 'Publish anyway', cancelLabel: 'Keep as draft' },
+        )
+        if (!confirmed) return
+      }
+      // Publish-time guard (AIA-S2): a scheduled session whose "Content
+      // approved" switch is off publishes into thin air — the board says
+      // placed and published, the public agenda simply never lists it. Same
+      // shape as the unplaced guard above: name them, then let the organiser
+      // decide. The one-click fix is the "Hidden" badge on the block itself.
+      const held = current.sessions.filter((s) => s.starts_at !== null && s.content_approved === 0)
+      if (held.length > 0) {
+        const listed = held.slice(0, 6).map((s) => `• ${s.code} · ${s.title}`)
+        if (held.length > 6) listed.push(`…and ${held.length - 6} more`)
+        const confirmed = await appConfirm(
+          `${held.length} scheduled session${held.length === 1 ? ' is' : 's are'} held out of public view by “Content approved” and will NOT appear on the public agenda:\n\n${listed.join(
+            '\n',
+          )}\n\nUse the “Hidden” badge on a session to make it public.`,
+          {
+            title: 'Sessions hidden from the public agenda',
+            confirmLabel: 'Publish anyway',
+            cancelLabel: 'Fix visibility first',
+          },
         )
         if (!confirmed) return
       }
@@ -780,7 +834,13 @@ export function AgendaSection({
       // Link the page people actually read, not the JSON feed behind it
       // (the feed still serves at the same path + `.json`).
       showToast({
-        message: next ? `Agenda published at /e/${current.event.slug}/agenda` : 'Agenda unpublished',
+        // AIA-S2: the public pages are edge-cached, so "published" and
+        // "visible to attendees" are up to a couple of minutes apart. Saying
+        // so is the difference between a normal wait and an organiser
+        // concluding publishing is broken and hunting for a switch.
+        message: next
+          ? `Agenda published at /e/${current.event.slug}/agenda — the public page can take a minute or two to catch up`
+          : 'Agenda unpublished',
         ...(next ? { link: { href: `/e/${current.event.slug}/agenda`, label: 'View agenda' } } : {}),
       })
     } catch (e: unknown) {
@@ -908,6 +968,16 @@ export function AgendaSection({
           </p>
           <p className="agenda-slot-summary">
             {unscheduled.length} unplaced · {pencilledCount} pencilled · {conflictCount} conflict{conflictCount === 1 ? '' : 's'}
+            {hiddenSessions.length > 0 && (
+              <>
+                {' · '}
+                <span title={`Scheduled, but held out of every public feed by their “Content approved” switch:\n${hiddenSessions
+                  .map((s) => `• ${s.code} · ${s.title}`)
+                  .join('\n')}`}>
+                  {hiddenSessions.length} hidden from public
+                </span>
+              </>
+            )}
           </p>
           {jobNote && (
             <p className="agenda-job-note" role="status">{jobNote}</p>
@@ -1102,6 +1172,7 @@ export function AgendaSection({
                 commitScheduleGuarded(id, patchFrom(local.day, local.minutes, dur, s.room_id))
               }}
               onOpenMove={setMoveId}
+              onMakePublic={(id) => void makeSessionPublic(id)}
               previewDrop={(id, col, startMin, dur) => {
                 const roomId = groupBy === 'room' ? col.key : sessionById.get(id)?.room_id ?? null
                 return previewFor(id, col.day, startMin, dur, roomId)
@@ -1142,6 +1213,7 @@ export function AgendaSection({
                 commitScheduleGuarded(id, patchFrom(local.day, local.minutes, dur, s.room_id))
               }}
               onOpenMove={setMoveId}
+              onMakePublic={(id) => void makeSessionPublic(id)}
               previewDrop={(id, col, startMin, dur) =>
                 previewFor(id, col.day, startMin, dur, sessionById.get(id)?.room_id ?? null)
               }

@@ -50,6 +50,10 @@ view only), contact details, any custom fields your event has added, biography, 
 social links, their submissions, cross-event history, and — in single-event view — a history of
 profile edits with the ability to restore an earlier version.
 
+In the **All events** view, a person's company, job title, status, biography and custom fields are
+one event's answer about them — profile details live per event, not per person. A **Profile from**
+line names which event that is, and an edit made here writes back to that same event.
+
 - **Edit** — edit the record.
 - **Invite to portal** — sends (or re-sends) their portal sign-in link. Works even if you don't
   otherwise have edit rights.

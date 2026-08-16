@@ -21,6 +21,21 @@ import { matchTrackIds } from './embed';
 
 export const landingRoutes = new Hono<AppEnv>();
 
+/**
+ * Edge-cache policy for every public event surface (pages and feeds alike).
+ *
+ * AIA-S2: this was `s-maxage=60, stale-while-revalidate=300`, so an organiser
+ * who scheduled a session, published, and went straight to /e/<slug>/agenda
+ * could be served the pre-change page for up to six minutes — long enough to
+ * conclude that publishing was broken and to go looking for a switch to
+ * flip. (Every write path does bump the event revision; the revision is not
+ * what these URLs are keyed on, so it cannot shorten this window.) A minute
+ * of shared cache plus a minute of stale-serving keeps the CDN doing its job
+ * while bounding "I published and nothing happened" to about two minutes —
+ * which the publish toast now says out loud.
+ */
+const PUBLIC_PAGE_CACHE = 'public, max-age=0, s-maxage=60, stale-while-revalidate=60';
+
 /** The repo's docs folder on GitHub — the demo is public and the source is too,
  * so the orientation a tester needs is one link away rather than pasted here. */
 const REPO_DOCS = 'https://github.com/restspace/kms/blob/main/docs';
@@ -170,16 +185,25 @@ landingRoutes.get('/', async (c) => {
       )
     : '<section><h2>Demo speaker login</h2><p class="muted">No speaker is seeded for this event.</p></section>';
 
-  const resetBlock =
-    c.env.DEMO_RESET === 'on'
-      ? `<section>
+  let resetBlock = '';
+  if (c.env.DEMO_RESET === 'on') {
+    const { readRedirectEmail } = await import('../demoEmails');
+    const redirectEmail = await readRedirectEmail(c.env.DB);
+    resetBlock = `<section>
   <h2>Demo data</h2>
   <p class="muted">Replays the seed: the demo organisation and everything below it are recreated from scratch.</p>
   <form method="post" action="/demo/reset" id="demo-reset">
+    <label for="demo-reset-email">Send all contact email to (optional)</label><br/>
+    <input type="email" id="demo-reset-email" name="redirect_email" placeholder="you@example.com" value="${esc(redirectEmail ?? '')}"/>
+    <p class="muted">Every seeded contact is rewritten to a distinct <code>+tag</code> variant of this address (Ada
+    Lovelace becomes <code>you+adalovelace@example.com</code>), so demo mail all lands in one mailbox you can open,
+    still telling recipients apart. Organiser accounts keep their real address so you can still sign in. Saved with
+    the reset, so the nightly replay reapplies it too; leave blank to keep the seeded <code>@example.com</code>
+    addresses.</p>
     <button type="submit">Reset demo data</button>
   </form>
-</section>`
-      : '';
+</section>`;
+  }
 
   return c.html(
     page(
@@ -221,13 +245,29 @@ landingRoutes.post('/demo/reset', async (c) => {
       403,
     );
   }
+  const { parseRedirectBase, writeRedirectEmail } = await import('../demoEmails');
+  const body = await c.req.parseBody();
+  const raw = typeof body.redirect_email === 'string' ? body.redirect_email.trim() : '';
+  if (raw.length > 0 && !parseRedirectBase(raw)) {
+    return c.html(
+      page(
+        'Reset failed',
+        `<h1>That address didn't look valid</h1><p>Go back and try again, or leave the field blank.</p>
+<p><a href="/">Back to the front page</a></p>`,
+      ),
+      400,
+    );
+  }
+  const redirect = raw.length > 0 ? raw : null;
+  await writeRedirectEmail(c.env.DB, redirect, new Date().toISOString());
   const { resetDemoData } = await import('../demo');
-  await resetDemoData(c.env.DB);
+  await resetDemoData(c.env.DB, redirect);
   return c.html(
     page(
       'Demo data reset',
       `<h1>Demo data reset</h1>
 <p>The seed has been replayed — every demo record is back to its starting state.</p>
+${redirect ? `<p>Every seeded contact was given a <code>${esc(redirect)}</code> address.</p>` : ''}
 <p><a href="/">Back to the front page</a></p>`,
     ),
   );
@@ -414,7 +454,7 @@ async function loadAgendaFeed(db: D1Database, slug: string) {
 landingRoutes.get('/e/:slug/agenda.json', async (c) => {
   const feed = await loadAgendaFeed(c.env.DB, c.req.param('slug'));
   if (!feed) return c.json({ error: 'not_found' }, 404);
-  return c.json(feed, 200, { 'cache-control': 'public, max-age=0, s-maxage=60, stale-while-revalidate=300' });
+  return c.json(feed, 200, { 'cache-control': PUBLIC_PAGE_CACHE });
 });
 
 // ---------------------------------------------------------------------------
@@ -432,7 +472,7 @@ landingRoutes.get('/e/:slug/agenda.json', async (c) => {
 landingRoutes.get('/e/:slug/sessions.json', async (c) => {
   const feed = await loadAgendaFeed(c.env.DB, c.req.param('slug'));
   if (!feed) return c.json({ error: 'not_found' }, 404);
-  return c.json(feed, 200, { 'cache-control': 'public, max-age=0, s-maxage=60, stale-while-revalidate=300' });
+  return c.json(feed, 200, { 'cache-control': PUBLIC_PAGE_CACHE });
 });
 
 // ---------------------------------------------------------------------------
@@ -556,7 +596,7 @@ landingRoutes.get('/e/:slug/speakers.json', async (c) => {
       speakers: redactInternalAll(speakers),
     },
     200,
-    { 'cache-control': 'public, max-age=0, s-maxage=60, stale-while-revalidate=300' },
+    { 'cache-control': PUBLIC_PAGE_CACHE },
   );
 });
 
@@ -708,7 +748,7 @@ landingRoutes.get('/e/:slug/agenda.ics', async (c) => {
   return c.body(body, 200, {
     'content-type': 'text/calendar; charset=utf-8',
     'content-disposition': `inline; filename="${slug}-agenda.ics"`,
-    'cache-control': 'public, max-age=0, s-maxage=60, stale-while-revalidate=300',
+    'cache-control': PUBLIC_PAGE_CACHE,
   });
 });
 
@@ -721,7 +761,7 @@ landingRoutes.get('/e/:slug/sessions.ics', async (c) => {
   return c.body(body, 200, {
     'content-type': 'text/calendar; charset=utf-8',
     'content-disposition': `inline; filename="${slug}-sessions.ics"`,
-    'cache-control': 'public, max-age=0, s-maxage=60, stale-while-revalidate=300',
+    'cache-control': PUBLIC_PAGE_CACHE,
   });
 });
 
@@ -819,7 +859,7 @@ landingRoutes.get('/e/:slug/sessions.xml', async (c) => {
   return c.body(parts.join(''), 200, {
     'content-type': 'application/xml; charset=utf-8',
     'access-control-allow-origin': '*',
-    'cache-control': 'public, max-age=0, s-maxage=60, stale-while-revalidate=300',
+    'cache-control': PUBLIC_PAGE_CACHE,
   });
 });
 
@@ -964,7 +1004,7 @@ function eventPageResponse(c: Context<AppEnv>, event: EventLookupRow, kind: Even
   };
   const html = renderEventPage(`${event.name} — ${kindTitle(kind)}`, data);
   return c.html(html, 200, {
-    'cache-control': 'public, max-age=0, s-maxage=60, stale-while-revalidate=300',
+    'cache-control': PUBLIC_PAGE_CACHE,
     // Framing is the point of these pages (rubric EMB-15): they are the embed
     // targets for /embed.js on an organiser's own site. Stated explicitly, and
     // with no X-Frame-Options alongside it, so nobody has to guess whether the

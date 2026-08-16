@@ -100,6 +100,25 @@ describe('public feeds respect content_approved', () => {
   });
 });
 
+describe('the agenda board sees the gate (AIA-S2)', () => {
+  it('carries content_approved on every session so a hidden one can be flagged', async () => {
+    const slug = `ca-board-${crypto.randomUUID().slice(0, 8)}`;
+    const eventId = await createEvent({ slug });
+    const { cookie } = await adminSession(eventId, slug);
+    const visible = await seedAcceptedScheduled(eventId, 'sub-board-vis', 'SESS-1');
+    const hidden = await seedAcceptedScheduled(eventId, 'sub-board-hid', 'SESS-2');
+    await env.DB.prepare('UPDATE submissions SET content_approved = 0 WHERE id = ?').bind(hidden).run();
+
+    const res = await SELF.fetch('https://example.com/app/api/agenda', { headers: { cookie } });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { sessions: Array<{ id: string; content_approved: number }> };
+    // Without this the board could show a session placed, confirmed and
+    // published while every public feed silently skipped it.
+    expect(body.sessions.find((s) => s.id === visible)?.content_approved).toBe(1);
+    expect(body.sessions.find((s) => s.id === hidden)?.content_approved).toBe(0);
+  });
+});
+
 describe('PUT /app/api/submissions/:id { content_approved }', () => {
   it('lets an organiser toggle the gate independently of status', async () => {
     const eventId = await createEvent({ slug: `ca-toggle-${crypto.randomUUID().slice(0, 8)}` });

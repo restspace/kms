@@ -52,6 +52,15 @@ interface SessionRow {
   pencilled_at: string | null;
   updated_at: string;
   invited: number;
+  /**
+   * AIA-S2: the public-visibility gate (0010). Every public feed requires it,
+   * so a session can be accepted, scheduled, conflict-free and published and
+   * still be missing from the attendee-facing agenda — and the flag lives on
+   * another screen entirely (Edit submission), which is not somewhere anyone
+   * looks when the board says the session is placed. The board carries it so
+   * it can say so itself.
+   */
+  content_approved: number;
 }
 
 interface SpeakerRow {
@@ -69,6 +78,7 @@ export interface AgendaSession extends SessionRow {
 const SESSION_SELECT = `
   SELECT s.id, s.code, s.title, s.description, s.format, s.level, s.capacity,
          s.track_id, s.room_id, s.starts_at, s.ends_at, s.pencilled_at, s.updated_at,
+         s.content_approved,
          EXISTS (SELECT 1 FROM calendar_invites ci
                  WHERE ci.session_id = s.id AND ci.method = 'REQUEST') AS invited
   FROM submissions s

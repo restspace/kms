@@ -211,4 +211,59 @@ describe('contacts custom-field values', () => {
     const contact = await env.DB.prepare('SELECT id FROM contacts WHERE id = ?').bind(contactId).first();
     expect(contact).toBeTruthy();
   });
+  /**
+   * SPK-15 regression: a save must survive the round trip in BOTH scopes.
+   * The org directory used to select NULL for speaker_status and
+   * custom_fields_json, so a status and a custom value written through the
+   * event-scoped form came back empty the moment the same record was read as
+   * a directory row — which read as data loss, and made the organiser edit
+   * (and "lose") it again.
+   */
+  it('round-trips speaker_status and a custom field in event scope and org scope', async () => {
+    const eventId = await seedEvent();
+    const admin = await seedStaff(eventId, 'admin');
+    const field = (await (await api('/contact-fields', admin.cookie, {
+      label: 'Travel & Logistics', type: 'multiline',
+    })).json()) as { key: string };
+    const contactId = await seedContact(eventId, { email: 'priya@example.com', first_name: 'Priya', last_name: 'Raman' });
+
+    const saved = await api(`/contacts/${contactId}`, admin.cookie, {
+      speaker_status: 'confirmed',
+      custom_fields: { [field.key]: 'Arrival May 11, aisle seat' },
+    }, 'PUT');
+    expect(saved.status).toBe(200);
+
+    const eventRow = (await (await SELF.fetch('https://example.com/app/api/contacts/query', {
+      method: 'POST',
+      headers: { cookie: admin.cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ from: 0, size: 10, filters: { contact_id: contactId } }),
+    })).json()) as { items: Array<Record<string, unknown>> };
+    expect(eventRow.items[0]).toMatchObject({ speaker_status: 'confirmed' });
+    expect(JSON.parse(eventRow.items[0].custom_fields_json as string)).toEqual({
+      [field.key]: 'Arrival May 11, aisle seat',
+    });
+
+    const orgRow = (await (await SELF.fetch('https://example.com/app/api/contacts/query', {
+      method: 'POST',
+      headers: { cookie: admin.cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ from: 0, size: 50, scope: 'org', filters: { contact_id: contactId } }),
+    })).json()) as { items: Array<Record<string, unknown>> };
+    const person = orgRow.items.find((r) => r.id === contactId)!;
+    expect(person).toMatchObject({
+      speaker_status: 'confirmed',
+      profile_event_id: eventId,
+      // The row is a person; it names the membership its profile came from
+      // rather than pretending to be that membership.
+      event_id: null,
+    });
+    expect(JSON.parse(person.custom_fields_json as string)).toEqual({
+      [field.key]: 'Arrival May 11, aisle seat',
+    });
+
+    // Nothing else on the record moved.
+    const stored = await env.DB.prepare(
+      'SELECT company, job_title, biography FROM event_contacts WHERE event_id = ? AND contact_id = ?',
+    ).bind(eventId, contactId).first<Record<string, unknown>>();
+    expect(stored).toMatchObject({ company: null, job_title: null, biography: null });
+  });
 });

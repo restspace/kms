@@ -17,12 +17,17 @@ import { describe, expect, it, vi, beforeAll } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/preact';
 
 const getFileLibrary = vi.fn();
+const contactsQuery = vi.fn();
+const contactsOrgQuery = vi.fn();
 
 vi.mock('./api', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./api')>();
   return {
     ...actual,
     getFileLibrary: (...args: unknown[]) => getFileLibrary(...args),
+    queryResource: (resource: string) =>
+      resource === 'contacts' ? contactsQuery : (actual.queryResource as any)(resource),
+    queryContactsOrg: () => contactsOrgQuery,
     // FileLibraryDetail loads the chain on mount; keep it off the network.
     getFileChain: async () => ({ versions: [], comments: [] }),
   };
@@ -247,5 +252,38 @@ describe('files ?rec= restore', () => {
     expect(await loadWorkspaceRecord('files', 'up-gone', null)).toBeNull();
     // Org scope sends no event_id at all rather than an empty string.
     expect(getFileLibrary).toHaveBeenLastCalledWith({ upload_id: 'up-gone', size: 1, event_id: undefined });
+  });
+});
+
+/**
+ * SPK-15: which SCOPE a `?rec=` speaker resolves in is the whole defect. An
+ * org-directory row carries no event_name, no speaker_status and no
+ * custom_fields_json — read one while the URL names an event and the detail
+ * panel shows "Event —", "Status —" and every custom field empty for a record
+ * whose values are stored perfectly well. (The caller's half of the fix is in
+ * App: the effect waits for `/api/me` before resolving, because `filter` reads
+ * 'all' until then.)
+ */
+describe("speakers ?rec= restore resolves in the URL's scope", () => {
+  it('uses the event-scoped contacts query when an event is selected', async () => {
+    contactsQuery.mockResolvedValueOnce({ items: [{ id: 'c-1', event_id: 'ev-1' }], total: 1 });
+
+    const item = await loadWorkspaceRecord('speakers', 'c-1', 'ev-1');
+
+    expect(contactsOrgQuery).not.toHaveBeenCalled();
+    expect(contactsQuery).toHaveBeenCalledWith({
+      from: 0,
+      size: 1,
+      filters: { contact_id: 'c-1', event_id: 'ev-1' },
+    });
+    expect((item as { event_id: string }).event_id).toBe('ev-1');
+  });
+
+  it('falls back to the org directory only when no event is selected', async () => {
+    contactsOrgQuery.mockResolvedValueOnce({ items: [{ id: 'c-1', event_id: null }], total: 1 });
+
+    await loadWorkspaceRecord('speakers', 'c-1', null);
+
+    expect(contactsOrgQuery).toHaveBeenCalledWith({ from: 0, size: 1, filters: { contact_id: 'c-1' } });
   });
 });

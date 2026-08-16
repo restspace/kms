@@ -426,6 +426,22 @@
 .tg-block.conflict-warning .tg-block-time { padding-left: 15px; }
 .tg-block.conflict-error .tg-block-flag { color: var(--danger); }
 .tg-block.conflict-warning .tg-block-flag { color: var(--notice-text); }
+/* AIA-S2: "this session is scheduled but held out of the public agenda".
+   Always visible (unlike the open-in-Workspace button) — it is the answer to
+   "why isn't it on the public page", so it must read without hovering. */
+.tg-block-hidden {
+  display: inline-block;
+  margin-top: 2px;
+  padding: 0 5px;
+  border: 1px solid var(--notice-text);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--notice-text);
+  font-size: 10px;
+  line-height: 15px;
+  cursor: pointer;
+}
+.tg-block-hidden:hover { background: var(--notice-bg, var(--surface)); }
 /* Hover/focus-revealed "open submission in Workspace" affordance, shared by
    grid blocks and tray cards. */
 .tg-open-btn {

@@ -104,7 +104,7 @@ adminApiRoutes.get('/meta', (c) => {
     resources,
     conventions: {
       scope:
-        'Queries span every event in the organisation where this staff email holds a seat; every row carries event_id and event_name. Pass filters.event_id to narrow to one (403 outside the accessible set). contacts also accepts a top-level scope:"org" on the query body — the organisation\'s contact directory, one row per person (memberships folded into event_count/events_json, profile columns taken from the most recent membership, event_id/event_name/custom_fields_json/confirmation null, people on no roster at all included). filters.event_id is ignored in that mode.',
+        'Queries span every event in the organisation where this staff email holds a seat; every row carries event_id and event_name. Pass filters.event_id to narrow to one (403 outside the accessible set). contacts also accepts a top-level scope:"org" on the query body — the organisation\'s contact directory, one row per person (memberships folded into event_count/events_json; the profile columns — company, job_title, biography, notes, headshot_asset_id, speaker_status, custom_fields_json — are the MOST RECENT membership\'s answer, and profile_event_id/profile_event_name name the event they came from; event_id/event_name/confirmation null; people on no roster at all included). filters.event_id is ignored in that mode.',
       pagination:
         'from/size offset paging and cursor keyset paging both work. Cursor mode ignores from, returns next_cursor, and answers 400 { error: "invalid_cursor" } for a tampered value.',
       errors: 'Non-2xx responses carry { error: <machine_code> }; validation failures add errors: [{ question_id, code, message }].',
@@ -991,8 +991,21 @@ const CONTACTS_ORG_SPEC: Omit<ResourceDef, 'fromSql'> = {
                                  ORDER BY ec2.added_at DESC, ec2.event_id DESC
                                  LIMIT 1)`,
   // event_id/event_name stay in the row shape (NULL) so one grid can render
-  // both modes; custom_fields_json and confirmation are per-event concepts with
-  // no org-level answer at all, and read NULL rather than an arbitrary event's.
+  // both modes, and `confirmation` — a tally across submissions this person is
+  // on — has no org-level answer at all, so it reads NULL rather than an
+  // arbitrary event's.
+  //
+  // SPK-15: `speaker_status` and `custom_fields_json` used to read NULL here
+  // for the same reason, but they are not really unanswerable — they are the
+  // most-recent membership's answer, exactly like company/job_title/biography
+  // above, and reading them as NULL made the directory's detail panel show
+  // "Status —" and every custom field empty for a person whose event row has
+  // both filled in. They are read from the SAME membership `m` the profile
+  // columns come from and labelled as such: `profile_event_id` /
+  // `profile_event_name` say which event these five columns belong to, so the
+  // panel can caption them instead of implying they are the person's own, and
+  // the edit form can address its PUT at that event rather than the session's.
+  //
   // Both event_count and events_json now join through `events`, so a
   // membership row left behind by a deleted event (orphaned event_contacts)
   // counts in neither — the eval-caught mismatch (#6b) was event_count
@@ -1000,10 +1013,19 @@ const CONTACTS_ORG_SPEC: Omit<ResourceDef, 'fromSql'> = {
   // events row, so a contact with one orphaned + zero live memberships
   // showed "1 event" in the grid and "On no event yet" in the detail panel.
   selectSql: `SELECT c.*,
-        NULL AS event_id, NULL AS event_name,
-        NULL AS custom_fields_json, NULL AS confirmation,
+        NULL AS event_id, NULL AS event_name, NULL AS confirmation,
         m.company, m.job_title, m.biography, m.notes, m.headshot_asset_id,
         m.added_at, m.source, m.extra,
+        m.event_id AS profile_event_id,
+        (SELECT ev.name FROM events ev WHERE ev.id = m.event_id) AS profile_event_name,
+        (SELECT json_group_object(d.key, v.value) FROM contact_field_values v
+         JOIN contact_field_definitions d ON d.id = v.field_id
+         WHERE v.contact_id = c.id AND d.event_id = m.event_id) AS custom_fields_json,
+        COALESCE(m.speaker_status, CASE
+          WHEN m.confirmed_participant_count > 0 THEN 'confirmed'
+          WHEN m.participant_count > 0 THEN 'awaiting_reply'
+          ELSE NULL
+        END) AS speaker_status,
         (SELECT COUNT(*) FROM event_contacts ec JOIN events ev ON ev.id = ec.event_id
           WHERE ec.contact_id = c.id) AS event_count,
         (SELECT json_group_array(ev.name ORDER BY ec.added_at DESC, ec.event_id DESC)
@@ -1777,6 +1799,37 @@ adminApiRoutes.put('/contacts/:id', async (c) => {
     const seat = await requireEventAccess(c, body.event_id);
     if (!seat || !isWriter(seat.role)) return c.json({ error: 'forbidden' }, 403);
     eventId = body.event_id;
+  } else if (typeof body.event_id !== 'string' || body.event_id === '') {
+    // SPK-15: a caller with no event_id (the org directory before it learned
+    // to send `profile_event_id`, and any /api/v1 client) fell through to the
+    // session's event and 404'd for anyone not on it — even though the
+    // directory row it was editing plainly existed. Fall back to the same
+    // membership the directory reads its profile columns from (most recent
+    // wins, exactly as CONTACTS_ORG_SPEC.baseFrom picks it) so read and write
+    // address one row. Only when the session's own event has no membership to
+    // write, so every existing single-event caller is unaffected.
+    const onSession = await c.env.DB.prepare(
+      'SELECT 1 AS ok FROM event_contacts WHERE event_id = ? AND contact_id = ?',
+    )
+      .bind(session.eventId, id)
+      .first<{ ok: number }>();
+    if (!onSession) {
+      const fallback = await c.env.DB.prepare(
+        `SELECT ec.event_id FROM event_contacts ec
+           JOIN contacts c ON c.id = ec.contact_id
+           JOIN events ev ON ev.id = ec.event_id AND ev.org_id = c.org_id
+          WHERE ec.contact_id = ?
+          ORDER BY ec.added_at DESC, ec.event_id DESC
+          LIMIT 1`,
+      )
+        .bind(id)
+        .first<{ event_id: string }>();
+      if (fallback) {
+        const seat = await requireEventAccess(c, fallback.event_id);
+        if (!seat || !isWriter(seat.role)) return c.json({ error: 'forbidden' }, 403);
+        eventId = fallback.event_id;
+      }
+    }
   }
 
   if (fields.speaker_status && !(await isValidSpeakerStatus(c.env.DB, eventId, fields.speaker_status))) {
@@ -4625,6 +4678,7 @@ async function contactWithCustomFields(
     .prepare(
       `SELECT c.*, ec.event_id, ec.biography, ec.headshot_asset_id, ec.company,
               ec.job_title, ec.notes, ec.added_at, ec.source, ec.extra, ec.speaker_status,
+              (SELECT ev.name FROM events ev WHERE ev.id = ec.event_id) AS event_name,
         (SELECT json_group_object(d.key, v.value) FROM contact_field_values v
          JOIN contact_field_definitions d ON d.id = v.field_id
          WHERE v.contact_id = c.id AND d.event_id = ec.event_id) AS custom_fields_json

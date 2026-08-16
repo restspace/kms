@@ -135,4 +135,7 @@ was meant for.
   of the demo you're testing.
 - The address is saved when you reset, and reapplied by the nightly reset — you don't have to
   retype it every day.
+- The same field is on the public front-door page's **Reset demo data** button too, for anyone
+  testing the demo who isn't signed in — it shares the saved address with this screen, so setting
+  it here means it's already filled in there, and vice versa.
 - Clear the field and reset to put the seeded `@example.com` addresses back.

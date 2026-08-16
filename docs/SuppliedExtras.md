@@ -93,7 +93,7 @@ hundred people.
 
 Worth testing: give an AI assistant the URL `<host>/llms.txt` and a token, then ask it something
 real — "which accepted speakers still owe us a headshot?", or "how many pending submissions have
-fewer than two reviews?" It should get there without you explaining the API.
+fewer than two reviews?" It should get there without you explaining the API. Also it can write updates, for instance scanning submissions for spam and setting tags so you can deal with them.
 
 ### 8. Embed the schedule and the speaker gallery on another site
 
@@ -137,7 +137,7 @@ Then check **Dashboard → Speaker Tracking**: an **Approval pending** panel lis
 with a countdown of days until the event. The acceptance email can optionally ask the question for
 you, opt-in per batch.
 
-### 13. Reminders that a human sends
+### 13. See automatic reminders before sending
 
 By default the system chases speakers automatically. Switch the event to assisted mode in
 **Settings → Chase inbox**, and the same nightly sweep stages an editable draft instead of sending

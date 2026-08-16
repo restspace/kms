@@ -50,6 +50,15 @@ export interface ContactRow {
    * 'awaiting' (a participant somewhere, none confirmed), or null/absent
    * when the contact is not a submission participant at all. */
   confirmation?: 'confirmed' | 'awaiting' | null
+  /** Org mode (SPK-15): the event whose membership supplied the profile
+   * columns on this row — company, job_title, biography, notes,
+   * headshot_asset_id, speaker_status and custom_fields_json are all that
+   * event's answer, not an org-level one. The directory captions them with
+   * `profile_event_name` and addresses its PUT at `profile_event_id`, so what
+   * the panel shows and what an edit writes are the same membership row.
+   * Absent in event mode (the row IS a membership there). */
+  profile_event_id?: string | null
+  profile_event_name?: string | null
   /** Org mode (CRM-01): number of event memberships. Absent in event mode. */
   event_count?: number
   /** Org mode: JSON string array of member event names, most recent first. */
@@ -1267,7 +1276,10 @@ export interface FileLibraryRow extends FileVersion {
    * The session (submission) this upload belongs to (#9) — resolved
    * server-side from `submission_id` when set, falling back to the
    * submission of the task assignment the upload's chain came from when it
-   * isn't (a task assigned directly to a contact rather than a submission).
+   * isn't (a task assigned directly to a contact rather than a submission),
+   * and finally (CNT-13) to the uploader's single accepted session in the
+   * event. Null means genuinely ambiguous — nobody, or more than one — which
+   * is what `setFileSubmission` is for.
    * `session_code`/`session_title` are the same value as
    * `submission_code`/`submission_title` today; kept as a distinct field so
    * the Files library's Session column has a name independent of the
@@ -1310,6 +1322,19 @@ export const getFileChain = (uploadId: string) => request<FileChain>(`/app/api/f
 
 export const getTaskAssignmentFiles = (assignmentId: string) =>
   request<FileChain>(`/app/api/files/task-assignments/${assignmentId}`)
+
+/**
+ * CNT-13: link a file to a session by hand (or unlink it with null). The
+ * server resolves the unambiguous cases itself — this is for the speaker with
+ * two accepted sessions, where the SESSION column would otherwise stay blank
+ * with nothing the organiser could do about it. The write moves the whole
+ * version chain, not just the current file.
+ */
+export const setFileSubmission = (uploadId: string, submissionId: string | null) =>
+  request<{ ok: boolean; submission_id: string | null }>(
+    `/app/api/files/uploads/${uploadId}/submission`,
+    { method: 'PUT', body: JSON.stringify({ submission_id: submissionId }) },
+  )
 
 export const addFileComment = (uploadId: string, body: string) =>
   request<{ ok: boolean; id: string; comments: FileComment[] }>(`/app/api/files/uploads/${uploadId}/comments`, {
@@ -1504,6 +1529,13 @@ export interface AgendaSessionRow {
   updated_at: string
   /** 1 when a live METHOD:REQUEST calendar invite exists */
   invited: number
+  /**
+   * AIA-S2: 0 means every public feed skips this session however well it is
+   * scheduled and published — the "Content approved" switch on the submission
+   * (migration 0010). The board flags it rather than letting a scheduled,
+   * conflict-free, published session be quietly absent from the public agenda.
+   */
+  content_approved: number
   speakers: Array<{ contact_id: string; name: string; email?: string | null }>
 }
 

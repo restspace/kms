@@ -3,7 +3,9 @@
 **Sidebar:** Agenda
 
 Where accepted sessions become an actual schedule. The header shows a **Draft / Published**
-status chip and a running summary — unplaced, pencilled, and conflicting session counts.
+status chip and a running summary — unplaced, pencilled, and conflicting session counts, plus
+**N hidden from public** when some scheduled sessions are being held back (see
+[Publishing](#publishing-and-the-public-page)).
 
 ## Views
 
@@ -29,8 +31,10 @@ instead (Week always groups by room).
   that doesn't have one yet (pencilled sessions are excluded from the count). This runs as a
   background job with a live progress line ("Queued X of Y…", then a sent/failed summary).
 - **Publish / Unpublish** — toggles whether the public agenda feed is live. Unpublishing asks for
-  confirmation. Publishing warns you if any accepted sessions are still unscheduled (listing up to
-  six of them) and lets you publish anyway or stay in draft.
+  confirmation. Publishing warns you if any accepted sessions are still unscheduled, if any
+  scheduled ones are hidden from public view, or if any conflicts are unresolved (listing up to six
+  of each) and lets you publish anyway or go back and fix them. See
+  [Publishing and the public page](#publishing-and-the-public-page).
 - **+ Add Session** — opens the Add Session dialog (see below).
 - **Undo** — ⌘Z / Ctrl+Z reverts the last schedule change; an auto-place batch undoes as one unit,
   not session by session. A toast also offers an **Undo** link at the moment of the change.
@@ -70,6 +74,21 @@ on the other session in the clash), **Remove speaker** (only for a speaker-ident
 for confirmation), and **Ignore** — ignored conflicts collapse into a separate "Ignored (N)"
 section with a **Restore** option. Outside the Conflicts tab, a banner shows your top three live
 conflicts with a **Review conflicts** button.
+
+## Publishing and the public page
+
+Three things have to be true before attendees see a session on `/e/<your-event>/agenda`: the
+session is **accepted**, it is **scheduled** (a confirmed slot, not a pencilled one), and it is
+**approved for public view**. That last one is the **Content approved** switch on the submission
+itself — it exists so you can hold a session back (a speaker still to confirm, a title still being
+argued about) without declining it or pulling it off the grid.
+
+A session that is scheduled but held back shows a **Hidden** badge on its block. Click the badge to
+make it public — that is the whole fix, no trip to the submission needed. The header summary counts
+them, and publishing warns you before they go missing from the public page.
+
+> **Note:** the public pages are cached at the edge, so a change can take a minute or two to show
+> up there after you publish. That is normal — you do not need to unpublish and publish again.
 
 ## Adding or editing a session
 

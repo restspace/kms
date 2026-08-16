@@ -4,6 +4,8 @@ import {
   getFileChain,
   getFileLibrary,
   getTaskAssignmentFiles,
+  queryResource,
+  setFileSubmission,
   uploadOrganiserFile,
   type FileChain,
   type FileComment,
@@ -332,6 +334,102 @@ export function SubmissionFilesPanel({ submissionId }: { submissionId: string })
   )
 }
 
+/**
+ * CNT-13: the file's session, and the way to set it when the server could not.
+ * Reads as plain text once linked; the picker only opens on demand, so the
+ * common (already resolved) case stays a single line. The options are the
+ * event's sessions, fetched once when the organiser actually asks for them.
+ */
+function FileSessionRow({ item }: { item: FileLibraryRow }) {
+  const [sessionId, setSessionId] = useState<string | null>(item.session_id)
+  const [label, setLabel] = useState<string | null>(
+    item.session_id ? `${item.session_code ?? ''}${item.session_title ? ` — ${item.session_title}` : ''}`.trim() : null,
+  )
+  const [editing, setEditing] = useState(false)
+  const [options, setOptions] = useState<Array<{ id: string; code: string | null; title: string }> | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    setSessionId(item.session_id)
+    setLabel(
+      item.session_id
+        ? `${item.session_code ?? ''}${item.session_title ? ` — ${item.session_title}` : ''}`.trim()
+        : null,
+    )
+    setEditing(false)
+  }, [item.upload_id, item.session_id, item.session_code, item.session_title])
+
+  const openPicker = () => {
+    setEditing(true)
+    if (options) return
+    queryResource<{ id: string; code: string | null; title: string }>('submissions')({
+      from: 0,
+      size: 200,
+      filters: { event_id: item.event_id },
+    })
+      .then((r) => setOptions(r.items))
+      .catch((e: unknown) => setError(e instanceof Error ? e.message : 'Could not load sessions'))
+  }
+
+  const save = async (next: string) => {
+    setBusy(true)
+    setError(null)
+    try {
+      const id = next || null
+      await setFileSubmission(item.upload_id, id)
+      const picked = options?.find((o) => o.id === id)
+      setSessionId(id)
+      setLabel(id && picked ? `${picked.code ?? ''}${picked.title ? ` — ${picked.title}` : ''}`.trim() : null)
+      setEditing(false)
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : 'Could not link the file')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div style={{ display: 'contents' }}>
+      <dt>Session</dt>
+      <dd>
+        {editing ? (
+          <>
+            <select
+              defaultValue={sessionId ?? ''}
+              disabled={busy || !options}
+              onChange={(e) => void save(e.target.value)}
+            >
+              <option value="">— Not linked —</option>
+              {(options ?? []).map((o) => (
+                <option key={o.id} value={o.id}>
+                  {`${o.code ?? ''}${o.title ? ` — ${o.title}` : ''}`.trim()}
+                </option>
+              ))}
+            </select>{' '}
+            <button type="button" disabled={busy} onClick={() => setEditing(false)}>
+              Cancel
+            </button>
+            {!options && !error && <span className="file-vmeta"> Loading sessions…</span>}
+          </>
+        ) : (
+          <>
+            {label ?? <span style={{ color: 'var(--text-faint)' }}>Not linked</span>}{' '}
+            <button
+              type="button"
+              onClick={openPicker}
+              title="Link this file to one of the event's sessions"
+            >
+              {label ? 'Change' : 'Link to session'}
+            </button>
+          </>
+        )}
+        {error && <p className="file-error" role="alert">{error}</p>}
+      </dd>
+    </div>
+  )
+}
+
 /** Files library tab: the detail panel behind a library row. */
 export function FileLibraryDetail({ item }: { item: FileLibraryRow }) {
   const [chain, setChain] = useState<FileChain | null>(null)
@@ -375,6 +473,7 @@ export function FileLibraryDetail({ item }: { item: FileLibraryRow }) {
               <dd>{item.uploader_name ?? item.uploader_email}</dd>
             </div>
           )}
+        <FileSessionRow item={item} />
         <div style={{ display: 'contents' }}>
           <dt>Size</dt>
           <dd>{formatBytes(current?.size_bytes ?? item.size_bytes)}</dd>

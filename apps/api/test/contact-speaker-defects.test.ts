@@ -61,10 +61,16 @@ describe('PUT /app/api/contacts/:id persists edits', () => {
       email: 'only-on-b@example.com', first_name: 'Only', last_name: 'OnB', company: 'Oldco',
     });
 
-    // Session cookie is bound to event A. Without an event_id the write cannot
-    // find the membership and must NOT answer 200.
-    const blind = await api(`/contacts/${speaker}`, admin.cookie, { company: 'Newco' }, 'PUT');
-    expect(blind.status).toBe(404);
+    // Session cookie is bound to event A, where this contact has no
+    // membership. SPK-15: rather than 404 (or writing to event A, where
+    // nothing the caller is looking at would change), the write falls back to
+    // the same membership the org directory reads its profile columns from.
+    const blind = await api(`/contacts/${speaker}`, admin.cookie, { company: 'Fallbackco' }, 'PUT');
+    expect(blind.status).toBe(200);
+    const fallbackProfile = await env.DB.prepare(
+      'SELECT company FROM event_contacts WHERE event_id = ? AND contact_id = ?',
+    ).bind(eventB, speaker).first<{ company: string | null }>();
+    expect(fallbackProfile?.company).toBe('Fallbackco');
 
     // With the row's own event_id (which the edit form echoes) it persists.
     const scoped = await api(`/contacts/${speaker}`, admin.cookie, { company: 'Newco', event_id: eventB }, 'PUT');

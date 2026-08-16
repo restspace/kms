@@ -29,9 +29,14 @@ export function adminLoginPage(events: Event[], error?: string): string {
 <select id="${id}" name="event_slug" required>${options}</select>`;
   const errorHtml = error ? `<p class="field-err">${esc(error)}</p>` : '';
   return page(
-    'Admin sign in',
-    `<h1>Admin sign in</h1>
+    'Sign in',
+    `<h1>Sign in</h1>
 <p>Enter your email address and we will send you a sign-in link.</p>
+<!-- ABS-S3 (D5): this gate serves reviewers as well as organisers, and an
+     invited reviewer has no password — nobody sets one for them. Leading with
+     "Admin sign in" over a password box sent them looking for credentials
+     that do not exist; the link path is the door they actually have. -->
+<p class="muted">Organisers and reviewers both sign in here. If you were invited, use the link — a password only works if you created one yourself.</p>
 <form method="post" action="/auth/request">
   <label for="email">Email address</label>
   <input type="email" id="email" name="email" required autocomplete="email" placeholder="you@example.com">

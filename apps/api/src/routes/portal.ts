@@ -304,6 +304,35 @@ export interface FieldError {
 const fieldId = (key: string): string => `field-${key}`;
 const errId = (key: string): string => `err-${key}`;
 
+/**
+ * CFP-S2 (D4): the portal home's profile nag. It used to read "Your bio or
+ * headshot is missing" whichever of the two was actually absent, so a speaker
+ * who had just written a bio in the submission's Participant step — which does
+ * land on this very profile (participants.ts merges it into
+ * event_contacts.biography) — read it as the app having lost their words, and
+ * went looking for a second bio field that does not exist. It now names the
+ * one thing that is missing and links straight at the control for it.
+ */
+function profileGapNotice(
+  ctx: { contact: { biography: string | null; headshot_asset_id: string | null } },
+  base: string,
+): string {
+  const missingBio = !ctx.contact.biography;
+  const missingHeadshot = !ctx.contact.headshot_asset_id;
+  if (!missingBio && !missingHeadshot) return '';
+  const [what, anchor] =
+    missingBio && missingHeadshot
+      ? ['Your biography and headshot are missing', fieldId('biography')]
+      : missingBio
+        ? ['Your biography is missing', fieldId('biography')]
+        : ['Your headshot is missing', fieldId('headshot')];
+  return `<p class="small" style="color:var(--notice-text)">${esc(what)} — organisers use ${
+    missingBio && missingHeadshot ? 'both' : 'it'
+  } in the programme. <a href="${base}/profile#${esc(anchor)}">Add ${
+    missingBio && missingHeadshot ? 'them' : 'it'
+  } now</a>.</p>`;
+}
+
 function errorSummaryHtml(errors: FieldError[]): string {
   if (errors.length === 0) return '';
   const heading = errors.length === 1 ? 'There is a problem' : `There are ${errors.length} problems`;
@@ -618,7 +647,7 @@ ${t.due_at ? `<span class="due${isOverdue(t) ? ' overdue' : ''}">Due ${esc(fmtDa
 <div>
 <div class="card"><h2>My Profile</h2>
 <p>${esc(displayName(ctx.contact))}<br><span class="muted small">${esc(ctx.contact.email)}</span></p>
-${!ctx.contact.biography || !ctx.contact.headshot_asset_id ? '<p class="small" style="color:var(--notice-text)">Your bio or headshot is missing — organisers use both in the programme.</p>' : ''}
+${profileGapNotice(ctx, base)}
 <a href="${base}/profile">View more</a></div>
 <div class="card"><h2>Tasks <a href="${base}/tasks">View All</a></h2>${taskSummary}</div>
 </div>
@@ -995,6 +1024,32 @@ async function ensureHeadshotFileRequestId(db: D1Database, eventId: string): Pro
 // concurrent first-uploads can't race) and each upload is appended as a
 // version in the speaker's chain, so a portal deliverable always lands in
 // Workspace > Files with the full version history.
+/**
+ * CNT-13: the one accepted session this contact has in this event, or null
+ * when they have none or more than one. Deliberately the same rule (and the
+ * same ambiguity guard) as step 3 of filesAdmin.ts's RESOLVED_SUBMISSION_ID,
+ * so a stamped upload and an unstamped one resolve to the same session —
+ * stamping is an optimisation of the read, never a different answer.
+ */
+export async function soleAcceptedSessionId(
+  db: D1Database,
+  eventId: string,
+  contactId: string,
+): Promise<string | null> {
+  const row = await db
+    .prepare(
+      `SELECT MIN(s.id) AS id FROM submissions s
+        WHERE s.event_id = ? AND s.status = 'accepted'
+          AND (s.submitter_contact_id = ?
+               OR EXISTS (SELECT 1 FROM submission_participants sp
+                           WHERE sp.submission_id = s.id AND sp.contact_id = ?))
+       HAVING COUNT(*) = 1`,
+    )
+    .bind(eventId, contactId, contactId)
+    .first<{ id: string | null }>();
+  return row?.id ?? null;
+}
+
 export async function ensureTaskFileRequestId(
   db: D1Database,
   eventId: string,
@@ -1589,13 +1644,21 @@ portalRoutes.post('/:slug/tasks/:assignmentId/complete', async (c) => {
     // row get a standing per-task request created on first upload.
     const chainRequestId =
       row.file_request_id ?? (await ensureTaskFileRequestId(c.env.DB, ctx.event.id, row.task_id, row.title));
+    // CNT-13: the stock "Upload Session Presentation" task is targeted at the
+    // CONTACT, so `ta.submission_id` is NULL and the upload landed in the
+    // library with an empty SESSION column while the session's own Files tab
+    // said no files had been uploaded — for the most ordinary upload there is.
+    // When the speaker has exactly one accepted session in this event there is
+    // nothing to guess, so stamp it; with two (or none) the column stays NULL
+    // and the organiser links it by hand (PUT /files/uploads/:id/submission).
+    const submissionId = row.submission_id ?? (await soleAcceptedSessionId(c.env.DB, ctx.event.id, ctx.contactId));
     // Appends version N+1 and demotes the previous current row in one batch.
     const appended = await appendUploadVersion(
       c.env.DB,
       {
         fileRequestId: chainRequestId,
         contactId: ctx.contactId,
-        submissionId: row.submission_id,
+        submissionId,
       },
       { assetId: saved.id, uploadedAt: ts },
     );
