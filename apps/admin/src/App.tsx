@@ -3669,8 +3669,9 @@ export default function App() {
           action === 'accept_queue' ? acceptConditionRef.current.trim() || null : null,
         )
         setBulkNote(`${r.changed} moved to ${statusLabel(action)}`)
-        setCheckedIds([])
-        setChecklistResetKey((k) => k + 1)
+        // The selection stays checked, same as revise/enroll below: a queue
+        // move is often followed by acting on the same rows again (e.g.
+        // Send Decisions), so don't make the organiser re-check them.
         setListReloadKey((k) => k + 1)
       } catch (e) {
         setBulkNote(e instanceof Error ? e.message : 'Action failed')
