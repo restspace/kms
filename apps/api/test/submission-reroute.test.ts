@@ -266,6 +266,42 @@ describe('re-routing on a speaker portal edit', () => {
     expect(tags).not.toContain(talkTag);
   });
 
+  it('keeps routing a rule keyed on an organiser-only answer the speaker never sees', async () => {
+    // Internal-audience questions (0042) are not rendered on the portal edit
+    // page and survive its delete-and-reinsert untouched — so routing has to
+    // be handed them explicitly, or an unrelated save would evaluate the rule
+    // against a missing answer and un-route the submission.
+    const internalQ = await createQuestion(eventId, formId, {
+      key: 'committee_stream',
+      label: 'Committee stream',
+      type: 'dropdown',
+      audience: 'internal',
+      position: 3,
+      options: [{ value: 'Deep dive', label: 'Deep dive' }],
+    });
+    const id = await seedRoutedSubmission();
+    await setAnswer(id, internalQ, 'Deep dive');
+    await setRoutingRules({
+      rules: [
+        {
+          id: 'r-internal',
+          when: { question_id: internalQ, op: 'equals', value: 'Deep dive' },
+          then: { assign_evaluation_plan_id: workshopPlan, add_tag_ids: [workshopTag] },
+        },
+      ],
+    });
+    // Re-route once so the internal rule owns the plan and tag.
+    await postPortalEdit(id, { [`q_${titleQ}`]: 'Routed talk', [`q_${formatQ}`]: 'Talk' });
+    expect((await rowOf(id))!.evaluation_plan_id).toBe(workshopPlan);
+    expect(await tagsOf(id)).toContain(workshopTag);
+
+    // A later edit that touches nothing the rule reads must not undo it.
+    const res = await postPortalEdit(id, { [`q_${titleQ}`]: 'Retitled', [`q_${formatQ}`]: 'Talk' });
+    expect(res.status).toBe(302);
+    expect((await rowOf(id))!.evaluation_plan_id).toBe(workshopPlan);
+    expect(await tagsOf(id)).toContain(workshopTag);
+  });
+
   it('only adds to a submission with no provenance — it never re-points its track or plan', async () => {
     const id = await seedRoutedSubmission();
     // A pre-0046 row: routed values present, but nothing recording that

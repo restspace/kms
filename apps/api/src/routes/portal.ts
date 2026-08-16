@@ -2589,6 +2589,19 @@ portalRoutes.post('/:slug/submissions/:id/edit', async (c) => {
   // together, or neither does. Only values routing itself set are moved; an
   // organiser's manual override survives. Skipped once frozen, where the
   // inputs cannot have changed anyway.
+  //
+  // Routing must see the answer set as it will be AFTER this batch, which is
+  // not the same as `stored`: internal-audience questions (0042) are never
+  // rendered on this page and survive the delete-and-reinsert above untouched,
+  // so they are absent from `stored` entirely. A rule keyed on one of them —
+  // the Routing panel offers every option question on the Abstract step,
+  // internal ones included — would otherwise evaluate against a missing answer
+  // on every portal save and un-route the submission for a value the speaker
+  // never touched.
+  const internalAnswers: Answers = {};
+  for (const questionId of internalQuestionIds) {
+    if (questionId in existing) internalAnswers[questionId] = existing[questionId];
+  }
   if (!isRoutingFrozen(submission.status)) {
     const reroute = await rerouteStatements(
       c.env.DB,
@@ -2606,7 +2619,7 @@ portalRoutes.post('/:slug/submissions/:id/edit', async (c) => {
         routing_state: submission.routing_state ?? null,
       },
       routingConfig,
-      stored,
+      { ...internalAnswers, ...stored },
       updatedAt,
     );
     statements.push(...reroute.statements);
